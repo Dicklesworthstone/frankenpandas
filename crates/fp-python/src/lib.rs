@@ -44777,471 +44777,645 @@ impl PyDataFrame {
         columns: Option<&Bound<'_, PyAny>>,
         dtype: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        // Each list of a dict refuses a masked integer dtype as the Series
-        // constructor does (br-frankenpandas-lqss7).
-        if let (Some(dict), Some(dtype)) = (
-            data.and_then(|data| data.cast::<PyDict>().ok()),
-            dtype.filter(|dtype| !dtype.is_none()),
-        ) {
-            for (_, values) in dict.iter() {
-                refuse_masked_int_list(&values, dtype)?;
+        let mut frame = (|| -> PyResult<Self> {
+            // Each list of a dict refuses a masked integer dtype as the Series
+            // constructor does (br-frankenpandas-lqss7).
+            if let (Some(dict), Some(dtype)) = (
+                data.and_then(|data| data.cast::<PyDict>().ok()),
+                dtype.filter(|dtype| !dtype.is_none()),
+            ) {
+                for (_, values) in dict.iter() {
+                    refuse_masked_int_list(&values, dtype)?;
+                }
             }
-        }
-        // ints with a missing value become float64 with NaN, as pandas (and
-        // the Series constructor) build them - except under dtype=object,
-        // which keeps the values as given (DISC-011), and a masked integer
-        // dtype, whose ints stay exact (2**53 + 1 read 2**53;
-        // br-frankenpandas-lqss7).
-        let keep_objects = dtype.is_some_and(|dtype| {
-            !dtype.is_none() && (is_object_dtype_arg(dtype) || is_nullable_integer_dtype_arg(dtype))
-        });
-        let promote = |scalars: Vec<Scalar>| {
-            if keep_objects {
-                scalars
-            } else {
-                pandas_promote_int_with_missing(scalars)
-            }
-        };
-        let object_cells_kept =
-            dtype.is_some_and(|dtype| !dtype.is_none() && is_object_dtype_arg(dtype));
-        // An empty list / tuple / iterable is numpy's empty float64 array
-        // in pandas (it was object). Under dtype=object each cell stays as
-        // given: an int beside a float stays an int (the list was inferred
-        // float64 first, 1 read 1.0; br-frankenpandas-d1ac4).
-        let sequence_column = |scalars: Vec<Scalar>| {
-            if scalars.is_empty() && !keep_objects {
-                Column::new(DType::Float64, Vec::new())
-            } else if object_cells_kept {
-                Ok(Column::from_object_values(scalars))
-            } else {
-                Column::from_values(promote(scalars))
-            }
-        };
-        let built = (|| -> PyResult<Self> {
-            let explicit_cols = extract_columns_names(columns)?;
-
-            let Some(data) = data else {
-                if let Some(cols) = explicit_cols {
-                    let labels = extract_index_labels(index, 0)?;
-                    let mut col_map = BTreeMap::new();
-                    for c in &cols {
-                        let scalars = vec![Scalar::Null(NullKind::NaN); labels.len()];
-                        let col = Column::from_values(scalars).map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?;
-                        col_map.insert(c.clone(), col);
-                    }
-                    let df = DataFrame::new_with_column_order(Index::new(labels), col_map, cols)
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?;
-                    return Ok(PyDataFrame { inner: df });
-                } else if let Some(idx_arg) = index {
-                    let labels = extract_index_labels(Some(idx_arg), 0)?;
-                    let col_map = BTreeMap::new();
-                    let cols: Vec<String> = Vec::new();
-                    let df = DataFrame::new_with_column_order(Index::new(labels), col_map, cols)
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?;
-                    return Ok(PyDataFrame { inner: df });
+            // ints with a missing value become float64 with NaN, as pandas (and
+            // the Series constructor) build them - except under dtype=object,
+            // which keeps the values as given (DISC-011), and a masked integer
+            // dtype, whose ints stay exact (2**53 + 1 read 2**53;
+            // br-frankenpandas-lqss7).
+            let keep_objects = dtype.is_some_and(|dtype| {
+                !dtype.is_none()
+                    && (is_object_dtype_arg(dtype) || is_nullable_integer_dtype_arg(dtype))
+            });
+            let promote = |scalars: Vec<Scalar>| {
+                if keep_objects {
+                    scalars
                 } else {
-                    return Ok(PyDataFrame {
-                        inner: empty_dataframe(),
-                    });
+                    pandas_promote_int_with_missing(scalars)
                 }
             };
-
-            // A numpy structured / record array is a column per field, in
-            // field order (it raised 'Cannot convert tuple to Scalar';
-            // br-frankenpandas-azgpi).
-            if let Some(fields) = structured_array_fields(data)? {
-                return Self::new(py, Some(&fields), index, columns, dtype);
-            }
-
-            // A list of Series: one row each, pandas' (fvsao.63).
-            if is_series_list(data) {
-                let rows: Vec<Series> = data
-                    .try_iter()?
-                    .map(|item| Ok(item?.extract::<PyRef<'_, PySeries>>()?.inner.clone()))
-                    .collect::<PyResult<_>>()?;
-                // columns= as labels (typed ones too).
-                let wanted: Option<Vec<IndexLabel>> = match columns.filter(|c| !c.is_none()) {
-                    None => None,
-                    Some(columns) => Some(
-                        columns
-                            .try_iter()?
-                            .map(|item| {
-                                let item = item?;
-                                match typed_column_label(&item) {
-                                    Some(label) => Ok(label),
-                                    None => Ok(IndexLabel::Utf8(item.str()?.to_string())),
-                                }
-                            })
-                            .collect::<PyResult<_>>()?,
-                    ),
-                };
-                let mut frame = frame_from_series_rows(&rows, wanted.as_deref(), promote)?;
-                if let Some(index) = index.filter(|index| !index.is_none()) {
-                    let labels = extract_index_labels(Some(index), frame.len())?;
-                    frame = frame
-                        .with_index(Index::new(labels))
-                        .map_err(axis_length_error_to_py)?;
-                }
-                return Ok(PyDataFrame { inner: frame });
-            }
-
-            if let Ok(df) = data.extract::<PyRef<'_, PyDataFrame>>() {
-                let mut res = df.inner.clone();
-                if let Some(cols) = explicit_cols {
-                    let col_refs: Vec<&str> = cols.iter().map(String::as_str).collect();
-                    res = res.select_columns(&col_refs).map_err(frame_error_to_py)?;
-                }
-                if let Some(idx) = index {
-                    let labels = extract_index_labels(Some(idx), res.len())?;
-                    res = res.reindex(labels).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                    })?;
-                }
-                return Ok(PyDataFrame { inner: res });
-            }
-
-            if let Ok(s) = data.extract::<PyRef<'_, PySeries>>() {
-                // The column is the given one, else the Series' typed name,
-                // else pandas' RangeIndex column 0.
-                let given = explicit_cols.as_ref().and_then(|c| c.first().cloned());
-                let unnamed = given.is_none() && s.inner.name().is_empty();
-                let named = match given {
-                    Some(col_name) => s.inner.rename(col_name),
-                    None if unnamed => s.inner.rename(LabelName::typed(IndexLabel::Int64(0))),
-                    None => Ok(s.inner.clone()),
-                }
-                .map_err(frame_error_to_py)?;
-                let mut df = named.to_frame(None).map_err(frame_error_to_py)?;
-                if unnamed {
-                    df = df.with_column_range((0, 1, 1));
-                }
-                if let Some(idx) = index {
-                    let labels = extract_index_labels(Some(idx), df.len())?;
-                    df = df.reindex(labels).map_err(|e| {
-                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                    })?;
-                }
-                return Ok(PyDataFrame { inner: df });
-            }
-
-            if let Ok(dict) = data.cast::<PyDict>() {
-                // A dict value is a column keyed by row label, as pandas'
-                // dict_to_mgr reads it (br-frankenpandas-azgpi).
-                if let Some((data, labels)) = dict_of_dicts_data(py, dict, index)? {
-                    return Self::new(py, Some(&data), labels.as_ref().or(index), columns, dtype);
-                }
-                let mut col_map = BTreeMap::new();
-                let mut detected_order = Vec::new();
-                let mut detected_nrows: Option<usize> = None;
-                let mut scalar_columns: Vec<(String, Scalar, Option<String>)> = Vec::new();
-
-                // Check for any PySeries in dict to align indices
-                let mut series_indices: Vec<Index> = Vec::new();
-                for (_k, v) in dict.iter() {
-                    if let Ok(s) = v.extract::<PyRef<'_, PySeries>>() {
-                        series_indices.push(s.inner.index().clone());
-                    }
-                }
-
-                // An index given is its own rows, shared: its labels were
-                // copied out and rebuilt (a DatetimeIndex lost its typed
-                // instants; br-frankenpandas-lsn8d).
-                let common_rows = if let Some(idx_arg) = index {
-                    Some(index_arg_index(idx_arg)?)
-                } else if !series_indices.is_empty() {
-                    // pandas' union_indexes: identical indexes keep their
-                    // order, others are united and SORTED (it kept the
-                    // first-seen order).
-                    let first = series_indices[0].labels();
-                    if series_indices.iter().all(|idx| idx.labels() == first) {
-                        Some(Index::new(first.to_vec()))
-                    } else {
-                        let mut seen = HashSet::new();
-                        let mut union_labels: Vec<IndexLabel> = series_indices
-                            .iter()
-                            .flat_map(|idx| idx.labels().iter())
-                            .filter(|label| seen.insert(*label))
-                            .cloned()
-                            .collect();
-                        sort_union_labels(&mut union_labels)?;
-                        Some(Index::new(union_labels))
-                    }
+            let object_cells_kept =
+                dtype.is_some_and(|dtype| !dtype.is_none() && is_object_dtype_arg(dtype));
+            // An empty list / tuple / iterable is numpy's empty float64 array
+            // in pandas (it was object). Under dtype=object each cell stays as
+            // given: an int beside a float stays an int (the list was inferred
+            // float64 first, 1 read 1.0; br-frankenpandas-d1ac4).
+            let sequence_column = |scalars: Vec<Scalar>| {
+                if scalars.is_empty() && !keep_objects {
+                    Column::new(DType::Float64, Vec::new())
+                } else if object_cells_kept {
+                    Ok(Column::from_object_values(scalars))
                 } else {
-                    None
-                };
+                    Column::from_values(promote(scalars))
+                }
+            };
+            let built = (|| -> PyResult<Self> {
+                let explicit_cols = extract_columns_names(columns)?;
 
-                for (key, value) in dict.iter() {
-                    let col_name: String = if let Ok(s) = key.extract::<String>() {
-                        s
-                    } else {
-                        key.str()?.to_str()?.to_string()
-                    };
-                    refuse_unordered_set(&value)?;
-
-                    let col = if let Ok(s) = value.extract::<PyRef<'_, PySeries>>() {
-                        if let Some(target) = common_rows
-                            .as_ref()
-                            .filter(|target| s.inner.index().labels() != target.labels())
-                        {
-                            // A Series already on the target labels - repeated
-                            // labels too - is taken as it is, as pandas' (the
-                            // reindex refused a repeated index;
-                            // br-frankenpandas-rbiki).
-                            let reindexed =
-                                s.inner.reindex(target.labels().to_vec()).map_err(|e| {
+                let Some(data) = data else {
+                    if let Some(cols) = explicit_cols {
+                        let labels = extract_index_labels(index, 0)?;
+                        let mut col_map = BTreeMap::new();
+                        for c in &cols {
+                            let scalars = vec![Scalar::Null(NullKind::NaN); labels.len()];
+                            let col = Column::from_values(scalars).map_err(|e| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                            })?;
+                            col_map.insert(c.clone(), col);
+                        }
+                        let df =
+                            DataFrame::new_with_column_order(Index::new(labels), col_map, cols)
+                                .map_err(|e| {
                                     PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
                                 })?;
-                            reindexed.column().clone()
-                        } else {
-                            s.inner.column().clone()
-                        }
-                    } else if let Ok(categorical) = value.extract::<PyRef<'_, PyCategorical>>() {
-                        // A Categorical column keeps its categories (it raised
-                        // "Cannot convert Categorical to Scalar"; br-frankenpandas-hrxn9).
-                        let column = categorical.inner.column().clone();
-                        if let Some(nr) = detected_nrows {
-                            if column.len() != nr {
-                                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                    "All arrays must be of the same length",
-                                ));
-                            }
-                        } else {
-                            detected_nrows = Some(column.len());
-                        }
-                        column
-                    } else if let Some(column) = py_array_like_column(py, &value)? {
-                        if let Some(nr) = detected_nrows {
-                            if column.len() != nr {
-                                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                    "All arrays must be of the same length",
-                                ));
-                            }
-                        } else {
-                            detected_nrows = Some(column.len());
-                        }
-                        column
-                    } else if let Ok(list) = value.cast::<PyList>() {
-                        if let Some(nr) = detected_nrows {
-                            if list.len() != nr {
-                                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                    "All arrays must be of the same length",
-                                ));
-                            }
-                        } else {
-                            detected_nrows = Some(list.len());
-                        }
-                        // A list of text is one contiguous Utf8 column
-                        // (br-frankenpandas-mf3tj); a list of one narrow
-                        // numpy scalar type keeps its width (mwuhp).
-                        let typed = match narrow_numpy_list_column(py, list)? {
-                            Some(column) => Some(column),
-                            None => contiguous_text_column(list.iter()),
-                        };
-                        match typed {
-                            Some(column) => column,
-                            None => {
-                                let scalars: Vec<Scalar> = list
-                                    .iter()
-                                    .map(|v| py_to_cell(py, &v))
-                                    .collect::<PyResult<Vec<_>>>()?;
-                                // ints with a missing value are float64 with
-                                // NaN, as the Series constructor already made
-                                // them (the frame kept int64 with a null;
-                                // DISC-011).
-                                sequence_column(scalars).map_err(|e| {
+                        return Ok(PyDataFrame { inner: df });
+                    } else if let Some(idx_arg) = index {
+                        let labels = extract_index_labels(Some(idx_arg), 0)?;
+                        let col_map = BTreeMap::new();
+                        let cols: Vec<String> = Vec::new();
+                        let df =
+                            DataFrame::new_with_column_order(Index::new(labels), col_map, cols)
+                                .map_err(|e| {
                                     PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                                })?
-                            }
-                        }
-                    } else if let Ok(tuple) = value.cast::<PyTuple>() {
-                        let scalars: Vec<Scalar> = tuple
-                            .iter()
-                            .map(|v| py_to_cell(py, &v))
-                            .collect::<PyResult<Vec<_>>>()?;
-                        if let Some(nr) = detected_nrows {
-                            if scalars.len() != nr {
-                                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                    "All arrays must be of the same length",
-                                ));
-                            }
-                        } else {
-                            detected_nrows = Some(scalars.len());
-                        }
-                        sequence_column(scalars).map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?
-                    } else if !value.is_instance_of::<pyo3::types::PyString>()
-                        && !value.is_instance_of::<pyo3::types::PyBytes>()
-                        && !value.is_instance_of::<PyDict>()
-                        && let Ok(iter) = value.try_iter()
-                    {
-                        // Any other ordered iterable (a generator) is its values,
-                        // as pandas takes it.
-                        let scalars = iter
-                            .map(|v| v.and_then(|v| py_to_cell(py, &v)))
-                            .collect::<PyResult<Vec<_>>>()?;
-                        if let Some(nr) = detected_nrows {
-                            if scalars.len() != nr {
-                                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                    "All arrays must be of the same length",
-                                ));
-                            }
-                        } else {
-                            detected_nrows = Some(scalars.len());
-                        }
-                        sequence_column(scalars).map_err(column_error_to_py)?
+                                })?;
+                        return Ok(PyDataFrame { inner: df });
                     } else {
-                        let scalar = py_to_cell(py, &value)?;
-                        // A scalar broadcasts to the length the other values
-                        // give, however they are ordered (a scalar before a
-                        // list made one row; br-frankenpandas-vzoct), typed,
-                        // an aware instant in its zone (it was a Scalar a
-                        // row, naive; br-frankenpandas-ufwpf).
-                        let zone = scalar_zone(&value)?;
-                        let Some(nr) = common_rows.as_ref().map(Index::len) else {
-                            detected_order.push(col_name.clone());
-                            scalar_columns.push((col_name, scalar, zone));
-                            continue;
-                        };
-                        zoned(broadcast_assigned_column(scalar, nr)?, zone)
-                    };
-
-                    detected_order.push(col_name.clone());
-                    col_map.insert(col_name, col);
-                }
-                if !scalar_columns.is_empty() {
-                    let Some(nr) = detected_nrows else {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                            "If using all scalar values, you must pass an index",
-                        ));
-                    };
-                    for (col_name, scalar, zone) in scalar_columns {
-                        col_map.insert(
-                            col_name,
-                            zoned(broadcast_assigned_column(scalar, nr)?, zone),
-                        );
+                        return Ok(PyDataFrame {
+                            inner: empty_dataframe(),
+                        });
                     }
-                }
-
-                let column_order = explicit_cols.unwrap_or(detected_order);
-                let n_rows = col_map.values().next().map(|c| c.len()).unwrap_or(0);
-                // No index= and no Series is the default range, built as one:
-                // its labels were made, scanned back into a range and dropped
-                // (half of a DataFrame of arrays; br-frankenpandas-1ze1o).
-                let rows = match common_rows {
-                    Some(rows) => rows,
-                    None => Index::default_range(n_rows),
                 };
 
-                // If explicit columns contains extra columns not in dict, add NaN columns
-                for c in &column_order {
-                    if !col_map.contains_key(c) {
-                        let scalars = vec![Scalar::Null(NullKind::NaN); rows.len()];
-                        let col = Column::from_values(scalars).map_err(|e| {
+                // A numpy structured / record array is a column per field, in
+                // field order (it raised 'Cannot convert tuple to Scalar';
+                // br-frankenpandas-azgpi).
+                if let Some(fields) = structured_array_fields(data)? {
+                    return Self::new(py, Some(&fields), index, columns, dtype);
+                }
+
+                // A list of Series: one row each, pandas' (fvsao.63).
+                if is_series_list(data) {
+                    let rows: Vec<Series> = data
+                        .try_iter()?
+                        .map(|item| Ok(item?.extract::<PyRef<'_, PySeries>>()?.inner.clone()))
+                        .collect::<PyResult<_>>()?;
+                    // columns= as labels (typed ones too).
+                    let wanted: Option<Vec<IndexLabel>> = match columns.filter(|c| !c.is_none()) {
+                        None => None,
+                        Some(columns) => Some(
+                            columns
+                                .try_iter()?
+                                .map(|item| {
+                                    let item = item?;
+                                    match typed_column_label(&item) {
+                                        Some(label) => Ok(label),
+                                        None => Ok(IndexLabel::Utf8(item.str()?.to_string())),
+                                    }
+                                })
+                                .collect::<PyResult<_>>()?,
+                        ),
+                    };
+                    let mut frame = frame_from_series_rows(&rows, wanted.as_deref(), promote)?;
+                    if let Some(index) = index.filter(|index| !index.is_none()) {
+                        let labels = extract_index_labels(Some(index), frame.len())?;
+                        frame = frame
+                            .with_index(Index::new(labels))
+                            .map_err(axis_length_error_to_py)?;
+                    }
+                    return Ok(PyDataFrame { inner: frame });
+                }
+
+                if let Ok(df) = data.extract::<PyRef<'_, PyDataFrame>>() {
+                    let mut res = df.inner.clone();
+                    if let Some(cols) = explicit_cols {
+                        let col_refs: Vec<&str> = cols.iter().map(String::as_str).collect();
+                        res = res.select_columns(&col_refs).map_err(frame_error_to_py)?;
+                    }
+                    if let Some(idx) = index {
+                        let labels = extract_index_labels(Some(idx), res.len())?;
+                        res = res.reindex(labels).map_err(|e| {
                             PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
                         })?;
-                        col_map.insert(c.clone(), col);
                     }
+                    return Ok(PyDataFrame { inner: res });
                 }
-                // Retain only columns in column_order (a set: the Vec scan
-                // per column made a 20,000-column dict quadratic).
-                let wanted: HashSet<&String> = column_order.iter().collect();
-                col_map.retain(|k, _| wanted.contains(k));
 
-                let df = DataFrame::new_with_column_order(rows, col_map, column_order)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                return Ok(PyDataFrame { inner: df });
-            }
-
-            // A numpy array: each column of a 2-D array (the one column of a
-            // 1-D array) as its own typed column, its dtype kept - it raised
-            // "DataFrame data format not recognized", an ndarray not being a
-            // Sequence (fvsao.32's `DataFrame(np.random.rand(5, 3))`).
-            if data.get_type().name()?.to_str()? == "ndarray" {
-                let shape: Vec<usize> = data.getattr("shape")?.extract()?;
-                let matrix = match shape.as_slice() {
-                    [rows, width] => matrix_columns(py, data, *rows, *width)?,
-                    _ => None,
-                };
-                let parts: Vec<Bound<'_, PyAny>> = match shape.as_slice() {
-                    _ if matrix.is_some() => Vec::new(),
-                    [_] => vec![data.clone()],
-                    [_, width] => (0..*width)
-                        .map(|column| data.get_item((pyo3::types::PySlice::full(py), column)))
-                        .collect::<PyResult<_>>()?,
-                    _ => {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "Must pass 2-d input. shape={}",
-                            data.getattr("shape")?.repr()?
-                        )));
+                if let Ok(s) = data.extract::<PyRef<'_, PySeries>>() {
+                    // The column is the given one, else the Series' typed name,
+                    // else pandas' RangeIndex column 0.
+                    let given = explicit_cols.as_ref().and_then(|c| c.first().cloned());
+                    let unnamed = given.is_none() && s.inner.name().is_empty();
+                    let named = match given {
+                        Some(col_name) => s.inner.rename(col_name),
+                        None if unnamed => s.inner.rename(LabelName::typed(IndexLabel::Int64(0))),
+                        None => Ok(s.inner.clone()),
                     }
-                };
-                let rows = shape.first().copied().unwrap_or(0);
-                let width = matrix.as_ref().map_or(parts.len(), Vec::len);
-                let names = match explicit_cols {
-                    Some(names) if names.len() != width => {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "Shape of passed values is ({rows}, {width}), indices imply ({rows}, {})",
-                            names.len()
-                        )));
+                    .map_err(frame_error_to_py)?;
+                    let mut df = named.to_frame(None).map_err(frame_error_to_py)?;
+                    if unnamed {
+                        df = df.with_column_range((0, 1, 1));
                     }
-                    Some(names) => names,
-                    None => (0..width).map(|at| at.to_string()).collect(),
-                };
-                let columns = match matrix {
-                    Some(columns) => columns,
-                    None => parts
-                        .iter()
-                        .map(|part| {
-                            py_array_like_column(py, part)?.ok_or_else(|| {
-                                PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                    "DataFrame data format not recognized",
-                                )
-                            })
-                        })
-                        .collect::<PyResult<Vec<_>>>()?,
-                };
-                let pairs: Vec<(String, Column)> = names.iter().cloned().zip(columns).collect();
-                // No index= is the default range, built as one, as the dict
-                // form builds it (1ze1o): a label a row was made and held,
-                // and the frame's transpose could not be the lazy view
-                // (DataFrame(ndarray).T of 1M x 10 504 ms, pandas 0.04; of
-                // 200k x 10 82 ms, the dict form's 0.004; br-frankenpandas-e186m).
-                let rows_index = match index {
-                    None => Index::default_range(rows),
-                    Some(_) => Index::new(extract_index_labels(index, rows)?),
-                };
-                let df = DataFrame::new_with_column_order(
-                    rows_index,
-                    fp_frame::ColumnStore::from_pairs(pairs),
-                    names,
-                )
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                return Ok(PyDataFrame { inner: df });
-            }
+                    if let Some(idx) = index {
+                        let labels = extract_index_labels(Some(idx), df.len())?;
+                        df = df.reindex(labels).map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                        })?;
+                    }
+                    return Ok(PyDataFrame { inner: df });
+                }
 
-            // List / Sequence forms; text and bytes are scalars (a str took
-            // this path character by character; lcqm5).
-            let text = data.is_instance_of::<pyo3::types::PyString>()
-                || data.is_instance_of::<pyo3::types::PyBytes>();
-            if !text && let Ok(seq) = data.cast::<pyo3::types::PySequence>() {
-                let len = seq.len()?;
-                if len == 0 {
-                    let labels = extract_index_labels(index, 0)?;
-                    let column_order = explicit_cols.unwrap_or_default();
-                    let mut col_map = BTreeMap::new();
-                    for c in &column_order {
-                        col_map.insert(
-                            c.clone(),
-                            Column::from_values(Vec::<Scalar>::new()).unwrap(),
+                if let Ok(dict) = data.cast::<PyDict>() {
+                    // A dict value is a column keyed by row label, as pandas'
+                    // dict_to_mgr reads it (br-frankenpandas-azgpi).
+                    if let Some((data, labels)) = dict_of_dicts_data(py, dict, index)? {
+                        return Self::new(
+                            py,
+                            Some(&data),
+                            labels.as_ref().or(index),
+                            columns,
+                            dtype,
                         );
                     }
+                    let mut col_map = BTreeMap::new();
+                    let mut detected_order = Vec::new();
+                    let mut detected_nrows: Option<usize> = None;
+                    let mut scalar_columns: Vec<(String, Scalar, Option<String>)> = Vec::new();
+
+                    // Check for any PySeries in dict to align indices
+                    let mut series_indices: Vec<Index> = Vec::new();
+                    for (_k, v) in dict.iter() {
+                        if let Ok(s) = v.extract::<PyRef<'_, PySeries>>() {
+                            series_indices.push(s.inner.index().clone());
+                        }
+                    }
+
+                    // An index given is its own rows, shared: its labels were
+                    // copied out and rebuilt (a DatetimeIndex lost its typed
+                    // instants; br-frankenpandas-lsn8d).
+                    let common_rows = if let Some(idx_arg) = index {
+                        Some(index_arg_index(idx_arg)?)
+                    } else if !series_indices.is_empty() {
+                        // pandas' union_indexes: identical indexes keep their
+                        // order, others are united and SORTED (it kept the
+                        // first-seen order).
+                        let first = series_indices[0].labels();
+                        if series_indices.iter().all(|idx| idx.labels() == first) {
+                            Some(Index::new(first.to_vec()))
+                        } else {
+                            let mut seen = HashSet::new();
+                            let mut union_labels: Vec<IndexLabel> = series_indices
+                                .iter()
+                                .flat_map(|idx| idx.labels().iter())
+                                .filter(|label| seen.insert(*label))
+                                .cloned()
+                                .collect();
+                            sort_union_labels(&mut union_labels)?;
+                            Some(Index::new(union_labels))
+                        }
+                    } else {
+                        None
+                    };
+
+                    for (key, value) in dict.iter() {
+                        let col_name: String = if let Ok(s) = key.extract::<String>() {
+                            s
+                        } else {
+                            key.str()?.to_str()?.to_string()
+                        };
+                        refuse_unordered_set(&value)?;
+
+                        let col = if let Ok(s) = value.extract::<PyRef<'_, PySeries>>() {
+                            if let Some(target) = common_rows
+                                .as_ref()
+                                .filter(|target| s.inner.index().labels() != target.labels())
+                            {
+                                // A Series already on the target labels - repeated
+                                // labels too - is taken as it is, as pandas' (the
+                                // reindex refused a repeated index;
+                                // br-frankenpandas-rbiki).
+                                let reindexed =
+                                    s.inner.reindex(target.labels().to_vec()).map_err(|e| {
+                                        PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                            e.to_string(),
+                                        )
+                                    })?;
+                                reindexed.column().clone()
+                            } else {
+                                s.inner.column().clone()
+                            }
+                        } else if let Ok(categorical) = value.extract::<PyRef<'_, PyCategorical>>()
+                        {
+                            // A Categorical column keeps its categories (it raised
+                            // "Cannot convert Categorical to Scalar"; br-frankenpandas-hrxn9).
+                            let column = categorical.inner.column().clone();
+                            if let Some(nr) = detected_nrows {
+                                if column.len() != nr {
+                                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                        "All arrays must be of the same length",
+                                    ));
+                                }
+                            } else {
+                                detected_nrows = Some(column.len());
+                            }
+                            column
+                        } else if let Some(column) = py_array_like_column(py, &value)? {
+                            if let Some(nr) = detected_nrows {
+                                if column.len() != nr {
+                                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                        "All arrays must be of the same length",
+                                    ));
+                                }
+                            } else {
+                                detected_nrows = Some(column.len());
+                            }
+                            column
+                        } else if let Ok(list) = value.cast::<PyList>() {
+                            if let Some(nr) = detected_nrows {
+                                if list.len() != nr {
+                                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                        "All arrays must be of the same length",
+                                    ));
+                                }
+                            } else {
+                                detected_nrows = Some(list.len());
+                            }
+                            // A list of text is one contiguous Utf8 column
+                            // (br-frankenpandas-mf3tj); a list of one narrow
+                            // numpy scalar type keeps its width (mwuhp).
+                            let typed = match narrow_numpy_list_column(py, list)? {
+                                Some(column) => Some(column),
+                                None => contiguous_text_column(list.iter()),
+                            };
+                            match typed {
+                                Some(column) => column,
+                                None => {
+                                    let scalars: Vec<Scalar> = list
+                                        .iter()
+                                        .map(|v| py_to_cell(py, &v))
+                                        .collect::<PyResult<Vec<_>>>()?;
+                                    // ints with a missing value are float64 with
+                                    // NaN, as the Series constructor already made
+                                    // them (the frame kept int64 with a null;
+                                    // DISC-011).
+                                    sequence_column(scalars).map_err(|e| {
+                                        PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                            e.to_string(),
+                                        )
+                                    })?
+                                }
+                            }
+                        } else if let Ok(tuple) = value.cast::<PyTuple>() {
+                            let scalars: Vec<Scalar> = tuple
+                                .iter()
+                                .map(|v| py_to_cell(py, &v))
+                                .collect::<PyResult<Vec<_>>>()?;
+                            if let Some(nr) = detected_nrows {
+                                if scalars.len() != nr {
+                                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                        "All arrays must be of the same length",
+                                    ));
+                                }
+                            } else {
+                                detected_nrows = Some(scalars.len());
+                            }
+                            sequence_column(scalars).map_err(|e| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                            })?
+                        } else if !value.is_instance_of::<pyo3::types::PyString>()
+                            && !value.is_instance_of::<pyo3::types::PyBytes>()
+                            && !value.is_instance_of::<PyDict>()
+                            && let Ok(iter) = value.try_iter()
+                        {
+                            // Any other ordered iterable (a generator) is its values,
+                            // as pandas takes it.
+                            let scalars = iter
+                                .map(|v| v.and_then(|v| py_to_cell(py, &v)))
+                                .collect::<PyResult<Vec<_>>>()?;
+                            if let Some(nr) = detected_nrows {
+                                if scalars.len() != nr {
+                                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                        "All arrays must be of the same length",
+                                    ));
+                                }
+                            } else {
+                                detected_nrows = Some(scalars.len());
+                            }
+                            sequence_column(scalars).map_err(column_error_to_py)?
+                        } else {
+                            let scalar = py_to_cell(py, &value)?;
+                            // A scalar broadcasts to the length the other values
+                            // give, however they are ordered (a scalar before a
+                            // list made one row; br-frankenpandas-vzoct), typed,
+                            // an aware instant in its zone (it was a Scalar a
+                            // row, naive; br-frankenpandas-ufwpf).
+                            let zone = scalar_zone(&value)?;
+                            let Some(nr) = common_rows.as_ref().map(Index::len) else {
+                                detected_order.push(col_name.clone());
+                                scalar_columns.push((col_name, scalar, zone));
+                                continue;
+                            };
+                            zoned(broadcast_assigned_column(scalar, nr)?, zone)
+                        };
+
+                        detected_order.push(col_name.clone());
+                        col_map.insert(col_name, col);
+                    }
+                    if !scalar_columns.is_empty() {
+                        let Some(nr) = detected_nrows else {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                "If using all scalar values, you must pass an index",
+                            ));
+                        };
+                        for (col_name, scalar, zone) in scalar_columns {
+                            col_map.insert(
+                                col_name,
+                                zoned(broadcast_assigned_column(scalar, nr)?, zone),
+                            );
+                        }
+                    }
+
+                    let column_order = explicit_cols.unwrap_or(detected_order);
+                    let n_rows = col_map.values().next().map(|c| c.len()).unwrap_or(0);
+                    // No index= and no Series is the default range, built as one:
+                    // its labels were made, scanned back into a range and dropped
+                    // (half of a DataFrame of arrays; br-frankenpandas-1ze1o).
+                    let rows = match common_rows {
+                        Some(rows) => rows,
+                        None => Index::default_range(n_rows),
+                    };
+
+                    // If explicit columns contains extra columns not in dict, add NaN columns
+                    for c in &column_order {
+                        if !col_map.contains_key(c) {
+                            let scalars = vec![Scalar::Null(NullKind::NaN); rows.len()];
+                            let col = Column::from_values(scalars).map_err(|e| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                            })?;
+                            col_map.insert(c.clone(), col);
+                        }
+                    }
+                    // Retain only columns in column_order (a set: the Vec scan
+                    // per column made a 20,000-column dict quadratic).
+                    let wanted: HashSet<&String> = column_order.iter().collect();
+                    col_map.retain(|k, _| wanted.contains(k));
+
+                    let df = DataFrame::new_with_column_order(rows, col_map, column_order)
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                        })?;
+                    return Ok(PyDataFrame { inner: df });
+                }
+
+                // A numpy array: each column of a 2-D array (the one column of a
+                // 1-D array) as its own typed column, its dtype kept - it raised
+                // "DataFrame data format not recognized", an ndarray not being a
+                // Sequence (fvsao.32's `DataFrame(np.random.rand(5, 3))`).
+                if data.get_type().name()?.to_str()? == "ndarray" {
+                    let shape: Vec<usize> = data.getattr("shape")?.extract()?;
+                    let matrix = match shape.as_slice() {
+                        [rows, width] => matrix_columns(py, data, *rows, *width)?,
+                        _ => None,
+                    };
+                    let parts: Vec<Bound<'_, PyAny>> = match shape.as_slice() {
+                        _ if matrix.is_some() => Vec::new(),
+                        [_] => vec![data.clone()],
+                        [_, width] => (0..*width)
+                            .map(|column| data.get_item((pyo3::types::PySlice::full(py), column)))
+                            .collect::<PyResult<_>>()?,
+                        _ => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "Must pass 2-d input. shape={}",
+                                data.getattr("shape")?.repr()?
+                            )));
+                        }
+                    };
+                    let rows = shape.first().copied().unwrap_or(0);
+                    let width = matrix.as_ref().map_or(parts.len(), Vec::len);
+                    let names = match explicit_cols {
+                        Some(names) if names.len() != width => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "Shape of passed values is ({rows}, {width}), indices imply ({rows}, {})",
+                                names.len()
+                            )));
+                        }
+                        Some(names) => names,
+                        None => (0..width).map(|at| at.to_string()).collect(),
+                    };
+                    let columns = match matrix {
+                        Some(columns) => columns,
+                        None => parts
+                            .iter()
+                            .map(|part| {
+                                py_array_like_column(py, part)?.ok_or_else(|| {
+                                    PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                        "DataFrame data format not recognized",
+                                    )
+                                })
+                            })
+                            .collect::<PyResult<Vec<_>>>()?,
+                    };
+                    let pairs: Vec<(String, Column)> = names.iter().cloned().zip(columns).collect();
+                    // No index= is the default range, built as one, as the dict
+                    // form builds it (1ze1o): a label a row was made and held,
+                    // and the frame's transpose could not be the lazy view
+                    // (DataFrame(ndarray).T of 1M x 10 504 ms, pandas 0.04; of
+                    // 200k x 10 82 ms, the dict form's 0.004; br-frankenpandas-e186m).
+                    let rows_index = match index {
+                        None => Index::default_range(rows),
+                        Some(_) => Index::new(extract_index_labels(index, rows)?),
+                    };
+                    let df = DataFrame::new_with_column_order(
+                        rows_index,
+                        fp_frame::ColumnStore::from_pairs(pairs),
+                        names,
+                    )
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                    return Ok(PyDataFrame { inner: df });
+                }
+
+                // List / Sequence forms; text and bytes are scalars (a str took
+                // this path character by character; lcqm5).
+                let text = data.is_instance_of::<pyo3::types::PyString>()
+                    || data.is_instance_of::<pyo3::types::PyBytes>();
+                if !text && let Ok(seq) = data.cast::<pyo3::types::PySequence>() {
+                    let len = seq.len()?;
+                    if len == 0 {
+                        let labels = extract_index_labels(index, 0)?;
+                        let column_order = explicit_cols.unwrap_or_default();
+                        let mut col_map = BTreeMap::new();
+                        for c in &column_order {
+                            col_map.insert(
+                                c.clone(),
+                                Column::from_values(Vec::<Scalar>::new()).unwrap(),
+                            );
+                        }
+                        let df = DataFrame::new_with_column_order(
+                            Index::new(labels),
+                            col_map,
+                            column_order,
+                        )
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                        })?;
+                        return Ok(PyDataFrame { inner: df });
+                    }
+
+                    let first_item = seq.get_item(0)?;
+
+                    // Case A: List of dicts (records)
+                    if let Ok(_first_dict) = first_item.cast::<PyDict>() {
+                        let mut col_order = explicit_cols.unwrap_or_default();
+                        // The keys as given, so a record keyed by 0 is read by 0
+                        // (it was read by '0': every value NaN; fvsao.32).
+                        let mut col_keys: Vec<Bound<'_, PyAny>> = Vec::new();
+                        if col_order.is_empty() {
+                            for i in 0..len {
+                                let item = seq.get_item(i)?;
+                                let row_dict = item.cast::<PyDict>()?;
+                                for (k, _) in row_dict.iter() {
+                                    let col_name: String = if let Ok(s) = k.extract::<String>() {
+                                        s
+                                    } else {
+                                        k.str()?.to_str()?.to_string()
+                                    };
+                                    if !col_order.contains(&col_name) {
+                                        col_order.push(col_name);
+                                        col_keys.push(k);
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut col_scalars: Vec<Vec<Scalar>> =
+                            vec![Vec::with_capacity(len); col_order.len()];
+                        for i in 0..len {
+                            let item = seq.get_item(i)?;
+                            let row_dict = item.cast::<PyDict>()?;
+                            for (c_idx, col_name) in col_order.iter().enumerate() {
+                                let val = match col_keys.get(c_idx) {
+                                    Some(key) => row_dict.get_item(key)?,
+                                    None => row_dict.get_item(col_name)?,
+                                };
+                                let scalar = match val {
+                                    Some(v) => py_to_cell(py, &v)?,
+                                    None => Scalar::Null(NullKind::NaN),
+                                };
+                                col_scalars[c_idx].push(scalar);
+                            }
+                        }
+
+                        let mut col_map = BTreeMap::new();
+                        for (i, name) in col_order.iter().enumerate() {
+                            // As a dict's lists: dtype=object keeps each cell
+                            // (br-frankenpandas-d1ac4).
+                            let col = sequence_column(col_scalars[i].clone()).map_err(|e| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                            })?;
+                            col_map.insert(name.clone(), col);
+                        }
+
+                        let labels = extract_index_labels(index, len)?;
+                        let df = DataFrame::new_with_column_order(
+                            Index::new(labels),
+                            col_map,
+                            col_order,
+                        )
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                        })?;
+                        return Ok(PyDataFrame { inner: df });
+                    }
+
+                    // Case B: 2D Matrix (list of lists/tuples/iterables). A text
+                    // first value is a scalar, not a row: DataFrame(['ab', 'cd'])
+                    // was a 2 x 2 frame of characters (lcqm5).
+                    let text_row = first_item.is_instance_of::<pyo3::types::PyString>()
+                        || first_item.is_instance_of::<pyo3::types::PyBytes>();
+                    if !text_row
+                        && let Ok(first_row_seq) = first_item.cast::<pyo3::types::PySequence>()
+                    {
+                        let num_cols = first_row_seq.len()?;
+                        if let Some(ref explicit) = explicit_cols
+                            && explicit.len() != num_cols
+                        {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "Shape of passed values is ({len}, {num_cols}), indices imply ({len}, {})",
+                                explicit.len()
+                            )));
+                        }
+                        let col_order = explicit_cols
+                            .unwrap_or_else(|| (0..num_cols).map(|i| i.to_string()).collect());
+
+                        let mut col_scalars: Vec<Vec<Scalar>> =
+                            vec![Vec::with_capacity(len); num_cols];
+                        #[allow(clippy::needless_range_loop)]
+                        for r in 0..len {
+                            let row_item = seq.get_item(r)?;
+                            let row = row_item.cast::<pyo3::types::PySequence>()?;
+                            for c in 0..num_cols {
+                                let val = row.get_item(c)?;
+                                col_scalars[c].push(py_to_cell(py, &val)?);
+                            }
+                        }
+
+                        // A ColumnStore keeps every column of a duplicated name; the
+                        // map kept only the last (br-frankenpandas-5ihhi).
+                        let mut pairs = Vec::with_capacity(num_cols);
+                        for (name, scalars) in col_order.iter().zip(col_scalars) {
+                            let col = Column::from_values(promote(scalars)).map_err(|e| {
+                                PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                            })?;
+                            pairs.push((name.clone(), col));
+                        }
+
+                        let labels = extract_index_labels(index, len)?;
+                        let df = DataFrame::new_with_column_order(
+                            Index::new(labels),
+                            fp_frame::ColumnStore::from_pairs(pairs),
+                            col_order,
+                        )
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                        })?;
+                        return Ok(PyDataFrame { inner: df });
+                    }
+
+                    // Case C: 1D list of scalars
+                    if let Some(ref cols) = explicit_cols
+                        && cols.len() != 1
+                    {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Shape of passed values is ({len}, 1), indices imply ({len}, {})",
+                            cols.len()
+                        )));
+                    }
+                    let mut scalars = Vec::with_capacity(len);
+                    for i in 0..len {
+                        let item = seq.get_item(i)?;
+                        scalars.push(py_to_cell(py, &item)?);
+                    }
+                    let col_name = explicit_cols
+                        .as_ref()
+                        .and_then(|c| c.first().cloned())
+                        .unwrap_or_else(|| "0".to_string());
+                    let column_order = vec![col_name.clone()];
+                    let mut col_map = BTreeMap::new();
+                    let col = Column::from_values(promote(scalars)).map_err(|e| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                    })?;
+                    col_map.insert(col_name, col);
+
+                    let labels = extract_index_labels(index, len)?;
                     let df =
                         DataFrame::new_with_column_order(Index::new(labels), col_map, column_order)
                             .map_err(|e| {
@@ -45250,61 +45424,23 @@ impl PyDataFrame {
                     return Ok(PyDataFrame { inner: df });
                 }
 
-                let first_item = seq.get_item(0)?;
-
-                // Case A: List of dicts (records)
-                if let Ok(_first_dict) = first_item.cast::<PyDict>() {
-                    let mut col_order = explicit_cols.unwrap_or_default();
-                    // The keys as given, so a record keyed by 0 is read by 0
-                    // (it was read by '0': every value NaN; fvsao.32).
-                    let mut col_keys: Vec<Bound<'_, PyAny>> = Vec::new();
-                    if col_order.is_empty() {
-                        for i in 0..len {
-                            let item = seq.get_item(i)?;
-                            let row_dict = item.cast::<PyDict>()?;
-                            for (k, _) in row_dict.iter() {
-                                let col_name: String = if let Ok(s) = k.extract::<String>() {
-                                    s
-                                } else {
-                                    k.str()?.to_str()?.to_string()
-                                };
-                                if !col_order.contains(&col_name) {
-                                    col_order.push(col_name);
-                                    col_keys.push(k);
-                                }
-                            }
-                        }
+                // Case D: scalar broadcast, which pandas makes only over a given
+                // index and columns (it built a one-row frame; lcqm5).
+                if let Ok(scalar) = py_to_scalar(py, data) {
+                    if index.is_none_or(|index| index.is_none()) || explicit_cols.is_none() {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "DataFrame constructor not properly called!",
+                        ));
                     }
-
-                    let mut col_scalars: Vec<Vec<Scalar>> =
-                        vec![Vec::with_capacity(len); col_order.len()];
-                    for i in 0..len {
-                        let item = seq.get_item(i)?;
-                        let row_dict = item.cast::<PyDict>()?;
-                        for (c_idx, col_name) in col_order.iter().enumerate() {
-                            let val = match col_keys.get(c_idx) {
-                                Some(key) => row_dict.get_item(key)?,
-                                None => row_dict.get_item(col_name)?,
-                            };
-                            let scalar = match val {
-                                Some(v) => py_to_cell(py, &v)?,
-                                None => Scalar::Null(NullKind::NaN),
-                            };
-                            col_scalars[c_idx].push(scalar);
-                        }
-                    }
-
+                    let labels = extract_index_labels(index, 1)?;
+                    let col_order = explicit_cols.unwrap_or_else(|| vec!["0".to_string()]);
                     let mut col_map = BTreeMap::new();
-                    for (i, name) in col_order.iter().enumerate() {
-                        // As a dict's lists: dtype=object keeps each cell
-                        // (br-frankenpandas-d1ac4).
-                        let col = sequence_column(col_scalars[i].clone()).map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?;
-                        col_map.insert(name.clone(), col);
+                    for c in &col_order {
+                        let col = Column::from_values(vec![scalar.clone(); labels.len()]).map_err(
+                            |e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()),
+                        )?;
+                        col_map.insert(c.clone(), col);
                     }
-
-                    let labels = extract_index_labels(index, len)?;
                     let df =
                         DataFrame::new_with_column_order(Index::new(labels), col_map, col_order)
                             .map_err(|e| {
@@ -45313,305 +45449,219 @@ impl PyDataFrame {
                     return Ok(PyDataFrame { inner: df });
                 }
 
-                // Case B: 2D Matrix (list of lists/tuples/iterables). A text
-                // first value is a scalar, not a row: DataFrame(['ab', 'cd'])
-                // was a 2 x 2 frame of characters (lcqm5).
-                let text_row = first_item.is_instance_of::<pyo3::types::PyString>()
-                    || first_item.is_instance_of::<pyo3::types::PyBytes>();
-                if !text_row && let Ok(first_row_seq) = first_item.cast::<pyo3::types::PySequence>()
+                Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "DataFrame data format not recognized",
+                ))
+            })()?;
+            // An Index given as index= keeps its name, as pandas (it was dropped).
+            let built = match index.and_then(py_index_arg_name) {
+                Some(index_name) => {
+                    let renamed = built.inner.index().rename_index(Some(&index_name));
+                    built.inner.with_index(renamed).map_err(frame_error_to_py)?
+                }
+                None => built.inner,
+            };
+            // No rows show the index's type: an empty frame keeps the index
+            // given as it is (an empty date_range made an object index of no
+            // labels; br-frankenpandas-ce86r).
+            let built = match index {
+                Some(index)
+                    if built.is_empty() && index.extract::<PyRef<'_, PyMultiIndex>>().is_err() =>
                 {
-                    let num_cols = first_row_seq.len()?;
-                    if let Some(ref explicit) = explicit_cols
-                        && explicit.len() != num_cols
-                    {
-                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                            "Shape of passed values is ({len}, {num_cols}), indices imply ({len}, {})",
-                            explicit.len()
-                        )));
-                    }
-                    let col_order = explicit_cols
-                        .unwrap_or_else(|| (0..num_cols).map(|i| i.to_string()).collect());
-
-                    let mut col_scalars: Vec<Vec<Scalar>> = vec![Vec::with_capacity(len); num_cols];
-                    #[allow(clippy::needless_range_loop)]
-                    for r in 0..len {
-                        let row_item = seq.get_item(r)?;
-                        let row = row_item.cast::<pyo3::types::PySequence>()?;
-                        for c in 0..num_cols {
-                            let val = row.get_item(c)?;
-                            col_scalars[c].push(py_to_cell(py, &val)?);
-                        }
-                    }
-
-                    // A ColumnStore keeps every column of a duplicated name; the
-                    // map kept only the last (br-frankenpandas-5ihhi).
-                    let mut pairs = Vec::with_capacity(num_cols);
-                    for (name, scalars) in col_order.iter().zip(col_scalars) {
-                        let col = Column::from_values(promote(scalars)).map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?;
-                        pairs.push((name.clone(), col));
-                    }
-
-                    let labels = extract_index_labels(index, len)?;
-                    let df = DataFrame::new_with_column_order(
-                        Index::new(labels),
-                        fp_frame::ColumnStore::from_pairs(pairs),
-                        col_order,
-                    )
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                    return Ok(PyDataFrame { inner: df });
+                    let rows = index_arg_rows(index, 0)?.rename_index(built.index().name());
+                    built.with_index(rows).map_err(frame_error_to_py)?
                 }
-
-                // Case C: 1D list of scalars
-                if let Some(ref cols) = explicit_cols
-                    && cols.len() != 1
-                {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                        "Shape of passed values is ({len}, 1), indices imply ({len}, {})",
-                        cols.len()
-                    )));
-                }
-                let mut scalars = Vec::with_capacity(len);
-                for i in 0..len {
-                    let item = seq.get_item(i)?;
-                    scalars.push(py_to_cell(py, &item)?);
-                }
-                let col_name = explicit_cols
-                    .as_ref()
-                    .and_then(|c| c.first().cloned())
-                    .unwrap_or_else(|| "0".to_string());
-                let column_order = vec![col_name.clone()];
-                let mut col_map = BTreeMap::new();
-                let col = Column::from_values(promote(scalars))
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-                col_map.insert(col_name, col);
-
-                let labels = extract_index_labels(index, len)?;
-                let df =
-                    DataFrame::new_with_column_order(Index::new(labels), col_map, column_order)
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?;
-                return Ok(PyDataFrame { inner: df });
-            }
-
-            // Case D: scalar broadcast, which pandas makes only over a given
-            // index and columns (it built a one-row frame; lcqm5).
-            if let Ok(scalar) = py_to_scalar(py, data) {
-                if index.is_none_or(|index| index.is_none()) || explicit_cols.is_none() {
-                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                        "DataFrame constructor not properly called!",
-                    ));
-                }
-                let labels = extract_index_labels(index, 1)?;
-                let col_order = explicit_cols.unwrap_or_else(|| vec!["0".to_string()]);
-                let mut col_map = BTreeMap::new();
-                for c in &col_order {
-                    let col =
-                        Column::from_values(vec![scalar.clone(); labels.len()]).map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                        })?;
-                    col_map.insert(c.clone(), col);
-                }
-                let df = DataFrame::new_with_column_order(Index::new(labels), col_map, col_order)
-                    .map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
-                })?;
-                return Ok(PyDataFrame { inner: df });
-            }
-
-            Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "DataFrame data format not recognized",
-            ))
-        })()?;
-        // An Index given as index= keeps its name, as pandas (it was dropped).
-        let built = match index.and_then(py_index_arg_name) {
-            Some(index_name) => {
-                let renamed = built.inner.index().rename_index(Some(&index_name));
-                built.inner.with_index(renamed).map_err(frame_error_to_py)?
-            }
-            None => built.inner,
-        };
-        // No rows show the index's type: an empty frame keeps the index
-        // given as it is (an empty date_range made an object index of no
-        // labels; br-frankenpandas-ce86r).
-        let built = match index {
-            Some(index)
-                if built.is_empty() && index.extract::<PyRef<'_, PyMultiIndex>>().is_err() =>
-            {
-                let rows = index_arg_rows(index, 0)?.rename_index(built.index().name());
-                built.with_index(rows).map_err(frame_error_to_py)?
-            }
-            _ => built,
-        };
-        // A MultiIndex given as index= or columns= stays one, and a dict
-        // keyed by tuples makes a MultiIndex column axis, as pandas' (only
-        // the flattened labels were kept; fvsao.34).
-        let built = match index.and_then(|index| index.extract::<PyRef<'_, PyMultiIndex>>().ok()) {
-            Some(multi) => built
-                .with_row_multiindex(multi.inner.clone())
-                .map_err(frame_error_to_py)?,
-            None => built,
-        };
-        // A dict value listing tz-aware datetimes of one zone builds an aware
-        // column (it came back naive).
-        let mut built = built;
-        if let Some(dict) = data.and_then(|data| data.cast::<PyDict>().ok()) {
-            for (key, value) in dict.iter() {
-                // Datetimes of several zones: an object column of the values
-                // as they are, as pandas (fvsao.60).
-                if let Some(cells) = mixed_zone_cells(py, &value)? {
-                    let name = key.str()?.extract::<String>()?;
-                    if built
-                        .column(&name)
-                        .is_some_and(|column| column.len() == cells.len())
-                    {
-                        built = built.with_column(name, cells).map_err(frame_error_to_py)?;
-                    }
-                    continue;
-                }
-                let Some(zone) = sequence_zone(&value) else {
-                    continue;
+                _ => built,
+            };
+            // A MultiIndex given as index= or columns= stays one, and a dict
+            // keyed by tuples makes a MultiIndex column axis, as pandas' (only
+            // the flattened labels were kept; fvsao.34).
+            let built =
+                match index.and_then(|index| index.extract::<PyRef<'_, PyMultiIndex>>().ok()) {
+                    Some(multi) => built
+                        .with_row_multiindex(multi.inner.clone())
+                        .map_err(frame_error_to_py)?,
+                    None => built,
                 };
-                let name = key.str()?.extract::<String>()?;
-                if let Some(column) = built
-                    .column(&name)
-                    .filter(|column| column.dtype() == DType::Datetime64 { tz: None })
-                {
-                    let zoned = column.with_dtype(DType::datetime64_tz(zone));
-                    built = built.with_column(name, zoned).map_err(frame_error_to_py)?;
+            // A dict value listing tz-aware datetimes of one zone builds an aware
+            // column (it came back naive).
+            let mut built = built;
+            if let Some(dict) = data.and_then(|data| data.cast::<PyDict>().ok()) {
+                for (key, value) in dict.iter() {
+                    // Datetimes of several zones: an object column of the values
+                    // as they are, as pandas (fvsao.60).
+                    if let Some(cells) = mixed_zone_cells(py, &value)? {
+                        let name = key.str()?.extract::<String>()?;
+                        if built
+                            .column(&name)
+                            .is_some_and(|column| column.len() == cells.len())
+                        {
+                            built = built.with_column(name, cells).map_err(frame_error_to_py)?;
+                        }
+                        continue;
+                    }
+                    let Some(zone) = sequence_zone(&value) else {
+                        continue;
+                    };
+                    let name = key.str()?.extract::<String>()?;
+                    if let Some(column) = built
+                        .column(&name)
+                        .filter(|column| column.dtype() == DType::Datetime64 { tz: None })
+                    {
+                        let zoned = column.with_dtype(DType::datetime64_tz(zone));
+                        built = built.with_column(name, zoned).map_err(frame_error_to_py)?;
+                    }
                 }
             }
-        }
-        // A tz-aware index= keeps its zone (its labels were taken naive).
-        let built = match index.and_then(index_arg_zone) {
-            Some(zone) => {
-                let zoned = built
-                    .index()
-                    .clone()
-                    .with_tz(Some(&zone))
-                    .map_err(index_error_to_py)?;
-                built.with_index(zoned).map_err(frame_error_to_py)?
-            }
-            None => built,
-        };
-        // ... and its freq (the rows are its labels, in its order).
-        let built = match index.and_then(index_arg_freq) {
-            Some(freq) => {
-                let index = built.index().clone().with_freq(Some(freq));
-                built.with_index(index).map_err(frame_error_to_py)?
-            }
-            None => built,
-        };
-        // ... and its categories, a CategoricalIndex given (cld41).
-        let built = match index.and_then(index_arg_categories) {
-            Some(categories) => {
-                let index = built
-                    .index()
-                    .clone()
-                    .with_categories(Some(categories))
-                    .map_err(index_error_to_py)?;
-                built.with_index(index).map_err(frame_error_to_py)?
-            }
-            None => built,
-        };
-        // ... and its dtype where its labels read another (i20vm).
-        let built = match index.and_then(index_arg_declared) {
-            Some(declared) => {
-                let index = built.index().clone().with_declared_dtype(Some(declared));
-                built.with_index(index).map_err(frame_error_to_py)?
-            }
-            None => built,
-        };
-        // Rows with no index of their own are pandas' RangeIndex (fvsao.18).
-        let built = match constructor_range_span(data, index, true, built.index()) {
-            Some(span) if built.row_multiindex().is_none() => built.with_range_span(Some(span)),
-            _ => built,
-        };
-        // A frame built without columns, none named, has pandas' empty
-        // RangeIndex columns (DataFrame(), DataFrame({}), DataFrame(index=
-        // [1, 2]); they were an object Index; br-frankenpandas-ksd1f).
-        // Named ones (columns=[]) stay object, as pandas keeps them.
-        let built = if built.num_columns() == 0 && columns.is_none_or(|columns| columns.is_none()) {
-            built.with_column_range((0, 0, 1))
-        } else {
-            built
-        };
-        let column_multi = match columns {
-            Some(columns) => columns
-                .extract::<PyRef<'_, PyMultiIndex>>()
-                .ok()
-                .map(|multi| multi.inner.clone()),
-            None => match data.map(|data| data.cast::<PyDict>()) {
-                Some(Ok(dict))
-                    if !dict.is_empty()
-                        && dict
+            // A tz-aware index= keeps its zone (its labels were taken naive).
+            let built = match index.and_then(index_arg_zone) {
+                Some(zone) => {
+                    let zoned = built
+                        .index()
+                        .clone()
+                        .with_tz(Some(&zone))
+                        .map_err(index_error_to_py)?;
+                    built.with_index(zoned).map_err(frame_error_to_py)?
+                }
+                None => built,
+            };
+            // ... and its freq (the rows are its labels, in its order).
+            let built = match index.and_then(index_arg_freq) {
+                Some(freq) => {
+                    let index = built.index().clone().with_freq(Some(freq));
+                    built.with_index(index).map_err(frame_error_to_py)?
+                }
+                None => built,
+            };
+            // ... and its categories, a CategoricalIndex given (cld41).
+            let built = match index.and_then(index_arg_categories) {
+                Some(categories) => {
+                    let index = built
+                        .index()
+                        .clone()
+                        .with_categories(Some(categories))
+                        .map_err(index_error_to_py)?;
+                    built.with_index(index).map_err(frame_error_to_py)?
+                }
+                None => built,
+            };
+            // ... and its dtype where its labels read another (i20vm).
+            let built = match index.and_then(index_arg_declared) {
+                Some(declared) => {
+                    let index = built.index().clone().with_declared_dtype(Some(declared));
+                    built.with_index(index).map_err(frame_error_to_py)?
+                }
+                None => built,
+            };
+            // Rows with no index of their own are pandas' RangeIndex (fvsao.18).
+            let built = match constructor_range_span(data, index, true, built.index()) {
+                Some(span) if built.row_multiindex().is_none() => built.with_range_span(Some(span)),
+                _ => built,
+            };
+            // A frame built without columns, none named, has pandas' empty
+            // RangeIndex columns (DataFrame(), DataFrame({}), DataFrame(index=
+            // [1, 2]); they were an object Index; br-frankenpandas-ksd1f).
+            // Named ones (columns=[]) stay object, as pandas keeps them.
+            let built =
+                if built.num_columns() == 0 && columns.is_none_or(|columns| columns.is_none()) {
+                    built.with_column_range((0, 0, 1))
+                } else {
+                    built
+                };
+            let column_multi = match columns {
+                Some(columns) => columns
+                    .extract::<PyRef<'_, PyMultiIndex>>()
+                    .ok()
+                    .map(|multi| multi.inner.clone()),
+                None => match data.map(|data| data.cast::<PyDict>()) {
+                    Some(Ok(dict))
+                        if !dict.is_empty()
+                            && dict
+                                .keys()
+                                .iter()
+                                .all(|key| key.is_instance_of::<PyTuple>()) =>
+                    {
+                        let tuples = dict
                             .keys()
                             .iter()
-                            .all(|key| key.is_instance_of::<PyTuple>()) =>
-                {
-                    let tuples = dict
-                        .keys()
-                        .iter()
-                        .map(|key| {
-                            key.try_iter()?
-                                .map(|label| py_to_index_label(&label?))
-                                .collect()
-                        })
-                        .collect::<PyResult<Vec<Vec<IndexLabel>>>>()?;
-                    Some(fp_index::MultiIndex::from_tuples(tuples).map_err(index_error_to_py)?)
-                }
-                _ => None,
-            },
-        };
-        let built = match column_multi {
-            Some(multi) => frame_with_column_multiindex(&built, multi)?,
-            None => built,
-        };
-        // Column labels keep their types (fvsao.32).
-        let built = constructor_column_labels(data, columns, built)?;
-        // dtype= casts every column once built, as the Series constructor
-        // does; object keeps the values. The constructor took no dtype=
-        // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.22).
-        let inner = match dtype.filter(|dtype| !dtype.is_none()) {
-            None => built,
-            Some(dtype) if is_object_dtype_arg(dtype) => object_frame(&built, None)?,
-            // dtype='string': every column pandas' `string` dtype (fvsao.59).
-            Some(dtype) if is_string_dtype_arg(dtype) => {
-                let mut frame = built;
-                for name in frame
-                    .column_names()
-                    .into_iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                {
-                    if let Some(column) = frame.column(&name) {
-                        let text = pandas_string_column(column)?;
-                        frame = frame.with_column(name, text).map_err(frame_error_to_py)?;
+                            .map(|key| {
+                                key.try_iter()?
+                                    .map(|label| py_to_index_label(&label?))
+                                    .collect()
+                            })
+                            .collect::<PyResult<Vec<Vec<IndexLabel>>>>()?;
+                        Some(fp_index::MultiIndex::from_tuples(tuples).map_err(index_error_to_py)?)
                     }
-                }
-                frame
-            }
-            Some(dtype) => match py_width_arg(dtype) {
-                Some((width, nullable)) => {
-                    // A frame's columns cast as the Series constructor's
-                    // (see `refuse_lossy_constructor_ints`); a frame given
-                    // as the data casts as astype.
-                    if data.is_some_and(|data| data.extract::<PyRef<'_, PyDataFrame>>().is_err()) {
-                        for position in 0..built.num_columns() {
-                            if let Some(column) = built.column_at(position) {
-                                refuse_lossy_constructor_ints(column, width, nullable, false)?;
-                            }
+                    _ => None,
+                },
+            };
+            let built = match column_multi {
+                Some(multi) => frame_with_column_multiindex(&built, multi)?,
+                None => built,
+            };
+            // Column labels keep their types (fvsao.32).
+            let built = constructor_column_labels(data, columns, built)?;
+            // dtype= casts every column once built, as the Series constructor
+            // does; object keeps the values. The constructor took no dtype=
+            // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.22).
+            let inner = match dtype.filter(|dtype| !dtype.is_none()) {
+                None => built,
+                Some(dtype) if is_object_dtype_arg(dtype) => object_frame(&built, None)?,
+                // dtype='string': every column pandas' `string` dtype (fvsao.59).
+                Some(dtype) if is_string_dtype_arg(dtype) => {
+                    let mut frame = built;
+                    for name in frame
+                        .column_names()
+                        .into_iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                    {
+                        if let Some(column) = frame.column(&name) {
+                            let text = pandas_string_column(column)?;
+                            frame = frame.with_column(name, text).map_err(frame_error_to_py)?;
                         }
                     }
-                    built.astype_width(width, nullable)
+                    frame
                 }
-                None => built.astype(py_dtype_arg(dtype)?),
+                Some(dtype) => match py_width_arg(dtype) {
+                    Some((width, nullable)) => {
+                        // A frame's columns cast as the Series constructor's
+                        // (see `refuse_lossy_constructor_ints`); a frame given
+                        // as the data casts as astype.
+                        if data
+                            .is_some_and(|data| data.extract::<PyRef<'_, PyDataFrame>>().is_err())
+                        {
+                            for position in 0..built.num_columns() {
+                                if let Some(column) = built.column_at(position) {
+                                    refuse_lossy_constructor_ints(column, width, nullable, false)?;
+                                }
+                            }
+                        }
+                        built.astype_width(width, nullable)
+                    }
+                    None => built.astype(py_dtype_arg(dtype)?),
+                }
+                .map_err(|e| astype_error_to_py(&e))?,
+            };
+            Ok(PyDataFrame { inner })
+        })()?;
+        // The column axis is named and zoned as an Index given as `columns=`
+        // is - its name, a tz-aware DatetimeIndex's zone - as pandas' (the
+        // constructor dropped both: the axis unnamed, the labels the UTC
+        // clock; br-frankenpandas-e186m).
+        if let Some(columns) = columns.filter(|columns| is_index_object(columns))
+            && frame.inner.columns_multiindex().is_none()
+        {
+            if let Some(name) = py_axis_name(&columns.getattr("name")?)? {
+                frame.inner = frame.inner.with_columns_name(Some(name));
             }
-            .map_err(|e| astype_error_to_py(&e))?,
-        };
-        Ok(PyDataFrame { inner })
+            if let Ok(datetimes) = columns.extract::<PyRef<'_, PyDatetimeIndex>>()
+                && let Some(zone) = datetimes.inner.tz()
+            {
+                frame.inner = frame.inner.with_columns_tz(Some(zone));
+            }
+        }
+        Ok(frame)
     }
 
     /// Return the shape of the DataFrame as (rows, cols).
@@ -46048,10 +46098,16 @@ impl PyDataFrame {
         // boolean Series is a row mask (below): extracting it as names built
         // a Python list of all its rows first (br-frankenpandas-sj5bn).
         // So is a bool array, an empty one too (it named no columns).
-        let bool_mask = key
+        let series_mask = key
             .extract::<PyRef<'_, PySeries>>()
-            .is_ok_and(|mask| mask.inner.dtype().is_bool())
-            || bool_mask_key(key).is_some();
+            .is_ok_and(|mask| mask.inner.dtype().is_bool());
+        // Read once: the mask branch below takes it (it was read twice).
+        let list_mask = if series_mask {
+            None
+        } else {
+            bool_mask_key(key)
+        };
+        let bool_mask = series_mask || list_mask.is_some();
         if !bool_mask && let Ok(cols) = key.extract::<Vec<String>>() {
             for col in &cols {
                 if self.inner.column(col).is_none() {
@@ -46137,7 +46193,7 @@ impl PyDataFrame {
             return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
         }
         // `df[mask]` with a boolean list -> filtered rows
-        if let Some(mask) = bool_mask_key(key) {
+        if let Some(mask) = list_mask {
             let frame = self
                 .inner
                 .iloc_bool(&mask)
@@ -49410,6 +49466,19 @@ impl PyDataFrame {
                     "by must be a string or list of strings",
                 ));
             };
+            // A label two columns share names neither: pandas' ValueError (it
+            // sorted by the first of them; br-frankenpandas-e186m). Under a
+            // column MultiIndex a tuple names one column whatever its leaf.
+            let names = self.inner.column_names();
+            if self.inner.columns_multiindex().is_none()
+                && let Some(repeated) = by_cols
+                    .iter()
+                    .find(|by| names.iter().filter(|name| **name == *by).count() > 1)
+            {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "The column label '{repeated}' is not unique."
+                )));
+            }
 
             let asc_flags: Vec<bool> = match ascending {
                 None => vec![true; by_cols.len()],
@@ -58947,14 +59016,30 @@ fn bool_mask_key(key: &Bound<'_, PyAny>) -> Option<Vec<bool>> {
     // elements were each made a Python object to find that out (a
     // DatetimeIndex key's every Timestamp, df.loc[idx[::3]];
     // br-frankenpandas-lsn8d).
-    if let Ok(kind) = key
+    let kind = key
         .getattr("dtype")
         .and_then(|dtype| dtype.getattr("kind"))
-        .and_then(|kind| kind.extract::<String>())
+        .and_then(|kind| kind.extract::<String>());
+    if let Ok(kind) = &kind
         && kind != "b"
         && kind != "O"
     {
         return None;
+    }
+    // A one-dimensional numpy bool array is read through its buffer, a byte
+    // a flag: each element was made a numpy scalar (df[mask] of a million
+    // rows 171 ms, pandas 8; br-frankenpandas-e186m).
+    if kind.as_deref().is_ok_and(|kind| kind == "b")
+        && key.get_type().name().is_ok_and(|name| name == "ndarray")
+        && key
+            .getattr("ndim")
+            .and_then(|ndim| ndim.extract::<usize>())
+            .is_ok_and(|ndim| ndim == 1)
+        && let Ok(bytes) = key
+            .call_method1("view", ("uint8",))
+            .and_then(|bytes| ndarray_elements::<u8>(key.py(), &bytes))
+    {
+        return Some(bytes.into_iter().map(|byte| byte != 0).collect());
     }
     let mask = key.extract::<Vec<bool>>().ok()?;
     if mask.is_empty() {

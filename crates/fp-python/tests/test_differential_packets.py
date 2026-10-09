@@ -33499,3 +33499,96 @@ def test_series_ops_keep_dtype_like_pandas_76kq0(kind: str, op: str) -> None:
             return ("raise", type(error).__name__)
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m / br-frankenpandas-wm1te: a row gather (take,
+# sort_values, a boolean filter, iloc by positions or a step, head) keeps the
+# frame's column axis whole - int labels, a RangeIndex, repeated names, the
+# axis name, a column MultiIndex, tz-aware datetime labels - now carried by
+# position rather than rebuilt from the names; a numpy bool mask is read
+# through its buffer. NEGATIVE: plain text columns, an int array (positions,
+# not a mask), a list / object array of bools, an empty bool array and a
+# mask of the wrong length answer as pandas.
+def _e186m_axis_frames(m: Any) -> dict[str, Any]:
+    values = np.arange(24.0).reshape(6, 4)
+    zoned = m.date_range("2024-01-01", periods=4, freq="D", tz="US/Eastern")
+    frames = {
+        "text": m.DataFrame(values, columns=["a", "b", "c", "d"]),
+        "int": m.DataFrame(values, columns=[10, 20, 30, 40]),
+        "range": m.DataFrame(values),
+        "repeated": m.DataFrame(values, columns=["a", "a", "b", "c"]),
+        "named": m.DataFrame(values, columns=m.Index(["a", "b", "c", "d"], name="cols")),
+        "multi": m.DataFrame(values, columns=m.MultiIndex.from_tuples([("x", 1), ("x", 2), ("y", 1), ("y", 2)])),
+        "zoned": m.DataFrame(values, columns=zoned),
+    }
+    return frames
+
+
+_E186M_GATHERS = {
+    "take": lambda m, df: df.take([4, 0, 2]),
+    "sort_values": lambda m, df: df.sort_values(df.columns[1], ascending=False),
+    "np mask": lambda m, df: df[np.array([True, False, True, True, False, True])],
+    "loc np mask": lambda m, df: df.loc[np.array([False, True, True, False, False, True])],
+    "iloc np mask": lambda m, df: df.iloc[np.array([True, True, False, False, True, False])],
+    "strided np mask": lambda m, df: df[np.array([True, False] * 6)[::2]],
+    "list mask": lambda m, df: df[[True, False, True, True, False, True]],
+    "object mask": lambda m, df: df[np.array([True, False, True, True, False, True], dtype=object)],
+    "empty mask": lambda m, df: df.iloc[:0][np.array([], dtype=bool)],
+    "short mask": lambda m, df: df[np.array([True, False])],
+    "iloc perm": lambda m, df: df.iloc[np.array([5, 3, 1, 0])],
+    "iloc step": lambda m, df: df.iloc[::2],
+    "iloc reverse": lambda m, df: df.iloc[::-1],
+    "head": lambda m, df: df.head(2),
+}
+
+
+def _e186m_axis_show(frame: Any) -> Any:
+    columns = frame.columns
+    return (
+        type(columns).__name__,
+        [repr(label) for label in columns],
+        getattr(columns, "names", None) and list(columns.names),
+        [repr(label) for label in frame.index],
+        frame.to_numpy().tolist(),
+    )
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", ["text", "int", "range", "repeated", "named", "multi", "zoned"])
+@pytest.mark.parametrize("op", list(_E186M_GATHERS))
+def test_row_gathers_keep_the_column_axis_like_pandas_e186m(kind: str, op: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _e186m_axis_show(_E186M_GATHERS[op](m, _e186m_axis_frames(m)[kind]))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "key",
+    ["bool array", "strided bool array", "int array", "list of bools", "object array", "empty", "wrong length"],
+)
+def test_series_mask_keys_like_pandas_wm1te(key: str) -> None:
+    # A Series reads the same keys: a numpy bool array (strided too) is a
+    # mask; NEGATIVE: an int array is labels / positions, the others as pandas.
+    def run(m: Any) -> Any:
+        s = m.Series([1.5, 2.5, 3.5, 4.5], index=[3, 2, 1, 0], name="s")
+        keys = {
+            "bool array": np.array([True, False, False, True]),
+            "strided bool array": np.array([True, True, False, False, False, True, True, True])[::2],
+            "int array": np.array([1, 3]),
+            "list of bools": [False, True, True, False],
+            "object array": np.array([True, False, True, False], dtype=object),
+            "empty": np.array([], dtype=bool),
+            "wrong length": np.array([True, False]),
+        }
+        try:
+            got = s[keys[key]]
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        return ([repr(label) for label in got.index], got.tolist())
+
+    assert run(fpd) == run(pd)
