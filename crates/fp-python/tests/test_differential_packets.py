@@ -28735,6 +28735,47 @@ def test_grouped_ring_periods_like_pandas_knu1r(case: Any) -> None:
     assert run(fpd) == run(pd)
 
 
+# br-frankenpandas-knu1r: unique of a float column builds its distinct
+# floats directly - first-seen order, every missing value one NaN where the
+# first is seen, -0.0 and 0.0 one value (the first seen kept), from numpy
+# NaN, by where, by a reindex adding a label, all NaN, empty, float32,
+# infinities; NEGATIVE: a nullable Float64's unique stays its FloatingArray
+# with <NA>, an int64 column's an int64 array.
+_KNU1R_UNIQUE = {
+    "numpy nan": lambda m: m.Series(np.array([1.5, np.nan, 2.5, 1.5, np.nan, 3.0, 2.5])),
+    "nan first": lambda m: m.Series(np.array([np.nan, 0.25, 0.25, np.nan])),
+    "signed zeros": lambda m: m.Series(np.array([-0.0, 0.0, np.nan, 0.0, -0.0])),
+    "zero first": lambda m: m.Series(np.array([0.0, np.nan, -0.0])),
+    "where": lambda m: m.Series([0.2, 0.7, 0.9, 0.1, 0.7]).where(m.Series([0.2, 0.7, 0.9, 0.1, 0.7]) > 0.5),
+    "reindex": lambda m: m.Series([1.0, 2.0, 1.0], index=[0, 1, 2]).reindex([2, 7, 0, 9]),
+    "all nan": lambda m: m.Series(np.array([np.nan, np.nan])),
+    "empty": lambda m: m.Series(np.array([], dtype="float64")),
+    "float32": lambda m: m.Series(np.array([0.1, np.nan, 0.1, 2.5], dtype="float32")),
+    "infinities": lambda m: m.Series(np.array([np.inf, -np.inf, np.nan, np.inf, 1.0])),
+    "no missing": lambda m: m.Series(np.array([3.5, 1.25, 3.5, -2.0, 1.25])),
+    "nullable Float64": lambda m: m.Series([1.5, None, 1.5, 2.0], dtype="Float64"),
+    "int64": lambda m: m.Series(np.array([3, 1, 3, 2])),
+}
+
+
+def _knu1r_unique_cell(v: Any) -> Any:
+    if type(v).__name__ == "NAType":
+        return "<NA>"
+    if isinstance(v, (float, np.floating)):
+        return "nan" if v != v else (float(v), bool(np.signbit(v)))
+    return int(v)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_KNU1R_UNIQUE))
+def test_float_unique_like_pandas_knu1r(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _KNU1R_UNIQUE[case](m).unique()
+        return [type(out).__name__, str(out.dtype), [_knu1r_unique_cell(v) for v in list(out)]]
+
+    assert run(fpd) == run(pd)
+
+
 # br-frankenpandas-knu1r: grouped cumsum / cumprod / cummax / cummin of a
 # float column holding NaN (a group's first value, runs of them) by an int
 # key (the key-offset kernel) and a text key (the group-id kernel);

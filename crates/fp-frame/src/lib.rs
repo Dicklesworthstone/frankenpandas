@@ -18679,6 +18679,55 @@ impl Series {
         Some(Column::from_temporal_nanos(self.column.dtype(), distinct))
     }
 
+    /// A float column's distinct values as floats, in first-seen order with
+    /// every missing value one NaN where the first is seen and -0.0 one value
+    /// with 0.0 (the first seen kept), as pandas' unique; None for any other
+    /// column. The binding's unique made a Scalar a distinct value and a
+    /// column back from them, two thirds of s.unique() of a million floats
+    /// holding NaN (64 ms, the hashing alone 23, pandas 57;
+    /// br-frankenpandas-knu1r).
+    #[must_use]
+    pub fn unique_f64_values(&self) -> Option<Vec<f64>> {
+        if self.categorical.is_some() {
+            return None;
+        }
+        // An all-valid column (`as_f64_slice`) holds no NaN: its f64 bits
+        // dedup with FxHash, keyed as ScalarKey::FloatBits keys them (0.0
+        // for either zero), spread against bucket clustering on
+        // floored / integer float data (br-frankenpandas-uqf64, mixf64).
+        if let Some(data) = self.column.as_f64_slice() {
+            let mut seen: rustc_hash::FxHashSet<u64> = rustc_hash::FxHashSet::default();
+            return Some(
+                data.iter()
+                    .copied()
+                    .filter(|&v| {
+                        seen.insert(spread_float_bits(
+                            (if v == 0.0 { 0.0 } else { v }).to_bits(),
+                        ))
+                    })
+                    .collect(),
+            );
+        }
+        // With missing values: the rows `First` keeps (the Scalar path was
+        // 0.13x pandas on round keys with NaN; br-frankenpandas-bss5q.3).
+        let (data, validity) = self.column.as_f64_slice_with_validity()?;
+        let flags = float_duplicate_flags(data, validity, DuplicateKeep::First);
+        Some(
+            data.iter()
+                .zip(flags)
+                .enumerate()
+                .filter(|(_, (_, repeat))| !repeat)
+                .map(|(row, (&value, _))| {
+                    if validity.get(row) && !value.is_nan() {
+                        value
+                    } else {
+                        f64::NAN
+                    }
+                })
+                .collect(),
+        )
+    }
+
     /// Return unique non-null values in first-seen order.
     ///
     /// Matches `pd.Series.unique()`.
@@ -18780,44 +18829,16 @@ impl Series {
             return out;
         }
 
-        // Typed Float64 fast path (br-frankenpandas-uqf64): an all-valid no-NaN Float64
-        // column (`as_f64_slice`) dedups its f64 bits with FxHash, first-seen order. The key
-        // is `(if v==0.0 {0.0} else {v}).to_bits()` — EXACTLY `ScalarKey::FloatBits` for
-        // non-NaN floats (see scalar_key_allow_missing), so bit-identical to the general
-        // ScalarKey path, but skips the values() Vec<Scalar> + per-row key match + enum hash.
-        if self.categorical.is_none()
-            && let Some(data) = self.column.as_f64_slice()
-        {
-            let mut seen: rustc_hash::FxHashSet<u64> = rustc_hash::FxHashSet::default();
-            let mut out: Vec<Scalar> = Vec::new();
-            for &v in data {
-                // Spread (bijective ⇒ membership identical) against bucket
-                // clustering on floored/integer float data (br-frankenpandas-mixf64).
-                let key = spread_float_bits((if v == 0.0 { 0.0 } else { v }).to_bits());
-                if seen.insert(key) {
-                    out.push(Scalar::Float64(v));
-                }
-            }
-            return out;
-        }
-        // A float column with missing values: the rows `First` keeps, every
-        // missing value one NaN where first seen, as pandas - the Scalar path
-        // below was 0.13x pandas on round keys with NaN
-        // (br-frankenpandas-bss5q.3).
-        if self.categorical.is_none()
-            && let Some((data, validity)) = self.column.as_f64_slice_with_validity()
-        {
-            let flags = float_duplicate_flags(data, validity, DuplicateKeep::First);
-            return data
-                .iter()
-                .zip(flags)
-                .enumerate()
-                .filter(|(_, (_, repeat))| !repeat)
-                .map(|(row, (&value, _))| {
-                    if validity.get(row) && !value.is_nan() {
-                        Scalar::Float64(value)
-                    } else {
+        // A float column's distinct floats ([`Self::unique_f64_values`]), the
+        // NaN that stands for its missing values a missing Scalar.
+        if let Some(values) = self.unique_f64_values() {
+            return values
+                .into_iter()
+                .map(|value| {
+                    if value.is_nan() {
                         Scalar::Null(NullKind::NaN)
+                    } else {
+                        Scalar::Float64(value)
                     }
                 })
                 .collect();
@@ -129955,6 +129976,97 @@ mod tests {
         let s = Series::from_values("empty", vec![], vec![]).unwrap();
         assert!(s.unique().is_empty());
         assert_eq!(s.nunique(), 0);
+    }
+
+    #[test]
+    fn unique_f64_values_keep_first_seen_floats_knu1r() {
+        // unique_f64_values equals a first-seen reference - every missing
+        // value (NaN, a cleared bit over a number) one NaN where the first is
+        // seen, -0.0 one value with 0.0 (the first kept) - over a column
+        // holding NaN, one masked by its validity, an all-valid one, an
+        // all-missing one and an empty one; unique's Scalars are those floats
+        // (br-frankenpandas-knu1r).
+        let reference = |data: &[f64], valid: &[bool]| -> Vec<u64> {
+            let mut out: Vec<f64> = Vec::new();
+            let mut missing_seen = false;
+            for (&v, &ok) in data.iter().zip(valid) {
+                if !ok || v.is_nan() {
+                    if !missing_seen {
+                        missing_seen = true;
+                        out.push(f64::NAN);
+                    }
+                } else if !out
+                    .iter()
+                    .any(|u| u.partial_cmp(&v) == Some(std::cmp::Ordering::Equal))
+                {
+                    out.push(v);
+                }
+            }
+            out.iter().map(|v| v.to_bits()).collect()
+        };
+        let nan = f64::NAN;
+        let inf = f64::INFINITY;
+        let cases: [(Vec<f64>, Vec<usize>); 5] = [
+            (
+                vec![1.5, nan, -0.0, 2.5, 0.0, nan, 1.5, -0.0, inf, -inf, inf],
+                vec![],
+            ),
+            (
+                vec![0.0, 4.0, -0.0, 4.0, 7.5, 9.0, 7.5, 0.25],
+                vec![1, 4, 5],
+            ),
+            (vec![3.5, 0.0, -0.0, 3.5, 1.25, -inf, 1.25], vec![]),
+            (vec![nan, 2.0, nan], vec![1]),
+            (Vec::new(), vec![]),
+        ];
+        for (data, masked) in cases {
+            let n = data.len();
+            let mut validity = fp_columnar::ValidityMask::all_valid(n);
+            for &row in &masked {
+                validity.set(row, false);
+            }
+            let valid: Vec<bool> = (0..n)
+                .map(|row| !masked.contains(&row) && !data[row].is_nan())
+                .collect();
+            let column = if masked.is_empty() {
+                Column::from_f64_values(data.clone())
+            } else {
+                Column::from_f64_values_with_validity(data.clone(), validity)
+            };
+            let rows = i64::try_from(n).unwrap();
+            let s = Series::new("v", Index::from_range(0, rows, 1), column).unwrap();
+            let got = s.unique_f64_values().unwrap();
+            let bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(bits, reference(&data, &valid), "{data:?} masked {masked:?}");
+            let scalars: Vec<Scalar> = got
+                .iter()
+                .map(|&v| {
+                    if v.is_nan() {
+                        Scalar::Null(NullKind::NaN)
+                    } else {
+                        Scalar::Float64(v)
+                    }
+                })
+                .collect();
+            assert_eq!(format!("{:?}", s.unique()), format!("{scalars:?}"));
+        }
+        // NEGATIVE: an int column and a categorical of floats hold no floats
+        // of their own to give.
+        let ints = Series::from_values(
+            "i",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(3)],
+        )
+        .unwrap();
+        assert!(ints.unique_f64_values().is_none());
+        let categorical = Series::from_categorical_codes(
+            "c",
+            vec![1, 0, 1],
+            vec![Scalar::Float64(0.5), Scalar::Float64(2.5)],
+            false,
+        )
+        .unwrap();
+        assert!(categorical.unique_f64_values().is_none());
     }
 
     #[test]

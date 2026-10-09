@@ -32775,6 +32775,13 @@ impl PySeries {
                 .keeping_dtype_of(source);
             return extension_array(py, distinct);
         }
+        // A float column's distinct floats, its missing values one NaN: a
+        // Scalar a distinct value and a column inferred back from them were
+        // two thirds of s.unique() (br-frankenpandas-knu1r).
+        if let Some(values) = self.inner.unique_f64_values() {
+            let column = Column::from_f64_values(values).keeping_dtype_of(source);
+            return Ok(column_ndarray(py, &column)?.unbind());
+        }
         // The distinct values are the column's own: an int32 column's are an
         // int32 array (fvsao.23); missing values alone (or none) keep the
         // column's dtype - a float64 column's [nan] and an empty int64
