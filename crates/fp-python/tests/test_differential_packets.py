@@ -33067,3 +33067,100 @@ def test_index_of_timestamp_intervals_refused_until_held_1qj7z() -> None:
     assert str(held.dtype) == "object"
     assert held.iloc[0] == _1qj7z_days(fpd)
     assert str(held.iloc[0].right) == "2024-02-01 00:00:00"
+
+
+def _e186m_frames(m: Any) -> dict[str, Any]:
+    zoned = m.date_range("2024-01-01", periods=4, freq="D", tz="US/Eastern")
+    named = m.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+    named.columns.name = "cols"
+    return {
+        "transposed tz rows": m.DataFrame({"a": [1.0, 2, 3, 4], "b": [5.0, 6, 7, 8]}, index=zoned).T,
+        "naive datetime columns": m.DataFrame({"a": [1.0, 2], "b": [3.0, 4]}, index=m.to_datetime(["2024-01-01", "2024-01-02"])).T,
+        "range columns": m.DataFrame(np.arange(12.0).reshape(4, 3)),
+        "named columns": named,
+        "repeated columns": m.DataFrame([[1, 2, 3], [4, 5, 6]], columns=["a", "b", "a"]),
+    }
+
+
+_E186M_ROW_OPS = {
+    "iloc[:1]": lambda d: d.iloc[:1],
+    "iloc[1:]": lambda d: d.iloc[1:],
+    "iloc[5:]": lambda d: d.iloc[5:],
+    "head(1)": lambda d: d.head(1),
+    "tail(1)": lambda d: d.tail(1),
+    "iloc[[1, 0]]": lambda d: d.iloc[[1, 0]],
+    "astype(float32)": lambda d: d.astype("float32"),
+    "shift(1)": lambda d: d.shift(1),
+    "+ 1": lambda d: d + 1,
+    "isna": lambda d: d.isna(),
+    "notna": lambda d: d.notna(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("frame", ["transposed tz rows", "naive datetime columns", "range columns", "named columns", "repeated columns"])
+@pytest.mark.parametrize("op", list(_E186M_ROW_OPS))
+def test_row_slices_and_casts_keep_the_columns_index_e186m(frame: str, op: str) -> None:
+    # A row slice, take, cast, shift or arithmetic keeps the columns Index
+    # whole - its labels, type, name and zone (a tz-aware one came back naive
+    # UTC from a row slice); NEGATIVE: a naive one stays naive.
+    def run(m: Any) -> Any:
+        try:
+            out = _E186M_ROW_OPS[op](_e186m_frames(m)[frame])
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        columns = out.columns
+        return (
+            type(columns).__name__,
+            [repr(label) for label in columns],
+            columns.name,
+            str(getattr(columns, "tz", None)),
+            out.shape,
+            [str(dtype) for dtype in out.dtypes],
+            repr(out.to_numpy().tolist()),
+        )
+
+    assert run(fpd) == run(pd)
+
+
+_E186M_GRID = np.arange(7 * 37, dtype="float64").reshape(7, 37) * 1.5 - 40.0
+
+_E186M_MATRICES = {
+    "C float64": lambda: _E186M_GRID.copy(),
+    "Fortran float64": lambda: np.asfortranarray(_E186M_GRID),
+    "C int64": lambda: _E186M_GRID.astype("int64"),
+    "Fortran int64": lambda: np.asfortranarray(_E186M_GRID.astype("int64")),
+    "C bool": lambda: _E186M_GRID > 0,
+    "Fortran bool": lambda: np.asfortranarray(_E186M_GRID > 0),
+    "strided columns": lambda: _E186M_GRID[:, ::3],
+    "strided rows": lambda: _E186M_GRID[::2],
+    "reversed": lambda: _E186M_GRID[::-1, ::-1],
+    "transposed view": lambda: _E186M_GRID.T,
+    "one row": lambda: _E186M_GRID[:1].copy(),
+    "one column": lambda: _E186M_GRID[:, :1].copy(),
+    "no rows": lambda: np.empty((0, 4)),
+    "no columns": lambda: np.empty((3, 0)),
+    "big-endian": lambda: _E186M_GRID.astype(">f8"),
+    "with NaN": lambda: np.where(_E186M_GRID > 10, np.nan, _E186M_GRID),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("matrix", list(_E186M_MATRICES))
+def test_frame_of_a_2d_array_in_any_layout_e186m(matrix: str) -> None:
+    # DataFrame(ndarray) reads a C-ordered buffer a block of columns at a
+    # time, a Fortran-ordered one a column at a time, any other through a
+    # gather: every layout holds pandas' values and dtypes. NEGATIVE: views
+    # whose strides fit neither order (a step, a reversal) take the gather.
+    def run(m: Any) -> Any:
+        frame = m.DataFrame(_E186M_MATRICES[matrix]())
+        # Not parity: pandas keeps a big-endian array's '>f8'; fp holds its
+        # values as native float64 (the values are compared as they are).
+        return (
+            frame.shape,
+            [str(np.dtype(str(dtype)).newbyteorder("=")) for dtype in frame.dtypes],
+            repr(frame.to_numpy().tolist()),
+            repr(frame.iloc[:, -1:].to_numpy().tolist()) if frame.shape[1] else None,
+        )
+
+    assert run(fpd) == run(pd)

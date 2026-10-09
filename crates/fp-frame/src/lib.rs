@@ -1563,6 +1563,28 @@ fn clear_infinite_differences(data: &[f64], periods: i64, p: usize, valid_words:
     }
 }
 
+/// The workers a column-parallel frame op spreads `ncols` columns of `rows`
+/// rows over: none past one while the cells number under `par_min_values`,
+/// else one a `CELLS_PER_WORKER` cells - fewer for an op whose threshold is
+/// low, as a heavier op's is (rank) - a core and a column at most. A worker
+/// a core spawned 64 threads for a 1000 x 1000 frame, each with ~16k cells
+/// to do, so the spawns and their abandoned allocator heaps were most of
+/// df * df (0.07x pandas; br-frankenpandas-e186m). A high threshold
+/// (a bandwidth-bound op's) only says when to spread, not over how many:
+/// sizing by it left df + 1 over 1M x 10 two workers (2.12x -> 1.33x).
+fn column_workers(ncols: usize, rows: usize, par_min_values: usize) -> usize {
+    const PAR_MIN_COLS: usize = 2;
+    const CELLS_PER_WORKER: usize = 1 << 17;
+    let cells = ncols.saturating_mul(rows);
+    if ncols < PAR_MIN_COLS || cells < par_min_values {
+        return 1;
+    }
+    let per_worker = par_min_values.saturating_mul(8).clamp(1, CELLS_PER_WORKER);
+    fp_columnar::cached_available_parallelism()
+        .min(ncols)
+        .min(cells.div_ceil(per_worker))
+}
+
 /// The words of `validity` (`n` rows) shifted by `periods` rows, a 64-row
 /// word at a time: bit i is the source's bit i - periods, 0 where that row
 /// is outside the column, and every bit past `n` 0.
@@ -73309,6 +73331,39 @@ impl ColumnStore {
         store
     }
 
+    /// `names` paired with `columns` position for position, as
+    /// [`Self::from_pairs`] over their zip, the pairs collected in one
+    /// allocation. When `like` holds exactly `names`, in that order, its name
+    /// lookup is shared rather than rebuilt: a lookup insert and two
+    /// allocations a column, which made the reassembly of a 1000-column
+    /// frame's `df + 1` cost a third of the op (br-frankenpandas-e186m).
+    fn from_names_like(names: &[String], columns: Vec<Column>, like: Option<&Self>) -> Self {
+        let shared = like.filter(|like| {
+            names.len() == columns.len()
+                && like.columns.len() == names.len()
+                && like
+                    .columns
+                    .iter()
+                    .zip(names)
+                    .all(|((have, _), name)| have == name)
+        });
+        let pairs: Vec<(String, Column)> = names.iter().cloned().zip(columns).collect();
+        let lookup = shared.map_or_else(
+            || {
+                let mut lookup: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+                for (pos, (name, _)) in pairs.iter().enumerate() {
+                    lookup.entry(name.clone()).or_default().push(pos);
+                }
+                Arc::new(lookup)
+            },
+            |like| Arc::clone(&like.lookup),
+        );
+        Self {
+            columns: Arc::new(pairs),
+            lookup,
+        }
+    }
+
     /// Append a column at the next position, allowing repeated names.
     pub fn push(&mut self, name: String, column: Column) {
         let pos = self.columns.len();
@@ -73999,6 +74054,19 @@ impl LazyDataFrameColumns {
     #[allow(dead_code)]
     fn is_empty(&self) -> bool {
         self.logical_len() == 0
+    }
+
+    /// The store these columns are already held in - eager, or a lazy one
+    /// already materialized - without materializing one for the asking.
+    fn held_store(&self) -> Option<&ColumnStore> {
+        match self {
+            Self::Eager(columns) => Some(columns),
+            Self::HomogeneousTranspose { materialized, .. } => {
+                materialized.get().map(AsRef::as_ref)
+            }
+            #[cfg(feature = "block-storage")]
+            Self::Float64Block { materialized, .. } => materialized.get().map(AsRef::as_ref),
+        }
     }
 
     fn materialized(&self) -> &ColumnStore {
@@ -74695,6 +74763,25 @@ impl ColumnAxis {
     #[cfg(feature = "lazy-transpose-view")]
     fn name_at(&self, position: usize) -> Option<String> {
         self.order.name_at(position)
+    }
+
+    /// The name at `position` where the axis holds it written out, borrowed;
+    /// None past the end and for a lazy range's unwritten names.
+    fn name_ref_at(&self, position: usize) -> Option<&str> {
+        #[cfg(feature = "lazy-transpose-view")]
+        {
+            match &self.order {
+                LazyDataFrameColumnOrder::Eager(names) => names.get(position),
+                LazyDataFrameColumnOrder::Int64UnitRange { materialized, .. } => {
+                    materialized.get()?.get(position)
+                }
+            }
+            .map(String::as_str)
+        }
+        #[cfg(not(feature = "lazy-transpose-view"))]
+        {
+            self.order.get(position).map(String::as_str)
+        }
     }
 }
 
@@ -77622,30 +77709,29 @@ impl DataFrame {
         self.take_rows_by_positions_unchecked(positions)
     }
 
-    fn take_contiguous_row_range_unchecked(
-        &self,
-        start: usize,
-        len: usize,
-    ) -> Result<Self, FrameError> {
+    fn take_contiguous_row_range_unchecked(&self, start: usize, len: usize) -> Self {
         debug_assert!(start.checked_add(len).is_some_and(|end| end <= self.len()));
         debug_assert!(self.row_multiindex.is_none());
 
-        let index = self.index.slice(start, len);
-        let n_cols = self.num_columns();
-        let mut pairs = Vec::with_capacity(n_cols);
-        let mut order = Vec::with_capacity(n_cols);
-        for i in 0..n_cols {
-            let name = self.column_name_at(i).expect("column name in bounds");
-            let column = self.column_at(i).expect("column in bounds");
-            pairs.push((name.clone(), column.take_contiguous_range(start, len)));
-            order.push(name);
+        // Each column sliced in place under the frame's own column axis, its
+        // store's name lookup shared: a row slice keeps the columns as they
+        // are. The names rebuilt and checked a column at a time were the
+        // whole of df.iloc[:10] over 1000 columns (br-frankenpandas-e186m).
+        let columns = (0..self.num_columns())
+            .map(|i| {
+                self.column_at(i)
+                    .expect("column in bounds")
+                    .take_contiguous_range(start, len)
+            })
+            .collect();
+        Self {
+            index: self.index.slice(start, len),
+            row_multiindex: None,
+            columns: self.own_column_store(columns).into(),
+            column_order: self.column_order.clone(),
+            column_multiindex: self.column_multiindex.clone(),
+            allows_duplicate_labels: self.allows_duplicate_labels,
         }
-        let columns = ColumnStore::from_pairs(pairs);
-
-        let mut out =
-            Self::new_with_axes(index, None, columns, order, self.column_multiindex.clone())?;
-        out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out.with_labels_of(self))
     }
 
     /// Internal unchecked variant - caller guarantees positions are in bounds.
@@ -82363,6 +82449,13 @@ impl DataFrame {
         if self.column_order.name.is_none() {
             self.column_order.name.clone_from(&source.column_order.name);
         }
+        // And the zone of its datetime labels: a row slice or take of a
+        // transposed tz-aware frame gave its columns back naive UTC
+        // (br-frankenpandas-e186m). An axis no longer all datetimes keeps
+        // the plain labels where the zone is read.
+        if self.column_order.tz.is_none() {
+            self.column_order.tz.clone_from(&source.column_order.tz);
+        }
         // And the MultiIndex levels of the columns it keeps (g3bux).
         if self.column_multiindex.is_none() {
             self.column_multiindex = source.column_levels_of(&self.column_labels());
@@ -82468,6 +82561,14 @@ impl DataFrame {
     /// when it carries that label (O(1), the usual case), else the same
     /// occurrence of the label, which keeps duplicated labels apart.
     fn store_position(&self, store: &ColumnStore, position: usize) -> Option<usize> {
+        // The usual case reads the name in place: column_name_at's copy, an
+        // allocation a column at every column_at, was a wide frame's cost
+        // (br-frankenpandas-e186m).
+        if let Some(name) = self.column_order.name_ref_at(position)
+            && store.name_at(position) == Some(name)
+        {
+            return Some(position);
+        }
         let name = self.column_name_at(position)?;
         if store.name_at(position) == Some(name.as_str()) {
             return Some(position);
@@ -82629,52 +82730,14 @@ impl DataFrame {
     ///
     /// Matches `df.isna()`.
     pub fn isna(&self) -> Result<Self, FrameError> {
-        let n_cols = self.num_columns();
-        let mut pairs = Vec::with_capacity(n_cols);
-        let mut column_order = Vec::with_capacity(n_cols);
-        for pos in 0..n_cols {
-            let name = self.column_name_at(pos).expect("column in bounds");
-            let column = self.column_at(pos).expect("column in bounds");
-            pairs.push((name.to_string(), column_na_mask(column, true)));
-            column_order.push(name.to_string());
-        }
-
-        let columns = ColumnStore::from_pairs(pairs);
-        let mut out = Self::new_with_axes(
-            self.index.clone(),
-            self.row_multiindex.clone(),
-            columns,
-            column_order,
-            self.column_multiindex.clone(),
-        )?;
-        out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out.with_labels_of(self))
+        self.with_columns_mapped(|_, column| Ok(column_na_mask(column, true)))
     }
 
     /// Return a DataFrame of booleans indicating non-missing values.
     ///
     /// Matches `df.notna()`.
     pub fn notna(&self) -> Result<Self, FrameError> {
-        let n_cols = self.num_columns();
-        let mut pairs = Vec::with_capacity(n_cols);
-        let mut column_order = Vec::with_capacity(n_cols);
-        for pos in 0..n_cols {
-            let name = self.column_name_at(pos).expect("column in bounds");
-            let column = self.column_at(pos).expect("column in bounds");
-            pairs.push((name.to_string(), column_na_mask(column, false)));
-            column_order.push(name.to_string());
-        }
-
-        let columns = ColumnStore::from_pairs(pairs);
-        let mut out = Self::new_with_axes(
-            self.index.clone(),
-            self.row_multiindex.clone(),
-            columns,
-            column_order,
-            self.column_multiindex.clone(),
-        )?;
-        out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out.with_labels_of(self))
+        self.with_columns_mapped(|_, column| Ok(column_na_mask(column, false)))
     }
 
     /// Alias for `isna`.
@@ -85941,7 +86004,7 @@ impl DataFrame {
 
         let len = end_pos - start_pos;
         if self.row_multiindex.is_none() {
-            return self.take_contiguous_row_range_unchecked(start_pos, len);
+            return Ok(self.take_contiguous_row_range_unchecked(start_pos, len));
         }
 
         let positions: Vec<usize> = (start_pos..end_pos).collect();
@@ -86209,59 +86272,42 @@ impl DataFrame {
         &self,
         width: NumericWidth,
         nullable: bool,
-        selected: impl Fn(&str) -> bool,
+        selected: impl Fn(&str) -> bool + Sync,
     ) -> Result<Self, FrameError> {
-        let n_cols = self.num_columns();
-        let mut pairs = Vec::with_capacity(n_cols);
-        let mut column_order = Vec::with_capacity(n_cols);
-        for pos in 0..n_cols {
-            let col_name = self.column_name_at(pos).expect("column in bounds");
-            let col = self.column_at(pos).expect("column in bounds");
-            let casted = if selected(&col_name) {
-                col.cast_to_width(width, nullable)?
+        let names: &[String] = &self.column_order;
+        self.with_columns_mapped(|pos, col| {
+            if selected(&names[pos]) {
+                Ok(col.cast_to_width(width, nullable)?)
             } else {
-                col.clone()
-            };
-            pairs.push((col_name.clone(), casted));
-            column_order.push(col_name);
-        }
-        let columns = ColumnStore::from_pairs(pairs);
-        let mut out = Self::new_with_axes(
-            self.index.clone(),
-            self.row_multiindex.clone(),
-            columns,
-            column_order,
-            self.column_multiindex.clone(),
-        )?;
-        out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out.with_labels_of(self))
+                Ok(col.clone())
+            }
+        })
+    }
+
+    /// This frame with each column replaced by `map(position, column)`,
+    /// threaded by column, its column axis kept whole. The first column by
+    /// position whose map fails raises, as the walk in order did - a walk on
+    /// one core that built the frame's names and their lookup again a
+    /// column at a time (df.astype('float32'), df.isna() over 1000 columns;
+    /// br-frankenpandas-e186m).
+    fn with_columns_mapped(
+        &self,
+        map: impl Fn(usize, &Column) -> Result<Column, FrameError> + Sync,
+    ) -> Result<Self, FrameError> {
+        let mapped = self.par_map_column_positions_min(16_384, |pos| {
+            Ok(map(pos, self.column_at(pos).expect("column in bounds")))
+        })?;
+        let columns = mapped
+            .into_iter()
+            .collect::<Result<Vec<Column>, FrameError>>()?;
+        Ok(self.with_columns_at_positions(columns))
     }
 
     /// Cast all columns to a single target dtype.
     ///
     /// Matches `df.astype(dtype)` (scalar form).
     pub fn astype(&self, dtype: DType) -> Result<Self, FrameError> {
-        let n_cols = self.num_columns();
-        let mut pairs = Vec::with_capacity(n_cols);
-        let mut column_order = Vec::with_capacity(n_cols);
-
-        for pos in 0..n_cols {
-            let col_name = self.column_name_at(pos).expect("column in bounds");
-            let col = self.column_at(pos).expect("column in bounds");
-            let casted = col.astype(dtype.clone())?;
-            pairs.push((col_name.clone(), casted));
-            column_order.push(col_name);
-        }
-        let columns = ColumnStore::from_pairs(pairs);
-        let mut out = Self::new_with_axes(
-            self.index.clone(),
-            self.row_multiindex.clone(),
-            columns,
-            column_order,
-            self.column_multiindex.clone(),
-        )?;
-        out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out.with_labels_of(self))
+        self.with_columns_mapped(|_, col| Ok(col.astype(dtype.clone())?))
     }
 
     /// Apply the CONSTRUCTOR's `dtype=` argument to every column.
@@ -89881,7 +89927,10 @@ impl DataFrame {
         // Gated so small frames keep the zero-overhead serial path. By
         // position: a repeated column key ranks its own column (a name-keyed
         // map kept one; i17d4).
-        let ranked = self.par_map_column_positions_min(16_384, |pos| {
+        // A rank sorts its column, far more work a cell than an elementwise
+        // op: a lower threshold keeps ~a worker a core on a 1000 x 1000
+        // frame (16_384 gave it 8 and it slowed 3.1 -> 4.8 ms; e186m).
+        let ranked = self.par_map_column_positions_min(2_048, |pos| {
             let col = self.column_at(pos).expect("column in bounds");
             let series = Series::new(
                 self.column_order[pos].as_str(),
@@ -100318,15 +100367,8 @@ impl DataFrame {
         T: Send,
         F: Fn(&str) -> Result<T, FrameError> + Sync,
     {
-        const PAR_MIN_COLS: usize = 2;
-
         let ncols = names.len();
-        let worker_count =
-            if ncols >= PAR_MIN_COLS && ncols.saturating_mul(self.len()) >= par_min_values {
-                fp_columnar::cached_available_parallelism().min(ncols)
-            } else {
-                1
-            };
+        let worker_count = column_workers(ncols, self.len(), par_min_values);
 
         if worker_count < 2 {
             return names.iter().map(|name| f(name)).collect();
@@ -100392,14 +100434,7 @@ impl DataFrame {
         T: Send,
         F: Fn(usize) -> Result<T, FrameError> + Sync,
     {
-        const PAR_MIN_COLS: usize = 2;
-
-        let worker_count =
-            if ncols >= PAR_MIN_COLS && ncols.saturating_mul(self.len()) >= par_min_values {
-                fp_columnar::cached_available_parallelism().min(ncols)
-            } else {
-                1
-            };
+        let worker_count = column_workers(ncols, self.len(), par_min_values);
 
         if worker_count < 2 {
             return (0..ncols).map(&f).collect();
@@ -103002,33 +103037,7 @@ impl DataFrame {
                     .clone())
             }
         })?;
-        self.with_columns_in_position_order(transformed)
-    }
-
-    /// Rebuild this frame (same index, axes and flags) from one replacement
-    /// column per existing column, in the frame's column order (the order
-    /// `column_at` reads).
-    fn with_columns_in_position_order(&self, transformed: Vec<Column>) -> Result<Self, FrameError> {
-        let pairs: Vec<(String, Column)> = self
-            .column_names()
-            .into_iter()
-            .cloned()
-            .zip(transformed)
-            .collect();
-        let column_order = pairs
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>();
-        let columns = ColumnStore::from_pairs(pairs);
-        let mut out = Self::new_with_axes(
-            self.index.clone(),
-            self.row_multiindex.clone(),
-            columns,
-            column_order,
-            self.column_multiindex.clone(),
-        )?;
-        out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out.with_labels_of(self))
+        Ok(self.with_columns_at_positions(transformed))
     }
 
     /// Shift values per column, filling the vacated positions with `fill_value`
@@ -103067,7 +103076,7 @@ impl DataFrame {
                 .column()
                 .clone())
         })?;
-        self.with_columns_in_position_order(transformed)
+        Ok(self.with_columns_at_positions(transformed))
     }
 
     /// Shift index horizontally by desired number of periods.
@@ -103813,9 +103822,7 @@ impl DataFrame {
         let as_series = |name: &str, column: Column| Series::new(name, self.index.clone(), column);
         // Each column's own data, by position: a repeated column key keeps
         // its own column (i17d4).
-        let own_columns = |columns: Vec<Column>| {
-            ColumnStore::from_pairs(self.column_order.iter().cloned().zip(columns))
-        };
+        let own_columns = |columns: Vec<Column>| self.own_column_store(columns);
         if axis == 0 {
             let mut index = None;
             let mut out_columns = Vec::with_capacity(self.num_columns());
@@ -104487,6 +104494,20 @@ impl DataFrame {
                         rc.as_f64_slice_with_validity(),
                     ) && ld.len() == rd.len()
                     {
+                        // Two all-valid columns: the op over the slices, moved
+                        // into the column, a NaN result missing as the NaN-exact
+                        // backing marks it (cleared bit + NaN datum, as below) -
+                        // the loop below read two mask bits a row into a zeroed
+                        // buffer (a fifth of a wide frame's df * df;
+                        // br-frankenpandas-e186m).
+                        if lv.all() && rv.all() {
+                            let out: Vec<f64> = ld
+                                .iter()
+                                .zip(rd)
+                                .map(|(&left, &right)| op(left, right))
+                                .collect();
+                            return Ok(Column::from_f64_values_owned(out));
+                        }
                         let n = ld.len();
                         let mut out = vec![0.0_f64; n];
                         let mut out_valid = fp_columnar::ValidityMask::all_valid(n);
@@ -106482,6 +106503,17 @@ impl DataFrame {
         })
     }
 
+    /// A store of `columns` under this frame's column names, position for
+    /// position, sharing the name lookup of the store the frame holds when
+    /// that store holds the same names in the same order (e186m).
+    fn own_column_store(&self, columns: Vec<Column>) -> ColumnStore {
+        #[cfg(feature = "lazy-transpose-view")]
+        let held = self.columns.held_store();
+        #[cfg(not(feature = "lazy-transpose-view"))]
+        let held = Some(&self.columns);
+        ColumnStore::from_names_like(&self.column_order, columns, held)
+    }
+
     /// This frame with its columns replaced, position for position, by
     /// `columns` (names, order, axes and labels kept). Rebuilding by POSITION
     /// keeps repeated column keys apart: a name-keyed map kept one column per
@@ -106494,7 +106526,7 @@ impl DataFrame {
     #[allow(clippy::useless_conversion)]
     pub fn with_columns_at_positions(&self, columns: Vec<Column>) -> Self {
         Self {
-            columns: ColumnStore::from_pairs(self.column_order.iter().cloned().zip(columns)).into(),
+            columns: self.own_column_store(columns).into(),
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
@@ -106515,7 +106547,7 @@ impl DataFrame {
         let mut axis = self.column_order.clone();
         axis.range = None;
         Self {
-            columns: ColumnStore::from_pairs(self.column_order.iter().cloned().zip(columns)).into(),
+            columns: self.own_column_store(columns).into(),
             column_order: axis,
             index,
             column_multiindex: self.column_multiindex.clone(),
@@ -107878,10 +107910,7 @@ impl DataFrame {
                 bitset.as_ref(),
             )
         })?;
-        self.over_own_columns(
-            self.index.clone(),
-            ColumnStore::from_pairs(self.column_order.iter().cloned().zip(columns)),
-        )
+        self.over_own_columns(self.index.clone(), self.own_column_store(columns))
     }
 
     /// Element-wise membership test with per-column value sets.
@@ -107913,11 +107942,7 @@ impl DataFrame {
         // Index (never a RangeIndex).
         let mut axis = self.column_order.clone();
         axis.range = None;
-        Self::new_with_axis(
-            self.index.clone(),
-            ColumnStore::from_pairs(self.column_order.iter().cloned().zip(columns)),
-            axis,
-        )
+        Self::new_with_axis(self.index.clone(), self.own_column_store(columns), axis)
     }
 
     /// Check whether this DataFrame is identical to another.
@@ -126003,6 +126028,137 @@ mod tests {
             text.mode().unwrap().values(),
             &[Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())]
         );
+    }
+
+    #[test]
+    fn column_workers_follow_the_cells_e186m() {
+        // A column-parallel op spreads its cells a 2^17 a worker (fewer for
+        // an op whose threshold is low), at most a core and a column: a
+        // 1000 x 1000 frame had a worker a core (br-frankenpandas-e186m).
+        let cores = fp_columnar::cached_available_parallelism();
+        assert_eq!(crate::column_workers(1000, 1000, 16_384), cores.min(8));
+        // A tall frame keeps a worker a column; a high threshold says when
+        // to spread, not over how many.
+        assert_eq!(crate::column_workers(10, 1_000_000, 16_384), cores.min(10));
+        assert_eq!(crate::column_workers(10, 1_000_000, 1 << 20), cores.min(10));
+        // A heavy op's low threshold keeps more workers.
+        assert_eq!(crate::column_workers(1000, 1000, 2_048), cores.min(62));
+        // NEGATIVE: under the threshold, or one column, runs inline.
+        assert_eq!(crate::column_workers(1000, 10, 16_384), 1);
+        assert_eq!(crate::column_workers(1, 10_000_000, 16_384), 1);
+    }
+
+    #[test]
+    fn frame_ops_share_the_name_lookup_e186m() {
+        // A frame op's columns come back under the source's names, the source
+        // store's name lookup shared where it holds them in that order
+        // (br-frankenpandas-e186m).
+        use crate::ColumnStore;
+        let float = |values: &[f64]| values.iter().map(|&v| Scalar::Float64(v)).collect();
+        let df = DataFrame::from_dict(
+            &["b", "a"],
+            vec![("a", float(&[1.0, 2.0])), ("b", float(&[10.0, 20.0]))],
+        )
+        .unwrap();
+        let out = df.add_scalar(1.0).unwrap();
+        assert_eq!(out.column_names(), ["b", "a"]);
+        assert_eq!(out.column("a").unwrap().values(), float(&[2.0, 3.0]));
+        assert_eq!(out.column("b").unwrap().values(), float(&[11.0, 21.0]));
+        #[cfg(feature = "lazy-transpose-view")]
+        assert!(std::sync::Arc::ptr_eq(
+            &df.columns.held_store().unwrap().lookup,
+            &out.columns.held_store().unwrap().lookup
+        ));
+        // Repeated names share too, each occurrence at its own position.
+        let column = |v: f64| Column::from_f64_values(vec![v]);
+        let names = ["a".to_owned(), "a".to_owned(), "b".to_owned()];
+        let like = ColumnStore::from_pairs(names.iter().cloned().zip([0.0, 1.0, 2.0].map(column)));
+        let store =
+            ColumnStore::from_names_like(&names, [5.0, 6.0, 7.0].map(column).into(), Some(&like));
+        assert!(std::sync::Arc::ptr_eq(&store.lookup, &like.lookup));
+        assert_eq!(store.positions_of("a"), [0, 1]);
+        assert_eq!(store.column_at(1).unwrap().values(), float(&[6.0]));
+        // NEGATIVE: a store holding the names in another order, or a column
+        // short, builds its own lookup - each name at its new position.
+        let swapped = ["b".to_owned(), "a".to_owned(), "a".to_owned()];
+        let store =
+            ColumnStore::from_names_like(&swapped, [5.0, 6.0, 7.0].map(column).into(), Some(&like));
+        assert!(!std::sync::Arc::ptr_eq(&store.lookup, &like.lookup));
+        assert_eq!(store.positions_of("b"), [0]);
+        assert_eq!(store.positions_of("a"), [1, 2]);
+        assert_eq!(store.get("b").unwrap().values(), float(&[5.0]));
+        let short = ColumnStore::from_names_like(&names, vec![column(5.0)], Some(&like));
+        assert!(!std::sync::Arc::ptr_eq(&short.lookup, &like.lookup));
+        assert_eq!(short.len(), 1);
+        assert!(short.get("b").is_none());
+        // A frame whose store is in another order than its axis (assembled
+        // field by field from a name-sorted map) reads each column by label.
+        let mismatched = DataFrame {
+            index: Index::default_range(2),
+            row_multiindex: None,
+            columns: ColumnStore::from_pairs([
+                ("a".to_owned(), Column::from_f64_values(vec![1.0, 2.0])),
+                ("b".to_owned(), Column::from_f64_values(vec![10.0, 20.0])),
+            ])
+            .into(),
+            column_order: vec!["b".to_owned(), "a".to_owned()].into(),
+            column_multiindex: None,
+            allows_duplicate_labels: true,
+        };
+        let out = mismatched.add_scalar(1.0).unwrap();
+        assert_eq!(out.column_at(0).unwrap().values(), float(&[11.0, 21.0]));
+        assert_eq!(out.column("a").unwrap().values(), float(&[2.0, 3.0]));
+    }
+
+    #[test]
+    fn row_slices_keep_the_column_zone_e186m() {
+        // A row slice or take of a transposed tz-aware frame keeps its
+        // columns' zone, as pandas' keeps the columns Index (they came back
+        // naive UTC; br-frankenpandas-e186m).
+        let day = 86_400_000_000_000;
+        let aware = Index::new(vec![IndexLabel::Datetime64(0), IndexLabel::Datetime64(day)])
+            .with_tz(Some("US/Eastern"))
+            .unwrap();
+        let frame = DataFrame::new(
+            aware,
+            BTreeMap::from([
+                ("a".to_owned(), Column::from_f64_values(vec![1.0, 2.0])),
+                ("b".to_owned(), Column::from_f64_values(vec![3.0, 4.0])),
+            ]),
+        )
+        .unwrap();
+        let transposed = frame.transpose().unwrap();
+        assert_eq!(transposed.columns_tz(), Some("US/Eastern"));
+        for slice in [
+            transposed.iloc_slice(Some(0), Some(1)).unwrap(),
+            transposed.iloc_slice(Some(1), None).unwrap(),
+            transposed.iloc_slice(Some(5), None).unwrap(),
+            transposed.take_rows_by_positions(&[1, 0]).unwrap(),
+        ] {
+            assert_eq!(slice.columns_tz(), Some("US/Eastern"));
+            assert_eq!(slice.column_labels(), transposed.column_labels());
+        }
+        let first = transposed.iloc_slice(Some(0), Some(1)).unwrap();
+        assert_eq!(first.column_at(1).unwrap().values(), [Scalar::Float64(2.0)]);
+        // NEGATIVES: a naive frame's slice stays naive, and new column labels
+        // bring no zone of the old axis.
+        let naive = DataFrame::new(
+            Index::new(vec![IndexLabel::Datetime64(0), IndexLabel::Datetime64(day)]),
+            BTreeMap::from([("a".to_owned(), Column::from_f64_values(vec![1.0, 2.0]))]),
+        )
+        .unwrap()
+        .transpose()
+        .unwrap();
+        assert_eq!(naive.columns_tz(), None);
+        assert_eq!(
+            naive.iloc_slice(Some(0), Some(1)).unwrap().columns_tz(),
+            None
+        );
+        let relabeled = first.with_recorded_column_labels(vec![
+            IndexLabel::Utf8("x".into()),
+            IndexLabel::Utf8("y".into()),
+        ]);
+        assert_eq!(relabeled.columns_tz(), None);
     }
 
     #[test]

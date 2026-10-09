@@ -8857,9 +8857,9 @@ fn ndarray_elements<T: pyo3::buffer::Element>(
 }
 
 /// The columns of a native-order 2-D float64 / int64 / bool numpy array of
-/// `rows` rows and `width` columns, read through one buffer in column-major
-/// order - each column as [`py_array_like_column`] reads its view, without
-/// the view: a view and its conversion per column cost ~3 us a column
+/// `rows` rows and `width` columns, read through one buffer - each column
+/// as [`py_array_like_column`] reads its view, without the view: a view and
+/// its conversion per column cost ~3 us a column
 /// (`DataFrame(np.random.normal(size=(10, 100_000)))` 300 ms, pandas 0.01;
 /// br-frankenpandas-9xlbq). None for any other array.
 fn matrix_columns(
@@ -8868,42 +8868,70 @@ fn matrix_columns(
     rows: usize,
     width: usize,
 ) -> PyResult<Option<Vec<Column>>> {
-    fn split<T: Copy, U>(
-        values: &[T],
+    /// The columns of `array`, `rows` x `width`, as `build` makes them,
+    /// read where the buffer holds them: a C-ordered buffer a tile at a
+    /// time - TILE_ROWS rows of BLOCK columns, a few KiB the cache keeps -
+    /// each of the tile's columns extended by its rows' values (every
+    /// source line read once); a Fortran-ordered one a column at a time;
+    /// any other gathered column-major first. That gather of a C-ordered
+    /// array copied an element a memcpy call, and each column was copied
+    /// out of it again (DataFrame(ndarray) of 1000 x 1000 floats 7.3 ms, of
+    /// 1M x 10 75 ms; br-frankenpandas-e186m).
+    fn columns<T: pyo3::buffer::Element + Copy, U>(
+        py: Python<'_>,
+        array: &Bound<'_, PyAny>,
         rows: usize,
         width: usize,
         build: fn(Vec<T>) -> U,
-    ) -> Vec<U> {
-        if rows == 0 {
-            return (0..width).map(|_| build(Vec::new())).collect();
+    ) -> PyResult<Vec<U>> {
+        const BLOCK: usize = 16;
+        const TILE_ROWS: usize = 128;
+        if rows == 0 || width == 0 {
+            return Ok((0..width).map(|_| build(Vec::new())).collect());
         }
-        values
+        let buffer = pyo3::buffer::PyBuffer::<T>::get(array)?;
+        if let Some(cells) = buffer.as_slice(py) {
+            let mut out: Vec<Vec<T>> = (0..width).map(|_| Vec::with_capacity(rows)).collect();
+            for (block_index, block) in out.chunks_mut(BLOCK).enumerate() {
+                let start = block_index * BLOCK;
+                for tile in cells.chunks(TILE_ROWS * width) {
+                    for (offset, column) in block.iter_mut().enumerate() {
+                        let at = start + offset;
+                        column.extend(tile.chunks_exact(width).map(|row| row[at].get()));
+                    }
+                }
+            }
+            return Ok(out.into_iter().map(build).collect());
+        }
+        if let Some(cells) = buffer.as_fortran_slice(py) {
+            return Ok(cells
+                .chunks_exact(rows)
+                .map(|column| build(column.iter().map(pyo3::buffer::ReadOnlyCell::get).collect()))
+                .collect());
+        }
+        Ok(buffer
+            .to_fortran_vec(py)?
             .chunks_exact(rows)
             .map(|column| build(column.to_vec()))
-            .collect()
-    }
-    fn fortran<T: pyo3::buffer::Element>(
-        py: Python<'_>,
-        array: &Bound<'_, PyAny>,
-    ) -> PyResult<Vec<T>> {
-        pyo3::buffer::PyBuffer::<T>::get(array)?.to_fortran_vec(py)
+            .collect())
     }
     let dtype = data.getattr("dtype")?;
     if !dtype.getattr("isnative")?.extract::<bool>()? {
         return Ok(None);
     }
     let columns = match dtype.getattr("name")?.extract::<String>()?.as_str() {
-        "float64" => split(&fortran(py, data)?, rows, width, Column::from_f64_values),
-        "int64" => split(&fortran(py, data)?, rows, width, Column::from_i64_values),
+        "float64" => columns(py, data, rows, width, Column::from_f64_values)?,
+        "int64" => columns(py, data, rows, width, Column::from_i64_values)?,
         // A numpy bool is one byte, zero or not.
-        "bool" => split(
-            &fortran::<u8>(py, &data.call_method1("view", ("uint8",))?)?,
+        "bool" => columns(
+            py,
+            &data.call_method1("view", ("uint8",))?,
             rows,
             width,
             |bytes: Vec<u8>| {
                 Column::from_bool_values(bytes.into_iter().map(|byte| byte != 0).collect())
             },
-        ),
+        )?,
         _ => return Ok(None),
     };
     Ok(Some(columns))
@@ -48107,6 +48135,11 @@ impl PyDataFrame {
                 .iter()
                 .map(|(column, spec)| Ok((column.extract::<String>()?, spec)))
                 .collect::<PyResult<_>>()?
+        } else if !astype_spec_acts_per_column(dtype) {
+            // One dtype for every column, read once: the walk below parsed it
+            // through Python twice a column for nothing (df.astype('float32')
+            // of 1000 columns; br-frankenpandas-e186m).
+            Vec::new()
         } else {
             self.inner
                 .column_names()
@@ -77569,6 +77602,18 @@ fn python_int_literal(text: &str) -> bool {
 /// not whole (pandas casts the values to object first then), an infinite
 /// largest value OverflowError, and a string as above. Any other dtype
 /// passes.
+/// Whether `dtype` is a target `DataFrame.astype`'s per-column walk has
+/// anything to do for: a datetime dtype (an object column of zoned
+/// datetimes, `zoned_astype`) or an integer one (`pandas_astype_int_source`).
+fn astype_spec_acts_per_column(dtype: &Bound<'_, PyAny>) -> bool {
+    let parsed = py_dtype_arg(dtype);
+    let integer = match py_width_arg(dtype) {
+        Some((width, _)) => !width.is_float(),
+        None => matches!(parsed, Ok(DType::Int64 | DType::Int64Nullable)),
+    };
+    integer || parsed.is_ok_and(|target| target.is_datetime())
+}
+
 fn pandas_astype_int_source(column: &Column, dtype: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
     let (name, width, nullable) = if let Some((width, nullable)) = py_width_arg(dtype) {
         if width.is_float() {
