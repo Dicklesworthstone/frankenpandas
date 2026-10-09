@@ -13075,6 +13075,15 @@ fn owned_index(
 }
 
 impl PyIndex {
+    /// The positions ordering the labels (the period and categorical
+    /// classes' argsort, and a typed index's).
+    fn label_order(&self) -> IndexerArray {
+        let labels = self.inner.labels();
+        let mut indices: Vec<usize> = (0..labels.len()).collect();
+        indices.sort_by(|&a, &b| labels[a].cmp(&labels[b]));
+        indices.into()
+    }
+
     /// `item`'s label at `loc` among this index's labels, as given (the
     /// datetime, timedelta, period and categorical classes' insert; a plain
     /// Index's reads pandas' dtype rules, see `insert`).
@@ -14043,11 +14052,26 @@ impl PyIndex {
         index_arg_extreme(py, &self.inner, "Index", false, axis, skipna)
     }
 
-    fn argsort(&self) -> IndexerArray {
-        let labels = self.inner.labels();
-        let mut indices: Vec<usize> = (0..labels.len()).collect();
-        indices.sort_by(|&a, &b| labels[a].cmp(&labels[b]));
-        indices.into()
+    /// pandas' `argsort`: numpy's of the labels. An object index's is
+    /// numpy's over its Python objects - `<` between a missing label or a
+    /// number and text is Python's TypeError, a NaN compares False wherever
+    /// it lies - so numpy sorts them (fp ordered them all;
+    /// br-frankenpandas-n3ktr).
+    fn argsort(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if self.inner.len() > 1 && self.inner.dtype() == "object" {
+            // The labels' own Python objects: `values` infers a column, so
+            // ints beside None came back a float64 array numpy sorted.
+            let objects = self
+                .inner
+                .labels()
+                .iter()
+                .map(|label| index_label_to_py(py, label))
+                .collect::<PyResult<Vec<_>>>()?;
+            return Ok(py_objects_ndarray(py, objects)?
+                .call_method0("argsort")?
+                .unbind());
+        }
+        Ok(self.label_order().into_pyobject(py)?.unbind())
     }
 
     fn all(&self) -> bool {
@@ -14276,17 +14300,31 @@ impl PyIndex {
     #[pyo3(signature = (indices, axis=0, allow_fill=true, fill_value=None))]
     fn take(
         &self,
-        indices: Positions,
+        py: Python<'_>,
+        indices: &Bound<'_, PyAny>,
         axis: i64,
         allow_fill: bool,
         fill_value: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let _ = axis;
-        let indices = indices.0;
+        let filling = allow_fill && fill_value.is_some_and(|value| !value.is_none());
+        // An int64 array's positions over a typed int64 index are read in
+        // place, each wrapped, checked and gathered in one pass
+        // (br-frankenpandas-fk877); a position out of range answers below.
+        if !filling
+            && let Some(buffer) = native_int64_buffer(indices)?
+            && let Some(cells) = buffer.as_slice(py)
+            && let Some(inner) = self
+                .inner
+                .take_signed_i64(cells.iter().map(pyo3::buffer::ReadOnlyCell::get))
+        {
+            return Ok(PyIndex { inner });
+        }
+        let indices = indices.extract::<Positions>()?.0;
         let n = self.inner.len() as i64;
         let value_error =
             |message: &str| PyErr::new::<pyo3::exceptions::PyValueError, _>(message.to_owned());
-        let missing = if allow_fill && fill_value.is_some_and(|value| !value.is_none()) {
+        let missing = if filling {
             let missing = match self.inner.dtype() {
                 "int64" | "bool" => {
                     return Err(value_error(
@@ -16486,12 +16524,14 @@ impl PyDatetimeIndex {
                 .inner
                 .freq()
                 .and_then(|freq| fp_index::scale_freq(&freq, i64::try_from(s_idx.step).ok()?));
-            if let (Ok(start), Ok(step)) =
-                (usize::try_from(s_idx.start), usize::try_from(s_idx.step))
+            // Backwards too: dti[::-1] read each stamp through asi8_at and
+            // rebuilt labels (6.4 ms a million, pandas 0.006;
+            // br-frankenpandas-5s8nr).
+            if let Ok(start) = usize::try_from(s_idx.start)
                 && let Some(index) =
                     self.inner
                         .as_index()
-                        .stepped_view(start, step, s_idx.slicelength)
+                        .stepped(start, s_idx.step, s_idx.slicelength)
             {
                 let inner = DatetimeIndex::from_index(index)
                     .map_err(index_error_to_py)?
@@ -20415,18 +20455,15 @@ impl PyTimedeltaIndex {
                 .inner
                 .freq()
                 .and_then(|freq| fp_index::scale_freq(&freq, i64::try_from(indices.step).ok()?));
-            // A run, or an even step of a typed backing, is a view of the same
-            // durations (name kept); any other slice takes the ones it picks.
-            // Every slice made and read the labels (tdi[::2] 3.5 ms a million,
+            // A run, or any step of a typed backing, reads the same durations
+            // (name kept); any other slice takes the ones it picks. Every
+            // slice made and read the labels (tdi[::2] 3.5 ms a million,
             // pandas 0.003; br-frankenpandas-5s8nr).
             let index = self.inner.as_index();
-            let view = match (
-                usize::try_from(indices.start),
-                usize::try_from(indices.step),
-            ) {
-                (Ok(start), Ok(1)) => Some(index.slice(start, indices.slicelength)),
-                (Ok(start), Ok(step)) => index.stepped_view(start, step, indices.slicelength),
-                _ => None,
+            let view = match usize::try_from(indices.start) {
+                Ok(start) if indices.step == 1 => Some(index.slice(start, indices.slicelength)),
+                Ok(start) => index.stepped(start, indices.step, indices.slicelength),
+                Err(_) => None,
             };
             let out = match view {
                 Some(view) => TimedeltaIndex::from_index(view).map_err(index_error_to_py)?,
@@ -22593,7 +22630,7 @@ impl PyPeriodIndex {
     }
 
     fn argsort(&self) -> IndexerArray {
-        self.as_py_index().argsort()
+        self.as_py_index().label_order()
     }
 
     /// pandas' `Index.array` (see [`index_array`]; it was a method
@@ -24187,7 +24224,7 @@ impl PyCategoricalIndex {
     }
 
     fn argsort(&self) -> IndexerArray {
-        self.as_py_index().argsort()
+        self.as_py_index().label_order()
     }
 
     /// pandas' `Index.array` (see [`index_array`]; it was a method
@@ -31672,6 +31709,80 @@ fn execute_series_where(inner: &Series, cond: &Series, other: &SeriesOrScalar) -
     Ok(keep_object(inner, result))
 }
 
+/// Whether `new` holds `old`'s cells: each missing in both, or equal - as
+/// numbers compare, since an op may have read an object column's 1 as 1.0.
+fn cells_unchanged(new: &Column, old: &Column) -> bool {
+    let number = |cell: &Scalar| match cell {
+        Scalar::Int64(value) => Some(*value as f64),
+        Scalar::Float64(value) => Some(*value),
+        _ => None,
+    };
+    new.len() == old.len()
+        && new.values().iter().zip(old.values()).all(|(new, old)| {
+            (new.is_missing() && old.is_missing())
+                || new == old
+                || number(new).is_some_and(|new| Some(new) == number(old))
+        })
+}
+
+/// pandas' cumsum / cumprod (`op` "add" / "mul") of an object Series of
+/// numbers: Python's arithmetic cell by cell, a missing cell counted as
+/// `fill` (0.0 / 1.0, pandas' fill) and NaN again in the result; under
+/// skipna=False the cells as they are (a NaN carries on, a None is Python's
+/// TypeError, as numpy's accumulation over the object array). The engine's
+/// float answer read [1, nan, 2] as [1.0, nan, 3.0] (pandas [1, nan, 3.0])
+/// and cumprod came back float64 (br-frankenpandas-7v4wf). `None` for any
+/// other Series.
+fn object_cumulative(
+    series: &Series,
+    op: &str,
+    fill: f64,
+    skipna: bool,
+) -> PyResult<Option<Series>> {
+    let column = series.column();
+    if !is_object_column(column)
+        || !column.values().iter().all(|cell| {
+            cell.is_missing()
+                || matches!(
+                    cell,
+                    Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Bool(_)
+                )
+        })
+    {
+        return Ok(None);
+    }
+    Python::attach(|py| {
+        let apply = py.import("operator")?.getattr(op)?;
+        let mut total: Option<Bound<'_, PyAny>> = None;
+        let mut cells = Vec::with_capacity(column.len());
+        for value in column.values() {
+            if skipna && value.is_missing() {
+                let filler = fill.into_bound_py_any(py)?;
+                total = Some(match total {
+                    Some(total) => apply.call1((total, filler))?,
+                    None => filler,
+                });
+                cells.push(Scalar::Null(NullKind::NaN));
+                continue;
+            }
+            let cell = cell_to_py(py, column, value)?.into_bound(py);
+            let next = match total {
+                Some(total) => apply.call1((total, cell))?,
+                None => cell,
+            };
+            cells.push(py_to_scalar(py, &next)?);
+            total = Some(next);
+        }
+        Series::new(
+            series.name().clone(),
+            series.index().clone(),
+            Column::from_object_values(cells),
+        )
+        .map(Some)
+        .map_err(frame_error_to_py)
+    })
+}
+
 /// `result` of an op that keeps an object Series' own values (where /
 /// mask, drop_duplicates, combine_first, update, repeat, cumsum, a group's
 /// first): an object column still, as pandas keeps its object array - the
@@ -33897,6 +34008,9 @@ impl PySeries {
                 Ok(())
             })?;
         }
+        if let Some(inner) = object_cumulative(&self.inner, "add", 0.0, skipna)? {
+            return Ok(PySeries { inner });
+        }
         let r = self
             .inner
             .cumsum_with_skipna(skipna)
@@ -34412,6 +34526,9 @@ impl PySeries {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "No axis named {ax} for object type Series"
             )));
+        }
+        if let Some(inner) = object_cumulative(&self.inner, "mul", 1.0, skipna)? {
+            return Ok(PySeries { inner });
         }
         let r = self
             .inner
@@ -35398,6 +35515,35 @@ impl PySeries {
                 inner: self.inner.clone(),
             })
         })()?;
+        // An object column replaces as pandas' object block: unchanged when
+        // nothing matched (it came back inferred, float64); where the engine
+        // answered an int64 holding a missing value - no numpy dtype, an int
+        // beside a None - its cells soft-converted as infer_objects does,
+        // float64 (br-frankenpandas-7v4wf).
+        let result = if !padded && is_object_column(self.inner.column()) {
+            if cells_unchanged(result.inner.column(), self.inner.column()) {
+                PySeries {
+                    inner: self.inner.clone(),
+                }
+            } else if result.inner.dtype() != DType::Int64
+                || !result.inner.column().has_any_missing()
+            {
+                result
+            } else {
+                let cells = Column::from_object_values(result.inner.values().to_vec());
+                let object = Series::new(
+                    result.inner.name().clone(),
+                    result.inner.index().clone(),
+                    cells,
+                )
+                .map_err(frame_error_to_py)?;
+                PySeries {
+                    inner: object.infer_objects().map_err(frame_error_to_py)?,
+                }
+            }
+        } else {
+            result
+        };
         if !padded && replace_downcast(self.inner.column(), result.inner.column()) {
             warn_replace_downcast(py, 1)?;
         }
@@ -37257,6 +37403,42 @@ impl PySeries {
             .inner
             .combine_first(&other.inner)
             .map_err(frame_error_to_py)?;
+        // Either side object, the result is object holding each cell as its
+        // side held it - ours where present, else the other's - over the
+        // result's labels: the engine read both sides' numbers as float64 /
+        // int64 (pandas [1.5, 6, 2.5, 8]; it gave float64 6.0, 8.0;
+        // br-frankenpandas-7v4wf).
+        if (is_object_column(self.inner.column()) || is_object_column(other.inner.column()))
+            && self.inner.index().is_unique()
+            && other.inner.index().is_unique()
+        {
+            let mine = self.inner.index().get_indexer(res.index());
+            let theirs = other.inner.index().get_indexer(res.index());
+            let (my_cells, their_cells) = (self.inner.values(), other.inner.values());
+            let pick = |mine: &Option<usize>, theirs: &Option<usize>| -> Scalar {
+                let present = mine
+                    .map(|at| &my_cells[at])
+                    .filter(|cell| !cell.is_missing());
+                match present {
+                    Some(cell) => cell.clone(),
+                    None => {
+                        theirs.map_or(Scalar::Null(NullKind::NaN), |at| their_cells[at].clone())
+                    }
+                }
+            };
+            let cells: Vec<Scalar> = mine
+                .iter()
+                .zip(&theirs)
+                .map(|(mine, theirs)| pick(mine, theirs))
+                .collect();
+            let inner = Series::new(
+                res.name().clone(),
+                res.index().clone(),
+                Column::from_object_values(cells),
+            )
+            .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner });
+        }
         Ok(PySeries {
             inner: keep_object(&self.inner, res),
         })
@@ -78351,22 +78533,95 @@ fn concat_kept_dtypes<'py>(
             .into_iter()
             .all(|unique| unique)
     {
-        for column in result.getattr("columns")?.try_iter()? {
-            let column = column?;
-            let mut dtypes = Vec::with_capacity(pieces.len());
-            for piece in pieces {
-                if !piece.getattr("columns")?.contains(&column)? {
-                    break;
-                }
-                dtypes.push(piece.get_item(&column)?.getattr("dtype")?);
+        // Each result column beside the pieces' own (by its key), read in
+        // Rust: a Series and a dtype object were made of every column of
+        // every piece, and every cell copied out whether any piece held
+        // objects or not (a 200k-row text frame's concat 10.5 ms, pandas
+        // 5.0; its float column 2.4 ms, pandas 0.14; br-frankenpandas-e186m).
+        let frames = pieces
+            .iter()
+            .map(|piece| {
+                piece
+                    .extract::<PyRef<'_, PyDataFrame>>()
+                    .map_err(PyErr::from)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let stacked = result.extract::<PyRef<'_, PyDataFrame>>()?;
+        let keys: Vec<String> = stacked.inner.column_names().into_iter().cloned().collect();
+        let held = |key: &str| -> Option<Vec<&Column>> {
+            frames.iter().map(|frame| frame.inner.column(key)).collect()
+        };
+        // A column every piece holds as categories of one dtype keeps it.
+        let categorical: Vec<usize> = keys
+            .iter()
+            .enumerate()
+            .filter(|(_, key)| {
+                held(key).is_some_and(|columns| {
+                    columns.iter().all(|column| column.categorical().is_some())
+                })
+            })
+            .map(|(at, _)| at)
+            .collect();
+        // A column some piece holds as objects is object in pandas' result,
+        // each cell as its piece held it - object beside anything is object
+        // (it became float64 / int64; br-frankenpandas-7v4wf).
+        let mut rebuilt: Vec<Option<Column>> = vec![None; keys.len()];
+        for (at, key) in keys.iter().enumerate() {
+            let Some(columns) = held(key) else {
+                continue;
+            };
+            let Some(stacked_column) = stacked.inner.column_at(at) else {
+                continue;
+            };
+            if is_object_column(stacked_column)
+                || !columns.iter().any(|column| is_object_column(column))
+            {
+                continue;
             }
-            if dtypes.len() == pieces.len() && same_categorical(&dtypes)? {
-                let kept = result
-                    .get_item(&column)?
-                    .call_method1("astype", (&dtypes[0],))?;
-                result.set_item(&column, kept)?;
+            let mut cells = Vec::with_capacity(stacked_column.len());
+            for column in &columns {
+                cells.extend(column.values().iter().cloned());
+            }
+            if cells.len() == stacked_column.len() {
+                rebuilt[at] = Some(Column::from_object_values(cells));
             }
         }
+        let inner = if rebuilt.iter().any(Option::is_some) {
+            let columns = rebuilt
+                .into_iter()
+                .enumerate()
+                .map(|(at, column)| column.or_else(|| stacked.inner.column_at(at).cloned()))
+                .collect::<Option<Vec<Column>>>();
+            columns.map(|columns| stacked.inner.with_columns_at_positions(columns))
+        } else {
+            None
+        };
+        drop(stacked);
+        drop(frames);
+        let result = match inner {
+            Some(inner) => PyDataFrame { inner }.into_bound_py_any(result.py())?,
+            None => result.clone(),
+        };
+        if !categorical.is_empty() {
+            let labels: Vec<Bound<'py, PyAny>> = result
+                .getattr("columns")?
+                .try_iter()?
+                .collect::<PyResult<_>>()?;
+            for at in categorical {
+                let label = &labels[at];
+                let dtypes = pieces
+                    .iter()
+                    .map(|piece| piece.get_item(label)?.getattr("dtype"))
+                    .collect::<PyResult<Vec<_>>>()?;
+                if same_categorical(&dtypes)? {
+                    let kept = result
+                        .get_item(label)?
+                        .call_method1("astype", (&dtypes[0],))?;
+                    result.set_item(label, kept)?;
+                }
+            }
+        }
+        return Ok(result);
     }
     Ok(result.clone())
 }
@@ -101491,7 +101746,10 @@ mod tests {
             assert_eq!(int(index.max(py, None, true)), Some(8));
             assert_eq!(int(index.argmax(py, None, true)), Some(4));
             assert_eq!(int(index.argmin(py, None, true)), Some(0));
-            assert_eq!(index.argsort().0, vec![0, 1, 2, 3, 4]);
+            let order = index
+                .argsort(py)
+                .and_then(|order| order.extract::<Vec<i64>>(py));
+            assert_eq!(order.ok(), Some(vec![0, 1, 2, 3, 4]));
             assert!(!index.all());
             assert!(index.any());
             assert!(!index.hasnans());
@@ -102061,13 +102319,12 @@ mod tests {
             let kept = at(&[0, -1]).expect("delete list"); // ubs:ignore — test fixture
             assert_eq!(kept.inner.labels(), &[IndexLabel::Int64(2)]);
             assert!(at(&[3]).is_err());
+            let positions = PyList::new(py, [1_i64, 0]).expect("list"); // ubs:ignore — test fixture
+            let taken = idx.take(py, &positions, 0, true, None).expect("take"); // ubs:ignore — test fixture
+            assert_eq!(taken.inner.len(), 2);
         });
         let repeated = idx.repeat(2, None).expect("repeat"); // ubs:ignore — test fixture
         assert_eq!(repeated.inner.len(), 6);
-        let taken = idx // ubs:ignore — test fixture
-            .take(Positions(vec![1, 0]), 0, true, None)
-            .expect("take");
-        assert_eq!(taken.inner.len(), 2);
 
         let s1 = Series::new(
             "s1",

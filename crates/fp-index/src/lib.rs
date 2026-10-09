@@ -1334,22 +1334,26 @@ impl Int64TwoAffineLabels {
     }
 }
 
+/// `len` values of a shared buffer from `start`, `step` apart; a negative
+/// step reads backwards (`idx[::-1]` of a typed DatetimeIndex is a view, as
+/// numpy's; br-frankenpandas-5s8nr).
 #[derive(Debug, Clone)]
 struct Int64StridedLabels {
     values: Arc<Vec<i64>>,
     start: usize,
-    step: usize,
+    step: isize,
     len: usize,
 }
 
 impl Int64StridedLabels {
-    fn new(values: Arc<Vec<i64>>, start: usize, step: usize, len: usize) -> Option<Self> {
+    fn new(values: Arc<Vec<i64>>, start: usize, step: isize, len: usize) -> Option<Self> {
         if len > 1 && step == 0 {
             return None;
         }
         if len > 0 {
-            let last = start.checked_add(step.checked_mul(len.checked_sub(1)?)?)?;
-            if last >= values.len() {
+            let reach = step.checked_mul(isize::try_from(len - 1).ok()?)?;
+            let last = start.checked_add_signed(reach)?;
+            if start.max(last) >= values.len() {
                 return None;
             }
         }
@@ -1361,32 +1365,32 @@ impl Int64StridedLabels {
         })
     }
 
-    fn materialize(self) -> Vec<IndexLabel> {
-        let mut labels = Vec::with_capacity(self.len);
-        let mut pos = self.start;
-        for offset in 0..self.len {
-            labels.push(IndexLabel::Int64(self.values[pos]));
-            if offset + 1 < self.len {
-                pos = pos
-                    .checked_add(self.step)
-                    .expect("validated Int64 strided range end");
-            }
+    /// The view of `len` of this view's values from its `start`-th, `step`
+    /// apart (either sign): the same buffer, nothing read. `None` for a run
+    /// outside the view.
+    fn sub_view(&self, start: usize, step: isize, len: usize) -> Option<Self> {
+        if len == 0 {
+            return Self::new(Arc::clone(&self.values), 0, 1, 0);
         }
-        labels
+        let reach = step.checked_mul(isize::try_from(len - 1).ok()?)?;
+        let last = start.checked_add_signed(reach)?;
+        if start.max(last) >= self.len {
+            return None;
+        }
+        Self::new(
+            Arc::clone(&self.values),
+            self.position(start),
+            self.step.checked_mul(step)?,
+            len,
+        )
+    }
+
+    fn materialize(self) -> Vec<IndexLabel> {
+        self.iter().map(IndexLabel::Int64).collect()
     }
 
     fn materialize_i64(self) -> Vec<i64> {
-        let mut labels = Vec::with_capacity(self.len);
-        let mut pos = self.start;
-        for offset in 0..self.len {
-            labels.push(self.values[pos]);
-            if offset + 1 < self.len {
-                pos = pos
-                    .checked_add(self.step)
-                    .expect("validated Int64 strided range end");
-            }
-        }
-        labels
+        self.iter().collect()
     }
 
     /// The values the view reads, in its order, nothing allocated.
@@ -1394,9 +1398,16 @@ impl Int64StridedLabels {
         (0..self.len).map(move |offset| self.value_at(offset))
     }
 
+    /// The buffer position of the view's `offset`-th value (`offset < len`,
+    /// which `new` bounds).
+    fn position(&self, offset: usize) -> usize {
+        self.start
+            .wrapping_add_signed(self.step.wrapping_mul(offset.cast_signed()))
+    }
+
     /// The value at `offset` of the view (`offset < len`).
     fn value_at(&self, offset: usize) -> i64 {
-        self.values[self.start + offset * self.step]
+        self.values[self.position(offset)]
     }
 
     /// The values the view reads: the buffer's own run when the view is
@@ -1567,24 +1578,19 @@ impl IndexLabels {
         })
     }
 
-    fn new_int64_strided(
-        values: Arc<Vec<i64>>,
-        start: usize,
-        step: usize,
-        len: usize,
-    ) -> Option<Self> {
-        Some(Self {
+    fn new_int64_strided(view: Int64StridedLabels) -> Self {
+        Self {
             materialized: Arc::default(),
             materialized_slice: None,
             int64_unit_range: None,
             int64_affine: None,
             int64_two_affine: None,
-            int64_strided: Some(Int64StridedLabels::new(values, start, step, len)?),
+            int64_strided: Some(view),
             datetime64_affine: None,
             temporal_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
-        })
+        }
     }
 
     fn new_int64_values(values: Arc<Vec<i64>>) -> Self {
@@ -1619,14 +1625,8 @@ impl IndexLabels {
         })
     }
 
-    fn new_temporal_strided(
-        kind: TemporalKind,
-        values: Arc<Vec<i64>>,
-        start: usize,
-        step: usize,
-        len: usize,
-    ) -> Option<Self> {
-        Some(Self {
+    fn new_temporal_strided(kind: TemporalKind, view: Int64StridedLabels) -> Self {
+        Self {
             materialized: Arc::default(),
             materialized_slice: None,
             int64_unit_range: None,
@@ -1634,13 +1634,10 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
-            temporal_strided: Some(TemporalStridedLabels {
-                kind,
-                view: Int64StridedLabels::new(values, start, step, len)?,
-            }),
+            temporal_strided: Some(TemporalStridedLabels { kind, view }),
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
-        })
+        }
     }
 
     /// The typed backing when it holds instants (a DatetimeIndex's).
@@ -1851,35 +1848,26 @@ impl IndexLabels {
             }
         }
 
-        if let Some(strided) = &self.int64_strided
-            && let Some(offset) = strided.step.checked_mul(start)
-            && let Some(next_start) = strided.start.checked_add(offset)
-            && let Some(labels) =
-                Self::new_int64_strided(Arc::clone(&strided.values), next_start, strided.step, len)
+        if let Some(view) = self
+            .int64_strided
+            .as_ref()
+            .and_then(|strided| strided.sub_view(start, 1, len))
         {
-            return labels;
+            return Self::new_int64_strided(view);
         }
 
         if let Some(Some(values)) = self.int64_typed.get()
-            && let Some(labels) = Self::new_int64_strided(Arc::clone(values), start, 1, len)
+            && let Some(view) = Int64StridedLabels::new(Arc::clone(values), start, 1, len)
         {
-            return labels;
+            return Self::new_int64_strided(view);
         }
 
         // A typed DatetimeIndex's / TimedeltaIndex's slice is a view of the
         // same instants or durations.
         if let Some(TemporalStridedLabels { kind, view }) = &self.temporal_strided
-            && let Some(offset) = view.step.checked_mul(start)
-            && let Some(next_start) = view.start.checked_add(offset)
-            && let Some(labels) = Self::new_temporal_strided(
-                *kind,
-                Arc::clone(&view.values),
-                next_start,
-                view.step,
-                len,
-            )
+            && let Some(view) = view.sub_view(start, 1, len)
         {
-            return labels;
+            return Self::new_temporal_strided(*kind, view);
         }
 
         if let Some(range) = self.datetime64_affine {
@@ -2109,17 +2097,7 @@ impl IndexLabels {
             return out;
         }
         if let Some(strided) = &self.int64_strided {
-            for position in 0..strided.len {
-                let offset = strided
-                    .step
-                    .checked_mul(position)
-                    .expect("validated Int64 strided range");
-                let index = strided
-                    .start
-                    .checked_add(offset)
-                    .expect("validated Int64 strided range");
-                out.push(source.position(strided.values[index]));
-            }
+            out.extend(strided.iter().map(|value| source.position(value)));
             return out;
         }
         if let Some(Some(values)) = self.int64_typed.get() {
@@ -2216,9 +2194,7 @@ impl IndexLabels {
                 if idx >= strided.len {
                     return None;
                 }
-                let offset = strided.step.checked_mul(idx)?;
-                let pos = strided.start.checked_add(offset)?;
-                out.push(*strided.values.get(pos)?);
+                out.push(strided.value_at(idx));
             }
             return Some(out);
         }
@@ -2907,8 +2883,9 @@ impl Index {
         step: usize,
         len: usize,
     ) -> Option<Self> {
+        let view = Int64StridedLabels::new(values, start, isize::try_from(step).ok()?, len)?;
         Some(Self {
-            labels: IndexLabels::new_int64_strided(values, start, step, len)?,
+            labels: IndexLabels::new_int64_strided(view),
             name: None,
             label_identity: next_index_label_identity(),
             duplicate_cache: Arc::default(),
@@ -3125,8 +3102,7 @@ impl Index {
         };
         let len = nanos.len();
         let values = Arc::new(nanos);
-        let Some(labels) = IndexLabels::new_temporal_strided(kind, Arc::clone(&values), 0, 1, len)
-        else {
+        let Some(view) = Int64StridedLabels::new(Arc::clone(&values), 0, 1, len) else {
             let nanos = Arc::unwrap_or_clone(values);
             return match kind {
                 TemporalKind::Datetime => Self::from_datetime64(nanos),
@@ -3134,7 +3110,7 @@ impl Index {
             };
         };
         Self {
-            labels,
+            labels: IndexLabels::new_temporal_strided(kind, view),
             name: None,
             label_identity: next_index_label_identity(),
             duplicate_cache: Arc::default(),
@@ -5556,6 +5532,39 @@ impl Index {
         }
     }
 
+    /// numpy's take of signed positions (negative from the end) over a
+    /// typed int64 index, each wrapped, checked and gathered in one pass:
+    /// copying the positions out, bounding, wrapping, bounding again and
+    /// gathering were five passes over a million (idx.take(perm) 2.6 ms,
+    /// pandas 1.06; br-frankenpandas-fk877). `None` for any other backing,
+    /// a freq, or a position out of range.
+    pub fn take_signed_i64<I>(&self, positions: I) -> Option<Self>
+    where
+        I: ExactSizeIterator<Item = i64>,
+    {
+        if self.row_multiindex.is_some() || self.freq.is_some() {
+            return None;
+        }
+        let Some(Some(values)) = self.labels.int64_typed.get() else {
+            return None;
+        };
+        let length = i64::try_from(values.len()).ok()?;
+        let mut missed = 0_usize;
+        let taken: Vec<i64> = positions
+            .map(|at| {
+                let position = usize::try_from(at + ((at >> 63) & length)).unwrap_or(usize::MAX);
+                match values.get(position) {
+                    Some(&value) => value,
+                    None => {
+                        missed += 1;
+                        0
+                    }
+                }
+            })
+            .collect();
+        (missed == 0).then(|| self.propagate_name(Self::from_i64_values(taken)))
+    }
+
     fn take_labels(&self, indices: &[usize]) -> Self {
         // Affine-in, affine-out fast path (br-frankenpandas, BlackThrush): when the
         // backing is an Int64 affine range AND the requested positions are
@@ -5646,20 +5655,27 @@ impl Index {
         Some(self.propagate_name(result))
     }
 
-    /// Every `step`-th label from `start`, `len` of them: a view of the same
-    /// instants or durations for a typed DatetimeIndex / TimedeltaIndex
-    /// backing (name and zone kept), `None` for any other backing or a run
-    /// past the buffer (br-frankenpandas-lsn8d, br-frankenpandas-5s8nr).
+    /// `len` labels from `start`, `step` apart (either sign) of a datetime /
+    /// timedelta index, its labels never made: a date_range stays an
+    /// arithmetic range, a typed backing is a view of the same instants or
+    /// durations, backwards too, as numpy's slice is (name and zone kept).
+    /// The callers took and cloned every label (`df.iloc[::-1]` over a
+    /// DatetimeIndex 4.9 ms a million rows, pandas 0.01;
+    /// br-frankenpandas-lsn8d, br-frankenpandas-5s8nr). `None` for any
+    /// other backing, an empty run or one outside the index.
     #[must_use]
-    pub fn stepped_view(&self, start: usize, step: usize, len: usize) -> Option<Self> {
+    pub fn stepped(&self, start: usize, step: isize, len: usize) -> Option<Self> {
+        let reach = step.checked_mul(isize::try_from(len.checked_sub(1)?).ok()?)?;
+        if start.max(start.checked_add_signed(reach)?) >= self.len() {
+            return None;
+        }
+        if let Some(range) = self.labels.datetime64_affine_range() {
+            let step = range.step.checked_mul(i64::try_from(step).ok()?)?;
+            let index = Self::from_datetime64_affine_range(range.value_at(start), step, len)?;
+            return Some(self.propagate_name(index));
+        }
         let TemporalStridedLabels { kind, view } = self.labels.temporal_strided.as_ref()?;
-        let labels = IndexLabels::new_temporal_strided(
-            *kind,
-            Arc::clone(&view.values),
-            view.start.checked_add(view.step.checked_mul(start)?)?,
-            view.step.checked_mul(step)?,
-            len,
-        )?;
+        let labels = IndexLabels::new_temporal_strided(*kind, view.sub_view(start, step, len)?);
         Some(self.propagate_name(Self {
             labels,
             name: None,
@@ -24605,16 +24621,13 @@ mod tests {
         );
         assert_eq!(typed, labelled);
         assert_eq!(typed.slice(1, 3).labels(), labelled.slice(1, 3).labels());
-        let every_other = typed.stepped_view(0, 2, 3).unwrap();
+        let every_other = typed.stepped(0, 2, 3).unwrap();
         assert_eq!(
             DatetimeIndex::from_index(every_other).unwrap().asi8(),
             vec![30, NAT, 10]
         );
-        assert!(labelled.stepped_view(0, 2, 3).is_none(), "no instants held");
-        assert!(
-            typed.stepped_view(1, 2, 3).is_none(),
-            "a run past the buffer"
-        );
+        assert!(labelled.stepped(0, 2, 3).is_none(), "no instants held");
+        assert!(typed.stepped(1, 2, 3).is_none(), "a run past the buffer");
         assert_eq!(
             typed.take(&[4, 0, 2]).labels(),
             labelled.take(&[4, 0, 2]).labels()
@@ -24654,18 +24667,93 @@ mod tests {
         // its start past the buffer, reads nothing.
         let view = crate::IndexLabels::new_temporal_strided(
             crate::TemporalKind::Datetime,
-            Arc::new(vec![1, 2, 3, 4, 5]),
-            0,
-            2,
-            3,
-        )
-        .unwrap();
+            crate::Int64StridedLabels::new(Arc::new(vec![1, 2, 3, 4, 5]), 0, 2, 3).unwrap(),
+        );
         assert_eq!(view.datetime64_nanos().unwrap().as_ref(), &[1, 3, 5]);
         assert_eq!(
             view.slice(1, 2).datetime64_nanos().unwrap().as_ref(),
             &[3, 5]
         );
         assert!(view.slice(3, 0).datetime64_nanos().unwrap().is_empty());
+    }
+
+    #[test]
+    fn temporal_index_steps_either_way_without_its_labels_5s8nr() {
+        // A typed DatetimeIndex / TimedeltaIndex, a slice of one and a
+        // date_range step over their instants or durations, backwards too,
+        // as the take of the same positions: name and zone kept, no label
+        // made (br-frankenpandas-5s8nr).
+        const NAT: i64 = i64::MIN;
+        let typed = Index::from_datetime64_values(vec![10, NAT, 30, 40, 50])
+            .with_tz(Some("UTC"))
+            .unwrap()
+            .set_name("t");
+        let tail = typed.slice(1, 4);
+        let affine = Index::from_datetime64_affine_range(100, 7, 6)
+            .unwrap()
+            .set_name("r");
+        let durations = Index::from_timedelta64_values(vec![5, 6, NAT, 8]);
+        for (index, step, positions) in [
+            (&typed, -1, &[4, 3, 2, 1, 0][..]),
+            (&typed, -2, &[4, 2, 0][..]),
+            (&typed, -3, &[3, 0][..]),
+            (&typed, 2, &[1, 3][..]),
+            (&tail, -1, &[3, 2, 1, 0][..]),
+            (&tail, -2, &[2, 0][..]),
+            (&affine, -1, &[5, 4, 3, 2, 1, 0][..]),
+            (&affine, -2, &[4, 2, 0][..]),
+            (&affine, 3, &[0, 3][..]),
+            (&durations, -1, &[3, 2, 1, 0][..]),
+            (&durations, -2, &[2, 0][..]),
+        ] {
+            let stepped = index.stepped(positions[0], step, positions.len()).unwrap();
+            assert!(stepped.labels.materialized.get().is_none());
+            assert_eq!(stepped.labels(), index.take(positions).labels());
+            assert_eq!(stepped.name(), index.name(), "{step} {positions:?}");
+            assert_eq!(stepped.tz(), index.tz(), "{step} {positions:?}");
+        }
+        let fresh = Index::from_datetime64_values(vec![1, 2, 3]);
+        let back = fresh.stepped(2, -1, 3).unwrap();
+        assert!(fresh.labels.materialized.get().is_none());
+        let buffer = |index: &Index| {
+            Arc::clone(&index.labels.temporal_strided.as_ref().unwrap().view.values)
+        };
+        assert!(
+            Arc::ptr_eq(&buffer(&back), &buffer(&fresh)),
+            "a view, nothing copied"
+        );
+        assert_eq!(
+            DatetimeIndex::from_index(back.clone()).unwrap().asi8(),
+            vec![3, 2, 1]
+        );
+        // Views compose: back again, a slice of a backwards one, a step of it.
+        assert_eq!(back.stepped(2, -1, 3).unwrap().labels(), fresh.labels());
+        let reversed = typed.stepped(4, -1, 5).unwrap();
+        assert_eq!(
+            reversed.slice(1, 3).labels(),
+            typed.take(&[3, 2, 1]).labels()
+        );
+        assert_eq!(
+            reversed.stepped(1, 2, 2).unwrap().labels(),
+            typed.take(&[3, 1]).labels()
+        );
+        // NEGATIVE: an int or a labelled datetime index has no instants to
+        // step over; a run reaching outside the index (past a slice's end
+        // though inside its buffer), or an empty one, is no answer.
+        assert!(
+            Index::from_i64_values(vec![1, 2, 3])
+                .stepped(2, -1, 3)
+                .is_none()
+        );
+        let labelled = Index::new(vec![IndexLabel::Datetime64(1), IndexLabel::Datetime64(2)]);
+        assert!(labelled.stepped(1, -1, 2).is_none());
+        assert!(typed.stepped(4, -2, 4).is_none());
+        assert!(typed.stepped(1, 2, 3).is_none());
+        assert!(typed.stepped(5, -1, 1).is_none());
+        assert!(typed.slice(0, 3).stepped(0, 2, 3).is_none());
+        assert!(tail.stepped(4, -1, 1).is_none());
+        assert!(affine.stepped(6, -1, 2).is_none());
+        assert!(typed.stepped(0, 1, 0).is_none());
     }
 
     #[test]
@@ -24686,7 +24774,7 @@ mod tests {
         );
         assert_eq!(typed.slice(1, 3).labels(), labelled.slice(1, 3).labels());
         assert_eq!(
-            typed.stepped_view(0, 2, 3).unwrap().labels(),
+            typed.stepped(0, 2, 3).unwrap().labels(),
             &[
                 IndexLabel::Timedelta64(50),
                 IndexLabel::Timedelta64(10),
@@ -24749,7 +24837,7 @@ mod tests {
             Index::from_datetime64_values(vec![5, NAT, 3]),
             Index::from_timedelta64_values(vec![NAT, 7, 2]),
             Index::from_timedelta64_values(vec![1, 2, 3, 4, 5, 6])
-                .stepped_view(1, 2, 3)
+                .stepped(1, 2, 3)
                 .unwrap(),
             Index::new(vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(3)]),
         ];

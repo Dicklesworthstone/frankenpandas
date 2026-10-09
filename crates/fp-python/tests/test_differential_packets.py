@@ -34060,3 +34060,276 @@ def test_index_behaviors_across_kinds_like_pandas_n3ktr(case: str) -> None:
                 return ("raise", type(error).__name__)
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-7v4wf: an object column of numbers holding missing values
+# keeps its object dtype and each value's type across ops, as pandas' object
+# array: cumsum / cumprod in Python's arithmetic (a missing cell as 0.0 /
+# 1.0, NaN again), shift's None fill, replace unchanged when nothing matched
+# else soft-converted (ints beside None float64), combine_first's cells as
+# each side held them (a numeric Series' combine_first with an object one
+# is object too), and a DataFrame concat of object columns object.
+# NEGATIVE: text object columns, and numeric columns' other ops, answer as
+# before.
+_7V4WFNA_SERIES = {
+    "ints None": lambda m: m.Series([1, None, 2, 3], dtype=object),
+    "floats NaN": lambda m: m.Series([1.5, np.nan, 2.5], dtype=object),
+    "mixed None": lambda m: m.Series([1, 2.5, None, 4], dtype=object),
+    "text": lambda m: m.Series(["a", None, "c"], dtype=object),
+    "numeric ints": lambda m: m.Series([1, 2, 3]),
+    "numeric floats NaN": lambda m: m.Series([1.5, np.nan, 2.5]),
+}
+_7V4WFNA_OPS = {
+    "cumsum": lambda s: s.cumsum(),
+    "cumsum skipna=False": lambda s: s.cumsum(skipna=False),
+    "cumprod": lambda s: s.cumprod(),
+    "shift(1)": lambda s: s.shift(1),
+    "shift(-1)": lambda s: s.shift(-1),
+    "replace(2, 9)": lambda s: s.replace(2, 9),
+    "replace(no match)": lambda s: s.replace(77, 9),
+    "combine_first": lambda s: s.combine_first(type(s)([5, 6, 7, 8], dtype=object)),
+}
+def _7v4wfna_show(value: Any) -> Any:
+    if isinstance(value, (pd.Series, fpd.Series)):
+        return (str(value.dtype), [repr(x) for x in value.tolist()], [repr(x) for x in value.index])
+    if isinstance(value, (pd.DataFrame, fpd.DataFrame)):
+        return ([str(t) for t in value.dtypes], [[repr(x) for x in value[c].tolist()] for c in value.columns])
+    return (type(value).__name__, repr(value))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(("series", "op"), [(series, op) for series in _7V4WFNA_SERIES for op in _7V4WFNA_OPS])
+def test_object_numbers_with_missing_keep_their_cells_like_pandas_7v4wf(series: str, op: str) -> None:
+    def run(m: Any) -> Any:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                return _7v4wfna_show(_7V4WFNA_OPS[op](_7V4WFNA_SERIES[series](m)))
+            except Exception as error:  # noqa: BLE001 - the exception is the outcome
+                return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+_7V4WFNA_CONCAT = {
+    "object + object": lambda m: m.concat([m.DataFrame({"a": m.Series([1, None], dtype=object)}), m.DataFrame({"a": m.Series([2.5, 3], dtype=object)})]),
+    "object + int64": lambda m: m.concat([m.DataFrame({"a": m.Series([1, 2], dtype=object), "b": [1.5, 2.5]}), m.DataFrame({"a": [3, 4], "b": [3.5, 4.5]})]),
+    "int64 + int64 (NEGATIVE)": lambda m: m.concat([m.DataFrame({"a": [1, 2]}), m.DataFrame({"a": [3, 4]})]),
+    "text + text (NEGATIVE)": lambda m: m.concat([m.DataFrame({"a": ["x", None]}), m.DataFrame({"a": ["y", "z"]})]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_7V4WFNA_CONCAT))
+def test_frame_concat_of_object_columns_like_pandas_7v4wf(case: str) -> None:
+    def run(m: Any) -> Any:
+        return _7v4wfna_show(_7V4WFNA_CONCAT[case](m))
+
+    assert run(fpd) == run(pd)
+
+
+# Still open on br-frankenpandas-7v4wf: Python's equality folds 1, 1.0 and
+# True together in an object column's unique / value_counts (pandas [1]).
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.xfail(strict=True, reason="object dedup by Python equality (7v4wf)")
+def test_object_unique_folds_equal_numbers_like_pandas_7v4wf() -> None:
+    def run(m: Any) -> Any:
+        return [repr(x) for x in m.Series([1, 1.0, True, 2], dtype=object).unique()]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a frame's integer columns against an integer
+# number run on the column's own scalar kernel (no full-length column of the
+# number), with pandas' answers: + - * wrap as int64, / is float64, // and %
+# floor, ** of a non-negative power stays int64. NEGATIVE: a zero divisor, a
+# negative power and a bool column take the broadcast path's answers, and
+# the float / NaN columns beside them answer as before.
+def _e186mint_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "i": [7, -3, 0, 2**62, -(2**62)],
+            "f": [1.5, np.nan, -2.25, 0.0, 3.0],
+            "b": [True, False, True, True, False],
+        }
+    )
+
+
+_E186MINT_OPS = {
+    "+ 3": lambda d: d[["i", "f"]] + 3,
+    "- 3": lambda d: d[["i", "f"]] - 3,
+    "3 - df": lambda d: 3 - d[["i", "f"]],
+    "* 3": lambda d: d[["i", "f"]] * 3,
+    "/ 3": lambda d: d[["i", "f"]] / 3,
+    "3 / df": lambda d: 3 / d[["i"]],
+    "// 3": lambda d: d[["i", "f"]] // 3,
+    "% 3": lambda d: d[["i", "f"]] % 3,
+    "// -2": lambda d: d[["i"]] // -2,
+    "-7 // df (zeros)": lambda d: -7 // d[["i"]],
+    "// 0 (NEGATIVE)": lambda d: d[["i"]] // 0,
+    "% 0 (NEGATIVE)": lambda d: d[["i"]] % 0,
+    "** 2": lambda d: d[["i"]] ** 2,
+    "** -1 (NEGATIVE)": lambda d: d[["i"]] ** -1,
+    "2 ** df": lambda d: 2 ** d[["i"]].abs().clip(upper=10),
+    "bool + 1 (NEGATIVE)": lambda d: d[["b"]] + 1,
+    "bool * 2 (NEGATIVE)": lambda d: d[["b", "i"]] * 2,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", list(_E186MINT_OPS))
+def test_frame_integer_arithmetic_like_pandas_e186m(op: str) -> None:
+    def run(m: Any) -> Any:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                out = _E186MINT_OPS[op](_e186mint_frame(m))
+            except Exception as error:  # noqa: BLE001 - the exception is the outcome
+                return ("raise", type(error).__name__)
+        return ([str(t) for t in out.dtypes], [[repr(x) for x in out[c].tolist()] for c in out.columns])
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-5s8nr: a stepped slice of a datetime / timedelta index -
+# itself, or a Series' / frame's rows over one - steps over its instants or
+# durations, backwards too (a date_range stays a range, a typed index a view
+# forwards and a buffer of its own backwards), with pandas' labels, dtype,
+# freq, zone and name. NEGATIVE: an int64 and a text index step as before.
+def _5s8nrstep_index(m: Any, kind: str) -> Any:
+    nat = np.datetime64("NaT", "ns")
+    if kind == "date_range":
+        return m.date_range("2024-01-01", periods=11, freq="h", name="t")
+    if kind == "date_range utc":
+        return m.date_range("2024-01-01", periods=11, freq="D", tz="UTC", name="t")
+    if kind == "instants with NaT":
+        stamps = np.array(["2024-01-01T00:00"] * 11, dtype="datetime64[ns]") + np.arange(11) * np.timedelta64(90, "m")
+        stamps[4] = nat
+        return m.DatetimeIndex(stamps, name="t")
+    if kind == "timedelta_range":
+        return m.timedelta_range("1 day", periods=11, freq="6h", name="d")
+    if kind == "durations with NaT":
+        spans = np.arange(11) * np.timedelta64(7, "s")
+        spans[2] = np.timedelta64("NaT", "ns")
+        return m.TimedeltaIndex(spans.astype("timedelta64[ns]"))
+    if kind == "int64 (NEGATIVE)":
+        return m.Index(np.arange(11, dtype="int64") * 3)
+    return m.Index([f"r{i}" for i in range(11)])
+
+
+_5S8NRSTEP_KINDS = [
+    "date_range",
+    "date_range utc",
+    "instants with NaT",
+    "timedelta_range",
+    "durations with NaT",
+    "int64 (NEGATIVE)",
+    "text (NEGATIVE)",
+]
+_5S8NRSTEP_SLICES = {
+    "::-1": slice(None, None, -1),
+    "::-2": slice(None, None, -2),
+    "9:2:-3": slice(9, 2, -3),
+    "::3": slice(None, None, 3),
+    "-1:-5:-1": slice(-1, -5, -1),
+    "5::-1": slice(5, None, -1),
+    "3:3:-1 (empty)": slice(3, 3, -1),
+    "100::-4": slice(100, None, -4),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("target", ["index", "series", "frame"])
+@pytest.mark.parametrize("cut", list(_5S8NRSTEP_SLICES))
+@pytest.mark.parametrize("kind", _5S8NRSTEP_KINDS)
+def test_stepped_slices_of_temporal_indexes_like_pandas_5s8nr(kind: str, cut: str, target: str) -> None:
+    def labels(index: Any) -> Any:
+        return (
+            [str(x) for x in index],
+            str(index.dtype),
+            getattr(index, "freqstr", None),
+            index.name,
+        )
+
+    def run(m: Any) -> Any:
+        index = _5s8nrstep_index(m, kind)
+        sl = _5S8NRSTEP_SLICES[cut]
+        if target == "index":
+            return labels(index[sl])
+        values = np.arange(11, dtype="float64") * 0.5
+        if target == "series":
+            out = m.Series(values, index=index, name="v").iloc[sl]
+            return labels(out.index), out.tolist()
+        out = m.DataFrame({"v": values, "w": np.arange(11)}, index=index).iloc[sl]
+        return labels(out.index), out["v"].tolist(), out["w"].tolist()
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-fk877: an int64 array's positions over a typed int64
+# Index are read in place, wrapped, checked and gathered in one pass, with
+# pandas' labels, dtype and name. NEGATIVE: a position past either end is
+# IndexError; a fill_value is ValueError for an int64 index; int32 / list
+# positions, a float index and a RangeIndex answer as before.
+_FK877C_VALUES = np.random.default_rng(11).integers(-(10**12), 10**12, 997)
+_FK877C_SIGNED = np.random.default_rng(12).integers(-997, 997, 2000)
+_FK877C_CASES = {
+    "typed, signed positions": lambda m: m.Index(_FK877C_VALUES, name="k").take(_FK877C_SIGNED),
+    "typed, all from the end": lambda m: m.Index(_FK877C_VALUES).take(np.arange(-997, 0)),
+    "typed, empty": lambda m: m.Index(_FK877C_VALUES, name="k").take(np.array([], dtype="int64")),
+    "typed, allow_fill without a fill_value": lambda m: m.Index(_FK877C_VALUES).take(np.array([-1, 3]), allow_fill=True),
+    "typed, fill_value not allowed": lambda m: m.Index(_FK877C_VALUES).take(np.array([-1, 3]), allow_fill=False, fill_value=5),
+    "typed, past the end (NEGATIVE: IndexError)": lambda m: m.Index(_FK877C_VALUES).take(np.array([0, 997])),
+    "typed, past the start (NEGATIVE: IndexError)": lambda m: m.Index(_FK877C_VALUES).take(np.array([-998])),
+    "typed, fill_value (NEGATIVE: ValueError)": lambda m: m.Index(_FK877C_VALUES).take(np.array([-1, 3]), fill_value=5),
+    "int32 positions (NEGATIVE)": lambda m: m.Index(_FK877C_VALUES).take(np.array([-1, 3], dtype="int32")),
+    "list positions (NEGATIVE)": lambda m: m.Index(_FK877C_VALUES).take([5, -5]),
+    "RangeIndex (NEGATIVE)": lambda m: m.RangeIndex(5, 50, 5).take(np.array([3, -1])),
+    "float index (NEGATIVE)": lambda m: m.Index(np.array([0.5, -2.0, 7.25])).take(np.array([2, -3])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FK877C_CASES))
+def test_int64_index_takes_signed_positions_in_place_like_pandas_fk877(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            return _fk877_shown(_FK877C_CASES[case](m))
+        except (IndexError, ValueError, TypeError) as error:
+            return (type(error).__name__, str(error) if isinstance(error, ValueError) else "")
+
+    assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-n3ktr: an object Index's argsort is numpy's over its
+# Python objects - None or NaN beside text, or text beside a number, is
+# Python's TypeError; a NaN among floats sorts where numpy's comparisons
+# leave it. NEGATIVE: text alone, numbers alone, one missing label, and a
+# float64 / datetime / categorical index's argsort answer as before.
+_N3KTRSORT_CASES = {
+    "text beside None": lambda m: m.Index(["b", None, "a"], dtype=object),
+    "None twice": lambda m: m.Index([None, None], dtype=object),
+    "text beside NaN": lambda m: m.Index(["a", np.nan, "b"], dtype=object),
+    "ints beside None": lambda m: m.Index([1, None, 2], dtype=object),
+    "floats beside NaN": lambda m: m.Index([1.5, np.nan, 0.5], dtype=object),
+    "int beside text": lambda m: m.Index([1, "a"], dtype=object),
+    "None then text": lambda m: m.Index([None, "a"], dtype=object),
+    "text alone (NEGATIVE)": lambda m: m.Index(["b", "c", "a"]),
+    "ints in object (NEGATIVE)": lambda m: m.Index([3, 1, 2], dtype=object),
+    "one None (NEGATIVE)": lambda m: m.Index([None], dtype=object),
+    "float64 with NaN (NEGATIVE)": lambda m: m.Index([1.5, np.nan, 0.5]),
+    "datetimes (NEGATIVE)": lambda m: m.DatetimeIndex(["2024-01-03", "2024-01-01", None]),
+    "categorical (NEGATIVE)": lambda m: m.CategoricalIndex(["b", "a", "b"]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_N3KTRSORT_CASES))
+def test_object_index_argsort_like_pandas_n3ktr(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return [int(x) for x in _N3KTRSORT_CASES[case](m).argsort()]
+        except TypeError as error:
+            return ("TypeError", str(error))
+
+    assert run(fpd) == run(pd)

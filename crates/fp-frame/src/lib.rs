@@ -16562,11 +16562,17 @@ impl Series {
                 )
             })
             .filter(|_| len > 0);
+        // A datetime / timedelta index steps over its instants or durations
+        // (`ts.iloc[::-1]` 0.8 ms a million, pandas 0.02;
+        // br-frankenpandas-5s8nr).
         let index = match affine_index {
             Some(index) => index
                 .with_dtype_of(&self.index)
                 .rename_index(self.index.name()),
-            None => self.index.take(positions()),
+            None => self
+                .index
+                .stepped(start, step, len)
+                .unwrap_or_else(|| self.index.take(positions())),
         };
         let column = self
             .column
@@ -25463,6 +25469,16 @@ impl Series {
             }
         }
 
+        // An object column stays object, each value as it was: rebuilt from
+        // its values, [1, 2.5] read as float64 (1.0) and the None fill as NaN
+        // (br-frankenpandas-7v4wf).
+        if dtype == DType::Utf8 && !self.column.is_pandas_string() {
+            return Self::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::from_object_values(out),
+            );
+        }
         self.with_values_preserving_index(out)
     }
 
@@ -78773,6 +78789,10 @@ impl DataFrame {
             let label_start = range_start.checked_add(i64::try_from(start).ok()?)?;
             let step = i64::try_from(step).ok()?;
             Index::new_known_unique_int64_affine_range(label_start, step, n)?
+        } else if let Some(index) = self.index.stepped(start, step, n) {
+            // A datetime / timedelta index steps over its instants or
+            // durations (br-frankenpandas-5s8nr).
+            index
         } else {
             let typed_view = match self.index.cached_int64_label_values() {
                 Some(view) => view,
@@ -104469,7 +104489,13 @@ impl DataFrame {
         } else {
             Some(f64_path(&self.take_columns(&rest)?)?)
         };
-        let broadcast = Column::from_i64_values(vec![integer; self.len()]);
+        // Each integer column against the number itself (binary_scalar: the
+        // same wrapping int64, / float64, // and % as the broadcast), the
+        // number's full-length column built only for what that declines (a
+        // bool column, **) - it was an 8 MB fill a million rows before every
+        // op (df + 1 of 4 x 1M 0.67-0.72x pandas; br-frankenpandas-e186m).
+        let number = Scalar::Int64(integer);
+        let broadcast = std::sync::OnceLock::new();
         // The integer columns run in parallel from the f64 kernels' 3M cells
         // (typed_scalar_arith): at 16k a 4 x 100k frame's one int column
         // woke the pool for a 15 us add (df + 1 0.65-0.87x pandas;
@@ -104479,10 +104505,15 @@ impl DataFrame {
                 return Ok(None);
             }
             let column = column_at(pos);
+            if let Some(out) = column.binary_scalar(&number, op, reflected) {
+                return Ok(Some(out));
+            }
+            let broadcast =
+                broadcast.get_or_init(|| Column::from_i64_values(vec![integer; self.len()]));
             Ok(Some(if reflected {
                 broadcast.binary_numeric(column, op)?
             } else {
-                column.binary_numeric(&broadcast, op)?
+                column.binary_numeric(broadcast, op)?
             }))
         })?;
         if let Some(out) = rest_out {
@@ -180653,7 +180684,25 @@ mod tests {
             Column::from_values(text).unwrap(),
         ];
         let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Utf8(format!("r{i}"))).collect();
-        for index in [Index::from_range(0, n as i64, 1), Index::new(labels)] {
+        // A zoned DatetimeIndex holding NaT and a date_range step over their
+        // instants (br-frankenpandas-5s8nr).
+        let instants = Index::from_datetime64_values(
+            (0..n as i64)
+                .map(|i| if i % 11 == 3 { i64::MIN } else { i * 1_000 })
+                .collect(),
+        )
+        .with_tz(Some("UTC"))
+        .unwrap()
+        .set_name("when");
+        let date_range =
+            Index::from_datetime64_affine_range(1_700_000_000_000_000_000, 60_000_000_000, n)
+                .unwrap();
+        for index in [
+            Index::from_range(0, n as i64, 1),
+            Index::new(labels),
+            instants,
+            date_range,
+        ] {
             let series: Vec<Series> = columns
                 .iter()
                 .enumerate()
@@ -180676,6 +180725,8 @@ mod tests {
                 let stepped = frame.iloc_step(start, step, len).unwrap();
                 let taken = frame.iloc(&positions).unwrap();
                 assert_eq!(stepped.index().labels(), taken.index().labels());
+                assert_eq!(stepped.index().tz(), taken.index().tz());
+                assert_eq!(stepped.index().name(), taken.index().name());
                 for name in taken.column_names() {
                     assert_eq!(
                         format!("{:?}", stepped.column(name).unwrap().values()),
@@ -180691,6 +180742,8 @@ mod tests {
                     let stepped = s.iloc_step(start, step, len).unwrap();
                     let taken = s.iloc(&positions).unwrap();
                     assert_eq!(stepped.index().labels(), taken.index().labels());
+                    assert_eq!(stepped.index().tz(), taken.index().tz());
+                    assert_eq!(stepped.index().name(), taken.index().name());
                     assert_eq!(
                         format!("{:?}", stepped.values()),
                         format!("{:?}", taken.values())
