@@ -7353,6 +7353,11 @@ fn cell_to_py(py: Python<'_>, column: &Column, value: &Scalar) -> PyResult<Py<Py
     if value.is_missing() && (is_nullable_extension(&column.dtype()) || column.is_pandas_string()) {
         return na_object(py);
     }
+    // A period column's missing value is NaT whichever way it went missing
+    // (a where / shift / reindex gap read back nan; br-frankenpandas-76kq0).
+    if value.is_missing() && column.dtype() == DType::Period {
+        return scalar_to_py(py, &Scalar::Null(NullKind::NaT));
+    }
     scalar_to_py(py, value)
 }
 
@@ -7364,7 +7369,20 @@ fn to_dict_cell(py: Python<'_>, column: &Column, value: &Scalar) -> PyResult<Py<
     if column.timezone().is_some() && !value.is_missing() {
         return cell_to_py(py, column, value);
     }
-    scalar_to_py(py, value)
+    let cell = scalar_to_py(py, value)?;
+    // An object cell's numpy number or bool is boxed native, as pandas'
+    // maybe_box_native (describe's np.int64 count is an int in to_dict;
+    // br-frankenpandas-76kq0).
+    if matches!(value, Scalar::Object(_)) {
+        let numpy = py.import("numpy")?;
+        let bound = cell.bind(py);
+        if bound.is_instance(&numpy.getattr("number")?)?
+            || bound.is_instance(&numpy.getattr("bool_")?)?
+        {
+            return Ok(bound.call_method0("item")?.unbind());
+        }
+    }
+    Ok(cell)
 }
 
 /// A row the core read from `frame` (iloc_row / loc_row), each tz-aware
@@ -24991,20 +25009,43 @@ fn groupby_reduction_width(width: NumericWidth, op: &str, result: &Column) -> Op
 /// A comparison of pandas' `string` Series as pandas gives it: boolean, with
 /// pd.NA where the Series is missing (`s == 'a'` of ['a', <NA>] is
 /// [True, <NA>]; fvsao.59). Any other comparison as it is.
-fn masked_string_comparison(left: &Series, result: PyResult<PySeries>) -> PyResult<PySeries> {
+fn masked_string_comparison(
+    left: &Series,
+    other: &Bound<'_, PyAny>,
+    result: PyResult<PySeries>,
+) -> PyResult<PySeries> {
     let result = result?;
     let source = left.column();
     if !source.is_pandas_string() || result.inner.len() != source.len() {
         return Ok(result);
     }
+    // A Series on the same index is <NA> where it is missing too, as
+    // pandas masks either side (it was False there; br-frankenpandas-76kq0).
+    let right_missing: Option<Vec<bool>> = other
+        .extract::<PyRef<'_, PySeries>>()
+        .ok()
+        .filter(|right| right.inner.index() == left.index())
+        .map(|right| {
+            right
+                .inner
+                .column()
+                .values()
+                .iter()
+                .map(Scalar::is_missing)
+                .collect()
+        });
     let values = result
         .inner
         .column()
         .values()
         .iter()
         .zip(source.values())
-        .map(|(value, original)| {
-            if original.is_missing() {
+        .enumerate()
+        .map(|(row, (value, original))| {
+            let right_gap = right_missing
+                .as_ref()
+                .is_some_and(|missing| missing.get(row).copied().unwrap_or(false));
+            if original.is_missing() || right_gap {
                 Scalar::Null(NullKind::Null)
             } else {
                 value.clone()
@@ -30888,7 +30929,7 @@ impl PySeries {
     /// temporal mean/median were refused here
     /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
     fn require_numeric(&self, name: &str) -> PyResult<()> {
-        self.refuse_string_reduction(name)?;
+        self.refuse_extension_reduction(name)?;
         let temporal_reduction = matches!(name, "mean" | "median" | "std");
         let array = match self.inner.dtype() {
             // The nullable extension dtypes reduce too (Int64 mean raised).
@@ -30899,6 +30940,8 @@ impl PySeries {
             | DType::Float64Nullable
             | DType::BoolNullable => return Ok(()),
             DType::Timedelta64 | DType::Datetime64 { .. } if temporal_reduction => return Ok(()),
+            // A period Series' median is its middle period (br-frankenpandas-76kq0).
+            DType::Period if name == "median" => return Ok(()),
             DType::Timedelta64 => "'TimedeltaArray' with dtype timedelta64[ns]",
             DType::Datetime64 { .. } => "'DatetimeArray' with dtype datetime64[ns]",
             _ => {
@@ -30913,20 +30956,144 @@ impl PySeries {
     }
 
     /// pandas' refusal of a numeric reduction (sum, mean, std, any, ...) of
-    /// its `string` dtype, and NotImplementedError for a cumulative one
-    /// (min / max reduce; fvsao.59 - sum concatenated the text).
-    fn refuse_string_reduction(&self, name: &str) -> PyResult<()> {
-        if !self.inner.column().is_pandas_string() || matches!(name, "min" | "max") {
+    /// its `string` dtype or a categorical, and NotImplementedError for a
+    /// cumulative one (min / max reduce; fvsao.59 - sum concatenated the
+    /// text; a categorical's cumsum concatenated its values, its any / all
+    /// answered; br-frankenpandas-76kq0).
+    fn refuse_extension_reduction(&self, name: &str) -> PyResult<()> {
+        // A period Series orders (min / max / median / cummin / cummax) and
+        // nothing else: pandas' TypeError (its any / all answered;
+        // br-frankenpandas-76kq0).
+        if self.inner.dtype() == DType::Period {
+            return match name {
+                "min" | "max" | "median" | "cummin" | "cummax" => Ok(()),
+                "cumsum" | "cumprod" => {
+                    Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                        "Accumulation {name} not supported for <class 'pandas.core.arrays.period.PeriodArray'>"
+                    )))
+                }
+                _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "'PeriodArray' with dtype {} does not support reduction '{name}'",
+                    self.dtype_name()
+                ))),
+            };
+        }
+        let (kind, refusal) = if self.inner.column().is_pandas_string() {
+            (
+                "string",
+                format!("Cannot perform reduction '{name}' with string dtype"),
+            )
+        } else if self.inner.cat().is_some() {
+            (
+                "category",
+                format!("'Categorical' with dtype category does not support reduction '{name}'"),
+            )
+        } else {
+            return Ok(());
+        };
+        if matches!(name, "min" | "max") {
             return Ok(());
         }
         if name.starts_with("cum") {
             return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
-                format!("cannot perform {name} with type string"),
+                format!("cannot perform {name} with type {kind}"),
             ));
         }
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-            "Cannot perform reduction '{name}' with string dtype"
-        )))
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(refusal))
+    }
+
+    /// pandas' flex `eq` / `ne` of two object Series on one index: numpy's
+    /// elementwise `==` of the cells, so None equals None (`==` itself
+    /// answers False there; NaN never equals). They answered False / True
+    /// (br-frankenpandas-76kq0). `result` with those rows set; as it came
+    /// for any other pair.
+    fn object_nones_compared(
+        &self,
+        other: &Bound<'_, PyAny>,
+        result: PySeries,
+        equal: bool,
+    ) -> PyResult<PySeries> {
+        let Ok(right) = other.extract::<PyRef<'_, PySeries>>() else {
+            return Ok(result);
+        };
+        let column = self.inner.column();
+        if !is_object_column(column)
+            || column.is_pandas_string()
+            || !is_object_column(right.inner.column())
+            || right.inner.index() != self.inner.index()
+            || result.inner.len() != self.inner.len()
+        {
+            return Ok(result);
+        }
+        let none = |value: &Scalar| matches!(value, Scalar::Null(NullKind::Null));
+        let values: Vec<Scalar> = result
+            .inner
+            .column()
+            .values()
+            .iter()
+            .zip(column.values().iter().zip(right.inner.column().values()))
+            .map(|(flag, (left, right))| {
+                if none(left) && none(right) {
+                    Scalar::Bool(equal)
+                } else {
+                    flag.clone()
+                }
+            })
+            .collect();
+        let column = Column::new(DType::Bool, values).map_err(column_error_to_py)?;
+        Series::new(result.inner.name(), result.inner.index().clone(), column)
+            .map(|inner| PySeries { inner })
+            .map_err(frame_error_to_py)
+    }
+
+    /// pandas' answer at a masked (Int64 / Float64 / boolean) or `string`
+    /// Series' missing rows in `isin`: whether a needle is pd.NA itself (a
+    /// None or NaN needle is not; measured, pandas 2.2.3), except that an
+    /// Int64 / Float64 Series of needles reads its NA as NaN for a masked
+    /// array, which matches nothing. An Int64 NA row matched an Int64 needle
+    /// Series' NA, a string one missed a needle pd.NA (br-frankenpandas-76kq0).
+    /// `found` with those rows set; None for any other Series, or nothing
+    /// missing.
+    fn masked_isin_missing_rows(
+        &self,
+        py: Python<'_>,
+        values: &Bound<'_, PyAny>,
+        needles: &[Bound<'_, PyAny>],
+        found: &Series,
+    ) -> PyResult<Option<Series>> {
+        let column = self.inner.column();
+        let masked = matches!(
+            column.dtype(),
+            DType::Int64Nullable | DType::Float64Nullable | DType::BoolNullable
+        );
+        if !(masked || column.is_pandas_string()) || !column.has_any_missing() {
+            return Ok(None);
+        }
+        let numeric_needles = masked
+            && values.extract::<PyRef<'_, PySeries>>().is_ok_and(|series| {
+                matches!(
+                    series.inner.dtype(),
+                    DType::Int64Nullable | DType::Float64Nullable
+                )
+            });
+        let na = na_object(py)?;
+        let needle_na = !numeric_needles && needles.iter().any(|needle| needle.is(na.bind(py)));
+        let flags = column
+            .values()
+            .iter()
+            .zip(found.values())
+            .map(|(value, flag)| {
+                if value.is_missing() {
+                    Scalar::Bool(needle_na)
+                } else {
+                    flag.clone()
+                }
+            })
+            .collect();
+        let column = Column::new(found.column().dtype(), flags).map_err(column_error_to_py)?;
+        Series::new(found.name(), found.index().clone(), column)
+            .map(Some)
+            .map_err(frame_error_to_py)
     }
 }
 
@@ -32383,7 +32550,7 @@ impl PySeries {
             return Ok(result);
         }
         let rhs = self.ordering_operand(py, other)?;
-        masked_string_comparison(&self.inner, wrap_series(self.inner.gt(&rhs)))
+        masked_string_comparison(&self.inner, other, wrap_series(self.inner.gt(&rhs)))
     }
     fn __ge__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         if let Some(inner) =
@@ -32402,7 +32569,7 @@ impl PySeries {
             return Ok(result);
         }
         let rhs = self.ordering_operand(py, other)?;
-        masked_string_comparison(&self.inner, wrap_series(self.inner.ge(&rhs)))
+        masked_string_comparison(&self.inner, other, wrap_series(self.inner.ge(&rhs)))
     }
     fn __lt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         if let Some(inner) =
@@ -32421,7 +32588,7 @@ impl PySeries {
             return Ok(result);
         }
         let rhs = self.ordering_operand(py, other)?;
-        masked_string_comparison(&self.inner, wrap_series(self.inner.lt(&rhs)))
+        masked_string_comparison(&self.inner, other, wrap_series(self.inner.lt(&rhs)))
     }
     fn __le__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         if let Some(inner) =
@@ -32440,7 +32607,7 @@ impl PySeries {
             return Ok(result);
         }
         let rhs = self.ordering_operand(py, other)?;
-        masked_string_comparison(&self.inner, wrap_series(self.inner.le(&rhs)))
+        masked_string_comparison(&self.inner, other, wrap_series(self.inner.le(&rhs)))
     }
     fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         if let Some(inner) =
@@ -32451,7 +32618,7 @@ impl PySeries {
         if let Some(result) = scalar_comparison(&self.inner, other, ComparisonOp::Eq) {
             return result;
         }
-        masked_string_comparison(&self.inner, self.equality(py, other, true))
+        masked_string_comparison(&self.inner, other, self.equality(py, other, true))
     }
     fn __ne__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         if let Some(inner) = period_comparison(&self.inner, other, std::cmp::Ordering::is_ne, true)?
@@ -32461,7 +32628,7 @@ impl PySeries {
         if let Some(result) = scalar_comparison(&self.inner, other, ComparisonOp::Ne) {
             return result;
         }
-        masked_string_comparison(&self.inner, self.equality(py, other, false))
+        masked_string_comparison(&self.inner, other, self.equality(py, other, false))
     }
 
     // The flex forms of the operators: pandas' (other, level=, fill_value=,
@@ -32688,7 +32855,8 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, other, level, fill_value, axis, Self::__eq__)
+        let result = self.flex(py, other, level, fill_value, axis, Self::__eq__)?;
+        self.object_nones_compared(other, result, true)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn ne(
@@ -32699,7 +32867,8 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, other, level, fill_value, axis, Self::__ne__)
+        let result = self.flex(py, other, level, fill_value, axis, Self::__ne__)?;
+        self.object_nones_compared(other, result, false)
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn lt(
@@ -32758,7 +32927,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         numpy_compat_kwargs("sum", kwargs)?;
-        self.refuse_string_reduction("sum")?;
+        self.refuse_extension_reduction("sum")?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("sum")?;
@@ -32935,7 +33104,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         numpy_compat_kwargs("std", kwargs)?;
-        self.refuse_string_reduction("std")?;
+        self.refuse_extension_reduction("std")?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("std")?;
@@ -33006,7 +33175,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         numpy_compat_kwargs("median", kwargs)?;
-        self.refuse_string_reduction("median")?;
+        self.refuse_extension_reduction("median")?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("median")?;
@@ -33047,7 +33216,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         numpy_compat_kwargs("var", kwargs)?;
-        self.refuse_string_reduction("var")?;
+        self.refuse_extension_reduction("var")?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("var")?;
@@ -33070,7 +33239,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         numpy_compat_kwargs("prod", kwargs)?;
-        self.refuse_string_reduction("prod")?;
+        self.refuse_extension_reduction("prod")?;
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("prod")?;
@@ -33256,6 +33425,18 @@ impl PySeries {
                 "bad operand type for abs(): 'str'",
             ));
         }
+        // A categorical or a period has no absolute value: pandas' TypeError
+        // (it was a ValueError; br-frankenpandas-76kq0).
+        if self.inner.cat().is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Object with dtype category cannot perform the numpy op absolute",
+            ));
+        }
+        if self.inner.dtype() == DType::Period && !self.inner.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "bad operand type for abs(): 'Period'",
+            ));
+        }
         refuse_datetime_unary(py, &self.inner, "abs")?;
         if let Some(inner) = host_object_unary(py, &self.inner, "abs")? {
             return Ok(PySeries { inner });
@@ -33276,7 +33457,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("cumsum", kwargs)?;
-        self.refuse_string_reduction("cumsum")?;
+        self.refuse_extension_reduction("cumsum")?;
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -33808,7 +33989,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("cumprod", kwargs)?;
-        self.refuse_string_reduction("cumprod")?;
+        self.refuse_extension_reduction("cumprod")?;
         // A product of durations is no duration: pandas' TypeError (it
         // answered; br-frankenpandas-wwbb1).
         if self.inner.dtype() == DType::Timedelta64 {
@@ -33838,7 +34019,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("cummin", kwargs)?;
-        self.refuse_string_reduction("cummin")?;
+        self.refuse_extension_reduction("cummin")?;
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -33865,7 +34046,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
         numpy_compat_kwargs("cummax", kwargs)?;
-        self.refuse_string_reduction("cummax")?;
+        self.refuse_extension_reduction("cummax")?;
         let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
         if ax != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -33892,7 +34073,27 @@ impl PySeries {
                 "No axis named {ax} for object type Series"
             )));
         }
+        // A categorical has no difference: pandas' TypeError (it answered
+        // NaN; br-frankenpandas-76kq0).
+        if self.inner.cat().is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Categorical has no 'diff' method. Convert to a suitable dtype prior to calling 'diff'.",
+            ));
+        }
         let column = self.inner.column();
+        // pandas' `string` dtype subtracts its text, Python's TypeError
+        // once two values meet (it answered NaN; br-frankenpandas-76kq0).
+        if column.is_pandas_string() {
+            let values = column.values();
+            let lag = usize::try_from(periods.unsigned_abs()).unwrap_or(usize::MAX);
+            let meet = (lag..values.len())
+                .any(|row| !values[row].is_missing() && !values[row - lag].is_missing());
+            if meet {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "unsupported operand type(s) for -: 'str' and 'str'",
+                ));
+            }
+        }
         if column.dtype() == DType::Utf8 && !column.is_pandas_string() {
             let inner = Python::attach(|py| object_diff(py, &self.inner, periods))?;
             return Ok(PySeries { inner });
@@ -33945,6 +34146,13 @@ impl PySeries {
     #[pyo3(signature = (decimals=0, **kwargs))]
     fn round(&self, decimals: i32, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PySeries> {
         numpy_compat_kwargs("round", kwargs)?;
+        // A categorical or period Series has nothing to round: itself, as
+        // pandas (it raised TypeError; br-frankenpandas-76kq0).
+        if self.inner.cat().is_some() || self.inner.dtype() == DType::Period {
+            return Ok(PySeries {
+                inner: self.inner.clone(),
+            });
+        }
         let r = self.inner.round(decimals).map_err(frame_error_to_py)?;
         // A masked Series rounds in its own dtype, as pandas' (a Float64
         // one came back float64; br-frankenpandas-mv4w4).
@@ -34234,12 +34442,174 @@ impl PySeries {
                         ))),
                     }
                 };
+                // Bounds given the wrong way round are swapped, as pandas'
+                // clip of two scalars (clip(later, earlier) clipped every
+                // value to the earlier; br-frankenpandas-76kq0).
+                let (low, high) = match (nanos(lower)?, nanos(upper)?) {
+                    (Some(low), Some(high)) if low > high => (Some(high), Some(low)),
+                    bounds => bounds,
+                };
                 let clipped = self
                     .inner
-                    .clip_nanos(nanos(lower)?, nanos(upper)?)
+                    .clip_nanos(low, high)
                     .map_err(frame_error_to_py)?
                     .expect("temporal dtype checked above");
                 return Ok(PySeries { inner: clipped });
+            }
+            // A period Series clips to Periods of its frequency on their
+            // ordinals, bounds the wrong way round swapped (it was refused;
+            // br-frankenpandas-76kq0).
+            if dtype == DType::Period {
+                let freq = column_period_freq(self.inner.column());
+                let ordinal = |bound: Option<&Bound<'_, PyAny>>| -> PyResult<Option<i64>> {
+                    let Some(bound) = bound.filter(|bound| !bound.is_none()) else {
+                        return Ok(None);
+                    };
+                    match py_to_scalar(py, bound)? {
+                        Scalar::Period(period) if freq.is_none_or(|freq| freq == period.freq) => {
+                            Ok(Some(period.ordinal))
+                        }
+                        _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                            "clip bound must be a Period of the Series' frequency, not {}",
+                            bound.repr()?
+                        ))),
+                    }
+                };
+                let (low, high) = match (ordinal(lower)?, ordinal(upper)?) {
+                    (Some(low), Some(high)) if low > high => (Some(high), Some(low)),
+                    bounds => bounds,
+                };
+                let values = self
+                    .inner
+                    .values()
+                    .iter()
+                    .map(|cell| match cell {
+                        Scalar::Period(period) if period.ordinal != i64::MIN => {
+                            let clipped = low.map_or(period.ordinal, |low| period.ordinal.max(low));
+                            let clipped = high.map_or(clipped, |high| clipped.min(high));
+                            Scalar::Period(Period::new(clipped, period.freq))
+                        }
+                        other => other.clone(),
+                    })
+                    .collect();
+                let column = Column::new(DType::Period, values).map_err(column_error_to_py)?;
+                let inner = Series::new(self.inner.name(), self.inner.index().clone(), column)
+                    .map_err(frame_error_to_py)?;
+                return Ok(PySeries { inner });
+            }
+            // An ordered categorical clips by its category order, as pandas:
+            // the bounds swapped as Python orders them, then a value below
+            // the lower one's code takes it and one above the upper one's
+            // (the original value's code) takes that; an unordered one, or
+            // a bound no category holds, is pandas' TypeError (it was
+            // refused as a number; br-frankenpandas-76kq0).
+            if let Some(meta) = self.inner.column().categorical() {
+                if !meta.ordered {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "Unordered Categoricals can only compare equality or not",
+                    ));
+                }
+                let (mut lower, mut upper) = (
+                    lower.filter(|bound| !bound.is_none()),
+                    upper.filter(|bound| !bound.is_none()),
+                );
+                if let (Some(low), Some(high)) = (lower, upper)
+                    && low.gt(high)?
+                {
+                    (lower, upper) = (Some(high), Some(low));
+                }
+                let code_of =
+                    |bound: Option<&Bound<'_, PyAny>>| -> PyResult<Option<(usize, Scalar)>> {
+                        let Some(bound) = bound else {
+                            return Ok(None);
+                        };
+                        let scalar = py_to_scalar(py, bound)?;
+                        let Some(code) = meta
+                            .categories
+                            .iter()
+                            .position(|category| category.semantic_eq(&scalar))
+                        else {
+                            let kind = bound.get_type().name()?.to_string();
+                            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                                "Invalid comparison between dtype=category and {kind}"
+                            )));
+                        };
+                        Ok(Some((code, meta.categories[code].clone())))
+                    };
+                let (low, high) = (code_of(lower)?, code_of(upper)?);
+                let values: Vec<Scalar> = self
+                    .inner
+                    .values()
+                    .iter()
+                    .map(|value| {
+                        let Some(code) = meta.categories.iter().position(|category| {
+                            !value.is_missing() && category.semantic_eq(value)
+                        }) else {
+                            return value.clone();
+                        };
+                        let raised = match &low {
+                            Some((bound, category)) if code < *bound => category.clone(),
+                            _ => value.clone(),
+                        };
+                        match &high {
+                            Some((bound, category)) if code > *bound => category.clone(),
+                            _ => raised,
+                        }
+                    })
+                    .collect();
+                let column = Column::from_values(values)
+                    .map_err(column_error_to_py)?
+                    .with_categorical(Some(meta.clone()))
+                    .with_dtype(DType::Categorical);
+                let inner = Series::new(self.inner.name(), self.inner.index().clone(), column)
+                    .map_err(frame_error_to_py)?;
+                return Ok(PySeries { inner });
+            }
+            // Text clips to text bounds as Python orders strings, a missing
+            // value kept and the dtype (object or `string`) too; bounds the
+            // wrong way round swapped (it was refused; br-frankenpandas-76kq0).
+            let text_bound = |bound: Option<&Bound<'_, PyAny>>| -> Option<Option<String>> {
+                match bound.filter(|bound| !bound.is_none()) {
+                    None => Some(None),
+                    Some(bound) => bound.extract::<String>().ok().map(Some),
+                }
+            };
+            if dtype == DType::Utf8
+                && self
+                    .inner
+                    .values()
+                    .iter()
+                    .all(|cell| cell.is_missing() || matches!(cell, Scalar::Utf8(_)))
+                && let (Some(low), Some(high)) = (text_bound(lower), text_bound(upper))
+            {
+                let (low, high) = match (low, high) {
+                    (Some(low), Some(high)) if low > high => (Some(high), Some(low)),
+                    bounds => bounds,
+                };
+                let values: Vec<Scalar> = self
+                    .inner
+                    .values()
+                    .iter()
+                    .map(|cell| match cell {
+                        Scalar::Utf8(text) => {
+                            if let Some(low) = low.as_ref().filter(|low| text < *low) {
+                                Scalar::Utf8(low.clone())
+                            } else if let Some(high) = high.as_ref().filter(|high| text > *high) {
+                                Scalar::Utf8(high.clone())
+                            } else {
+                                cell.clone()
+                            }
+                        }
+                        other => other.clone(),
+                    })
+                    .collect();
+                let mut column = Column::new(DType::Utf8, values).map_err(column_error_to_py)?;
+                if self.inner.column().is_pandas_string() {
+                    column = column.as_pandas_string();
+                }
+                let inner = Series::new(self.inner.name(), self.inner.index().clone(), column)
+                    .map_err(frame_error_to_py)?;
+                return Ok(PySeries { inner });
             }
 
             // An object column of numbers clips cell by cell, as pandas'
@@ -34621,6 +34991,9 @@ impl PySeries {
         if !padded && replace_downcast(self.inner.column(), result.inner.column()) {
             warn_replace_downcast(py, 1)?;
         }
+        let result = PySeries {
+            inner: zoned_object_cells_kept(&self.inner, result.inner)?,
+        };
         Ok(series_inplace(&mut self.inner, result, inplace))
     }
 
@@ -34869,6 +35242,9 @@ impl PySeries {
             .map(|item| py_to_cell(py, item))
             .collect::<PyResult<Vec<_>>>()?;
         let res = self.inner.isin(&scalars).map_err(frame_error_to_py)?;
+        if let Some(inner) = self.masked_isin_missing_rows(py, values, &needles, &res)? {
+            return Ok(PySeries { inner });
+        }
         // A column of zoned datetimes matches a datetime needle by instant,
         // aware with aware and naive with naive, as Timestamps compare (an
         // aware needle matched no cell; br-frankenpandas-an1xe).
@@ -34907,6 +35283,60 @@ impl PySeries {
         right: &Bound<'_, PyAny>,
         inclusive: &str,
     ) -> PyResult<PySeries> {
+        // An unordered categorical has no order to be between: pandas'
+        // TypeError (it answered all False; br-frankenpandas-76kq0).
+        if self
+            .inner
+            .cat()
+            .is_some_and(|categorical| !categorical.ordered())
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Unordered Categoricals can only compare equality or not",
+            ));
+        }
+        // An ordered one is between by its category order (it compared the
+        // values' text; br-frankenpandas-76kq0).
+        if let Some(meta) = self.inner.column().categorical() {
+            let code_of = |value: &Scalar| {
+                meta.categories
+                    .iter()
+                    .position(|category| !value.is_missing() && category.semantic_eq(value))
+            };
+            let bound_code = |bound: &Bound<'_, PyAny>| -> PyResult<usize> {
+                code_of(&py_to_scalar(py, bound)?).ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                        "Invalid comparison between dtype=category and str",
+                    )
+                })
+            };
+            let (low, high) = (bound_code(left)?, bound_code(right)?);
+            let (left_closed, right_closed) = match inclusive {
+                "both" => (true, true),
+                "left" => (true, false),
+                "right" => (false, true),
+                "neither" => (false, false),
+                _ => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "Inclusive has to be either string of 'both','left', 'right', or 'neither'.",
+                    ));
+                }
+            };
+            let flags = self
+                .inner
+                .values()
+                .iter()
+                .map(|value| {
+                    Scalar::Bool(code_of(value).is_some_and(|code| {
+                        (code > low || (left_closed && code == low))
+                            && (code < high || (right_closed && code == high))
+                    }))
+                })
+                .collect();
+            let column = Column::new(DType::Bool, flags).map_err(column_error_to_py)?;
+            let inner = Series::new(self.inner.name(), self.inner.index().clone(), column)
+                .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner });
+        }
         // String bounds on a datetime/timedelta column are parsed, as pandas
         // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
         let bound = |value: &Bound<'_, PyAny>| {
@@ -34945,6 +35375,29 @@ impl PySeries {
                 }
                 other => frame_error_to_py(other),
             })?;
+        // pandas' `string` dtype compares into its masked `boolean`, <NA>
+        // where a value is missing (it was bool, False there;
+        // br-frankenpandas-76kq0).
+        if self.inner.column().is_pandas_string() {
+            let values = self
+                .inner
+                .column()
+                .values()
+                .iter()
+                .zip(res.column().values())
+                .map(|(value, flag)| {
+                    if value.is_missing() {
+                        Scalar::Null(NullKind::Null)
+                    } else {
+                        flag.clone()
+                    }
+                })
+                .collect();
+            let column = Column::new(DType::BoolNullable, values).map_err(column_error_to_py)?;
+            let inner =
+                Series::new(res.name(), res.index().clone(), column).map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner });
+        }
         Ok(PySeries { inner: res })
     }
 
@@ -35843,7 +36296,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         let _ = bool_only;
-        self.refuse_string_reduction("any")?;
+        self.refuse_extension_reduction("any")?;
         self.check_logical_reduction(py, "any", axis, kwargs)?;
         let column = self.inner.column();
         let result = if skipna || !column.has_nulls() {
@@ -35873,7 +36326,7 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         let _ = bool_only;
-        self.refuse_string_reduction("all")?;
+        self.refuse_extension_reduction("all")?;
         self.check_logical_reduction(py, "all", axis, kwargs)?;
         let column = self.inner.column();
         let result = if skipna || !column.has_nulls() {
@@ -36643,6 +37096,16 @@ impl PySeries {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PySeries> {
         unsupported_params("Series.apply", &[("convert_dtype", convert_dtype)])?;
+        // pandas applies a function to a categorical's categories, its
+        // missing values left missing (na_action='ignore'), as `map` does -
+        // a categorical again while the results stay distinct (it was
+        // object, the function called on NaN; br-frankenpandas-76kq0).
+        if args.is_none()
+            && kwargs.is_none()
+            && let Some(mapped) = self.categorical_map(py, func, true)?
+        {
+            return Ok(mapped);
+        }
         if let Some(inner) = empty_mapped(&self.inner, false)? {
             return Ok(PySeries { inner });
         }
@@ -36963,6 +37426,18 @@ impl PySeries {
         exclude: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
         let _ = (include, exclude); // pandas' SeriesDescriber never reads them
+        // A period Series describes as an object one - count, unique, top,
+        // freq - as pandas (it was a numeric description of zeros and NaN;
+        // br-frankenpandas-76kq0).
+        if self.inner.dtype() == DType::Period {
+            let objects = Series::new(
+                self.inner.name(),
+                self.inner.index().clone(),
+                Column::from_object_values(self.inner.column().values().to_vec()),
+            )
+            .map_err(frame_error_to_py)?;
+            return PySeries { inner: objects }.describe(percentiles, None, None);
+        }
         let s = match percentiles {
             Some(p) => self
                 .inner
@@ -37009,9 +37484,13 @@ impl PySeries {
                 Column::from_object_values(cells),
             )
             .map_err(frame_error_to_py)?;
-            return Ok(PySeries { inner: s });
+            return Ok(PySeries {
+                inner: numpy_described(s)?,
+            });
         }
-        Ok(PySeries { inner: s })
+        Ok(PySeries {
+            inner: numpy_described(s)?,
+        })
     }
 
     /// pandas' `Series.dot(other)` / `@`: by a Series their sum of products
@@ -37661,6 +38140,33 @@ impl PySeries {
             if self.inner.dtype() == DType::BoolNullable && !self.inner.is_empty() {
                 return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
                     "interpolate is not implemented for dtype=boolean",
+                ));
+            }
+            // Nor do a categorical and a period Series (they answered
+            // themselves; br-frankenpandas-76kq0).
+            let refused = if self.inner.cat().is_some() {
+                Some("Categorical")
+            } else if self.inner.dtype() == DType::Period {
+                Some("PeriodArray")
+            } else {
+                None
+            };
+            if let Some(array) = refused {
+                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                    format!("{array} does not implement interpolate"),
+                ));
+            }
+            // pandas' `string` dtype reads its text as numbers to fill a gap
+            // beside a value, and cannot (it answered itself; nothing to
+            // fill, or nothing to fill from, is itself;
+            // br-frankenpandas-76kq0).
+            let cells = self.inner.column().values();
+            if self.inner.column().is_pandas_string()
+                && cells.iter().any(Scalar::is_missing)
+                && cells.iter().any(|cell| !cell.is_missing())
+            {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Cannot cast array data from dtype('O') to dtype('float64') according to the rule 'safe'",
                 ));
             }
             // pandas 2.2 leaves an object column as it is, with its
@@ -39887,6 +40393,41 @@ fn axis_passed_none(axis: &Passed<'_>) -> bool {
 }
 
 impl PyDataFrame {
+    /// A cumulative op down the columns where a column needs a Series' own
+    /// answer - pandas' `string`, a categorical or an object column - each
+    /// column through `each` (the Series' cumsum / cumprod / cummin /
+    /// cummax), so the frame refuses or answers as the Series does (a
+    /// string or categorical column's cummax answered, an object one's
+    /// skipped pandas' TypeError; br-frankenpandas-76kq0). None when no
+    /// column needs it, for the engine's own pass.
+    fn cumulative_by_series(
+        &self,
+        each: impl Fn(&PySeries) -> PyResult<PySeries>,
+    ) -> PyResult<Option<DataFrame>> {
+        let own_answer = |column: &Column| {
+            column.is_pandas_string() || column.categorical().is_some() || is_object_column(column)
+        };
+        let columns = self.inner.num_columns();
+        if !(0..columns).any(|position| self.inner.column_at(position).is_some_and(own_answer)) {
+            return Ok(None);
+        }
+        let mut out = self.inner.clone();
+        for position in 0..columns {
+            let Some(column) = self.inner.column_at(position) else {
+                continue;
+            };
+            let series = PySeries {
+                inner: Series::new("", self.inner.index().clone(), column.clone())
+                    .map_err(frame_error_to_py)?,
+            };
+            let result = each(&series)?;
+            out = out
+                .isetitem(position, result.inner.column().clone())
+                .map_err(frame_error_to_py)?;
+        }
+        Ok(Some(out))
+    }
+
     /// pandas' `join` of a list (or tuple) of frames / Series on the index
     /// (`_join_compat`): when every index is unique, their concat along the
     /// columns - joined outer and reindexed to this frame's index for
@@ -48009,6 +48550,7 @@ impl PyDataFrame {
     #[pyo3(signature = (lower=None, upper=None, axis=None, inplace=false, **kwargs))]
     fn clip(
         &mut self,
+        py: Python<'_>,
         lower: Option<&Bound<'_, PyAny>>,
         upper: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
@@ -48026,6 +48568,38 @@ impl PyDataFrame {
             if is_frame(lower) || is_frame(upper) {
                 return clip_by_frames(&self.inner, lower, upper)
                     .map(|inner| PyDataFrame { inner });
+            }
+            // A scalar bound that is not a number - a Timestamp, Timedelta,
+            // text - clips each column as a Series' clip does (a datetime
+            // column on its instants, in its zone); a column it does not
+            // compare with is that clip's TypeError (it was refused;
+            // br-frankenpandas-76kq0).
+            let other_scalar = |b: Option<&Bound<'_, PyAny>>| {
+                b.is_some_and(|b| {
+                    !b.is_none()
+                        && b.extract::<f64>().is_err()
+                        && b.extract::<PyRef<'_, PySeries>>().is_err()
+                        && !b.is_instance_of::<PyDict>()
+                })
+            };
+            if other_scalar(lower) || other_scalar(upper) {
+                let mut out = self.inner.clone();
+                for position in 0..self.inner.shape().1 {
+                    let Some(column) = self.inner.column_at(position) else {
+                        continue;
+                    };
+                    let mut series = PySeries {
+                        inner: Series::new("", self.inner.index().clone(), column.clone())
+                            .map_err(frame_error_to_py)?,
+                    };
+                    let Some(clipped) = series.clip(py, lower, upper, None, false, None)? else {
+                        continue;
+                    };
+                    out = out
+                        .isetitem(position, clipped.inner.column().clone())
+                        .map_err(frame_error_to_py)?;
+                }
+                return Ok(PyDataFrame { inner: out });
             }
 
             let extract_bound = |b: &Bound<'_, PyAny>| -> PyResult<SeriesOrScalarBound> {
@@ -50008,6 +50582,11 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         numpy_compat_kwargs("cumsum", kwargs)?;
         let ax = parse_axis_param(axis)?;
+        if ax == 0
+            && let Some(inner) = self.cumulative_by_series(|s| s.cumsum(None, skipna, None))?
+        {
+            return Ok(PyDataFrame { inner });
+        }
         let res = if ax == 0 {
             self.inner.cumsum_with_skipna(skipna)
         } else {
@@ -50027,6 +50606,11 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         numpy_compat_kwargs("cumprod", kwargs)?;
         let ax = parse_axis_param(axis)?;
+        if ax == 0
+            && let Some(inner) = self.cumulative_by_series(|s| s.cumprod(None, skipna, None))?
+        {
+            return Ok(PyDataFrame { inner });
+        }
         let res = if ax == 0 {
             self.inner.cumprod_with_skipna(skipna)
         } else {
@@ -50046,6 +50630,11 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         numpy_compat_kwargs("cummin", kwargs)?;
         let ax = parse_axis_param(axis)?;
+        if ax == 0
+            && let Some(inner) = self.cumulative_by_series(|s| s.cummin(None, skipna, None))?
+        {
+            return Ok(PyDataFrame { inner });
+        }
         let res = if ax == 0 {
             self.inner.cummin_with_skipna(skipna)
         } else {
@@ -50065,6 +50654,11 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         numpy_compat_kwargs("cummax", kwargs)?;
         let ax = parse_axis_param(axis)?;
+        if ax == 0
+            && let Some(inner) = self.cumulative_by_series(|s| s.cummax(None, skipna, None))?
+        {
+            return Ok(PyDataFrame { inner });
+        }
         let res = if ax == 0 {
             self.inner.cummax_with_skipna(skipna)
         } else {
@@ -74270,7 +74864,12 @@ impl PySeriesGroupBy {
                 values[to] = source[from].clone();
             }
         }
-        let column = Column::from_values(values).map_err(column_error_to_py)?;
+        let mut column = Column::from_values(values).map_err(column_error_to_py)?;
+        // A tz-aware Series' instants stay in its zone (br-frankenpandas-76kq0).
+        let dtype = self.series.column().dtype();
+        if dtype.timezone().is_some() && column.dtype() == (DType::Datetime64 { tz: None }) {
+            column = column.with_dtype(dtype);
+        }
         Series::new(self.series.name(), self.series.index().clone(), column)
             .map(|inner| PySeries { inner })
             .map_err(frame_error_to_py)
@@ -77701,6 +78300,90 @@ fn object_cells(column: &Column) -> PyResult<Vec<Scalar>> {
             })
             .collect()
     })
+}
+
+/// pandas' object description (`describe` of text, bools, categories,
+/// periods, datetimes): its count and freq numpy int64s and a bool top
+/// numpy's bool, as `Series.count()` and `value_counts` give them (they were
+/// Python numbers; br-frankenpandas-76kq0). Any other description as it
+/// came.
+fn numpy_described(described: Series) -> PyResult<Series> {
+    if !is_object_column(described.column()) {
+        return Ok(described);
+    }
+    let labels = described.index().labels().to_vec();
+    let mut changed = false;
+    let values = Python::attach(|py| -> PyResult<Vec<Scalar>> {
+        let numpy = py.import("numpy")?;
+        let mut values = Vec::with_capacity(labels.len());
+        for (value, label) in described.values().iter().zip(&labels) {
+            let IndexLabel::Utf8(name) = label else {
+                values.push(value.clone());
+                continue;
+            };
+            let host = match value {
+                Scalar::Int64(number) if name == "count" || name == "freq" => {
+                    Some(numpy.getattr("int64")?.call1((*number,))?)
+                }
+                Scalar::Bool(flag) if name == "top" => {
+                    Some(numpy.getattr("bool_")?.call1((*flag,))?)
+                }
+                _ => None,
+            };
+            values.push(match host {
+                Some(object) => {
+                    changed = true;
+                    Scalar::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(
+                        PyHost(object.unbind()),
+                    )))
+                }
+                None => value.clone(),
+            });
+        }
+        Ok(values)
+    })?;
+    if !changed {
+        return Ok(described);
+    }
+    Series::new(
+        described.name(),
+        described.index().clone(),
+        Column::from_object_values(values),
+    )
+    .map_err(frame_error_to_py)
+}
+
+/// `result`, an object Series made from tz-aware `source` (a replace with
+/// text or a number), holding `source`'s untouched instants as Timestamps
+/// in its zone, as pandas' object cast does (they were the naive UTC
+/// clock; br-frankenpandas-76kq0). Any other result is as it came.
+fn zoned_object_cells_kept(source: &Series, result: Series) -> PyResult<Series> {
+    if source.column().timezone().is_none()
+        || !is_object_column(result.column())
+        || result.len() != source.len()
+    {
+        return Ok(result);
+    }
+    let zoned = object_cells(source.column())?;
+    let before = source.column().values();
+    let mut values = result.column().values().to_vec();
+    let mut kept = false;
+    for ((value, old), zoned) in values.iter_mut().zip(before).zip(zoned) {
+        if matches!((&*value, old), (Scalar::Datetime64(new), Scalar::Datetime64(old)) if new == old)
+        {
+            *value = zoned;
+            kept = true;
+        }
+    }
+    if !kept {
+        return Ok(result);
+    }
+    Series::new(
+        result.name(),
+        result.index().clone(),
+        Column::from_object_values(values),
+    )
+    .map_err(frame_error_to_py)
 }
 
 /// `series` as a pandas object column: the same values, as they are.
@@ -100467,7 +101150,7 @@ mod tests {
             let lo = pyo3::types::PyFloat::new(py, 2.0);
             let hi = pyo3::types::PyFloat::new(py, 5.0);
             let clip_df = py_df
-                .clip(Some(lo.as_any()), Some(hi.as_any()), None, false, None)
+                .clip(py, Some(lo.as_any()), Some(hi.as_any()), None, false, None)
                 .expect("clip")
                 .expect("a copy"); // ubs:ignore — test fixture
             assert_eq!(clip_df.shape(), (3, 2));
@@ -101452,7 +102135,7 @@ mod tests {
             clip_dict.set_item("a", 2.0).expect("set clip a");
             clip_dict.set_item("b", 3.0).expect("set clip b");
             let clipped_df = py_df
-                .clip(Some(clip_dict.as_any()), None, None, false, None)
+                .clip(py, Some(clip_dict.as_any()), None, None, false, None)
                 .expect("clip df dict")
                 .expect("a copy");
             assert_eq!(
@@ -102811,11 +103494,11 @@ mod tests {
             let mut py_df = PyDataFrame { inner: df };
             assert!(
                 py_df
-                    .clip(None, None, None, true, None)
+                    .clip(py, None, None, None, true, None)
                     .expect("df clip inplace") // ubs:ignore — test fixture
                     .is_none()
             );
-            assert!(py_df.clip(None, None, Some(&ax2), false, None).is_err());
+            assert!(py_df.clip(py, None, None, Some(&ax2), false, None).is_err());
         });
     }
 

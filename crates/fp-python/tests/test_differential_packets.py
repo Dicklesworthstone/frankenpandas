@@ -33383,3 +33383,119 @@ def test_categorical_index_reindex_follows_its_target_n3ktr(target: str) -> None
         return _n3ktr_show(source.reindex(targets[target]))
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-76kq0: Series operations keep pandas' dtype across kinds -
+# a tz-aware Series' zone through drop_duplicates / cummax / cummin /
+# replace / combine_first / groupby shift and ffill / DataFrame where,
+# replace, cummax and clip with Timestamp bounds; a categorical's categories
+# through shift / where / mask / ffill / bfill / mode / replace /
+# combine_first / groupby first, last, shift and ffill, its idxmin / idxmax
+# by code and pandas' refusals of cumsum / diff / any / interpolate / abs; a
+# period Series' comparisons, min / max / median / idxmin / idxmax /
+# cummax / clip and NaT gaps; a masked or string isin's missing rows; a
+# string between's boolean; text clip; describe's numpy counts. NEGATIVE:
+# the int and float Series, which agreed, still agree.
+def _76kq0_series(m: Any) -> dict[str, Any]:
+    index = ["a", "b", "c", "d", "e"]
+    return {
+        "int": m.Series([3, 1, 4, 1, 5], index=index, name="s"),
+        "float": m.Series([2.5, np.nan, -1.0, 2.5, 0.0], index=index, name="s"),
+        "datetime": m.Series(m.to_datetime(["2024-03-01", None, "2024-01-15", "2024-01-15", "2024-02-29"]), index=index, name="s"),
+        "timedelta": m.Series(m.to_timedelta(["1 days", None, "2h", "1 days", "3s"]), index=index, name="s"),
+        "datetime tz": m.Series(m.to_datetime(["2024-01-03", "2024-01-01", None, "2024-01-03", "2024-01-02"]).tz_localize("US/Eastern"), index=index, name="s"),
+        "category": m.Series(m.Categorical(["x", "y", None, "x", "y"], categories=["y", "x", "w"]), index=index, name="s"),
+        "ordered category": m.Series(m.Categorical(["x", "y", None, "w", "y"], categories=["y", "x", "w"], ordered=True), index=index, name="s"),
+        "period": m.Series(m.PeriodIndex(["2024-03", "2024-01", None, "2024-03", "2024-02"], freq="M"), index=index, name="s"),
+        "Int64": m.Series([3, None, 4, 1, 5], index=index, name="s", dtype="Int64"),
+        "Float64": m.Series([2.5, None, -1.0, 2.5, 0.0], index=index, name="s", dtype="Float64"),
+        "string": m.Series(["b", None, "a", "b", "c"], index=index, name="s", dtype="string"),
+        "object": m.Series(["b", None, "a", "b", "c"], index=index, name="s"),
+    }
+
+
+_76KQ0_OPS = {
+    "drop_duplicates": lambda m, s: s.drop_duplicates(),
+    "cummax": lambda m, s: s.cummax(),
+    "cummin": lambda m, s: s.cummin(),
+    "replace": lambda m, s: s.replace(s.iloc[0], s.iloc[4]),
+    "shift": lambda m, s: s.shift(1),
+    "where": lambda m, s: s.where([True, False, True, False, True]),
+    "mask": lambda m, s: s.mask([True, False, True, False, True]),
+    "ffill": lambda m, s: s.ffill(),
+    "bfill": lambda m, s: s.bfill(),
+    "mode": lambda m, s: s.mode(),
+    "combine_first": lambda m, s: s.combine_first(s.iloc[::-1]),
+    "reindex": lambda m, s: s.reindex(["e", "a", "z"]),
+    "groupby first": lambda m, s: s.groupby([1, 1, 2, 2, 2]).first(),
+    "groupby last": lambda m, s: s.groupby([1, 1, 2, 2, 2]).last(),
+    "groupby shift": lambda m, s: s.groupby([1, 1, 2, 2, 2]).shift(1),
+    "groupby ffill": lambda m, s: s.groupby([1, 1, 2, 2, 2]).ffill(),
+    "idxmin": lambda m, s: s.idxmin(),
+    "idxmax": lambda m, s: s.idxmax(),
+    "min": lambda m, s: s.min(),
+    "max": lambda m, s: s.max(),
+    "median": lambda m, s: s.median(),
+    "eq self": lambda m, s: s.eq(s.copy()),
+    "== reversed": lambda m, s: s.reset_index(drop=True) == s.iloc[::-1].reset_index(drop=True),
+    "< reversed": lambda m, s: s.reset_index(drop=True) < s.iloc[::-1].reset_index(drop=True),
+    "clip": lambda m, s: s.clip(s.iloc[4], s.iloc[0]),
+    "between": lambda m, s: s.between(s.iloc[4], s.iloc[0]),
+    "isin": lambda m, s: s.isin(s.iloc[:2]),
+    "cumsum": lambda m, s: s.cumsum(),
+    "diff": lambda m, s: s.diff(),
+    "any": lambda m, s: s.any(),
+    "interpolate": lambda m, s: s.interpolate(),
+    "abs": lambda m, s: s.abs(),
+    "round": lambda m, s: s.round(),
+    "apply(repr)": lambda m, s: s.apply(repr),
+    "describe": lambda m, s: s.describe(),
+    "df where": lambda m, s: s.to_frame().where(s.to_frame().notna() & False),
+    "df cummax": lambda m, s: s.to_frame().cummax(),
+    "df replace": lambda m, s: s.to_frame().replace(s.iloc[0], s.iloc[4]),
+    "df shift": lambda m, s: s.to_frame().shift(1),
+    "df ffill": lambda m, s: s.to_frame().ffill(),
+    "df clip": lambda m, s: s.to_frame().clip(s.iloc[4], s.iloc[0]),
+}
+
+
+def _76kq0_dtype(value: Any) -> str:
+    dtype = value.dtype
+    if str(dtype) == "category":
+        return f"category{list(dtype.categories)}{dtype.ordered}"
+    return str(dtype)
+
+
+def _76kq0_show(value: Any) -> Any:
+    if isinstance(value, (pd.DataFrame, fpd.DataFrame)):
+        return ("DataFrame", [_76kq0_dtype(value[c]) for c in value.columns], [repr(x) for x in value.index], [[repr(x) for x in row] for row in value.to_numpy().tolist()])
+    if isinstance(value, (pd.Series, fpd.Series)):
+        return ("Series", _76kq0_dtype(value), value.name, [repr(x) for x in value.index], [repr(x) for x in value.tolist()])
+    return (type(value).__name__, repr(value))
+
+
+_76KQ0_KINDS = ["int", "float", "datetime", "timedelta", "datetime tz", "category", "ordered category", "period", "Int64", "Float64", "string", "object"]
+# Still open on br-frankenpandas-76kq0: pandas' period diff holds DateOffset
+# objects (<-2 * MonthEnds>), fp's NaN.
+_76KQ0_OPEN = {("period", "diff")}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    ("kind", "op"),
+    [
+        pytest.param(kind, op, marks=pytest.mark.xfail(strict=True, reason="period diff: DateOffset objects (76kq0)"))
+        if (kind, op) in _76KQ0_OPEN
+        else (kind, op)
+        for kind in _76KQ0_KINDS
+        for op in _76KQ0_OPS
+    ],
+)
+def test_series_ops_keep_dtype_like_pandas_76kq0(kind: str, op: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _76kq0_show(_76KQ0_OPS[op](m, _76kq0_series(m)[kind]))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)

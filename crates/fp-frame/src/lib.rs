@@ -10233,6 +10233,34 @@ fn datetime_from_timedelta_result(result: Scalar) -> Scalar {
     }
 }
 
+/// A period column's gap: NaT at the column's frequency, so a column of
+/// gaps keeps its `period[freq]` dtype (an all-NaT column read `period`;
+/// br-frankenpandas-76kq0); a missing NaT where the column holds no period.
+fn period_nat_of(column: &Column) -> Scalar {
+    column
+        .values()
+        .iter()
+        .find_map(|value| match value {
+            Scalar::Period(period) => Some(Scalar::Period(Period::new(i64::MIN, period.freq))),
+            _ => None,
+        })
+        .unwrap_or(Scalar::Null(NullKind::NaT))
+}
+
+/// A reduction of a period Series' ordinals (`Series::period_as_timedelta`)
+/// as the period of `freq` it names, NaT for a missing one.
+fn period_from_timedelta_result(result: Scalar, freq: PeriodFreq) -> Scalar {
+    match result {
+        Scalar::Timedelta64(ordinal) if ordinal != Timedelta::NAT => {
+            Scalar::Period(Period::new(ordinal, freq))
+        }
+        other if other.is_missing() || matches!(other, Scalar::Timedelta64(_)) => {
+            Scalar::Null(NullKind::NaT)
+        }
+        other => other,
+    }
+}
+
 fn compare_non_missing_scalars_for_sort(left: &Scalar, right: &Scalar) -> Ordering {
     match (left, right) {
         (Scalar::Bool(lhs), Scalar::Bool(rhs)) => lhs.cmp(rhs),
@@ -10292,6 +10320,11 @@ fn compare_non_missing_scalars_for_between(
         // `df["date"].between(start, end)` — the canonical date-range filter — failed.
         (Scalar::Timedelta64(lhs), Scalar::Timedelta64(rhs))
         | (Scalar::Datetime64(lhs), Scalar::Datetime64(rhs)) => Ok(lhs.cmp(rhs)),
+        // Periods of one frequency by their ordinals (they could not be
+        // compared; br-frankenpandas-76kq0).
+        (Scalar::Period(lhs), Scalar::Period(rhs)) if lhs.freq == rhs.freq => {
+            Ok(lhs.ordinal.cmp(&rhs.ordinal))
+        }
         // Object cells (dates between two dates) as Python orders them; a
         // type error where Python cannot (fvsao.67).
         (Scalar::Object(lhs), Scalar::Object(rhs)) => lhs.python_cmp(rhs).ok_or_else(|| {
@@ -19993,6 +20026,11 @@ impl Series {
         if self.is_empty() {
             return Ok(self.clone());
         }
+        if let Some(meta) = &self.categorical
+            && let Some(out) = self.categorical_replace(meta, replacements)
+        {
+            return Ok(out);
+        }
         let replacements = self.replace_keys_by_value(replacements);
         let out = self.keeping_width(self.replace_storage(&replacements), false)?;
         let writes_missing = replacements.iter().any(|(_, value)| value.is_missing());
@@ -20002,6 +20040,85 @@ impl Series {
                 .find(|(key, _)| key.semantic_eq(before))
                 .map(|(_, value)| value.clone())
         })
+        .map(|out| self.keeping_zone(out))
+    }
+
+    /// pandas' replace of a categorical Series, which replaces its
+    /// categories (measured, pandas 2.2.3, on ['x', 'y', None, 'x', 'y'] over
+    /// the categories ['y', 'x', 'w']): a category replaced by a missing value
+    /// is removed - its values missing - and the categories left are sorted
+    /// unless ordered ('x' -> NaN: ['w', 'y']); each category left becomes its
+    /// replacement, one already a category merging into that one's place and
+    /// a new value taking the replaced one's ('x' -> 'y': ['y', 'w']; 'x' ->
+    /// 'z': ['y', 'z', 'w']); the values follow their categories, the dtype
+    /// stays categorical. It came back object (br-frankenpandas-76kq0). None
+    /// when the categories cannot be one column (a replacement of another
+    /// kind), for the value replace.
+    fn categorical_replace(
+        &self,
+        meta: &CategoricalMetadata,
+        replacements: &[(Scalar, Scalar)],
+    ) -> Option<Self> {
+        let replaced = |value: &Scalar| {
+            replacements
+                .iter()
+                .find(|(key, _)| !key.is_missing() && key.semantic_eq(value))
+                .map(|(_, to)| to)
+        };
+        let mut categories = meta.categories.clone();
+        let before = categories.len();
+        categories.retain(|category| !replaced(category).is_some_and(Scalar::is_missing));
+        // pandas sorts what is left when it can (categories of one kind).
+        if categories.len() != before
+            && !meta.ordered
+            && categories
+                .windows(2)
+                .all(|pair| pair[0].dtype() == pair[1].dtype())
+        {
+            categories.sort_by(compare_non_missing_scalars_for_sort);
+        }
+        let mapped: Vec<Scalar> = categories
+            .iter()
+            .map(|category| replaced(category).unwrap_or(category).clone())
+            .collect();
+        // Each replacement at the place of the category it equals, else at
+        // the replaced category's.
+        let place: Vec<usize> = mapped
+            .iter()
+            .enumerate()
+            .map(|(i, value)| {
+                categories
+                    .iter()
+                    .position(|category| category.semantic_eq(value))
+                    .unwrap_or(i)
+            })
+            .collect();
+        let mut positions: Vec<usize> = (0..mapped.len()).collect();
+        positions.sort_by_key(|&i| place[i]);
+        let mut new_categories: Vec<Scalar> = Vec::with_capacity(mapped.len());
+        for i in positions {
+            if !new_categories
+                .iter()
+                .any(|seen| seen.semantic_eq(&mapped[i]))
+            {
+                new_categories.push(mapped[i].clone());
+            }
+        }
+        let values: Vec<Scalar> = self
+            .column
+            .values()
+            .iter()
+            .map(|value| match replaced(value) {
+                _ if value.is_missing() => Scalar::Null(NullKind::NaN),
+                Some(to) if to.is_missing() => Scalar::Null(NullKind::NaN),
+                Some(to) => to.clone(),
+                None => value.clone(),
+            })
+            .collect();
+        Column::from_values(new_categories.clone()).ok()?;
+        let column = Column::from_values(values).ok()?;
+        let out = Self::new(self.name.clone(), self.index.clone(), column).ok()?;
+        Some(out.with_categories(CategoricalMetadata::new(new_categories, meta.ordered)))
     }
 
     /// The replace keys as this column compares them: pandas matches by
@@ -20744,7 +20861,10 @@ impl Series {
     /// Int64 / Float64 / boolean, or pandas' `string` - as pandas keeps it.
     /// The engine rebuilt such results from Scalars and inferred numpy
     /// int64 (an Int64 drop_duplicates was an int64 column HOLDING NaN),
-    /// float64, bool or object (br-frankenpandas-1t4kg).
+    /// float64, bool or object (br-frankenpandas-1t4kg). A tz-aware or
+    /// categorical Series' result keeps its zone or categories
+    /// ([`Self::keeping_zone`], [`Self::keeping_categories`]; ffill / bfill
+    /// too, through `with_carried_values`).
     fn keeping_extension_dtype(
         &self,
         result: Result<Self, FrameError>,
@@ -20762,8 +20882,34 @@ impl Series {
             && !result.column.is_pandas_string()
         {
             result.column = result.column.as_pandas_string();
+        } else {
+            result = self.keeping_categories(self.keeping_zone(result));
         }
         Ok(result)
+    }
+
+    /// `result`, this tz-aware Series' instants rebuilt by the engine as
+    /// naive datetime64, in this Series' zone again: the zone is column
+    /// metadata over the same UTC nanoseconds, and drop_duplicates, cummax,
+    /// replace and combine_first came back naive, showing the UTC clock
+    /// (br-frankenpandas-76kq0). Any other result is as it came.
+    fn keeping_zone(&self, mut result: Self) -> Self {
+        let dtype = self.column.dtype();
+        if dtype.timezone().is_some() && result.column.dtype() == (DType::Datetime64 { tz: None }) {
+            result.column = result.column.with_dtype(dtype);
+        }
+        result
+    }
+
+    /// `result`, this categorical Series' values moved, selected or filled,
+    /// categorical again over its categories ([`categories_kept`]); any
+    /// other result is as it came.
+    fn keeping_categories(&self, mut result: Self) -> Self {
+        if self.categorical.is_some() && result.categorical.is_none() {
+            result.column = categories_kept(&self.column, result.column);
+            result.categorical = result.column.categorical().cloned();
+        }
+        result
     }
 
     /// `result`, an elementwise operation on this Series that pandas keeps
@@ -22941,6 +23087,54 @@ impl Series {
         Self::new(self.name(), self.index.clone(), column).map(Some)
     }
 
+    /// A period Series as timedeltas of its ordinals, with its frequency,
+    /// for the operations that order its values (min / max / median /
+    /// idxmin / idxmax / cummin / cummax) - the datetimes' trick
+    /// ([`Self::datetime_as_timedelta`]); NaT at a missing slot. They raised
+    /// TypeError, reading a period as a number (br-frankenpandas-76kq0).
+    /// None unless the Series holds periods of one frequency.
+    fn period_as_timedelta(&self) -> Result<Option<(Self, PeriodFreq)>, FrameError> {
+        if self.column.dtype() != DType::Period {
+            return Ok(None);
+        }
+        let mut freq = None;
+        let mut values = Vec::with_capacity(self.len());
+        for value in self.column.values() {
+            match value {
+                Scalar::Period(period) if period.ordinal != i64::MIN => {
+                    if *freq.get_or_insert(period.freq) != period.freq {
+                        return Ok(None);
+                    }
+                    values.push(Scalar::Timedelta64(period.ordinal));
+                }
+                _ => values.push(Scalar::Timedelta64(Timedelta::NAT)),
+            }
+        }
+        let column = Column::new(DType::Timedelta64, values)?;
+        let ordinals = Self::new(self.name(), self.index.clone(), column)?;
+        Ok(Some((ordinals, freq.unwrap_or(PeriodFreq::Daily))))
+    }
+
+    /// A Series of ordinals ([`Self::period_as_timedelta`]) as periods of
+    /// `freq` again, NaT where an ordinal is missing.
+    fn period_from_ordinals(ordinals: &Self, freq: PeriodFreq) -> Result<Self, FrameError> {
+        let values = ordinals
+            .column
+            .values()
+            .iter()
+            .map(|value| period_from_timedelta_result(value.clone(), freq))
+            .map(|value| {
+                if value.is_missing() {
+                    Scalar::Period(Period::new(i64::MIN, freq))
+                } else {
+                    value
+                }
+            })
+            .collect();
+        let column = Column::new(DType::Period, values)?;
+        Self::new(ordinals.name(), ordinals.index.clone(), column)
+    }
+
     /// Mean of a datetime64 column the way pandas' nanmean takes it: NaT
     /// slots filled with 0, the int64 nanoseconds summed as float64 through
     /// numpy's cast buffer ([`fp_types::PandasReductions`]), divided by the
@@ -23049,6 +23243,11 @@ impl Series {
     pub fn min(&self) -> Result<Scalar, FrameError> {
         if let Some(meta) = &self.categorical {
             return self.categorical_extreme(meta, true);
+        }
+        if let Some((ordinals, freq)) = self.period_as_timedelta()? {
+            return ordinals
+                .min()
+                .map(|result| period_from_timedelta_result(result, freq));
         }
         if let Some(earliest) = self.temporal_typed_extreme(false) {
             return Ok(earliest);
@@ -23233,6 +23432,11 @@ impl Series {
     pub fn max(&self) -> Result<Scalar, FrameError> {
         if let Some(meta) = &self.categorical {
             return self.categorical_extreme(meta, false);
+        }
+        if let Some((ordinals, freq)) = self.period_as_timedelta()? {
+            return ordinals
+                .max()
+                .map(|result| period_from_timedelta_result(result, freq));
         }
         if let Some(latest) = self.temporal_typed_extreme(true) {
             return Ok(latest);
@@ -23695,6 +23899,11 @@ impl Series {
     pub fn median(&self) -> Result<Scalar, FrameError> {
         if let Some(nanos) = self.datetime_as_timedelta()? {
             return nanos.median().map(datetime_from_timedelta_result);
+        }
+        if let Some((ordinals, freq)) = self.period_as_timedelta()? {
+            return ordinals
+                .median()
+                .map(|result| period_from_timedelta_result(result, freq));
         }
         // Typed quickselect fast path: an all-valid Int64/Float64 column finds
         // the median over its contiguous buffer in O(n) (vs the O(n log n) sort
@@ -24345,14 +24554,32 @@ impl Series {
         // pandas sorts them. Decoding here fixes both halves at once: the values
         // are the labels, and the sort below then orders those labels.
         //
-        // ⚠️ ONE THING THIS DOES NOT FIX: the result is no longer categorical,
-        // where pandas keeps `dtype: category`. Preserving the metadata instead
-        // of decoding would keep the dtype but re-break the tie order, because
-        // FP's category numbering is first-seen and pandas' is sorted. That
-        // ordering difference is the deeper defect and wants its own change;
-        // this one is deliberately the half that fixes the values a user reads.
+        // pandas orders the modes by their codes - the category order, the
+        // missing value's -1 first - and keeps `dtype: category` (measured,
+        // pandas 2.2.3: Categorical(['x', 'y', None, 'x', 'y'], categories=
+        // ['y', 'x', 'w']).mode() is ['y', 'x'], category). The modes are
+        // put in that order here, and `keeping_extension_dtype` gives them
+        // the categories back (they came back object, sorted by value;
+        // br-frankenpandas-76kq0).
         if let Some(categorical) = self.cat() {
-            return categorical.to_values()?.mode_with_dropna(dropna);
+            let modes = categorical.to_values()?.mode_with_dropna(dropna)?;
+            let Some(meta) = &self.categorical else {
+                return Ok(modes);
+            };
+            let code = |value: &Scalar| -> i64 {
+                if value.is_missing() {
+                    return -1;
+                }
+                meta.categories
+                    .iter()
+                    .position(|category| category.semantic_eq(value))
+                    .map_or(i64::MAX, |position| {
+                        i64::try_from(position).unwrap_or(i64::MAX)
+                    })
+            };
+            let mut values = modes.column.values().to_vec();
+            values.sort_by_key(code);
+            return modes.with_values_preserving_index(values);
         }
         // High-cardinality typed sort-scan fast path (zero-free all-valid no-NaN
         // Float64). When distinct values dominate (the mode-of-a-near-unique-column
@@ -24689,6 +24916,7 @@ impl Series {
     /// values upward (later positions become NaN).
     pub fn shift(&self, periods: i64) -> Result<Self, FrameError> {
         self.keeping_width(self.shift_storage(periods), false)
+            .map(|out| self.keeping_categories(out))
     }
 
     fn shift_storage(&self, periods: i64) -> Result<Self, FrameError> {
@@ -24712,6 +24940,9 @@ impl Series {
             dtype @ (DType::Datetime64 { .. } | DType::Timedelta64 | DType::Utf8) => {
                 Scalar::missing_for_dtype(dtype)
             }
+            // A period column's gap is NaT (a frame's to_numpy read NaN;
+            // br-frankenpandas-76kq0).
+            DType::Period => period_nat_of(&self.column),
             _ => Scalar::Null(NullKind::NaN),
         };
         let shifted = self.shift_with_fill_value(periods, fill)?;
@@ -25587,6 +25818,9 @@ impl Series {
 
     /// Cumulative maximum with an explicit `skipna` (see [`cumsum_with_skipna`](Self::cumsum_with_skipna)).
     pub fn cummax_with_skipna(&self, skipna: bool) -> Result<Self, FrameError> {
+        if let Some((ordinals, freq)) = self.period_as_timedelta()? {
+            return Self::period_from_ordinals(&ordinals.cummax_with_skipna(skipna)?, freq);
+        }
         let out = if skipna {
             self.cummax()
         } else {
@@ -25597,6 +25831,9 @@ impl Series {
 
     /// Cumulative minimum with an explicit `skipna` (see [`cumsum_with_skipna`](Self::cumsum_with_skipna)).
     pub fn cummin_with_skipna(&self, skipna: bool) -> Result<Self, FrameError> {
+        if let Some((ordinals, freq)) = self.period_as_timedelta()? {
+            return Self::period_from_ordinals(&ordinals.cummin_with_skipna(skipna)?, freq);
+        }
         let out = if skipna {
             self.cummin()
         } else {
@@ -25615,7 +25852,7 @@ impl Series {
             DType::Float64Nullable => DType::Float64Nullable,
             DType::BoolNullable if arithmetic => DType::Int64Nullable,
             DType::BoolNullable => DType::BoolNullable,
-            _ => return Ok(out),
+            _ => return Ok(self.keeping_zone(out)),
         };
         if out.column.dtype() == target {
             return Ok(out);
@@ -27605,13 +27842,52 @@ impl Series {
         self.index.labels()[pos].clone()
     }
 
+    /// A categorical Series' idxmin / idxmax: the label of its first value
+    /// with the lowest / highest code - the category order, ordered or not,
+    /// as pandas' argmin / argmax over the codes (it read the values as
+    /// numbers and raised; br-frankenpandas-76kq0). Missing values are
+    /// skipped; None for any other Series.
+    fn categorical_arg_extreme(&self, max: bool) -> Option<Result<IndexLabel, FrameError>> {
+        let meta = self.categorical.as_ref()?;
+        let mut best: Option<(usize, usize)> = None;
+        for (row, value) in self.column.values().iter().enumerate() {
+            if value.is_missing() {
+                continue;
+            }
+            let Some(code) = meta
+                .categories
+                .iter()
+                .position(|category| category.semantic_eq(value))
+            else {
+                continue;
+            };
+            let better = best.is_none_or(|(_, held)| if max { code > held } else { code < held });
+            if better {
+                best = Some((row, code));
+            }
+        }
+        Some(match best {
+            Some((row, _)) => Ok(self.index.labels()[row].clone()),
+            None => Err(FrameError::CompatibilityRejected(format!(
+                "{} of empty or all-null series",
+                if max { "idxmax" } else { "idxmin" }
+            ))),
+        })
+    }
+
     /// Return the label of the minimum value.
     ///
     /// Matches `series.idxmin()`. Skips missing values. Returns an error
     /// if the series is empty or all-null.
     pub fn idxmin(&self) -> Result<IndexLabel, FrameError> {
+        if let Some(found) = self.categorical_arg_extreme(false) {
+            return found;
+        }
         if let Some(nanos) = self.datetime_as_timedelta()? {
             return nanos.idxmin();
+        }
+        if let Some((ordinals, _)) = self.period_as_timedelta()? {
+            return ordinals.idxmin();
         }
         // Per br-frankenpandas-7db78: pandas supports idxmin on Utf8
         // (returns label of lex-min). Was previously falling through to
@@ -27760,8 +28036,14 @@ impl Series {
     ///
     /// Matches `series.idxmax()`. Skips missing values.
     pub fn idxmax(&self) -> Result<IndexLabel, FrameError> {
+        if let Some(found) = self.categorical_arg_extreme(true) {
+            return found;
+        }
         if let Some(nanos) = self.datetime_as_timedelta()? {
             return nanos.idxmax();
+        }
+        if let Some((ordinals, _)) = self.period_as_timedelta()? {
+            return ordinals.idxmax();
         }
         // Per br-frankenpandas-7db78: pandas supports idxmax on Utf8
         // (returns label of lex-max). Sister to idxmin Utf8 path above.
@@ -48035,7 +48317,30 @@ impl SeriesGroupBy<'_> {
         } else {
             Column::from_values(out)?
         };
-        Series::new(self.series.name(), index, column)
+        Series::new(self.series.name(), index, column).map(|out| self.keeping_source_kind(out))
+    }
+
+    /// `out`, the grouped Series' values moved or filled (shift / ffill /
+    /// bfill and the other transforms), in the Series' own kind: a
+    /// tz-aware one's zone (they showed the UTC clock), a categorical one's
+    /// categories and pandas' `string` (they were object;
+    /// br-frankenpandas-76kq0).
+    fn keeping_source_kind(&self, out: Series) -> Series {
+        let mut out = self
+            .series
+            .keeping_categories(self.series.keeping_zone(out));
+        if self.series.column.is_pandas_string()
+            && out.column.dtype() == DType::Utf8
+            && !out.column.is_pandas_string()
+            && out
+                .column
+                .values()
+                .iter()
+                .all(|value| value.is_missing() || matches!(value, Scalar::Utf8(_)))
+        {
+            out.column = out.column.as_pandas_string();
+        }
+        out
     }
 
     fn agg_scalar<F>(&self, name: &str, func: F) -> Result<Series, FrameError>
@@ -52345,7 +52650,7 @@ impl SeriesGroupBy<'_> {
         };
         // pandas' dtype for the NaN-filled shift (int64 -> float64, ...).
         let column = shifted_column_dtype(&self.series.column.dtype(), shifted.column, periods)?;
-        Series::new(shifted.name, shifted.index, column)
+        Series::new(shifted.name, shifted.index, column).map(|out| self.keeping_source_kind(out))
     }
 
     /// Dense typed within-group shift for an **Int64** value column, replacing
@@ -52737,6 +53042,13 @@ impl SeriesGroupBy<'_> {
     }
 
     pub fn ffill(&self, limit: Option<usize>) -> Result<Series, FrameError> {
+        // The values filled, in the Series' own dtype: a masked Float64 one
+        // stays Float64 (it came back float64; br-frankenpandas-76kq0).
+        self.series
+            .keeping_extension_dtype(self.ffill_storage(limit))
+    }
+
+    fn ffill_storage(&self, limit: Option<usize>) -> Result<Series, FrameError> {
         if let Some(r) = self.try_dense_fill(limit, true) {
             return r;
         }
@@ -52771,8 +53083,14 @@ impl SeriesGroupBy<'_> {
         })
     }
 
-    /// Backward-fill missing values within each group.
+    /// Backward-fill missing values within each group, in the Series' own
+    /// dtype (see [`Self::ffill`]).
     pub fn bfill(&self, limit: Option<usize>) -> Result<Series, FrameError> {
+        self.series
+            .keeping_extension_dtype(self.bfill_storage(limit))
+    }
+
+    fn bfill_storage(&self, limit: Option<usize>) -> Result<Series, FrameError> {
         if let Some(r) = self.try_dense_fill(limit, false) {
             return r;
         }
@@ -53844,8 +54162,14 @@ impl SeriesGroupBy<'_> {
         )))
     }
 
-    /// First value of each group.
+    /// First value of each group; a categorical Series' are categorical
+    /// (they were object; br-frankenpandas-76kq0).
     pub fn first(&self) -> Result<Series, FrameError> {
+        self.first_storage()
+            .map(|out| self.series.keeping_categories(out))
+    }
+
+    fn first_storage(&self) -> Result<Series, FrameError> {
         // Dense fast path: a dense gid layout (Int64 / contiguous-Utf8 / Scalar-
         // backed-Utf8 key) + an all-valid typed value column. first() of an
         // all-valid column is the value at each group's first-seen row, so record
@@ -54037,7 +54361,14 @@ impl SeriesGroupBy<'_> {
         Some(Series::new(self.series.name(), index, column))
     }
 
+    /// Last value of each group; a categorical Series' are categorical (they
+    /// were object; br-frankenpandas-76kq0).
     pub fn last(&self) -> Result<Series, FrameError> {
+        self.last_storage()
+            .map(|out| self.series.keeping_categories(out))
+    }
+
+    fn last_storage(&self) -> Result<Series, FrameError> {
         // Dense fast path (mirror of `first`): an all-valid typed value column's
         // last non-missing value of each group is the value at its last-seen row.
         // Track last_row per gid (overwrite each occurrence) in one pass.
@@ -71760,6 +72091,52 @@ fn concat_nullable_dtype(frames: &[&DataFrame], col_name: &str) -> Option<DType>
         .then_some(nullable)
 }
 
+/// `result`, `source`'s categorical values moved, selected or filled (shift,
+/// where / mask, ffill / bfill, combine_first, the groupby first / last /
+/// shift / ffill), categorical again over `source`'s categories while every
+/// present value is one of them: pandas keeps the dtype through those, and
+/// they came back object (br-frankenpandas-76kq0). An int category read
+/// back as a float (a shift's gap made the values float64) is the category.
+/// A value no category holds, or a `source` that is not categorical, leaves
+/// `result` as it came.
+fn categories_kept(source: &Column, result: Column) -> Column {
+    let Some(meta) = source.categorical() else {
+        return result;
+    };
+    if result.categorical().is_some() {
+        return result;
+    }
+    let categories: FxHashMap<ScalarKey<'_>, &Scalar> = meta
+        .categories
+        .iter()
+        .map(|category| (scalar_key_allow_missing(category), category))
+        .collect();
+    let mut values = Vec::with_capacity(result.len());
+    for value in result.values() {
+        if value.is_missing() {
+            values.push(Scalar::Null(NullKind::NaN));
+            continue;
+        }
+        let found = categories
+            .get(&scalar_key_allow_missing(value))
+            .or_else(|| match value {
+                Scalar::Float64(number) => dense_i64_key_from_f64(*number)
+                    .and_then(|key| categories.get(&ScalarKey::Int64(key))),
+                _ => None,
+            });
+        let Some(category) = found else {
+            return result;
+        };
+        values.push((*category).clone());
+    }
+    match Column::from_values(values) {
+        Ok(column) => column
+            .with_categorical(Some(meta.clone()))
+            .with_dtype(DType::Categorical),
+        Err(_) => result,
+    }
+}
+
 /// `result` in `source`'s nullable dtype (Int64 / Float64 / boolean) when
 /// `source` is nullable and `result` holds the same kind of values: pandas'
 /// masked arrays keep their dtype through a selection or a fill (`where`,
@@ -71771,8 +72148,12 @@ fn concat_nullable_dtype(frames: &[&DataFrame], col_name: &str) -> Option<DType>
 /// br-frankenpandas-vzoct). An int64 source that already held a missing
 /// value keeps its dtype, so where(cond, self) stays the identity. An
 /// all-missing `result` of a nullable source is that dtype's NA throughout
-/// (it was object; br-frankenpandas-ygb4e). Anything else is `result`.
+/// (it was object; br-frankenpandas-ygb4e). A tz-aware source's instants
+/// rebuilt as naive datetime64 are in its zone again (df.where showed the
+/// UTC clock; br-frankenpandas-76kq0); a categorical source's values are
+/// categorical again ([`categories_kept`]). Anything else is `result`.
 fn nullable_kept(source: &Column, result: Column) -> Result<Column, FrameError> {
+    let result = categories_kept(source, result);
     let dtype = source.dtype();
     let numpy_int_gained_missing = dtype == DType::Int64 && !source.has_any_missing();
     if dtype.is_nullable() && result.dtype() == dtype.to_non_nullable() {
@@ -71788,6 +72169,54 @@ fn nullable_kept(source: &Column, result: Column) -> Result<Column, FrameError> 
         || (result.dtype() == DType::Null && (numpy_int_gained_missing || dtype == DType::Float64))
     {
         Ok(result.astype(DType::Float64)?)
+    } else if dtype.timezone().is_some() && result.dtype() == (DType::Datetime64 { tz: None }) {
+        Ok(result.with_dtype(dtype))
+    } else if matches!(
+        dtype,
+        DType::Datetime64 { .. } | DType::Timedelta64 | DType::Period
+    ) && (result.dtype() == DType::Null
+        || (dtype == DType::Period
+            && result.dtype() == DType::Period
+            && result
+                .values()
+                .iter()
+                .any(|value| matches!(value, Scalar::Null(NullKind::NaN | NullKind::Null)))))
+    {
+        // A datetime / timedelta / period column keeps its dtype through a
+        // selection that leaves it all missing, NaT throughout, and a
+        // period column's gaps are NaT (df.where gave object NaN;
+        // br-frankenpandas-76kq0).
+        let (nat, naive) = match &dtype {
+            DType::Period => (period_nat_of(source), DType::Period),
+            DType::Datetime64 { .. } => (
+                Scalar::Datetime64(Timestamp::NAT),
+                DType::Datetime64 { tz: None },
+            ),
+            _ => (Scalar::Timedelta64(Timedelta::NAT), DType::Timedelta64),
+        };
+        let values = result
+            .values()
+            .iter()
+            .map(|value| {
+                if value.is_missing() {
+                    nat.clone()
+                } else {
+                    value.clone()
+                }
+            })
+            .collect();
+        Ok(Column::new(naive, values)?.with_dtype(dtype))
+    } else if source.is_pandas_string()
+        && !result.is_pandas_string()
+        && matches!(result.dtype(), DType::Utf8 | DType::Null)
+        && result
+            .values()
+            .iter()
+            .all(|value| value.is_missing() || matches!(value, Scalar::Utf8(_)))
+    {
+        // pandas' `string` stays `string`, all-missing too (df.where gave
+        // object NaN; br-frankenpandas-76kq0).
+        Ok(Column::new(DType::Utf8, result.values().to_vec())?.as_pandas_string())
     } else {
         Ok(result)
     }

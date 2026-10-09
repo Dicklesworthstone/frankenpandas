@@ -2145,6 +2145,27 @@ fn scalar_compare(left: &Scalar, right: &Scalar, op: ComparisonOp) -> Result<boo
         return Ok(op_holds(a.cmp(b), op));
     }
 
+    // Two periods of one frequency order by their ordinals, NaT equal to
+    // nothing; of two frequencies they are unequal and unordered, pandas'
+    // IncompatibleFrequency (two period Series compared all unequal and
+    // refused <; br-frankenpandas-76kq0).
+    if let (Scalar::Period(a), Scalar::Period(b)) = (left, right) {
+        if a.ordinal == i64::MIN || b.ordinal == i64::MIN {
+            return Ok(op == ComparisonOp::Ne);
+        }
+        if a.freq == b.freq {
+            return Ok(op_holds(a.ordinal.cmp(&b.ordinal), op));
+        }
+        return match op {
+            ComparisonOp::Eq => Ok(false),
+            ComparisonOp::Ne => Ok(true),
+            _ => Err(ColumnError::Type(TypeError::NonNumericValue {
+                value: format!("{left:?}"),
+                dtype: DType::Period,
+            })),
+        };
+    }
+
     // Numeric: convert both to f64.
     let lhs = left.to_f64()?;
     let rhs = right.to_f64()?;
