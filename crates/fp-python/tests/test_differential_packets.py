@@ -33295,3 +33295,91 @@ def test_range_index_position_like_pandas_e186m(rng: str, key: str) -> None:
         return (type(value).__name__, value)
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-n3ktr: a typed index's methods answer with pandas' class
+# and values - astype(object) the label objects, to_numpy / values / isna /
+# notna numpy arrays, [[i, j]] and a mask taking positions, where / insert /
+# factorize / set operations / append / delete / repeat of the index's class
+# (a tz-aware one in its zone), reindex's indexer an int64 array, isin of
+# NaT, a tz-aware map; NEGATIVE: the int, float, object, range and bool
+# indexes, which agreed, still agree.
+def _n3ktr_indexes(m: Any) -> dict[str, Any]:
+    return {
+        "range": m.RangeIndex(1, 11, 2, name="r"),
+        "range down": m.RangeIndex(10, 0, -3, name="q"),
+        "int": m.Index([5, 3, 9, 3, 1], name="i"),
+        "float": m.Index([2.5, np.nan, 1.0, 2.5], name="f"),
+        "object": m.Index(["b", "a", "c", "a"], name="o"),
+        "datetime": m.DatetimeIndex(["2024-03-01", None, "2024-01-15", "2024-01-15"], name="d"),
+        "datetime tz": m.date_range("2024-01-01", periods=4, freq="D", tz="US/Eastern", name="z"),
+        "timedelta": m.TimedeltaIndex(["1 days", None, "2h", "1 days"], name="t"),
+        "period": m.period_range("2024-01", periods=4, freq="M", name="p"),
+        "category": m.CategoricalIndex(["x", "y", "x", None], name="c"),
+    }
+
+
+_N3KTR_OPS = {
+    "astype(object)": lambda i: i.astype(object),
+    "to_numpy": lambda i: i.to_numpy(),
+    "values": lambda i: i.values,
+    "isna": lambda i: i.isna(),
+    "notna": lambda i: i.notna(),
+    "[[2, 0]]": lambda i: i[[2, 0]],
+    "[mask]": lambda i: i[np.arange(len(i)) % 2 == 0],
+    "where": lambda i: i.where(np.arange(len(i)) % 2 == 0),
+    "insert": lambda i: i.insert(1, i[0]),
+    "factorize": lambda i: i.factorize(),
+    "factorize sort": lambda i: i.factorize(sort=True),
+    "union": lambda i: i.union(i[:2]),
+    "intersection": lambda i: i.intersection(i[1:]),
+    "difference": lambda i: i.difference(i[:1]),
+    "append": lambda i: i.append(i),
+    "delete": lambda i: i.delete(0),
+    "repeat": lambda i: i.repeat(2),
+    "reindex": lambda i: i.drop_duplicates().reindex(i.drop_duplicates()[:2]),
+    "reindex(self)": lambda i: i.drop_duplicates().reindex(i.drop_duplicates()),
+    "isin": lambda i: i.isin(i[:2]),
+    "map(str)": lambda i: i.map(str),
+    "min": lambda i: i.min(),
+    "max": lambda i: i.max(),
+}
+
+
+def _n3ktr_show(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return tuple(_n3ktr_show(part) for part in value)
+    if hasattr(value, "dtype") and hasattr(value, "__len__") and not isinstance(value, str):
+        return (type(value).__name__, str(value.dtype), [repr(item) for item in list(value)], getattr(value, "name", None))
+    return (type(value).__name__, repr(value))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", ["range", "range down", "int", "float", "object", "datetime", "datetime tz", "timedelta", "period", "category"])
+@pytest.mark.parametrize("op", list(_N3KTR_OPS))
+def test_index_methods_keep_class_and_values_like_pandas_n3ktr(kind: str, op: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _n3ktr_show(_N3KTR_OPS[op](_n3ktr_indexes(m)[kind]))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("target", ["categorical", "list", "list with a stranger", "Index"])
+def test_categorical_index_reindex_follows_its_target_n3ktr(target: str) -> None:
+    # A categorical target is the new index as it is, a CategoricalIndex;
+    # NEGATIVE: a list or another Index gives a plain Index, as pandas.
+    def run(m: Any) -> Any:
+        source = m.CategoricalIndex(["x", "y", "x", None], name="c").drop_duplicates()
+        targets = {
+            "categorical": source[:2],
+            "list": ["x", "y"],
+            "list with a stranger": ["x", "z"],
+            "Index": m.Index(["y"]),
+        }
+        return _n3ktr_show(source.reindex(targets[target]))
+
+    assert run(fpd) == run(pd)

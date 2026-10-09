@@ -10303,11 +10303,13 @@ fn index_fill_label(index: &Index, value: Option<&Bound<'_, PyAny>>) -> PyResult
         .iter()
         .filter(|label| !label.is_missing())
         .peekable();
+    // Instants, durations and periods are filled with NaT (a PeriodIndex's
+    // was NaN, an object index then; br-frankenpandas-n3ktr).
     let temporal = present.peek().is_some()
         && present.clone().all(|label| {
             matches!(
                 label,
-                IndexLabel::Datetime64(_) | IndexLabel::Timedelta64(_)
+                IndexLabel::Datetime64(_) | IndexLabel::Timedelta64(_) | IndexLabel::Period(_)
             )
         });
     if temporal {
@@ -10729,6 +10731,64 @@ fn row_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
         return Ok(Py::new(py, PyCategoricalIndex { inner: categorical })?.into_any());
     }
     flat_index_to_py(py, index)
+}
+
+/// `index` as pandas' class for its labels ([`row_index_to_py`]), its
+/// instants in `zone` when they all are instants: a typed index's operation
+/// answered through the plain Index came back a plain Index, its zone
+/// dropped (where, insert, factorize of a DatetimeIndex /
+/// TimedeltaIndex / PeriodIndex; br-frankenpandas-n3ktr).
+fn typed_index_result(py: Python<'_>, index: Index, zone: Option<&str>) -> PyResult<Py<PyAny>> {
+    let index = match zone {
+        Some(zone) => {
+            // A missing label beside the instants - a where's or insert's
+            // fill - is their NaT, so the zone applies to them all.
+            let labels = index.labels();
+            let gaps = labels
+                .iter()
+                .any(|label| matches!(label, IndexLabel::Null(_)));
+            let instants = gaps
+                && labels
+                    .iter()
+                    .all(|label| matches!(label, IndexLabel::Datetime64(_) | IndexLabel::Null(_)));
+            let filled = if instants {
+                Index::new(
+                    labels
+                        .iter()
+                        .map(|label| match label {
+                            IndexLabel::Null(_) => IndexLabel::Datetime64(Timestamp::NAT),
+                            other => other.clone(),
+                        })
+                        .collect(),
+                )
+                .rename_index(index.name())
+            } else {
+                index.clone()
+            };
+            filled.with_tz(Some(zone)).unwrap_or(index)
+        }
+        None => index,
+    };
+    row_index_to_py(py, &index)
+}
+
+/// An operation's labels answered through the plain Index as a
+/// CategoricalIndex of `source`'s categories, or - a label being no
+/// category - the labels' own class, as pandas falls back to object (a
+/// plain Index; br-frankenpandas-n3ktr).
+fn categorical_result(
+    py: Python<'_>,
+    source: &CategoricalIndex,
+    index: Index,
+) -> PyResult<Py<PyAny>> {
+    let categories = fp_index::IndexCategories {
+        categories: source.categories().to_vec(),
+        ordered: source.ordered(),
+    };
+    match index.clone().with_categories(Some(categories)) {
+        Ok(categorical) => row_index_to_py(py, &categorical),
+        Err(_) => row_index_to_py(py, &index),
+    }
 }
 
 /// `index` as the CategoricalIndex its category metadata describes - any
@@ -12479,7 +12539,21 @@ fn setop_sorted(result: Index, left: &Index, right: &Index, sort: Option<bool>) 
         _ => None,
     };
     let numbers: Option<Vec<f64>> = result.labels().iter().map(number).collect();
-    let mixed = result.inferred_type() == "mixed";
+    // Missing labels beside labels of one kind are no mix: pandas sorts the
+    // others and puts them last (['b', None, 'a'] unioned stayed in the
+    // order met; br-frankenpandas-n3ktr).
+    let labels = result.labels();
+    let present: Vec<usize> = (0..labels.len())
+        .filter(|&at| !labels[at].is_missing())
+        .collect();
+    let gaps = present.len() < labels.len();
+    let one_kind = present.first().is_some_and(|&first| {
+        let kind = fp_index::LabelKinds::of(&labels[first]);
+        present
+            .iter()
+            .all(|&at| fp_index::LabelKinds::of(&labels[at]) == kind)
+    });
+    let mixed = result.inferred_type() == "mixed" && !(gaps && one_kind);
     let sorts = match sort {
         Some(sort) => sort,
         None => {
@@ -12493,6 +12567,12 @@ fn setop_sorted(result: Index, left: &Index, right: &Index, sort: Option<bool>) 
         Some(numbers) if sorts && mixed => {
             let mut order: Vec<usize> = (0..numbers.len()).collect();
             order.sort_by(|&a, &b| numbers[a].total_cmp(&numbers[b]));
+            result.take(&order)
+        }
+        _ if sorts && gaps && one_kind => {
+            let mut order = present;
+            order.sort_by(|&a, &b| labels[a].cmp(&labels[b]));
+            order.extend((0..labels.len()).filter(|&at| labels[at].is_missing()));
             result.take(&order)
         }
         _ if sorts => result.sort_values(),
@@ -13206,11 +13286,18 @@ impl PyIndex {
     }
 
     fn to_list(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        // An instant of a zoned index - an object index of a tz-aware one's
+        // Timestamps - is its Timestamp in the zone (the naive UTC clock;
+        // br-frankenpandas-n3ktr).
+        let zoned = self.inner.tz().is_some();
         let items = self
             .inner
             .labels()
             .iter()
-            .map(|l| index_label_to_py(py, l))
+            .map(|label| match label {
+                IndexLabel::Datetime64(_) if zoned => row_label_to_py(py, &self.inner, label),
+                _ => index_label_to_py(py, label),
+            })
             .collect::<PyResult<Vec<_>>>()?;
         Ok(PyList::new(py, items)?.unbind())
     }
@@ -14698,7 +14785,14 @@ impl PyIndex {
             .into_iter()
             .map(|c| i64::try_from(c).unwrap_or(i64::MAX))
             .collect();
-        Ok((codes, PyIndex { inner: uniques }))
+        // pandas builds the uniques as a new Index: no name (it was kept;
+        // br-frankenpandas-n3ktr).
+        Ok((
+            codes,
+            PyIndex {
+                inner: uniques.rename_index(None::<&str>),
+            },
+        ))
     }
 
     /// pandas' deprecated `format(name=False, formatter=None, na_rep='NaN')`,
@@ -14928,7 +15022,7 @@ impl PyIndex {
         level: Option<usize>,
         limit: Option<usize>,
         tolerance: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<(Self, Vec<i64>)> {
+    ) -> PyResult<(Py<PyAny>, Option<IndexerArray>)> {
         unsupported_params(
             "Index.reindex",
             &[
@@ -14938,18 +15032,31 @@ impl PyIndex {
                 ("tolerance", tolerance.is_none()),
             ],
         )?;
-        let target_idx = if let Ok(py_idx) = plain_index_ref(target) {
-            py_idx.inner.clone()
-        } else {
-            let py_idx = PyIndex::new(Some(target), None)?;
-            py_idx.inner
+        // A typed target keeps its name and zone (rebuilt from its values, a
+        // DatetimeIndex's came back unnamed and naive; n3ktr).
+        let target_idx = target.extract::<IndexArg>()?.inner.clone();
+        // pandas answers no indexer for a target equal to this index.
+        let same = self.inner.equals(&target_idx);
+        let (mut out_idx, indexer) = self.inner.reindex(&target_idx);
+        // A target with no name of its own (a list) takes this index's.
+        if !target.hasattr("name")? {
+            out_idx = out_idx.rename_index(self.inner.name());
+        }
+        // The new index of its labels' class (a range a RangeIndex), the
+        // indexer an int64 array, as pandas' (a plain Index and a list;
+        // br-frankenpandas-n3ktr).
+        let indexer = (!same).then(|| {
+            indexer
+                .into_iter()
+                .map(|opt| opt.map_or(-1, |u| u as i64))
+                .collect()
+        });
+        // A categorical target is the new index as it is, a CategoricalIndex.
+        let out = match target.extract::<PyRef<'_, PyCategoricalIndex>>() {
+            Ok(categorical) => categorical_result(target.py(), &categorical.inner, out_idx)?,
+            Err(_) => row_index_to_py(target.py(), &out_idx)?,
         };
-        let (out_idx, indexer) = self.inner.reindex(&target_idx);
-        let indexer_vec: Vec<i64> = indexer
-            .into_iter()
-            .map(|opt| opt.map(|u| u as i64).unwrap_or(-1))
-            .collect();
-        Ok((PyIndex { inner: out_idx }, indexer_vec))
+        Ok((out, indexer))
     }
 
     #[pyo3(signature = (cond, other=None))]
@@ -14995,6 +15102,12 @@ impl PyIndex {
         } else {
             None
         };
+        // An instant of a tz-aware index is its Timestamp in the zone (the
+        // mapper read the naive UTC clock; br-frankenpandas-n3ktr).
+        let label_to_py = |label: &IndexLabel| match (self.inner.tz(), label) {
+            (Some(_), IndexLabel::Datetime64(_)) => row_label_to_py(py, &self.inner, label),
+            _ => index_label_to_py(py, label),
+        };
         if let Some(table) = table {
             let table = table.cast::<PyDict>()?;
             let nan = f64::NAN.into_pyobject(py)?.into_any();
@@ -15003,7 +15116,7 @@ impl PyIndex {
                 .labels()
                 .iter()
                 .map(|label| {
-                    let key = index_label_to_py(py, label)?;
+                    let key = label_to_py(label)?;
                     Ok(table.get_item(key)?.unwrap_or_else(|| nan.clone()))
                 })
                 .collect::<PyResult<Vec<_>>>()?;
@@ -15019,7 +15132,7 @@ impl PyIndex {
                 new_labels.push(l.clone());
                 continue;
             }
-            let py_val = index_label_to_py(py, l)?;
+            let py_val = label_to_py(l)?;
             let res = mapper.call1((py_val,))?;
             new_labels.push(py_to_index_label(&res)?);
         }
@@ -15812,7 +15925,14 @@ impl PyDatetimeIndex {
                 labels_missing_ndarray(py, self.inner.values().into_iter().map(|ns| ns.is_none()))
             })
             .transpose()?;
-        finish_to_numpy(self.values(py)?, missing, dtype, na_value)
+        // A tz-aware index's own array is its zoned Timestamps, as pandas'
+        // (it was the naive UTC instants; br-frankenpandas-n3ktr).
+        let array = if self.inner.tz().is_some() && dtype.is_none_or(|dtype| dtype.is_none()) {
+            py_objects_ndarray(py, self.to_list(py)?)?
+        } else {
+            self.values(py)?
+        };
+        finish_to_numpy(array, missing, dtype, na_value)
     }
 
     #[pyo3(signature = (dtype=None, copy=None))]
@@ -15899,20 +16019,21 @@ impl PyDatetimeIndex {
         Ok(self.inner.duplicated(parse_duplicate_keep(keep)?).into())
     }
 
-    fn isna(&self) -> Vec<bool> {
-        self.inner.isna()
+    /// pandas' `isna()`: a bool array (it was a list; br-frankenpandas-n3ktr).
+    fn isna(&self) -> BoolArray {
+        self.inner.isna().into()
     }
 
-    fn isnull(&self) -> Vec<bool> {
-        self.inner.isna()
+    fn isnull(&self) -> BoolArray {
+        self.inner.isna().into()
     }
 
-    fn notna(&self) -> Vec<bool> {
-        self.inner.notna()
+    fn notna(&self) -> BoolArray {
+        self.inner.notna().into()
     }
 
-    fn notnull(&self) -> Vec<bool> {
-        self.inner.notna()
+    fn notnull(&self) -> BoolArray {
+        self.inner.notna().into()
     }
 
     /// Membership of each instant in `values` - Timestamps (an aware one by
@@ -15928,6 +16049,9 @@ impl PyDatetimeIndex {
                         nanos.push(ts.nanos);
                     }
                 }
+                // NaT matches the NaT labels, as pandas (it matched nothing;
+                // br-frankenpandas-n3ktr).
+                Scalar::Null(NullKind::NaT) => nanos.push(Timestamp::NAT),
                 _ => {}
             }
         }
@@ -16695,6 +16819,9 @@ impl PyDatetimeIndex {
     /// `Series.astype(str)` does - the date alone when every instant is at
     /// midnight (it always printed the time).
     fn astype(&self, dtype: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        if is_object_dtype_arg(dtype) {
+            return Ok(object_declared_index(self.inner.as_index()));
+        }
         let name = index_astype_name(dtype)?;
         let index = self.as_py_index();
         if name != "str" {
@@ -16779,9 +16906,22 @@ impl PyDatetimeIndex {
         Ok(self.with_nanos(vals))
     }
 
+    /// pandas' `factorize`: its uniques of this index's class, in its zone (a
+    /// plain Index; br-frankenpandas-n3ktr).
     #[pyo3(signature = (sort=false, use_na_sentinel=true))]
-    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> PyResult<(IndexerArray, PyIndex)> {
-        self.as_py_index().factorize(sort, use_na_sentinel)
+    fn factorize(
+        &self,
+        py: Python<'_>,
+        sort: bool,
+        use_na_sentinel: bool,
+    ) -> PyResult<(IndexerArray, Py<PyAny>)> {
+        let index = self.as_py_index();
+        let zone = index.inner.tz().map(str::to_owned);
+        let (codes, uniques) = index.factorize(sort, use_na_sentinel)?;
+        Ok((
+            codes,
+            typed_index_result(py, uniques.inner, zone.as_deref())?,
+        ))
     }
 
     #[pyo3(signature = (name=false, formatter=None, na_rep="NaN"))]
@@ -16889,8 +17029,12 @@ impl PyDatetimeIndex {
         self.clone()
     }
 
-    fn insert(&self, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
-        self.as_py_index().insert_label(loc, item)
+    /// pandas' `insert`: this index's class while the labels fit it, in its
+    /// zone (a plain Index; br-frankenpandas-n3ktr).
+    fn insert(&self, py: Python<'_>, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let index = self.as_py_index();
+        let zone = index.inner.tz().map(str::to_owned);
+        typed_index_result(py, index.insert_label(loc, item)?.inner, zone.as_deref())
     }
 
     fn is_(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -17038,7 +17182,7 @@ impl PyDatetimeIndex {
         level: Option<usize>,
         limit: Option<usize>,
         tolerance: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<(PyIndex, Vec<i64>)> {
+    ) -> PyResult<(Py<PyAny>, Option<IndexerArray>)> {
         self.as_py_index()
             .reindex(target, method, level, limit, tolerance)
     }
@@ -17344,8 +17488,18 @@ impl PyDatetimeIndex {
     }
 
     #[pyo3(signature = (cond, other=None))]
-    fn r#where(&self, cond: Vec<bool>, other: Option<&Bound<'_, PyAny>>) -> PyResult<PyIndex> {
-        self.as_py_index().r#where(cond, other)
+    /// pandas' `where`: this index's class while the labels fit it, NaT
+    /// where a typed index's label is replaced by nothing, in its zone (a
+    /// plain Index; br-frankenpandas-n3ktr).
+    fn r#where(
+        &self,
+        py: Python<'_>,
+        cond: Vec<bool>,
+        other: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let index = self.as_py_index();
+        let zone = index.inner.tz().map(str::to_owned);
+        typed_index_result(py, index.r#where(cond, other)?.inner, zone.as_deref())
     }
 }
 
@@ -19818,20 +19972,21 @@ impl PyTimedeltaIndex {
         )
     }
 
-    pub fn isna(&self) -> Vec<bool> {
-        self.inner.isna()
+    /// pandas' `isna()`: a bool array (it was a list; br-frankenpandas-n3ktr).
+    pub fn isna(&self) -> BoolArray {
+        self.inner.isna().into()
     }
 
-    pub fn isnull(&self) -> Vec<bool> {
-        self.inner.isna()
+    pub fn isnull(&self) -> BoolArray {
+        self.inner.isna().into()
     }
 
-    pub fn notna(&self) -> Vec<bool> {
-        self.inner.notna()
+    pub fn notna(&self) -> BoolArray {
+        self.inner.notna().into()
     }
 
-    pub fn notnull(&self) -> Vec<bool> {
-        self.inner.notna()
+    pub fn notnull(&self) -> BoolArray {
+        self.inner.notna().into()
     }
 
     pub fn unique(&self) -> PyResult<Self> {
@@ -19918,13 +20073,33 @@ impl PyTimedeltaIndex {
         self.tolist(py)
     }
 
+    /// pandas' `TimedeltaIndex.values`: a timedelta64[ns] numpy array (it
+    /// was a list of nanosecond ints and None; br-frankenpandas-n3ktr).
     #[getter]
-    pub fn values(&self) -> Vec<Option<i64>> {
-        self.inner.values()
+    fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        i64_ndarray(py, &self.inner.asi8(), "timedelta64[ns]")
     }
 
-    pub fn to_numpy(&self) -> Vec<Option<i64>> {
-        self.inner.to_numpy()
+    /// pandas' `to_numpy(dtype=None, copy=False, na_value=...)`, as
+    /// DatetimeIndex's: `na_value` fills the NaT slots.
+    #[pyo3(signature = (dtype=None, copy=false, na_value=None))]
+    fn to_numpy<'py>(
+        &self,
+        py: Python<'py>,
+        dtype: Option<&Bound<'py, PyAny>>,
+        copy: bool,
+        na_value: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = copy;
+        let missing = na_value
+            .map(|_| {
+                labels_missing_ndarray(
+                    py,
+                    self.inner.asi8().into_iter().map(|ns| ns == Timedelta::NAT),
+                )
+            })
+            .transpose()?;
+        finish_to_numpy(self.values(py)?, missing, dtype, na_value)
     }
 
     pub fn copy(&self) -> Self {
@@ -20087,6 +20262,18 @@ impl PyTimedeltaIndex {
             )?
             .into_any()
             .into_py_any(py);
+        }
+        // A mask keeps the freq when it picks a run; positions drop it.
+        if let Some((positions, run)) = positions_key(item, self.inner.len())? {
+            let freq = self.inner.freq().filter(|_| run);
+            let inner = self
+                .inner
+                .take(&positions)
+                .map_err(index_error_to_py)?
+                .with_freq(freq);
+            return Py::new(py, PyTimedeltaIndex { inner })?
+                .into_any()
+                .into_py_any(py);
         }
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
             "TimedeltaIndex indices must be integers or slices",
@@ -20535,6 +20722,9 @@ impl PyTimedeltaIndex {
     }
 
     fn astype(&self, dtype: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        if is_object_dtype_arg(dtype) {
+            return Ok(object_declared_index(&self.as_py_index().inner));
+        }
         self.as_py_index().astype_name(&index_astype_name(dtype)?)
     }
 
@@ -20583,9 +20773,22 @@ impl PyTimedeltaIndex {
         Self { inner: res }
     }
 
+    /// pandas' `factorize`: its uniques of this index's class, in its zone (a
+    /// plain Index; br-frankenpandas-n3ktr).
     #[pyo3(signature = (sort=false, use_na_sentinel=true))]
-    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> PyResult<(IndexerArray, PyIndex)> {
-        self.as_py_index().factorize(sort, use_na_sentinel)
+    fn factorize(
+        &self,
+        py: Python<'_>,
+        sort: bool,
+        use_na_sentinel: bool,
+    ) -> PyResult<(IndexerArray, Py<PyAny>)> {
+        let index = self.as_py_index();
+        let zone = index.inner.tz().map(str::to_owned);
+        let (codes, uniques) = index.factorize(sort, use_na_sentinel)?;
+        Ok((
+            codes,
+            typed_index_result(py, uniques.inner, zone.as_deref())?,
+        ))
     }
 
     #[pyo3(signature = (name=false, formatter=None, na_rep="NaN"))]
@@ -20669,8 +20872,12 @@ impl PyTimedeltaIndex {
         self.clone()
     }
 
-    fn insert(&self, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
-        self.as_py_index().insert_label(loc, item)
+    /// pandas' `insert`: this index's class while the labels fit it, in its
+    /// zone (a plain Index; br-frankenpandas-n3ktr).
+    fn insert(&self, py: Python<'_>, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let index = self.as_py_index();
+        let zone = index.inner.tz().map(str::to_owned);
+        typed_index_result(py, index.insert_label(loc, item)?.inner, zone.as_deref())
     }
 
     fn is_(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -20725,7 +20932,7 @@ impl PyTimedeltaIndex {
         level: Option<usize>,
         limit: Option<usize>,
         tolerance: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<(PyIndex, Vec<i64>)> {
+    ) -> PyResult<(Py<PyAny>, Option<IndexerArray>)> {
         self.as_py_index()
             .reindex(target, method, level, limit, tolerance)
     }
@@ -20848,8 +21055,18 @@ impl PyTimedeltaIndex {
     }
 
     #[pyo3(signature = (cond, other=None))]
-    fn r#where(&self, cond: Vec<bool>, other: Option<&Bound<'_, PyAny>>) -> PyResult<PyIndex> {
-        self.as_py_index().r#where(cond, other)
+    /// pandas' `where`: this index's class while the labels fit it, NaT
+    /// where a typed index's label is replaced by nothing, in its zone (a
+    /// plain Index; br-frankenpandas-n3ktr).
+    fn r#where(
+        &self,
+        py: Python<'_>,
+        cond: Vec<bool>,
+        other: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let index = self.as_py_index();
+        let zone = index.inner.tz().map(str::to_owned);
+        typed_index_result(py, index.r#where(cond, other)?.inner, zone.as_deref())
     }
 }
 
@@ -21037,6 +21254,30 @@ impl PyRangeIndex {
         Ok(value.is_some_and(|value| {
             RangeIndex::new(start, stop, step).is_ok_and(|range| range.contains(value))
         }))
+    }
+
+    /// pandas' `RangeIndex.factorize`: the codes 0..n and the range itself,
+    /// its name kept; sorted with a descending step, the codes reversed and
+    /// the range ascending (a plain unnamed Index; br-frankenpandas-n3ktr).
+    #[pyo3(signature = (sort=false, use_na_sentinel=true))]
+    fn factorize(
+        slf: PyRef<'_, Self>,
+        py: Python<'_>,
+        sort: bool,
+        use_na_sentinel: bool,
+    ) -> PyResult<(IndexerArray, Py<PyAny>)> {
+        let _ = use_na_sentinel;
+        let index = &slf.as_super().inner;
+        let len = i64::try_from(index.len()).unwrap_or(i64::MAX);
+        let (start, stop, step) = range_span_of(index);
+        if sort && step < 0 && len > 0 {
+            let last = start + (len - 1) * step;
+            let codes = (0..len).rev().collect();
+            let uniques = Self::object(py, (last, start - step, -step), index.name().cloned())?;
+            return Ok((codes, uniques));
+        }
+        let uniques = Self::object(py, (start, stop, step), index.name().cloned())?;
+        Ok(((0..len).collect(), uniques))
     }
 
     /// A slice of a range is a range, as Python slices one
@@ -21570,9 +21811,11 @@ impl PyPeriodIndex {
         self.tolist(py)
     }
 
+    /// pandas' `PeriodIndex.values`: an object array of its Periods (it was
+    /// a list; br-frankenpandas-n3ktr).
     #[getter]
-    pub fn values(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        self.tolist(py)
+    pub fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        py_objects_ndarray(py, self.tolist(py)?)
     }
 
     pub fn copy(&self) -> Self {
@@ -21687,6 +21930,12 @@ impl PyPeriodIndex {
                 .into_any()
                 .into_py_any(py);
         }
+        if let Some((positions, _)) = positions_key(item, self.inner.len())? {
+            let inner = self.inner.take(&positions).map_err(index_error_to_py)?;
+            return Py::new(py, PyPeriodIndex { inner })?
+                .into_any()
+                .into_py_any(py);
+        }
         Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
             "PeriodIndex indices must be integers or slices",
         ))
@@ -21759,32 +22008,61 @@ impl PyPeriodIndex {
         false
     }
 
-    pub fn union(&self, other: IndexArg) -> PyIndex {
-        let other = other.named_like(self.inner.name());
-        PyIndex {
-            inner: self.named_index().union(&other.inner),
-        }
+    /// pandas' `union(other, sort=None)`, as an Index answers it, of this
+    /// index's class while the labels fit it (an object Index;
+    /// br-frankenpandas-n3ktr).
+    #[pyo3(signature = (other, sort=None))]
+    pub fn union(
+        &self,
+        py: Python<'_>,
+        other: IndexArg,
+        sort: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let plain = PyIndex {
+            inner: self.named_index(),
+        };
+        typed_index_result(py, plain.union(other, sort).inner, None)
     }
 
-    pub fn intersection(&self, other: IndexArg) -> PyIndex {
-        let other = other.named_like(self.inner.name());
-        PyIndex {
-            inner: self.named_index().intersection(&other.inner),
-        }
+    #[pyo3(signature = (other, sort=Some(false)))]
+    pub fn intersection(
+        &self,
+        py: Python<'_>,
+        other: IndexArg,
+        sort: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let plain = PyIndex {
+            inner: self.named_index(),
+        };
+        typed_index_result(py, plain.intersection(other, sort).inner, None)
     }
 
-    pub fn difference(&self, other: IndexArg) -> PyIndex {
-        let other = other.named_like(self.inner.name());
-        PyIndex {
-            inner: self.named_index().difference(&other.inner),
-        }
+    #[pyo3(signature = (other, sort=None))]
+    pub fn difference(
+        &self,
+        py: Python<'_>,
+        other: IndexArg,
+        sort: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let plain = PyIndex {
+            inner: self.named_index(),
+        };
+        typed_index_result(py, plain.difference(other, sort).inner, None)
     }
 
-    pub fn symmetric_difference(&self, other: IndexArg) -> PyIndex {
-        let other = other.named_like(self.inner.name());
-        PyIndex {
-            inner: self.named_index().symmetric_difference(&other.inner),
-        }
+    #[pyo3(signature = (other, result_name=None, sort=None))]
+    pub fn symmetric_difference(
+        &self,
+        py: Python<'_>,
+        other: IndexArg,
+        result_name: Option<&Bound<'_, PyAny>>,
+        sort: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let plain = PyIndex {
+            inner: self.named_index(),
+        };
+        let out = plain.symmetric_difference(other, result_name, sort)?;
+        typed_index_result(py, out.inner, None)
     }
 
     /// pandas' `get_loc`: a date string naming one period of the index's
@@ -22157,6 +22435,9 @@ impl PyPeriodIndex {
     }
 
     fn astype(&self, dtype: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        if is_object_dtype_arg(dtype) {
+            return Ok(object_declared_index(&self.as_py_index().inner));
+        }
         self.as_py_index().astype_name(&index_astype_name(dtype)?)
     }
 
@@ -22241,9 +22522,22 @@ impl PyPeriodIndex {
             .map_err(index_error_to_py)
     }
 
+    /// pandas' `factorize`: its uniques of this index's class, in its zone (a
+    /// plain Index; br-frankenpandas-n3ktr).
     #[pyo3(signature = (sort=false, use_na_sentinel=true))]
-    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> PyResult<(IndexerArray, PyIndex)> {
-        self.as_py_index().factorize(sort, use_na_sentinel)
+    fn factorize(
+        &self,
+        py: Python<'_>,
+        sort: bool,
+        use_na_sentinel: bool,
+    ) -> PyResult<(IndexerArray, Py<PyAny>)> {
+        let index = self.as_py_index();
+        let zone = index.inner.tz().map(str::to_owned);
+        let (codes, uniques) = index.factorize(sort, use_na_sentinel)?;
+        Ok((
+            codes,
+            typed_index_result(py, uniques.inner, zone.as_deref())?,
+        ))
     }
 
     #[pyo3(signature = (name=false, formatter=None, na_rep="NaN"))]
@@ -22441,8 +22735,12 @@ impl PyPeriodIndex {
         self.clone()
     }
 
-    fn insert(&self, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
-        self.as_py_index().insert_label(loc, item)
+    /// pandas' `insert`: this index's class while the labels fit it, in its
+    /// zone (a plain Index; br-frankenpandas-n3ktr).
+    fn insert(&self, py: Python<'_>, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let index = self.as_py_index();
+        let zone = index.inner.tz().map(str::to_owned);
+        typed_index_result(py, index.insert_label(loc, item)?.inner, zone.as_deref())
     }
 
     fn is_(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -22526,12 +22824,20 @@ impl PyPeriodIndex {
         self.as_py_index().map(py, mapper, na_action)
     }
 
-    fn max(&self) -> Option<String> {
-        self.inner
+    /// pandas' `max()`: the latest Period, NaT skipped (NaT when there is
+    /// none); it was the Period's text and could pick NaT
+    /// (br-frankenpandas-n3ktr).
+    fn max(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let latest = self
+            .inner
             .values()
             .iter()
-            .max_by_key(|p| p.ordinal)
-            .map(|p| p.to_string())
+            .filter(|period| !period.is_nat())
+            .max_by_key(|period| period.ordinal);
+        match latest {
+            Some(period) => scalar_to_py(py, &Scalar::Period(*period)),
+            None => nat_object(py),
+        }
     }
 
     fn mean(&self) -> Option<String> {
@@ -22544,12 +22850,18 @@ impl PyPeriodIndex {
         Some(p.to_string())
     }
 
-    fn min(&self) -> Option<String> {
-        self.inner
+    /// pandas' `min()`: the earliest Period, NaT skipped, as `max`.
+    fn min(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let earliest = self
+            .inner
             .values()
             .iter()
-            .min_by_key(|p| p.ordinal)
-            .map(|p| p.to_string())
+            .filter(|period| !period.is_nat())
+            .min_by_key(|period| period.ordinal);
+        match earliest {
+            Some(period) => scalar_to_py(py, &Scalar::Period(*period)),
+            None => nat_object(py),
+        }
     }
 
     fn notna(&self) -> BoolArray {
@@ -22594,17 +22906,16 @@ impl PyPeriodIndex {
         level: Option<usize>,
         limit: Option<usize>,
         tolerance: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<(PyIndex, Vec<i64>)> {
+    ) -> PyResult<(Py<PyAny>, Option<IndexerArray>)> {
         self.as_py_index()
             .reindex(target, method, level, limit, tolerance)
     }
 
-    fn repeat(&self, repeats: i64) -> PyResult<PyIndex> {
+    /// pandas' `repeat`: a PeriodIndex (an object Index; n3ktr).
+    fn repeat(&self, py: Python<'_>, repeats: i64) -> PyResult<Py<PyAny>> {
         let index = self.inner.to_index();
         let repeats = repeat_count(index.len(), repeats)?;
-        Ok(PyIndex {
-            inner: index.repeat(repeats),
-        })
+        typed_index_result(py, index.repeat(repeats), None)
     }
 
     #[getter]
@@ -22712,8 +23023,22 @@ impl PyPeriodIndex {
             .map_err(index_error_to_py)
     }
 
-    fn to_numpy(&self) -> Vec<String> {
-        self.inner.values().iter().map(|p| p.to_string()).collect()
+    /// pandas' `to_numpy(dtype=None, copy=False, na_value=...)`: an object
+    /// array of its Periods (it was a list of their text;
+    /// br-frankenpandas-n3ktr), `na_value` in the NaT slots, then `dtype`.
+    #[pyo3(signature = (dtype=None, copy=false, na_value=None))]
+    fn to_numpy<'py>(
+        &self,
+        py: Python<'py>,
+        dtype: Option<&Bound<'py, PyAny>>,
+        copy: bool,
+        na_value: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let _ = copy;
+        let missing = na_value
+            .map(|_| labels_missing_ndarray(py, self.inner.values().iter().map(Period::is_nat)))
+            .transpose()?;
+        finish_to_numpy(self.values(py)?, missing, dtype, na_value)
     }
 
     fn transpose(&self) -> Self {
@@ -22746,8 +23071,18 @@ impl PyPeriodIndex {
     }
 
     #[pyo3(signature = (cond, other=None))]
-    fn r#where(&self, cond: Vec<bool>, other: Option<&Bound<'_, PyAny>>) -> PyResult<PyIndex> {
-        self.as_py_index().r#where(cond, other)
+    /// pandas' `where`: this index's class while the labels fit it, NaT
+    /// where a typed index's label is replaced by nothing, in its zone (a
+    /// plain Index; br-frankenpandas-n3ktr).
+    fn r#where(
+        &self,
+        py: Python<'_>,
+        cond: Vec<bool>,
+        other: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let index = self.as_py_index();
+        let zone = index.inner.tz().map(str::to_owned);
+        typed_index_result(py, index.r#where(cond, other)?.inner, zone.as_deref())
     }
 }
 
@@ -23113,13 +23448,21 @@ impl PyCategoricalIndex {
                     i += indices.step;
                 }
             }
+            // A slice keeps the name, as pandas' (it was dropped; n3ktr).
             let out = CategoricalIndex::with_categories(
                 sliced,
                 self.inner.categories().to_vec(),
                 self.inner.ordered(),
             )
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+            .set_names(self.inner.name().cloned());
             return Py::new(py, PyCategoricalIndex { inner: out })?
+                .into_any()
+                .into_py_any(py);
+        }
+        if let Some((positions, _)) = positions_key(item, self.inner.len())? {
+            let inner = self.inner.take(&positions).map_err(index_error_to_py)?;
+            return Py::new(py, PyCategoricalIndex { inner })?
                 .into_any()
                 .into_py_any(py);
         }
@@ -23213,32 +23556,61 @@ impl PyCategoricalIndex {
         false
     }
 
-    pub fn union(&self, other: IndexArg) -> PyIndex {
-        let other = other.named_like(self.inner.name());
-        PyIndex {
-            inner: self.named_index().union(&other.inner),
-        }
+    /// pandas' `union(other, sort=None)`, as an Index answers it, of this
+    /// index's class while the labels fit it (an object Index;
+    /// br-frankenpandas-n3ktr).
+    #[pyo3(signature = (other, sort=None))]
+    pub fn union(
+        &self,
+        py: Python<'_>,
+        other: IndexArg,
+        sort: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let plain = PyIndex {
+            inner: self.named_index(),
+        };
+        categorical_result(py, &self.inner, plain.union(other, sort).inner)
     }
 
-    pub fn intersection(&self, other: IndexArg) -> PyIndex {
-        let other = other.named_like(self.inner.name());
-        PyIndex {
-            inner: self.named_index().intersection(&other.inner),
-        }
+    #[pyo3(signature = (other, sort=Some(false)))]
+    pub fn intersection(
+        &self,
+        py: Python<'_>,
+        other: IndexArg,
+        sort: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let plain = PyIndex {
+            inner: self.named_index(),
+        };
+        categorical_result(py, &self.inner, plain.intersection(other, sort).inner)
     }
 
-    pub fn difference(&self, other: IndexArg) -> PyIndex {
-        let other = other.named_like(self.inner.name());
-        PyIndex {
-            inner: self.named_index().difference(&other.inner),
-        }
+    #[pyo3(signature = (other, sort=None))]
+    pub fn difference(
+        &self,
+        py: Python<'_>,
+        other: IndexArg,
+        sort: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let plain = PyIndex {
+            inner: self.named_index(),
+        };
+        categorical_result(py, &self.inner, plain.difference(other, sort).inner)
     }
 
-    pub fn symmetric_difference(&self, other: IndexArg) -> PyIndex {
-        let other = other.named_like(self.inner.name());
-        PyIndex {
-            inner: self.named_index().symmetric_difference(&other.inner),
-        }
+    #[pyo3(signature = (other, result_name=None, sort=None))]
+    pub fn symmetric_difference(
+        &self,
+        py: Python<'_>,
+        other: IndexArg,
+        result_name: Option<&Bound<'_, PyAny>>,
+        sort: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        let plain = PyIndex {
+            inner: self.named_index(),
+        };
+        let out = plain.symmetric_difference(other, result_name, sort)?;
+        categorical_result(py, &self.inner, out.inner)
     }
 
     pub fn get_loc(&self, key: &Bound<'_, PyAny>) -> PyResult<usize> {
@@ -23536,7 +23908,9 @@ impl PyCategoricalIndex {
         self.as_py_index().any()
     }
 
-    fn append(&self, other: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+    /// pandas' `append`: a CategoricalIndex while the labels are among its
+    /// categories (a plain Index; br-frankenpandas-n3ktr).
+    fn append(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let other_idx = if let Ok(ci) = other.extract::<PyRef<'_, PyCategoricalIndex>>() {
             ci.inner.to_index()
         } else if let Ok(idx) = plain_index_ref(other) {
@@ -23544,9 +23918,7 @@ impl PyCategoricalIndex {
         } else {
             PyIndex::new(Some(other), None)?.inner
         };
-        Ok(PyIndex {
-            inner: self.inner.to_index().append(&other_idx),
-        })
+        categorical_result(py, &self.inner, self.inner.to_index().append(&other_idx))
     }
 
     #[pyo3(signature = (axis=None, skipna=true))]
@@ -23606,11 +23978,15 @@ impl PyCategoricalIndex {
     }
 
     fn astype(&self, dtype: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
+        if is_object_dtype_arg(dtype) {
+            return Ok(object_declared_index(&self.as_py_index().inner));
+        }
         self.as_py_index().astype_name(&index_astype_name(dtype)?)
     }
 
-    fn delete(&self, loc: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
-        self.as_py_index().delete(loc)
+    /// pandas' `delete`: a CategoricalIndex (a plain Index; n3ktr).
+    fn delete(&self, py: Python<'_>, loc: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        categorical_result(py, &self.inner, self.as_py_index().delete(loc)?.inner)
     }
 
     /// pandas refuses a categorical's diff whatever the periods, with this
@@ -23644,9 +24020,17 @@ impl PyCategoricalIndex {
         Ok(self.inner.duplicated(k).into())
     }
 
+    /// pandas' `factorize`: its uniques a CategoricalIndex of its categories
+    /// (a plain Index; br-frankenpandas-n3ktr).
     #[pyo3(signature = (sort=false, use_na_sentinel=true))]
-    fn factorize(&self, sort: bool, use_na_sentinel: bool) -> PyResult<(IndexerArray, PyIndex)> {
-        self.as_py_index().factorize(sort, use_na_sentinel)
+    fn factorize(
+        &self,
+        py: Python<'_>,
+        sort: bool,
+        use_na_sentinel: bool,
+    ) -> PyResult<(IndexerArray, Py<PyAny>)> {
+        let (codes, uniques) = self.as_py_index().factorize(sort, use_na_sentinel)?;
+        Ok((codes, categorical_result(py, &self.inner, uniques.inner)?))
     }
 
     #[pyo3(signature = (name=false, formatter=None, na_rep="NaN"))]
@@ -23695,8 +24079,11 @@ impl PyCategoricalIndex {
         self.clone()
     }
 
-    fn insert(&self, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
-        self.as_py_index().insert_label(loc, item)
+    /// pandas' `insert`: a CategoricalIndex while the item is a category (a
+    /// plain Index; br-frankenpandas-n3ktr).
+    fn insert(&self, py: Python<'_>, loc: usize, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let inserted = self.as_py_index().insert_label(loc, item)?;
+        categorical_result(py, &self.inner, inserted.inner)
     }
 
     fn is_(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -23791,7 +24178,7 @@ impl PyCategoricalIndex {
         level: Option<usize>,
         limit: Option<usize>,
         tolerance: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<(PyIndex, Vec<i64>)> {
+    ) -> PyResult<(Py<PyAny>, Option<IndexerArray>)> {
         self.as_py_index()
             .reindex(target, method, level, limit, tolerance)
     }
@@ -23995,8 +24382,17 @@ impl PyCategoricalIndex {
     }
 
     #[pyo3(signature = (cond, other=None))]
-    fn r#where(&self, cond: Vec<bool>, other: Option<&Bound<'_, PyAny>>) -> PyResult<PyIndex> {
-        self.as_py_index().r#where(cond, other)
+    /// pandas' `where`: this index's class while the labels fit it, NaT
+    /// where a typed index's label is replaced by nothing, in its zone (a
+    /// plain Index; br-frankenpandas-n3ktr).
+    fn r#where(
+        &self,
+        py: Python<'_>,
+        cond: Vec<bool>,
+        other: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let kept = self.as_py_index().r#where(cond, other)?;
+        categorical_result(py, &self.inner, kept.inner)
     }
 }
 
@@ -38660,6 +39056,18 @@ fn object_ndarray<'py>(
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "object")?;
     let array = np.call_method("empty", (items.len(),), Some(&kwargs))?;
+    array.set_item(pyo3::types::PySlice::full(py), PyList::new(py, items)?)?;
+    Ok(array)
+}
+
+/// An object numpy array of the Python objects `items`, filled through a
+/// slice as [`object_ndarray`] fills one.
+fn py_objects_ndarray(py: Python<'_>, items: Vec<Py<PyAny>>) -> PyResult<Bound<'_, PyAny>> {
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "object")?;
+    let array = py
+        .import("numpy")?
+        .call_method("empty", (items.len(),), Some(&kwargs))?;
     array.set_item(pyo3::types::PySlice::full(py), PyList::new(py, items)?)?;
     Ok(array)
 }
@@ -77570,6 +77978,19 @@ fn categorical_with_dtype(series: &Series, dtype: &Bound<'_, PyAny>) -> PyResult
 /// A typed index's `astype(dtype)` argument as `astype_name` reads it: a
 /// name as given, the `str` type as 'str', any other type or dtype by its
 /// pandas name (a type raised TypeError: 'type' object is not a 'str').
+/// pandas' `astype(object)` of a typed index: its labels as the objects
+/// they are - Timestamps (in the index's zone), Timedeltas, Periods, a
+/// category's values - in an object Index; they became their text
+/// (br-frankenpandas-n3ktr).
+fn object_declared_index(index: &Index) -> PyIndex {
+    PyIndex {
+        inner: index
+            .clone()
+            .with_range_span(None)
+            .with_declared_dtype(Some(fp_index::DeclaredDtype::Object)),
+    }
+}
+
 fn index_astype_name(dtype: &Bound<'_, PyAny>) -> PyResult<String> {
     if let Ok(name) = dtype.extract::<String>() {
         return Ok(name);
@@ -82055,10 +82476,10 @@ fn isna(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
             .unbind())
     };
     if let Ok(dti) = obj.extract::<PyRef<'_, PyDatetimeIndex>>() {
-        return as_array(dti.isna());
+        return as_array(dti.inner.isna());
     }
     if let Ok(tdi) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
-        return as_array(tdi.isna());
+        return as_array(tdi.inner.isna());
     }
     if let Ok(pi) = obj.extract::<PyRef<'_, PyPeriodIndex>>() {
         let mask: Vec<bool> = (0..pi.inner.len())
@@ -95124,6 +95545,29 @@ fn take_bounds(indices: &[i64], len: usize) -> PyResult<()> {
 /// `take` positions over `len` rows, negative from the end, as numpy reads
 /// them; one out of range is its IndexError.
 #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // checked into 0..len first
+/// The positions an index key picks from `len` labels - a boolean mask (and
+/// whether its picks are one run, which keeps a freq), or (signed) integer
+/// positions - as pandas' `Index.__getitem__`; `None` for any other key.
+/// TimedeltaIndex, PeriodIndex and CategoricalIndex raised TypeError for
+/// them (br-frankenpandas-n3ktr).
+fn positions_key(key: &Bound<'_, PyAny>, len: usize) -> PyResult<Option<(Vec<usize>, bool)>> {
+    if let Some(mask) = bool_mask_key(key) {
+        if mask.len() != len {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                "boolean index did not match indexed array along axis 0; size of axis is {len} but size of corresponding boolean axis is {}",
+                mask.len()
+            )));
+        }
+        let positions: Vec<usize> = (0..len).filter(|&at| mask[at]).collect();
+        let run = positions.windows(2).all(|pair| pair[1] == pair[0] + 1);
+        return Ok(Some((positions, run)));
+    }
+    if let Ok(Positions(requested)) = key.extract::<Positions>() {
+        return Ok(Some((take_positions(requested, len)?, false)));
+    }
+    Ok(None)
+}
+
 fn take_positions(indices: Vec<i64>, len: usize) -> PyResult<Vec<usize>> {
     let length = i64::try_from(len).unwrap_or(i64::MAX);
     // The bounds in one pass, then each negative position wrapped without a
@@ -99401,8 +99845,8 @@ mod tests {
         // test_typed_datetime_index_like_pandas_lsn8d): the instants it holds.
         assert_eq!(dti.inner.asi8(), vec![nanos1, nanos2]);
         assert_eq!(dti.nunique(), 2);
-        assert_eq!(dti.isna(), vec![false, false]);
-        assert_eq!(dti.notna(), vec![true, true]);
+        assert_eq!(dti.isna().0, vec![false, false]);
+        assert_eq!(dti.notna().0, vec![true, true]);
         Python::initialize();
         Python::attach(|py| {
             let values = PyList::new(py, [nanos1]).expect("list");

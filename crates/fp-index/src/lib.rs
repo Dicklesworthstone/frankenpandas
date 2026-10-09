@@ -13377,7 +13377,14 @@ impl PeriodIndex {
     /// among them), or None for any other label (45fzr).
     #[must_use]
     pub fn from_index(index: &Index) -> Option<Self> {
-        let mut freq = None;
+        // A missing label is the NaT period of the periods' freq, as pandas'
+        // PeriodIndex holds one (a where / insert / reindex over one was an
+        // object Index; br-frankenpandas-n3ktr); no period at all is none.
+        let mut freq = index.labels().iter().find_map(|label| match label {
+            IndexLabel::Period(period) => Some(period.freq),
+            _ => None,
+        });
+        let nat = Period::new(i64::MIN, freq?);
         let values = index
             .labels()
             .iter()
@@ -13386,6 +13393,7 @@ impl PeriodIndex {
                     freq = Some(period.freq);
                     Some(*period)
                 }
+                label if label.is_missing() => Some(nat),
                 _ => None,
             })
             .collect::<Option<Vec<_>>>()?;
