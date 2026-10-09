@@ -12838,8 +12838,7 @@ def test_from_records_index_field_like_pandas(case: str) -> None:
 
 # br-frankenpandas-05cm6: value_counts(dropna=False) of a nullable Series
 # labelled the missing value None; pandas' label is pd.NA itself (printed
-# <NA>). [ns] the index dtype: pandas' is the masked Int64, fp's object - fp
-# has no masked Index dtype yet (05cm6 stays open for it).
+# <NA>), under the masked index dtype (test_masked_indexes_keep_their_dtype_*).
 _NA_LABEL_CASES = {
     "Int64 value_counts": lambda m: repr(m.Series([1, None, 1], dtype="Int64").value_counts(dropna=False)),
     "Int64 value_counts NA label is pd.NA": lambda m: m.Series([1, None], dtype="Int64").value_counts(dropna=False).index[-1] is m.NA,
@@ -34331,5 +34330,228 @@ def test_object_index_argsort_like_pandas_n3ktr(case: str) -> None:
             return [int(x) for x in _N3KTRSORT_CASES[case](m).argsort()]
         except TypeError as error:
             return ("TypeError", str(error))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-vqjvd: an index of a narrow numpy array (int8 ... uint64,
+# float32) keeps that dtype - built, taken, sliced, repeated, its values /
+# to_numpy, astype to another width (astype('int64') leaves it) - and a
+# narrow column's set_index / value_counts / groupby keys label by it, a
+# reset_index giving the column back at its width; DatetimeIndex.year's
+# values are int32. NEGATIVE: int64 / float64 indexes and keys answer as
+# before in every row but an astype to a narrow width (which was refused);
+# a field over NaT is float64.
+_VQJVD_WIDTHS = ["int8", "int16", "int32", "uint8", "uint16", "uint32", "uint64", "float32"]
+
+
+def _vqjvd_values(width: str) -> Any:
+    if width == "float32":
+        return np.array([2.5, -1.25, 0.1, 2.5], dtype="float32")
+    if width.startswith("u"):
+        return np.array([7, 3, 250, 7], dtype=width)
+    return np.array([7, -3, 100, 7], dtype=width)
+
+
+_VQJVD_OPS = {
+    "Index": lambda m, w: m.Index(_vqjvd_values(w), name="k"),
+    "values": lambda m, w: m.Index(_vqjvd_values(w)).values,
+    "to_numpy": lambda m, w: m.Index(_vqjvd_values(w)).to_numpy(),
+    "take": lambda m, w: m.Index(_vqjvd_values(w)).take(np.array([3, 0])),
+    "[::-1]": lambda m, w: m.Index(_vqjvd_values(w))[::-1],
+    "[1:3]": lambda m, w: m.Index(_vqjvd_values(w))[1:3],
+    "repeat": lambda m, w: m.Index(_vqjvd_values(w)).repeat(2),
+    "astype int64": lambda m, w: m.Index(_vqjvd_values(w)).astype("int64"),
+    "astype int16": lambda m, w: m.Index(_vqjvd_values(w)).astype("int16"),
+    "astype float32": lambda m, w: m.Index(_vqjvd_values(w)).astype("float32"),
+    "empty": lambda m, w: m.Index(np.array([], dtype=w)),
+    "value_counts": lambda m, w: m.Series(_vqjvd_values(w)).value_counts().index,
+    "set_index": lambda m, w: m.DataFrame({"k": _vqjvd_values(w), "v": [1.0, 2.0, 3.0, 4.0]}).set_index("k").index,
+    "reset_index": lambda m, w: m.DataFrame({"k": _vqjvd_values(w), "v": [1.0, 2.0, 3.0, 4.0]}).set_index("k").reset_index()["k"],
+    "groupby keys": lambda m, w: m.DataFrame({"k": _vqjvd_values(w), "v": [1.0, 2.0, 3.0, 4.0]}).groupby("k").sum().index,
+    "delete": lambda m, w: m.Index(_vqjvd_values(w), name="k").delete(1),
+    "insert 5": lambda m, w: m.Index(_vqjvd_values(w)).insert(1, 5),
+    "insert 300": lambda m, w: m.Index(_vqjvd_values(w)).insert(1, 300),
+    "insert -1": lambda m, w: m.Index(_vqjvd_values(w)).insert(1, -1),
+    "insert 2**40": lambda m, w: m.Index(_vqjvd_values(w)).insert(1, 2**40),
+    "insert 2.5": lambda m, w: m.Index(_vqjvd_values(w)).insert(1, 2.5),
+    "insert None": lambda m, w: m.Index(_vqjvd_values(w)).insert(1, None),
+    "insert True (NEGATIVE: object)": lambda m, w: m.Index(_vqjvd_values(w)).insert(1, True),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("width", [*_VQJVD_WIDTHS, "int64", "float64"])
+@pytest.mark.parametrize("op", list(_VQJVD_OPS))
+def test_narrow_indexes_keep_their_width_like_pandas_vqjvd(op: str, width: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _VQJVD_OPS[op](m, width)
+        except (TypeError, ValueError, OverflowError) as error:
+            return ("raise", type(error).__name__)
+        # A numpy dtype object, not only its name (an alias numpy's
+        # promotion picks - uint64 as 'Q' or 'L' - compares equal).
+        return (
+            str(out.dtype),
+            isinstance(out.dtype, np.dtype),
+            [repr(x) for x in out.tolist()],
+            getattr(out, "name", None),
+        )
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_datetime_fields_are_int32_arrays_like_pandas_vqjvd() -> None:
+    def run(m: Any) -> Any:
+        year = m.DatetimeIndex(["2024-01-01", "2025-06-01"]).year
+        cast = year.astype("int64")
+        # NEGATIVE: a field over NaT is float64.
+        gappy = m.DatetimeIndex(["2024-01-01", None]).year
+        return (str(year.values.dtype), str(year.to_numpy().dtype), str(cast.dtype), str(gappy.dtype))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-05cm6 / spwrr: an Index under a masked extension dtype
+# (Int64, Int32, UInt8, Float64, Float32, boolean) - built with dtype=,
+# taken, sliced, its repr, values (the masked array), iteration (numpy
+# scalars, NA), to_numpy, isna, unique, astype - and a masked column's
+# value_counts / set_index / groupby keys label by it, reset_index giving
+# the masked column back (an Int64 one came back float64). NEGATIVE: an
+# int64 / float64 / bool index answers as before; a fraction to Int64 and
+# a number to boolean are refused.
+_05CM6M_DATA = {
+    "Int64": [3, None, 1, 3],
+    "Int32": [3, None, 1, 3],
+    "UInt8": [3, None, 1, 3],
+    "Float64": [2.5, None, -1.0, 2.5],
+    "Float32": [2.5, None, -1.0, 2.5],
+    "boolean": [True, None, False, True],
+    "int64 (NEGATIVE)": [3, 2, 1, 3],
+    "float64 (NEGATIVE)": [2.5, None, -1.0, 2.5],
+    "bool (NEGATIVE)": [True, False, False, True],
+}
+
+
+def _05cm6m_index(m: Any, kind: str) -> Any:
+    return m.Index(_05CM6M_DATA[kind], dtype=kind.split(" ")[0])
+
+
+def _05cm6m_frame(m: Any, kind: str) -> Any:
+    keys = m.Series(_05CM6M_DATA[kind], dtype=kind.split(" ")[0])
+    return m.DataFrame({"k": keys, "v": [1, 2, 3, 4]})
+
+
+_05CM6M_OPS = {
+    "Index": lambda m, k: _05cm6m_index(m, k),
+    "repr": lambda m, k: repr(_05cm6m_index(m, k)),
+    "values class": lambda m, k: type(_05cm6m_index(m, k).values).__name__,
+    "to_numpy": lambda m, k: _05cm6m_index(m, k).to_numpy(),
+    "tolist": lambda m, k: _05cm6m_index(m, k).tolist(),
+    "[1]": lambda m, k: _05cm6m_index(m, k)[1],
+    "[0]": lambda m, k: _05cm6m_index(m, k)[0],
+    "take": lambda m, k: _05cm6m_index(m, k).take([3, 1]),
+    "[::-1]": lambda m, k: _05cm6m_index(m, k)[::-1],
+    "isna": lambda m, k: list(_05cm6m_index(m, k).isna()),
+    "unique": lambda m, k: _05cm6m_index(m, k).unique(),
+    "value_counts": lambda m, k: m.Series(_05CM6M_DATA[k], dtype=k.split(" ")[0]).value_counts().index,
+    "value_counts dropna=False": lambda m, k: m.Series(_05CM6M_DATA[k], dtype=k.split(" ")[0]).value_counts(dropna=False).index,
+    "set_index": lambda m, k: _05cm6m_frame(m, k).set_index("k").index,
+    "reset_index": lambda m, k: _05cm6m_frame(m, k).set_index("k").reset_index()["k"],
+    "groupby keys": lambda m, k: _05cm6m_frame(m, k).groupby("k").sum().index,
+    "astype float64": lambda m, k: _05cm6m_index(m, k).astype("float64"),
+    "astype Int64 of a fraction (NEGATIVE)": lambda m, k: m.Index([0.5, 1.0]).astype("Int64"),
+    "astype boolean of ints (NEGATIVE)": lambda m, k: m.Index([3, 1]).astype("boolean"),
+}
+
+
+def _05cm6m_shown(value: Any) -> Any:
+    if isinstance(value, (str, list, bool)) or value is None:
+        return [f"{type(x).__name__}:{x!r}" for x in value] if isinstance(value, list) else repr(value)
+    if hasattr(value, "dtype") and hasattr(value, "__iter__"):
+        return (type(value).__name__, str(value.dtype), [f"{type(x).__name__}:{x!r}" for x in value])
+    return f"{type(value).__name__}:{value!r}"
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", list(_05CM6M_DATA))
+@pytest.mark.parametrize("op", list(_05CM6M_OPS))
+def test_masked_indexes_keep_their_dtype_like_pandas_05cm6(op: str, kind: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _05cm6m_shown(_05CM6M_OPS[op](m, kind))
+        except (TypeError, ValueError) as error:
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a plain int64 Index's slices are views (a run, a
+# step of either sign), unique / duplicated answer from the cached
+# uniqueness, min / max from the ints, drop filters the ints, argsort sorts
+# the ints, to_series / to_frame build the column from the ints (an int32
+# index's at int32, a DatetimeIndex's from its instants) - with pandas'
+# answers; an object index of ints stays object (its to_series / drop came
+# back int64). NEGATIVE: an index holding duplicates, a text index, ties in
+# argsort and a label drop cannot find take the paths they took.
+_E186MIDX_INTS = np.array([5, -3, 9, 0, 7, 2, -8, 4], dtype="int64")
+_E186MIDX_KINDS = {
+    "ints": lambda m: m.Index(_E186MIDX_INTS, name="k"),
+    "int32": lambda m: m.Index(_E186MIDX_INTS.astype("int32"), name="k"),
+    "repeats (NEGATIVE)": lambda m: m.Index(np.array([3, 1, 3, 2, 1, 3, 0, 2])),
+    "text (NEGATIVE)": lambda m: m.Index([f"t{i}" for i in (5, 3, 9, 0, 7, 2, 8, 4)]),
+    "object ints": lambda m: m.Index([int(x) for x in _E186MIDX_INTS], dtype=object),
+}
+_E186MIDX_OPS = {
+    "[2:6]": lambda i: i[2:6],
+    "[::2]": lambda i: i[::2],
+    "[::-1]": lambda i: i[::-1],
+    "[6:1:-2]": lambda i: i[6:1:-2],
+    "[5:5]": lambda i: i[5:5],
+    "unique": lambda i: i.unique(),
+    "duplicated": lambda i: list(i.duplicated()),
+    "duplicated keep=False": lambda i: list(i.duplicated(keep=False)),
+    "min": lambda i: i.min(),
+    "max": lambda i: i.max(),
+    "argsort": lambda i: [int(x) for x in i.argsort()],
+    "drop first two": lambda i: i.drop(list(i[:2])),
+    "drop a missing label (NEGATIVE)": lambda i: i.drop([12345]),
+    "drop missing, ignore": lambda i: i.drop([12345, i[0]], errors="ignore"),
+    "to_series": lambda i: i.to_series(),
+    "to_frame": lambda i: i.to_frame(),
+}
+
+
+def _e186midx_shown(value: Any) -> Any:
+    if hasattr(value, "columns"):
+        return ("frame", [str(t) for t in value.dtypes], repr(value.to_dict("list")), list(value.index))
+    if hasattr(value, "index") and hasattr(value, "dtype"):
+        return ("series", str(value.dtype), value.name, repr(value.tolist()), list(value.index))
+    if hasattr(value, "dtype") and hasattr(value, "tolist"):
+        return (type(value).__name__, str(value.dtype), getattr(value, "name", None), repr(value.tolist()))
+    return f"{type(value).__name__}:{value!r}"
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", list(_E186MIDX_KINDS))
+@pytest.mark.parametrize("op", list(_E186MIDX_OPS))
+def test_int64_index_typed_paths_like_pandas_e186m(op: str, kind: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _e186midx_shown(_E186MIDX_OPS[op](_E186MIDX_KINDS[kind](m)))
+        except (KeyError, TypeError, ValueError) as error:
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_datetime_index_to_series_like_pandas_e186m() -> None:
+    def run(m: Any) -> Any:
+        stamps = np.array(["2024-01-01T00:00", "NaT", "2024-03-01T12:30"], dtype="datetime64[ns]")
+        naive = m.DatetimeIndex(stamps, name="t").to_series()
+        zoned = m.DatetimeIndex(stamps).tz_localize("UTC").tz_convert("Asia/Tokyo").to_series()
+        return [(str(s.dtype), s.name, [str(x) for x in s.tolist()]) for s in (naive, zoned)]
 
     assert run(fpd) == run(pd)

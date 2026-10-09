@@ -574,11 +574,24 @@ fn index_dtype_object<'py>(
     name: &str,
     categories: Option<(Vec<Scalar>, bool)>,
 ) -> PyResult<Bound<'py, PyAny>> {
+    // numpy's dtype for numpy's types, every narrow width among them (an
+    // int8 index's dtype was the string 'int8'; br-frankenpandas-vqjvd).
     if matches!(
         name,
-        "int64" | "int32" | "float64" | "bool" | "object" | "datetime64[ns]" | "timedelta64[ns]"
-    ) {
+        "int64" | "float64" | "bool" | "object" | "datetime64[ns]" | "timedelta64[ns]"
+    ) || NumericWidth::parse(name).is_some_and(|(_, nullable)| !nullable)
+    {
         return py.import("numpy")?.call_method1("dtype", (name,));
+    }
+    // A masked index's extension dtype (pd.Int64Dtype() ...;
+    // br-frankenpandas-05cm6).
+    if let Some(masked) = fp_index::MaskedDtype::of_name(name) {
+        return match masked {
+            fp_index::MaskedDtype::Int64 => PyInt64Dtype.into_bound_py_any(py),
+            fp_index::MaskedDtype::Float64 => PyFloat64Dtype.into_bound_py_any(py),
+            fp_index::MaskedDtype::Boolean => PyBooleanDtype.into_bound_py_any(py),
+            fp_index::MaskedDtype::Width(width) => masked_width_dtype(py, width),
+        };
     }
     if let Some(zone) = name
         .strip_prefix("datetime64[ns, ")
@@ -1690,6 +1703,31 @@ fn pandas_column_label_texts(labels: &[IndexLabel]) -> Vec<String> {
 /// they printed each at its own, and ints beside floats as ints -
 /// br-frankenpandas-0jg0l); anything else label by label.
 #[allow(clippy::cast_precision_loss)] // pandas' float Index holds the ints as floats
+/// [`pandas_label_texts`] of `labels`, rows of `index`: a masked index's
+/// missing label prints `<NA>`, its values as their own (it printed None;
+/// br-frankenpandas-05cm6).
+fn pandas_index_label_texts(index: &Index, labels: &[IndexLabel]) -> Vec<String> {
+    if index.masked().is_none() || !labels.iter().any(IndexLabel::is_missing) {
+        return pandas_label_texts(labels, index.tz());
+    }
+    let present: Vec<IndexLabel> = labels
+        .iter()
+        .filter(|label| !label.is_missing())
+        .cloned()
+        .collect();
+    let mut texts = pandas_label_texts(&present, None).into_iter();
+    labels
+        .iter()
+        .map(|label| {
+            if label.is_missing() {
+                "<NA>".to_owned()
+            } else {
+                texts.next().unwrap_or_default()
+            }
+        })
+        .collect()
+}
+
 fn pandas_label_texts(labels: &[IndexLabel], zone: Option<&str>) -> Vec<String> {
     let all = |test: fn(&IndexLabel) -> bool| !labels.is_empty() && labels.iter().all(test);
     if all(|label| matches!(label, IndexLabel::Int64(_))) {
@@ -2230,7 +2268,7 @@ fn pandas_series_text(
                 .map(|&row| index.labels()[row].clone())
                 .collect();
             (
-                pandas_label_texts(&shown, index.tz()),
+                pandas_index_label_texts(index, &shown),
                 index.name().map(String::from),
             )
         }
@@ -2667,7 +2705,7 @@ fn pandas_html(
     }
     let index_texts = match style.index_cells.clone() {
         Some(texts) => texts,
-        None => pandas_label_texts(frame.index().labels(), frame.index().tz()),
+        None => pandas_index_label_texts(frame.index(), frame.index().labels()),
     };
     let columns: Vec<Vec<String>> = (0..width)
         .map(|position| {
@@ -2714,7 +2752,7 @@ fn pandas_frame_text(
         let labels = frame
             .row_multiindex()
             .and_then(pandas_multiindex_tuples)
-            .unwrap_or_else(|| pandas_label_texts(frame.index().labels(), frame.index().tz()));
+            .unwrap_or_else(|| pandas_index_label_texts(frame.index(), frame.index().labels()));
         let names = column_multi
             .and_then(pandas_multiindex_tuples)
             .unwrap_or_else(|| columns.iter().map(|(name, _)| name.clone()).collect());
@@ -9059,14 +9097,9 @@ fn typed_index_of(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
     // is int64; it was object, having no label to show a type;
     // br-frankenpandas-ce86r).
     if flat && data.len()? == 0 {
-        let declared = match dtype_name.as_str() {
-            "int64" => fp_index::DeclaredDtype::Int64,
-            "int32" => fp_index::DeclaredDtype::Int32,
-            "float64" => fp_index::DeclaredDtype::Float64,
-            "bool" => fp_index::DeclaredDtype::Bool,
-            "datetime64[ns]" => fp_index::DeclaredDtype::Datetime64,
-            "timedelta64[ns]" => fp_index::DeclaredDtype::Timedelta64,
-            _ => return Ok(None),
+        let declared = match fp_index::DeclaredDtype::of_name(&dtype_name) {
+            Some(fp_index::DeclaredDtype::Object) | None => return Ok(None),
+            Some(declared) => declared,
         };
         return Ok(Some(
             Index::new(Vec::new()).with_declared_dtype(Some(declared)),
@@ -9091,15 +9124,43 @@ fn typed_index_of(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
             Index::from_timedelta64_values(nanos)
         }));
     }
-    let int64 = dtype_name == "int64";
     let native = dtype.getattr("isnative")?.extract::<bool>()?;
-    if !(int64 && native && flat) {
+    if !(native && flat) {
         return Ok(None);
     }
-    Ok(Some(Index::from_i64_values(ndarray_elements::<i64>(
-        data.py(),
-        data,
-    )?)))
+    if dtype_name == "int64" {
+        return Ok(Some(Index::from_i64_values(ndarray_elements::<i64>(
+            data.py(),
+            data,
+        )?)));
+    }
+    // A narrower numpy array (int8 ... uint64, float32) is an index of its
+    // values under that width, as pandas' (it read the values one by one
+    // and came back int64 / float64; br-frankenpandas-vqjvd). A uint64
+    // past the int64 storage takes the generic path.
+    let Some((width, false)) = NumericWidth::parse(&dtype_name) else {
+        return Ok(None);
+    };
+    let index = if width.is_float() {
+        let floats = ndarray_elements::<f32>(data.py(), data)?;
+        Index::new(
+            floats
+                .into_iter()
+                .map(|value| IndexLabel::Float64(OrderedF64(f64::from(value))))
+                .collect(),
+        )
+    } else {
+        match narrow_ndarray_column(data.py(), data, width)
+            .ok()
+            .and_then(|column| column.as_i64_slice().map(<[i64]>::to_vec))
+        {
+            Some(ints) => Index::from_i64_values(ints),
+            None => return Ok(None),
+        }
+    };
+    Ok(Some(index.with_declared_dtype(Some(
+        fp_index::DeclaredDtype::Width(width),
+    ))))
 }
 
 /// The nanoseconds of a one-dimensional timedelta64 numpy array of any unit,
@@ -10517,6 +10578,19 @@ fn index_extreme(
     skipna: bool,
 ) -> PyResult<Py<PyAny>> {
     one_dim_axis(axis)?;
+    // A typed int64 index answers from its values, none missing (each label
+    // was made and compared: idx.min() 4.7 ms a million, pandas 0.12;
+    // br-frankenpandas-e186m).
+    if index.masked().is_none()
+        && let Some(values) = index.cached_int64_label_values().flatten()
+        && let Some(&best) = if largest {
+            values.iter().max()
+        } else {
+            values.iter().min()
+        }
+    {
+        return index_scalar_to_py(py, index, &IndexLabel::Int64(best));
+    }
     let labels = index.labels();
     let present: Vec<&IndexLabel> = labels.iter().filter(|label| !label.is_missing()).collect();
     let nan = || pyo3::types::PyFloat::new(py, f64::NAN).into_any().unbind();
@@ -10611,6 +10685,27 @@ fn index_arg_extreme(
 }
 
 fn index_scalar_to_py(py: Python<'_>, index: &Index, label: &IndexLabel) -> PyResult<Py<PyAny>> {
+    // An object index holds Python objects: its label is the object itself
+    // (an int under dtype=object was a numpy int64; br-frankenpandas-e186m).
+    if index.declared_dtype() == Some(fp_index::DeclaredDtype::Object) {
+        return index_label_to_py(py, label);
+    }
+    // A masked index's label is its array's element: a numpy scalar of its
+    // width, NA where missing (br-frankenpandas-05cm6).
+    if let Some(masked) = index.masked() {
+        let scalar = match label {
+            _ if label.is_missing() => return na_object(py),
+            IndexLabel::Int64(value) => Scalar::Int64(*value),
+            IndexLabel::Float64(value) => Scalar::Float64(value.0),
+            IndexLabel::Bool(value) => Scalar::Bool(*value),
+            other => return index_label_to_py(py, other),
+        };
+        let width = match masked {
+            fp_index::MaskedDtype::Width(width) => Some(width),
+            _ => None,
+        };
+        return numpy_scalar_of(py, &scalar, width);
+    }
     // A bool label is numpy's bool as pandas returns it (np.True_; it was
     // Python's True; br-frankenpandas-n3ktr).
     let numeric = |label: &IndexLabel| match label {
@@ -10643,7 +10738,9 @@ fn index_scalar_to_py(py: Python<'_>, index: &Index, label: &IndexLabel) -> PyRe
     }
     match numeric(label) {
         Some(Scalar::Int64(_)) if index.range_span().is_some() => row_label_to_py(py, index, label),
-        Some(scalar) => numpy_scalar(py, &scalar),
+        // A narrow index's label is a numpy scalar of its width (np.int32;
+        // br-frankenpandas-vqjvd).
+        Some(scalar) => numpy_scalar_of(py, &scalar, index.width()),
         None => row_label_to_py(py, index, label),
     }
 }
@@ -10760,7 +10857,7 @@ fn datetime_field_index<T: Into<i64>>(values: Vec<Option<T>>) -> PyIndex {
             None => IndexLabel::Null(NullKind::NaN),
         })
         .collect();
-    let declared = (!any_nat).then_some(fp_index::DeclaredDtype::Int32);
+    let declared = (!any_nat).then_some(fp_index::DeclaredDtype::Width(NumericWidth::Int32));
     PyIndex {
         inner: Index::new(labels).with_declared_dtype(declared),
     }
@@ -12303,11 +12400,15 @@ fn pandas_get_loc(
 /// with no dtype.
 fn pandas_index_repr(py: Python<'_>, index: &Index) -> PyResult<String> {
     let dtype = index.dtype();
+    let masked = index.masked().is_some();
     let items = index
         .labels()
         .iter()
         .map(|label| -> PyResult<String> {
             Ok(match label {
+                // A masked index's missing label is pandas' <NA>
+                // (br-frankenpandas-05cm6).
+                _ if masked && label.is_missing() => "<NA>".to_owned(),
                 IndexLabel::Utf8(s) => format!(
                     "'{}'",
                     s.replace('\t', "\\t")
@@ -13078,6 +13179,25 @@ impl PyIndex {
     /// The positions ordering the labels (the period and categorical
     /// classes' argsort, and a typed index's).
     fn label_order(&self) -> IndexerArray {
+        // A typed int64 index sorts (value, position) pairs - the stable
+        // order, ties by position - where every label was made and the
+        // positions sorted through them (idx.argsort() of a million
+        // shuffled ints 144 ms, pandas 31; br-frankenpandas-e186m).
+        if let Some(values) = self.inner.cached_int64_label_values().flatten() {
+            let mut pairs: Vec<(i64, usize)> = values
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(position, value)| (value, position))
+                .collect();
+            pairs.sort_unstable();
+            return IndexerArray(
+                pairs
+                    .into_iter()
+                    .map(|(_, position)| i64::try_from(position).unwrap_or(i64::MAX))
+                    .collect(),
+            );
+        }
         let labels = self.inner.labels();
         let mut indices: Vec<usize> = (0..labels.len()).collect();
         indices.sort_by(|&a, &b| labels[a].cmp(&labels[b]));
@@ -13402,6 +13522,14 @@ impl PyIndex {
     }
 
     fn to_list(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
+        // A masked index's are its array's: Python numbers, NA where missing
+        // (br-frankenpandas-05cm6).
+        if let Some(array) = masked_index_array(py, &self.inner)? {
+            return Ok(array
+                .call_method0("tolist")?
+                .cast_into::<PyList>()?
+                .unbind());
+        }
         // An instant of a zoned index - an object index of a tz-aware one's
         // Timestamps - is its Timestamp in the zone (the naive UTC clock;
         // br-frankenpandas-n3ktr).
@@ -13434,6 +13562,11 @@ impl PyIndex {
     /// pandas' Index does - `index[i]` is a numpy scalar (x8ql1), so the
     /// sequence-protocol fallback through `__getitem__` is not.
     fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        // A masked index iterates its array: numpy scalars, NA where missing
+        // (br-frankenpandas-05cm6).
+        if let Some(array) = masked_index_array(py, &self.inner)? {
+            return Ok(array.try_iter()?.into_any().unbind());
+        }
         Ok(self.tolist(py)?.bind(py).try_iter()?.into_any().unbind())
     }
 
@@ -13502,6 +13635,20 @@ impl PyIndex {
         }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
             let s_idx = slice.indices(self.inner.len() as isize)?;
+            // A run is a view of the labels, a step of a range or typed
+            // backing reads the values it picks (both cloned a label a row:
+            // idx[100:900000] 8.9 ms a million, pandas 0.002;
+            // br-frankenpandas-e186m).
+            if let Ok(start) = usize::try_from(s_idx.start) {
+                let viewed = if s_idx.step == 1 {
+                    Some(self.inner.slice(start, s_idx.slicelength))
+                } else {
+                    self.inner.stepped(start, s_idx.step, s_idx.slicelength)
+                };
+                if let Some(inner) = viewed {
+                    return Ok(Py::new(py, PyIndex { inner })?.into_any());
+                }
+            }
             let mut sliced = Vec::new();
             let mut i = s_idx.start;
             if s_idx.step > 0 {
@@ -13591,9 +13738,13 @@ impl PyIndex {
         self.to_list(py)
     }
 
-    /// pandas' `Index.values`: a numpy array of the labels (it was a list).
+    /// pandas' `Index.values`: a numpy array of the labels (it was a list);
+    /// a masked index's masked array (br-frankenpandas-05cm6).
     #[getter]
     fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if let Some(array) = masked_index_array(py, &self.inner)? {
+            return Ok(array);
+        }
         index_ndarray(py, &self.inner)
     }
 
@@ -13608,6 +13759,17 @@ impl PyIndex {
         copy: bool,
         na_value: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        // A masked index's is its array's: its numpy dtype, an object array
+        // holding NA where a label is missing (br-frankenpandas-05cm6).
+        if let Some(array) = masked_index_array(py, &self.inner)? {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", dtype)?;
+            kwargs.set_item("copy", copy)?;
+            if let Some(na_value) = na_value {
+                kwargs.set_item("na_value", na_value)?;
+            }
+            return array.call_method("to_numpy", (), Some(&kwargs));
+        }
         let _ = copy;
         let missing = na_value
             .map(|_| {
@@ -13624,6 +13786,9 @@ impl PyIndex {
         dtype: Option<&Bound<'py, PyAny>>,
         copy: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if let Some(array) = masked_index_array(py, &self.inner)? {
+            return array.call_method1("__array__", (dtype,));
+        }
         let _ = copy;
         finish_to_numpy(index_ndarray(py, &self.inner)?, None, dtype, None)
     }
@@ -14207,11 +14372,11 @@ impl PyIndex {
             .filter(|(at, _)| !dropped.contains(at))
             .map(|(_, label)| label.clone())
             .collect();
-        let mut res = Index::new(labels);
-        if let Some(n) = self.inner.name() {
-            res = res.rename_index(Some(n));
-        }
-        Ok(PyIndex { inner: res })
+        // The name and the dtype ride along (a narrow index's was int64;
+        // br-frankenpandas-vqjvd).
+        Ok(PyIndex {
+            inner: self.inner.relabeled(labels),
+        })
     }
 
     /// pandas' `insert(loc, item)`, in the dtype holding both: an object
@@ -14248,6 +14413,44 @@ impl PyIndex {
             }
             return Ok(PyIndex { inner: inferred });
         }
+        // A narrow index keeps its width for an item it holds; an int past
+        // it takes the smallest int dtype holding the width's range and the
+        // item (int8 and 300 int16, uint8 and -1 int16), a float into an
+        // int width float64, anything numeric into float32 float32, a
+        // missing item NaN at float64 / float32 (it became object;
+        // br-frankenpandas-vqjvd).
+        if let Some(width) = self.inner.width() {
+            let target = match &label {
+                _ if label.is_missing() => {
+                    label = IndexLabel::Float64(OrderedF64(f64::NAN));
+                    Some(if width.is_float() { "float32" } else { "float64" })
+                }
+                IndexLabel::Int64(_) | IndexLabel::Float64(_) if width.is_float() => {
+                    Some("float32")
+                }
+                IndexLabel::Int64(value) if width.holds_int(*value) => Some(width.name(false)),
+                IndexLabel::Int64(value) => {
+                    let (low, high) = width.int_bounds().unwrap_or((0, 0));
+                    let (low, high) = (low.min(*value), high.max(*value));
+                    let fitted = if low < 0 {
+                        NumericWidth::smallest_signed(low, high)
+                    } else {
+                        NumericWidth::smallest_unsigned(low, high)
+                    };
+                    Some(fitted.map_or("int64", |fitted| fitted.name(false)))
+                }
+                IndexLabel::Float64(_) => Some("float64"),
+                _ => None,
+            };
+            if let Some(target) = target {
+                labels.insert(loc, label);
+                return Index::new(labels)
+                    .rename_index(self.inner.name())
+                    .astype(target)
+                    .map(|inner| PyIndex { inner })
+                    .map_err(index_error_to_py);
+            }
+        }
         let dtype = if label.is_missing() {
             label = IndexLabel::Null(NullKind::NaN);
             if matches!(own, "int64" | "int32" | "float64") {
@@ -14283,11 +14486,11 @@ impl PyIndex {
                 out.push(l.clone());
             }
         }
-        let mut res = Index::new(out);
-        if let Some(n) = self.inner.name() {
-            res = res.rename_index(Some(n));
-        }
-        Ok(PyIndex { inner: res })
+        // The name and the dtype ride along (a narrow index's repeat was
+        // int64; br-frankenpandas-vqjvd).
+        Ok(PyIndex {
+            inner: self.inner.relabeled(out),
+        })
     }
 
     /// pandas' `take(indices, axis=0, allow_fill=True, fill_value=None)`:
@@ -14391,11 +14594,15 @@ impl PyIndex {
         } else {
             vec![labels.clone()]
         };
+        // Each label found through the index's lookup and a typed int64
+        // index filtered over its values: every label was made and scanned
+        // per item (idx.drop([1, 2, 3]) 31 ms a million, pandas 0.5;
+        // br-frankenpandas-e186m). The dtype rides along with the name.
         let mut to_drop = std::collections::HashSet::new();
         let mut missing = Vec::new();
         for item in items {
             let label = py_to_index_label(&item)?;
-            if !self.inner.labels().contains(&label) {
+            if self.inner.position(&label).is_none() {
                 missing.push(item.clone());
             }
             to_drop.insert(label);
@@ -14406,17 +14613,34 @@ impl PyIndex {
                 PyList::new(labels.py(), missing)?.repr()?
             )));
         }
-        let current = self.inner.labels();
-        let kept: Vec<IndexLabel> = current
+        if let Some(values) = self.inner.cached_int64_label_values().flatten() {
+            let dropped: rustc_hash::FxHashSet<i64> = to_drop
+                .iter()
+                .filter_map(|label| match label {
+                    IndexLabel::Int64(value) => Some(*value),
+                    _ => None,
+                })
+                .collect();
+            let kept: Vec<i64> = values
+                .iter()
+                .copied()
+                .filter(|value| !dropped.contains(value))
+                .collect();
+            let inner = Index::from_i64_values(kept)
+                .with_dtype_of(&self.inner)
+                .rename_index(self.inner.name());
+            return Ok(PyIndex { inner });
+        }
+        let kept: Vec<IndexLabel> = self
+            .inner
+            .labels()
             .iter()
             .filter(|l| !to_drop.contains(l))
             .cloned()
             .collect();
-        let mut res = Index::new(kept);
-        if let Some(n) = self.inner.name() {
-            res = res.rename_index(Some(n));
-        }
-        Ok(PyIndex { inner: res })
+        Ok(PyIndex {
+            inner: self.inner.relabeled(kept),
+        })
     }
 
     /// pandas `Index.astype`: a dtype name, a Python type or a numpy/pandas
@@ -14425,6 +14649,17 @@ impl PyIndex {
     fn astype(&self, dtype: &Bound<'_, PyAny>, copy: bool) -> PyResult<Py<PyAny>> {
         let _ = copy; // pandas' copy= does not change the result
         let py = dtype.py();
+        // A narrow numpy width (int16, uint8, float32 ...) or a masked dtype
+        // (Int64, UInt8, Float32, boolean ...) is an index of that dtype (it
+        // was "data type not understood" / refused; br-frankenpandas-vqjvd,
+        // 05cm6).
+        let text = dtype_arg_text(dtype)?;
+        if let Some(masked) = fp_index::MaskedDtype::of_name(&text) {
+            return Ok(Py::new(py, self.astype_name(masked.name())?)?.into_any());
+        }
+        if let Some((width, false)) = NumericWidth::parse(&text) {
+            return Ok(Py::new(py, self.astype_name(width.name(false))?)?.into_any());
+        }
         // astype(object) keeps the values - ints stay ints in an object
         // index, declared object (the type object made them strings, the
         // name was refused; br-frankenpandas-i20vm) - while astype(str)
@@ -14765,25 +15000,7 @@ impl PyIndex {
             Some(name) => py_series_name(name)?,
             None => self.inner.name().cloned().unwrap_or_default(),
         };
-        let col = Column::from_values(
-            self.inner
-                .labels()
-                .iter()
-                .map(|l| match l {
-                    IndexLabel::Int64(i) => Scalar::Int64(*i),
-                    IndexLabel::Float64(f) => Scalar::Float64(f.0),
-                    IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
-                    IndexLabel::Bool(b) => Scalar::Bool(*b),
-                    IndexLabel::Timedelta64(t) => Scalar::Timedelta64(*t),
-                    IndexLabel::Datetime64(d) => Scalar::Datetime64(*d),
-                    IndexLabel::Object(object) => Scalar::Object(object.clone()),
-                    IndexLabel::Period(period) => Scalar::Period(*period),
-                    IndexLabel::Interval(interval) => Scalar::Interval(*interval),
-                    IndexLabel::Null(k) => Scalar::Null(*k),
-                })
-                .collect(),
-        )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let col = index_values_column(&self.inner)?;
         let s = Series::new(series_name, idx, col).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
@@ -14805,25 +15022,7 @@ impl PyIndex {
         } else {
             Index::from_range(0, self.inner.len() as i64, 1)
         };
-        let col = Column::from_values(
-            self.inner
-                .labels()
-                .iter()
-                .map(|l| match l {
-                    IndexLabel::Int64(i) => Scalar::Int64(*i),
-                    IndexLabel::Float64(f) => Scalar::Float64(f.0),
-                    IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
-                    IndexLabel::Bool(b) => Scalar::Bool(*b),
-                    IndexLabel::Timedelta64(t) => Scalar::Timedelta64(*t),
-                    IndexLabel::Datetime64(d) => Scalar::Datetime64(*d),
-                    IndexLabel::Object(object) => Scalar::Object(object.clone()),
-                    IndexLabel::Period(period) => Scalar::Period(*period),
-                    IndexLabel::Interval(interval) => Scalar::Interval(*interval),
-                    IndexLabel::Null(k) => Scalar::Null(*k),
-                })
-                .collect(),
-        )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let col = index_values_column(&self.inner)?;
         let mut col_map = BTreeMap::new();
         col_map.insert(col_name.clone(), col);
         let df = DataFrame::new_with_column_order(idx, col_map, vec![col_name])
@@ -15493,8 +15692,9 @@ impl PyDatetimeIndex {
                 let values = field(&instants.dt()).ok()?;
                 let values = values.column().as_i64_slice()?.to_vec();
                 Some(
-                    Index::from_i64_values(values)
-                        .with_declared_dtype(Some(fp_index::DeclaredDtype::Int32)),
+                    Index::from_i64_values(values).with_declared_dtype(Some(
+                        fp_index::DeclaredDtype::Width(NumericWidth::Int32),
+                    )),
                 )
             })
             .flatten();
@@ -15618,22 +15818,14 @@ impl PyDatetimeIndex {
     /// The instants as a datetime column of the index's dtype (a tz-aware
     /// index's zone kept, as `to_series` / `to_frame` / `Series(index)`).
     fn values_column(&self) -> PyResult<Column> {
-        let column = Column::from_values(
-            self.inner
-                .as_index()
-                .labels()
-                .iter()
-                .map(|l| match l {
-                    IndexLabel::Datetime64(d) => Scalar::Datetime64(*d),
-                    _ => Scalar::Null(NullKind::NaT),
-                })
-                .collect(),
-        )
-        .map_err(column_error_to_py)?;
-        Ok(match self.inner.tz() {
-            Some(zone) => column.with_dtype(DType::datetime64_tz(zone)),
-            None => column,
-        })
+        // The instants as they are held, NaT missing - each was made a
+        // label and a Scalar (d.to_series() 15.9 ms a million, pandas 0.24;
+        // br-frankenpandas-e186m).
+        let dtype = match self.inner.tz() {
+            Some(zone) => DType::datetime64_tz(zone),
+            None => DType::datetime64_naive(),
+        };
+        Ok(Column::from_temporal_nanos(dtype, self.inner.asi8()))
     }
 
     /// One of this index's instants as a Timestamp in its zone (NaT for
@@ -24849,6 +25041,7 @@ fn index_error_to_py(err: fp_index::IndexError) -> PyErr {
             })
         }
         fp_index::IndexError::KeyError(msg) => PyErr::new::<pyo3::exceptions::PyKeyError, _>(msg),
+        fp_index::IndexError::TypeError(msg) => PyErr::new::<pyo3::exceptions::PyTypeError, _>(msg),
         other => PyErr::new::<pyo3::exceptions::PyValueError, _>(other.to_string()),
     }
 }
@@ -34134,8 +34327,11 @@ impl PySeries {
             };
             let column = r.column().astype(target).map_err(column_error_to_py)?;
             // The missing value's label is pd.NA itself, as pandas' (it
-            // printed None; 05cm6).
-            let index = if r.index().labels().iter().any(IndexLabel::is_missing) {
+            // printed None; 05cm6): a masked index's missing label is NA
+            // already, any other index's holds the NA object.
+            let index = if r.index().masked().is_none()
+                && r.index().labels().iter().any(IndexLabel::is_missing)
+            {
                 let na = IndexLabel::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(
                     PyHost(na_object(py)?),
                 )));
@@ -40274,7 +40470,84 @@ fn pandas_default_ndarray<'py>(
 /// a Scalar and a column per row: Index.values / to_numpy took 3-6 ms per
 /// 200k, pandas hands back a stored array (br-frankenpandas-bss5q.3). An
 /// empty index keeps the label path (pandas' object array).
+/// A masked index's IntegerArray / FloatingArray / BooleanArray, which
+/// pandas' masked Index wraps (`values`, iteration, `tolist`, `to_numpy`
+/// read through it; br-frankenpandas-05cm6); None for any other index.
+fn masked_index_array<'py>(py: Python<'py>, index: &Index) -> PyResult<Option<Bound<'py, PyAny>>> {
+    match fp_frame::masked_index_column(index) {
+        Some(column) => {
+            let column = column.map_err(column_error_to_py)?;
+            Ok(Some(extension_array(py, column)?.into_bound(py)))
+        }
+        None => Ok(None),
+    }
+}
+
+/// A plain index's labels as the column of its dtype (`to_series`,
+/// `to_frame`): a masked index's masked column, a typed int64 index's ints
+/// at its width, any other's labels as cells - each label was made a
+/// Scalar first (idx.to_series() of a million ints 19.6 ms, pandas 0.25;
+/// an int32 index's came back int64; br-frankenpandas-e186m, vqjvd).
+fn index_values_column(index: &Index) -> PyResult<Column> {
+    if let Some(column) = fp_frame::masked_index_column(index) {
+        return column.map_err(column_error_to_py);
+    }
+    let object = index.declared_dtype() == Some(fp_index::DeclaredDtype::Object);
+    if !object && let Some(values) = index.cached_int64_label_values().flatten() {
+        let column = Column::from_i64_values_owned(values.as_ref().clone());
+        return match index.width() {
+            Some(width) => column
+                .cast_to_width(width, false)
+                .map_err(column_error_to_py),
+            None => Ok(column),
+        };
+    }
+    let cells: Vec<Scalar> = index
+        .labels()
+        .iter()
+        .map(|l| match l {
+            IndexLabel::Int64(i) => Scalar::Int64(*i),
+            IndexLabel::Float64(f) => Scalar::Float64(f.0),
+            IndexLabel::Utf8(s) => Scalar::Utf8(s.clone()),
+            IndexLabel::Bool(b) => Scalar::Bool(*b),
+            IndexLabel::Timedelta64(t) => Scalar::Timedelta64(*t),
+            IndexLabel::Datetime64(d) => Scalar::Datetime64(*d),
+            IndexLabel::Object(object) => Scalar::Object(object.clone()),
+            IndexLabel::Period(period) => Scalar::Period(*period),
+            IndexLabel::Interval(interval) => Scalar::Interval(*interval),
+            IndexLabel::Null(k) => Scalar::Null(*k),
+        })
+        .collect();
+    // An object index's values are an object column, each as it is (ints
+    // under dtype=object came back int64).
+    if object {
+        return Ok(Column::from_object_values(cells));
+    }
+    let column = Column::from_values(cells)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    // A float32 index's values stay float32 (vqjvd).
+    match index.width() {
+        Some(width) => column
+            .cast_to_width(width, false)
+            .map_err(column_error_to_py),
+        None => Ok(column),
+    }
+}
+
 fn index_ndarray<'py>(py: Python<'py>, index: &Index) -> PyResult<Bound<'py, PyAny>> {
+    // A narrow index's array is of its width (int32 ... float32), as
+    // pandas' (it was int64 / float64; br-frankenpandas-vqjvd).
+    if let Some(width) = index
+        .declared_dtype()
+        .and_then(fp_index::DeclaredDtype::width)
+    {
+        let array = if index.is_empty() {
+            py.import("numpy")?.call_method1("empty", (0, "int64"))?
+        } else {
+            index_ndarray(py, &index.clone().with_declared_dtype(None))?
+        };
+        return array.call_method1("astype", (width.name(false),));
+    }
     if !index.is_empty() {
         if let Some(values) = index.int64_label_values() {
             return int_ndarray(py, &values, "int64");
@@ -91182,6 +91455,12 @@ fn index_array(obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
             "MultiIndex has no single backing array. Use 'MultiIndex.to_numpy()' to get a NumPy array of tuples.",
         ));
+    }
+    // A masked index's own masked array (br-frankenpandas-05cm6).
+    if let Ok(index) = plain_index_ref(obj)
+        && let Some(array) = masked_index_array(py, &index.inner)?
+    {
+        return Ok(array.unbind());
     }
     // Series(index) keeps every index class's dtype (a PeriodIndex's
     // to_series is an object column).

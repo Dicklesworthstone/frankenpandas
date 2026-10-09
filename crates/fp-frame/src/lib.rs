@@ -2447,6 +2447,77 @@ fn set_index_label(dtype: &DType, value: &Scalar) -> Result<IndexLabel, FrameErr
     })
 }
 
+/// The numpy width (int8 ... uint64, float32) of a column held in the plain
+/// int64 / float64 storage, which an index of its values keeps
+/// (br-frankenpandas-vqjvd); None for a 64-bit or masked column.
+fn narrow_numpy_width(column: &Column) -> Option<NumericWidth> {
+    column
+        .width()
+        .filter(|_| matches!(column.dtype(), DType::Int64 | DType::Float64))
+}
+
+/// The masked extension dtype (Int64, UInt8, Float32, boolean ...) of a
+/// nullable column, which an index of its values keeps
+/// (br-frankenpandas-05cm6); None for any other column.
+fn masked_dtype_of(column: &Column) -> Option<fp_index::MaskedDtype> {
+    use fp_index::MaskedDtype;
+    Some(match (column.dtype(), column.width()) {
+        (DType::BoolNullable, _) => MaskedDtype::Boolean,
+        (DType::Int64Nullable | DType::Float64Nullable, Some(width)) => MaskedDtype::Width(width),
+        (DType::Int64Nullable, None) => MaskedDtype::Int64,
+        (DType::Float64Nullable, None) => MaskedDtype::Float64,
+        _ => return None,
+    })
+}
+
+/// `index`, a column's values made an index (set_index, value_counts,
+/// groupby keys), under the column's dtype where the labels alone read
+/// another: a narrow numpy width (vqjvd) or a masked extension dtype
+/// (05cm6) - pandas' index of those values.
+fn indexed_like_column(index: Index, column: &Column) -> Index {
+    if let Some(masked) = masked_dtype_of(column) {
+        return index.with_masked(masked);
+    }
+    match narrow_numpy_width(column) {
+        Some(width) => index.with_width(width),
+        None => index,
+    }
+}
+
+/// A masked index's labels as the masked column of its dtype - pandas'
+/// IntegerArray / FloatingArray / BooleanArray under its Index - a missing
+/// label the column's missing value (br-frankenpandas-05cm6); None for any
+/// other index.
+///
+/// # Errors
+/// The column's own when it cannot hold a label (none can be: a masked
+/// index holds only labels of its kind).
+pub fn masked_index_column(index: &Index) -> Option<Result<Column, ColumnError>> {
+    use fp_index::MaskedDtype;
+    let masked = index.masked()?;
+    let cells: Vec<Scalar> = index
+        .labels()
+        .iter()
+        .map(|label| match label {
+            _ if label.is_missing() => Scalar::Null(NullKind::Null),
+            IndexLabel::Int64(value) => Scalar::Int64(*value),
+            IndexLabel::Float64(value) => Scalar::Float64(value.0),
+            IndexLabel::Bool(value) => Scalar::Bool(*value),
+            _ => Scalar::Null(NullKind::Null),
+        })
+        .collect();
+    let (storage, width) = match masked {
+        MaskedDtype::Int64 => (DType::Int64Nullable, None),
+        MaskedDtype::Float64 => (DType::Float64Nullable, None),
+        MaskedDtype::Boolean => (DType::BoolNullable, None),
+        MaskedDtype::Width(width) => (width.storage(true), Some(width)),
+    };
+    Some(Column::new(storage, cells).and_then(|column| match width {
+        Some(width) => column.cast_to_width(width, true),
+        None => Ok(column),
+    }))
+}
+
 /// Extract `chars[start:stop:step]` using CPython slice semantics (negative
 /// indices resolve from the end; a negative step walks backwards). Mirrors
 /// CPython's `PySlice_AdjustIndices`. `step` must be non-zero (callers reject 0).
@@ -18534,7 +18605,23 @@ impl Series {
         )
     }
 
+    /// The counts of each distinct value, indexed by the values under the
+    /// column's narrow width (an int32 Series' counts are indexed int32; it
+    /// was int64; br-frankenpandas-vqjvd).
     pub fn value_counts(&self) -> Result<Self, FrameError> {
+        self.value_counts_tally()
+            .map(|counts| counts.indexed_by_values_of(&self.column))
+    }
+
+    /// `self`, a result indexed by `source`'s values, its index under
+    /// `source`'s narrow numpy width or masked dtype (br-frankenpandas-vqjvd,
+    /// spwrr).
+    fn indexed_by_values_of(mut self, source: &Column) -> Self {
+        self.index = indexed_like_column(self.index, source);
+        self
+    }
+
+    fn value_counts_tally(&self) -> Result<Self, FrameError> {
         if self.categorical.is_some() {
             return self.categorical_value_counts_with_options(false, true, false, true);
         }
@@ -18814,8 +18901,21 @@ impl Series {
 
     /// Value counts with full pandas parameter support.
     ///
-    /// Matches `pd.Series.value_counts(normalize, sort, ascending, dropna)`.
+    /// Matches `pd.Series.value_counts(normalize, sort, ascending, dropna)`,
+    /// indexed by the values under the column's narrow width, as
+    /// [`Self::value_counts`].
     pub fn value_counts_with_options(
+        &self,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+    ) -> Result<Self, FrameError> {
+        self.value_counts_with_options_tally(normalize, sort, ascending, dropna)
+            .map(|counts| counts.indexed_by_values_of(&self.column))
+    }
+
+    fn value_counts_with_options_tally(
         &self,
         normalize: bool,
         sort: bool,
@@ -30607,6 +30707,13 @@ impl Series {
         let index_column = match held_datetime_index_column(&self.index) {
             Some(column) => column,
             None => Column::from_values(index_labels_to_column_scalars(self.index.labels()))?,
+        };
+        // A narrow index's column keeps its width, a masked index's its
+        // masked dtype (br-frankenpandas-vqjvd, 05cm6).
+        let index_column = match (self.index.width(), masked_index_column(&self.index)) {
+            (_, Some(masked)) => masked?,
+            (Some(width), None) => index_column.cast_to_width(width, false)?,
+            (None, None) => index_column,
         };
         // A tz-aware index comes back as a column of its dtype.
         let index_column = match self.index.tz() {
@@ -84917,6 +85024,10 @@ impl DataFrame {
             }))?,
             None => index,
         };
+        // A narrow numpy column's width or a masked one's dtype rides on it
+        // as well (an int32 column's index is int32, an Int64 one's Int64;
+        // they were int64 / object; br-frankenpandas-vqjvd, 05cm6).
+        let index = indexed_like_column(index, source);
 
         if verify_integrity && index.has_duplicates() {
             return Err(FrameError::CompatibilityRejected(
@@ -85280,6 +85391,14 @@ impl DataFrame {
                 Some(view) => Column::from_i64_values_owned(view.as_ref().clone()),
                 None => Column::from_values(Self::index_labels_to_scalars(self.index.labels()))?,
             },
+        };
+        // A narrow index's column keeps its width, a masked index's its
+        // masked dtype (an int32 index came back an int64 column, an Int64
+        // one float64; br-frankenpandas-vqjvd, 05cm6).
+        let index_column = match (self.index.width(), masked_index_column(&self.index)) {
+            (_, Some(masked)) => masked?,
+            (Some(width), None) => index_column.cast_to_width(width, false)?,
+            (None, None) => index_column,
         };
         // A tz-aware index comes back as a column of its dtype
         // (datetime64[ns, zone]); it came back naive.
@@ -110396,6 +110515,7 @@ impl DataFrameGroupBy<'_> {
                 col_order,
                 None,
             )
+            .map(|out| self.with_key_width(out))
         } else {
             // as_index=False: group keys become regular columns, index is
             // a default integer range (pandas semantics).
@@ -110740,7 +110860,30 @@ impl DataFrameGroupBy<'_> {
             // That signature was read directly rather than inferred from a range.
             _ => {}
         }
+        // A reduction's rows are the groups, labelled at one narrow key's
+        // width whichever path reduced them (br-frankenpandas-vqjvd).
+        self.reduce_named_func(func_name)
+            .map(|out| self.with_key_width(out))
+    }
 
+    /// `out`, a result indexed by the groups of one key column, its index
+    /// under that column's narrow numpy width or masked dtype (an int32
+    /// key's groups are int32, an Int64 key's Int64; they were int64;
+    /// br-frankenpandas-vqjvd, 05cm6).
+    fn with_key_width(&self, mut out: DataFrame) -> DataFrame {
+        if self.as_index
+            && out.row_multiindex.is_none()
+            && let [key] = self.by.as_slice()
+            && let Some(column) = self.df.columns.get(key)
+        {
+            out.index = indexed_like_column(out.index, column);
+        }
+        out
+    }
+
+    /// The reduction `func_name` of each value column per group (see
+    /// [`Self::aggregate_named_func`]).
+    fn reduce_named_func(&self, func_name: &str) -> Result<DataFrame, FrameError> {
         // Determine value columns (all columns not in group-by keys)
         let value_cols: Vec<String> = self
             .df

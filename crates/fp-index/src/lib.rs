@@ -88,8 +88,8 @@ use std::{
 
 use chrono::Datelike;
 use fp_types::{
-    Interval, IntervalClosed, Period, PeriodFreq, Scalar, Timedelta, TimedeltaComponents,
-    Timestamp, interval_range,
+    Interval, IntervalClosed, NumericWidth, Period, PeriodFreq, Scalar, Timedelta,
+    TimedeltaComponents, Timestamp, interval_range,
 };
 // Dedup / set-op seen-sets key on &IndexLabel and read output order from the
 // INPUT scan (first-seen filter / positional bool), never from map iteration —
@@ -2482,17 +2482,87 @@ pub struct IndexCategories {
 /// under the object dtype (they became the strings '1' and '2';
 /// br-frankenpandas-i20vm); an empty index keeps the dtype it was taken
 /// from (`iloc[:0]` of an int64 index is int64, it read as object; dwyud);
-/// a DatetimeIndex field (`.year`) is numpy's int32 (it was int64; pqjzo).
+/// a DatetimeIndex field (`.year`) is numpy's int32 (it was int64; pqjzo);
+/// an index of a narrower numpy array (int8 ... uint64, float32) holds its
+/// labels as Int64 / Float64 under that width, as a column does
+/// (br-frankenpandas-vqjvd).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeclaredDtype {
     Object,
     Int64,
-    Int32,
+    Width(NumericWidth),
     Float64,
     Bool,
     Datetime64,
     Timedelta64,
+    /// pandas' masked extension dtypes (br-frankenpandas-05cm6 / spwrr):
+    /// Int64 / Float64 / boolean labels, a missing one pandas' NA.
+    Masked(MaskedDtype),
+}
+
+/// A masked extension dtype an [`Index`] is declared with: `Int64`, the
+/// narrow `Int8` ... `UInt64` / `Float32`, `Float64`, `boolean` - labels of
+/// that kind (ints, floats, bools) beside missing ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskedDtype {
+    Int64,
+    Float64,
+    Boolean,
+    Width(NumericWidth),
+}
+
+impl MaskedDtype {
+    /// pandas' name of the dtype ('Int64', 'UInt8', 'Float32', 'boolean').
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Int64 => "Int64",
+            Self::Float64 => "Float64",
+            Self::Boolean => "boolean",
+            Self::Width(width) => width.name(true),
+        }
+    }
+
+    /// The masked dtype pandas' name reads as, None for another.
+    #[must_use]
+    pub fn of_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "Int64" | "Int64Dtype" => Self::Int64,
+            "Float64" | "Float64Dtype" => Self::Float64,
+            "boolean" | "BooleanDtype" => Self::Boolean,
+            _ => match NumericWidth::parse(name)? {
+                (width, true) => Self::Width(width),
+                (_, false) => return None,
+            },
+        })
+    }
+
+    /// Whether a label of this kind - or a missing one - can be held.
+    #[must_use]
+    pub fn holds(self, label: &IndexLabel) -> bool {
+        label.is_missing()
+            || match self {
+                Self::Int64 => matches!(label, IndexLabel::Int64(_)),
+                Self::Width(width) if !width.is_float() => {
+                    matches!(label, IndexLabel::Int64(value) if width.holds_int(*value))
+                }
+                Self::Float64 | Self::Width(_) => matches!(label, IndexLabel::Float64(_)),
+                Self::Boolean => matches!(label, IndexLabel::Bool(_)),
+            }
+    }
+
+    /// The kind pandas' `inferred_type` names its values.
+    const fn inferred_type(self) -> &'static str {
+        match self {
+            Self::Int64 => "integer",
+            Self::Float64 => "floating",
+            Self::Boolean => "boolean",
+            Self::Width(width) if width.is_float() => "floating",
+            Self::Width(_) => "integer",
+        }
+    }
 }
 
 impl DeclaredDtype {
@@ -2502,27 +2572,51 @@ impl DeclaredDtype {
         match self {
             Self::Object => "object",
             Self::Int64 => "int64",
-            Self::Int32 => "int32",
+            Self::Width(width) => width.name(false),
             Self::Float64 => "float64",
             Self::Bool => "bool",
             Self::Datetime64 => "datetime64[ns]",
             Self::Timedelta64 => "timedelta64[ns]",
+            Self::Masked(masked) => masked.name(),
         }
     }
 
     /// The declared dtype pandas' name reads as, None for another.
     #[must_use]
     pub fn of_name(name: &str) -> Option<Self> {
+        if let Some(masked) = MaskedDtype::of_name(name) {
+            return Some(Self::Masked(masked));
+        }
         Some(match name {
             "object" => Self::Object,
             "int64" => Self::Int64,
-            "int32" => Self::Int32,
             "float64" => Self::Float64,
             "bool" => Self::Bool,
             "datetime64[ns]" => Self::Datetime64,
             "timedelta64[ns]" => Self::Timedelta64,
-            _ => return None,
+            _ => match NumericWidth::parse(name)? {
+                (width, false) => Self::Width(width),
+                (_, true) => return None,
+            },
         })
+    }
+
+    /// The masked extension dtype, None for another.
+    #[must_use]
+    pub const fn masked(self) -> Option<MaskedDtype> {
+        match self {
+            Self::Masked(masked) => Some(masked),
+            _ => None,
+        }
+    }
+
+    /// The numpy width of a narrow numeric dtype, None for another.
+    #[must_use]
+    pub const fn width(self) -> Option<NumericWidth> {
+        match self {
+            Self::Width(width) => Some(width),
+            _ => None,
+        }
     }
 }
 
@@ -3316,23 +3410,95 @@ impl Index {
 
     /// These labels - selected, sliced or computed from `source`'s - under
     /// the dtype pandas gives them: `source`'s declared object dtype (it
-    /// holds any labels), its int32 while they are ints, and for no label
-    /// at all `source`'s dtype, as pandas' empty slice or selection keeps it
-    /// (br-frankenpandas-i20vm / pqjzo / dwyud). A dtype these labels are
-    /// already declared with stays.
+    /// holds any labels), its narrow width (int32, uint8, float32 ...)
+    /// while they are all ints / all floats, and for no label at all
+    /// `source`'s dtype, as pandas' empty slice or selection keeps it
+    /// (br-frankenpandas-i20vm / pqjzo / dwyud / vqjvd). A dtype these
+    /// labels are already declared with stays.
     #[must_use]
     pub fn with_dtype_of(mut self, source: &Self) -> Self {
         if self.declared.is_none() {
             self.declared = match source.declared {
                 Some(DeclaredDtype::Object) => Some(DeclaredDtype::Object),
-                Some(DeclaredDtype::Int32) if self.is_integer() => Some(DeclaredDtype::Int32),
                 declared if self.is_empty() => {
                     declared.or_else(|| DeclaredDtype::of_name(source.dtype()))
+                }
+                Some(DeclaredDtype::Width(width)) if self.holds_width(width) => {
+                    Some(DeclaredDtype::Width(width))
+                }
+                Some(DeclaredDtype::Masked(masked)) if self.holds_masked(masked) => {
+                    Some(DeclaredDtype::Masked(masked))
                 }
                 _ => None,
             };
         }
         self
+    }
+
+    /// These labels under a masked extension dtype (Int64, UInt8, Float64,
+    /// boolean ...) - a masked column's values made an index - when every
+    /// label is of its kind or missing, else as they are
+    /// (br-frankenpandas-05cm6).
+    #[must_use]
+    pub fn with_masked(self, masked: MaskedDtype) -> Self {
+        if self.holds_masked(masked) {
+            self.with_declared_dtype(Some(DeclaredDtype::Masked(masked)))
+        } else {
+            self
+        }
+    }
+
+    /// The masked extension dtype these labels are declared with, if any.
+    #[must_use]
+    pub fn masked(&self) -> Option<MaskedDtype> {
+        self.declared.and_then(DeclaredDtype::masked)
+    }
+
+    /// Whether every label is of `masked`'s kind or missing.
+    fn holds_masked(&self, masked: MaskedDtype) -> bool {
+        if self.labels.has_lazy_int64_backing() {
+            return matches!(masked, MaskedDtype::Int64)
+                || matches!(masked, MaskedDtype::Width(width) if !width.is_float()
+                    && self.labels.iter().all(|label| masked.holds(label)));
+        }
+        self.labels.iter().all(|label| masked.holds(label))
+    }
+
+    /// These labels under a narrow numpy `width` (int32, uint8, float32 ...),
+    /// as a narrow column's labels made an index are, when every label can
+    /// be held by it, else as they are (br-frankenpandas-vqjvd).
+    #[must_use]
+    pub fn with_width(self, width: NumericWidth) -> Self {
+        if self.is_empty() || self.holds_width(width) {
+            self.with_declared_dtype(Some(DeclaredDtype::Width(width)))
+        } else {
+            self
+        }
+    }
+
+    /// The narrow numpy width these labels are declared with, if any.
+    #[must_use]
+    pub fn width(&self) -> Option<NumericWidth> {
+        self.declared.and_then(DeclaredDtype::width)
+    }
+
+    /// Whether every label can be held under `width`: all ints for an
+    /// integer width, all floats (NaN among them) for float32 - no missing
+    /// label, which numpy's narrow arrays cannot hold.
+    fn holds_width(&self, width: NumericWidth) -> bool {
+        if width.is_float() {
+            return self.labels.iter().all(|label| {
+                matches!(
+                    label,
+                    IndexLabel::Float64(_) | IndexLabel::Null(fp_types::NullKind::NaN)
+                )
+            });
+        }
+        self.labels.has_lazy_int64_backing()
+            || self
+                .labels
+                .iter()
+                .all(|label| matches!(label, IndexLabel::Int64(_)))
     }
 
     /// These labels under `declared` (see [`DeclaredDtype`]); None their
@@ -4774,6 +4940,13 @@ impl Index {
         if !matches!(self.sort_order(), SortOrder::Unsorted) {
             return self.clone();
         }
+        // Labels known unique (the cached duplicate check, which pandas'
+        // is_unique caches likewise) are their own unique() - it hashed
+        // every label each call (idx.unique() of a million shuffled ints 1.9
+        // ms, pandas 0.001; br-frankenpandas-e186m).
+        if !self.has_duplicates() {
+            return self.clone();
+        }
         // Typed all-Int64 fast path: inline `i64` first-occurrence dedup instead
         // of the pointer-keyed `FxHashMap<&IndexLabel>`. Bit-identical order.
         if let Some(vals) = self.labels.int64_view() {
@@ -4816,7 +4989,8 @@ impl Index {
     pub fn duplicated(&self, keep: DuplicateKeep) -> Vec<bool> {
         let mut result = vec![false; self.labels.len()];
         // Strictly-ascending => no duplicates under any keep mode; skip hashing.
-        if !matches!(self.sort_order(), SortOrder::Unsorted) {
+        // Likewise labels known unique (the cached check; e186m).
+        if !matches!(self.sort_order(), SortOrder::Unsorted) || !self.has_duplicates() {
             return result;
         }
         // Typed all-Int64 fast path: inline `i64` keys (dense bitsets when the
@@ -5656,9 +5830,10 @@ impl Index {
     }
 
     /// `len` labels from `start`, `step` apart (either sign) of a datetime /
-    /// timedelta index, its labels never made: a date_range stays an
-    /// arithmetic range, a typed backing is a view of the same instants or
-    /// durations, backwards too, as numpy's slice is (name and zone kept).
+    /// timedelta / int64 index, its labels never made: a date_range or an
+    /// int64 range stays an arithmetic range, a typed backing is a view of
+    /// the same instants, durations or ints, backwards too, as numpy's slice
+    /// is (name, zone and dtype kept).
     /// The callers took and cloned every label (`df.iloc[::-1]` over a
     /// DatetimeIndex 4.9 ms a million rows, pandas 0.01;
     /// br-frankenpandas-lsn8d, br-frankenpandas-5s8nr). `None` for any
@@ -5674,8 +5849,27 @@ impl Index {
             let index = Self::from_datetime64_affine_range(range.value_at(start), step, len)?;
             return Some(self.propagate_name(index));
         }
-        let TemporalStridedLabels { kind, view } = self.labels.temporal_strided.as_ref()?;
-        let labels = IndexLabels::new_temporal_strided(*kind, view.sub_view(start, step, len)?);
+        // An int64 index the same way: an arithmetic range stays one, a
+        // typed buffer or a view of one is a view (`idx[::2]` and a run
+        // made a label each; br-frankenpandas-e186m).
+        if let Some(range) = self.labels.int64_affine_range() {
+            let step = range.step.checked_mul(i64::try_from(step).ok()?)?;
+            let index =
+                Self::new_known_unique_int64_affine_range(range.value_at(start), step, len)?;
+            return Some(self.propagate_name(index));
+        }
+        let labels = if let Some(TemporalStridedLabels { kind, view }) =
+            self.labels.temporal_strided.as_ref()
+        {
+            IndexLabels::new_temporal_strided(*kind, view.sub_view(start, step, len)?)
+        } else if let Some(view) = self.labels.int64_strided.as_ref() {
+            IndexLabels::new_int64_strided(view.sub_view(start, step, len)?)
+        } else if let Some(Some(values)) = self.labels.int64_typed.get() {
+            let whole = Int64StridedLabels::new(Arc::clone(values), 0, 1, values.len())?;
+            IndexLabels::new_int64_strided(whole.sub_view(start, step, len)?)
+        } else {
+            return None;
+        };
         Some(self.propagate_name(Self {
             labels,
             name: None,
@@ -6140,6 +6334,123 @@ impl Index {
         Ok(self.propagate_name(Self::new(labels)))
     }
 
+    /// pandas' astype to a masked extension dtype (Int64, UInt8, Float32,
+    /// boolean ...): numbers of its kind held as they are (a whole float
+    /// as an int, a float rounded to float32), a missing label or NaN
+    /// pandas' NA (it was refused; br-frankenpandas-05cm6). A value the
+    /// dtype cannot hold exactly - a fraction to an int, an int past a
+    /// narrow width, a number to boolean - is an error, as pandas' "cannot
+    /// safely cast".
+    fn astype_masked(&self, masked: MaskedDtype) -> Result<Self, IndexError> {
+        let refuse = |label: &IndexLabel| {
+            IndexError::TypeError(format!("cannot safely cast {label:?} to {}", masked.name()))
+        };
+        let labels = self
+            .labels()
+            .iter()
+            .map(|label| {
+                if label.is_missing() {
+                    return Ok(IndexLabel::Null(fp_types::NullKind::Null));
+                }
+                Ok(match masked {
+                    MaskedDtype::Boolean => match label {
+                        IndexLabel::Bool(_) => label.clone(),
+                        _ => return Err(refuse(label)),
+                    },
+                    MaskedDtype::Float64 | MaskedDtype::Width(NumericWidth::Float32) => {
+                        #[allow(clippy::cast_precision_loss)] // pandas' int64 -> float64
+                        let value = match label {
+                            IndexLabel::Int64(value) => *value as f64,
+                            IndexLabel::Float64(value) => value.0,
+                            IndexLabel::Bool(flag) => f64::from(u8::from(*flag)),
+                            _ => return Err(refuse(label)),
+                        };
+                        let value = if masked == MaskedDtype::Float64 {
+                            value
+                        } else {
+                            NumericWidth::round_f32(value)
+                        };
+                        IndexLabel::Float64(OrderedF64(value))
+                    }
+                    MaskedDtype::Int64 | MaskedDtype::Width(_) => {
+                        #[allow(clippy::cast_possible_truncation)] // a whole float only
+                        let value = match label {
+                            IndexLabel::Int64(value) => *value,
+                            IndexLabel::Float64(value)
+                                if value.0.fract() == 0.0
+                                    && value.0.abs() < 9_223_372_036_854_775_808.0 =>
+                            {
+                                value.0 as i64
+                            }
+                            IndexLabel::Bool(flag) => i64::from(*flag),
+                            _ => return Err(refuse(label)),
+                        };
+                        if let MaskedDtype::Width(width) = masked
+                            && !width.holds_int(value)
+                        {
+                            return Err(refuse(label));
+                        }
+                        IndexLabel::Int64(value)
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, IndexError>>()?;
+        Ok(self
+            .propagate_name(Self::new(labels))
+            .with_declared_dtype(Some(DeclaredDtype::Masked(masked))))
+    }
+
+    /// pandas' astype to a narrow numpy width (int8 ... uint64, float32):
+    /// numbers wrapped into an integer width as numpy's cast wraps them
+    /// (int8 of 300 is 44) or rounded to float32, held under that width
+    /// (it was refused; br-frankenpandas-vqjvd). A missing label or NaN has
+    /// no integer (pandas' ValueError), nor has a uint64 at or above 2**63
+    /// a place in the int64 storage.
+    fn astype_width(&self, width: NumericWidth) -> Result<Self, IndexError> {
+        let declared = Some(DeclaredDtype::Width(width));
+        let floats = self.astype_float()?;
+        if width.is_float() {
+            let rounded = floats
+                .labels()
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Float64(value) => {
+                        IndexLabel::Float64(OrderedF64(NumericWidth::round_f32(value.0)))
+                    }
+                    other => other.clone(),
+                })
+                .collect();
+            return Ok(self
+                .propagate_name(Self::new(rounded))
+                .with_declared_dtype(declared));
+        }
+        let ints = floats
+            .labels()
+            .iter()
+            .zip(self.labels().iter())
+            .map(|(float, label)| {
+                let value = match (label, float) {
+                    (IndexLabel::Int64(value), _) => *value,
+                    (_, IndexLabel::Float64(value)) if value.0.is_finite() => value.0 as i64,
+                    _ => {
+                        return Err(IndexError::InvalidArgument(
+                            "Cannot convert non-finite values (NA or inf) to integer".to_owned(),
+                        ));
+                    }
+                };
+                width.wrap_int(value).ok_or_else(|| {
+                    IndexError::InvalidArgument(format!(
+                        "{value} wraps past the int64 storage of {}",
+                        width.name(false)
+                    ))
+                })
+            })
+            .collect::<Result<Vec<i64>, IndexError>>()?;
+        Ok(self
+            .propagate_name(Self::from_i64_values(ints))
+            .with_declared_dtype(declared))
+    }
+
     /// Convert labels to bool (`pd.Index.astype(bool)`): nonzero numbers and
     /// non-empty strings are true; missing and datetime-like labels are
     /// refused. (fvsao.4)
@@ -6233,9 +6544,23 @@ impl Index {
     /// Matches `pd.Index.astype(dtype)` for the generic dtype names this crate
     /// can represent directly.
     pub fn astype(&self, dtype: &str) -> Result<Self, IndexError> {
+        if let Some(masked) = MaskedDtype::of_name(dtype) {
+            return self.astype_masked(masked);
+        }
+        if let Some((width, false)) = NumericWidth::parse(dtype) {
+            return self.astype_width(width);
+        }
         let (out, declared) = match dtype {
-            "int" | "int64" => (self.astype_int(), DeclaredDtype::Int64),
-            "float" | "float64" => (self.astype_float()?, DeclaredDtype::Float64),
+            // The labels' own int64 / float64, whatever width they were
+            // declared (an int32 index's astype('int64') stayed int32).
+            "int" | "int64" => (
+                self.astype_int().with_declared_dtype(None),
+                DeclaredDtype::Int64,
+            ),
+            "float" | "float64" => (
+                self.astype_float()?.with_declared_dtype(None),
+                DeclaredDtype::Float64,
+            ),
             "bool" => (self.astype_bool()?, DeclaredDtype::Bool),
             "str" | "string" | "object" => (self.astype_str(), DeclaredDtype::Object),
             "datetime64[ns]" => {
@@ -7205,7 +7530,9 @@ impl Index {
             // dtype's kind, as pandas (an empty DatetimeIndex said "empty";
             // br-frankenpandas-lsn8d), an object or undeclared one "empty".
             return match self.declared {
-                Some(DeclaredDtype::Int64 | DeclaredDtype::Int32) => "integer",
+                Some(DeclaredDtype::Masked(masked)) => masked.inferred_type(),
+                Some(DeclaredDtype::Width(width)) if width.is_float() => "floating",
+                Some(DeclaredDtype::Int64 | DeclaredDtype::Width(_)) => "integer",
                 Some(DeclaredDtype::Float64) => "floating",
                 Some(DeclaredDtype::Bool) => "boolean",
                 Some(DeclaredDtype::Datetime64) => "datetime64",
@@ -19709,6 +20036,10 @@ pub enum IndexError {
     /// pandas' `KeyError(message)`.
     #[error("{0}")]
     KeyError(String),
+    /// pandas' `TypeError(message)`: a cast the dtype cannot hold exactly
+    /// (a masked dtype's "cannot safely cast").
+    #[error("{0}")]
+    TypeError(String),
     /// An unknown zone, or a wall time a DST change skips or repeats.
     #[error(transparent)]
     TimeZone(#[from] fp_types::TimeZoneError),
@@ -24737,13 +25068,27 @@ mod tests {
             reversed.stepped(1, 2, 2).unwrap().labels(),
             typed.take(&[3, 1]).labels()
         );
-        // NEGATIVE: an int or a labelled datetime index has no instants to
-        // step over; a run reaching outside the index (past a slice's end
+        // A typed int index steps over its ints the same way (e186m), an
+        // int range stays one.
+        let ints = Index::from_i64_values(vec![1, 7, 3]);
+        assert_eq!(
+            ints.stepped(2, -1, 3).unwrap().labels(),
+            ints.take(&[2, 1, 0]).labels()
+        );
+        let range = Index::new_known_unique_int64_affine_range(10, 5, 4).unwrap();
+        let back = range.stepped(3, -2, 2).unwrap();
+        assert!(back.labels.int64_affine_range().is_some(), "still a range");
+        assert_eq!(back.labels(), range.take(&[3, 1]).labels());
+        // NEGATIVE: a text or a labelled datetime index has no typed values
+        // to step over; a run reaching outside the index (past a slice's end
         // though inside its buffer), or an empty one, is no answer.
         assert!(
-            Index::from_i64_values(vec![1, 2, 3])
-                .stepped(2, -1, 3)
-                .is_none()
+            Index::new(vec![
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("b".to_owned())
+            ])
+            .stepped(1, -1, 2)
+            .is_none()
         );
         let labelled = Index::new(vec![IndexLabel::Datetime64(1), IndexLabel::Datetime64(2)]);
         assert!(labelled.stepped(1, -1, 2).is_none());
@@ -25033,13 +25378,154 @@ mod tests {
         let floats = Index::new(vec![IndexLabel::Float64(OrderedF64(1.5))]);
         assert_eq!(floats.slice(0, 0).dtype(), "float64");
         // int32 while the labels are ints (pqjzo).
-        let int32 = ints().with_declared_dtype(Some(DeclaredDtype::Int32));
+        let int32 =
+            ints().with_declared_dtype(Some(DeclaredDtype::Width(fp_types::NumericWidth::Int32)));
         assert_eq!(int32.take(&[0]).dtype(), "int32");
         let halves = Index::new(vec![IndexLabel::Float64(OrderedF64(0.5))]);
         assert_eq!(halves.with_dtype_of(&int32).dtype(), "float64");
         // NEGATIVE: labels of their own read their own dtype.
         assert_eq!(ints().take(&[0]).dtype(), "int64");
         assert_eq!(object.with_declared_dtype(None).dtype(), "int64");
+    }
+
+    #[test]
+    fn narrow_indexes_keep_their_width_vqjvd() {
+        // An index of a narrow numpy array's values holds them under that
+        // width through takes and slices; astype wraps / rounds into one and
+        // astype('int64') leaves it (br-frankenpandas-vqjvd).
+        use fp_types::NumericWidth;
+
+        use crate::DeclaredDtype;
+        for (name, width) in [
+            ("int8", NumericWidth::Int8),
+            ("uint16", NumericWidth::UInt16),
+            ("int32", NumericWidth::Int32),
+            ("uint64", NumericWidth::UInt64),
+            ("float32", NumericWidth::Float32),
+        ] {
+            assert_eq!(
+                DeclaredDtype::of_name(name),
+                Some(DeclaredDtype::Width(width))
+            );
+            assert_eq!(DeclaredDtype::Width(width).name(), name);
+        }
+        assert_eq!(
+            DeclaredDtype::of_name("Int32"),
+            Some(DeclaredDtype::Masked(crate::MaskedDtype::Width(
+                NumericWidth::Int32
+            ))),
+            "a masked dtype is no numpy width"
+        );
+        let ints = Index::from_i64_values(vec![300, -5, 7]).with_width(NumericWidth::Int32);
+        assert_eq!(ints.dtype(), "int32");
+        assert_eq!(ints.take(&[2, 0]).dtype(), "int32");
+        assert_eq!(ints.slice(1, 2).dtype(), "int32");
+        assert_eq!(ints.astype("int64").unwrap().dtype(), "int64");
+        assert_eq!(ints.astype("float64").unwrap().dtype(), "float64");
+        let int8 = ints.astype("int8").unwrap();
+        assert_eq!(int8.dtype(), "int8");
+        assert_eq!(
+            int8.labels(),
+            &[
+                IndexLabel::Int64(44),
+                IndexLabel::Int64(-5),
+                IndexLabel::Int64(7)
+            ]
+        );
+        assert_eq!(
+            ints.astype("uint8").unwrap().labels()[1],
+            IndexLabel::Int64(251)
+        );
+        let floats = Index::new(vec![
+            IndexLabel::Float64(OrderedF64(0.1)),
+            IndexLabel::Float64(OrderedF64(f64::NAN)),
+        ]);
+        let float32 = floats.astype("float32").unwrap();
+        assert_eq!(float32.dtype(), "float32");
+        assert_eq!(
+            float32.labels()[0],
+            IndexLabel::Float64(OrderedF64(f64::from(0.1_f32)))
+        );
+        assert_eq!(float32.take(&[1, 0]).dtype(), "float32");
+        assert_eq!(
+            Index::new(Vec::new()).astype("uint8").unwrap().dtype(),
+            "uint8"
+        );
+        // NEGATIVE: a missing label or NaN has no integer, a negative value
+        // no uint64 in the storage; labels a width cannot hold (a missing
+        // one, floats under an int width) keep their own dtype.
+        assert!(floats.astype("int16").is_err());
+        assert!(Index::from_i64_values(vec![-1]).astype("uint64").is_err());
+        let gappy = Index::new(vec![
+            IndexLabel::Int64(1),
+            IndexLabel::Null(fp_types::NullKind::Null),
+        ]);
+        assert_eq!(gappy.with_width(NumericWidth::Int32).width(), None);
+        assert_eq!(floats.clone().with_width(NumericWidth::Int16).width(), None);
+        assert_eq!(floats.clone().with_dtype_of(&ints).dtype(), "float64");
+        assert_eq!(Index::from_i64_values(vec![1]).dtype(), "int64");
+    }
+
+    #[test]
+    fn masked_indexes_keep_their_dtype_05cm6() {
+        // An index under a masked extension dtype holds labels of its kind
+        // beside missing ones through takes and slices; astype casts into
+        // one exactly or refuses (br-frankenpandas-05cm6).
+        use fp_types::{NullKind, NumericWidth};
+
+        use crate::{DeclaredDtype, MaskedDtype};
+        for (name, masked) in [
+            ("Int64", MaskedDtype::Int64),
+            ("Float64", MaskedDtype::Float64),
+            ("boolean", MaskedDtype::Boolean),
+            ("UInt8", MaskedDtype::Width(NumericWidth::UInt8)),
+            ("Float32", MaskedDtype::Width(NumericWidth::Float32)),
+        ] {
+            assert_eq!(
+                DeclaredDtype::of_name(name),
+                Some(DeclaredDtype::Masked(masked))
+            );
+            assert_eq!(masked.name(), name);
+        }
+        let missing = IndexLabel::Null(NullKind::Null);
+        let ints = Index::new(vec![
+            IndexLabel::Int64(3),
+            missing.clone(),
+            IndexLabel::Int64(1),
+        ])
+        .with_masked(MaskedDtype::Int64);
+        assert_eq!(ints.dtype(), "Int64");
+        assert_eq!(ints.take(&[2, 1]).dtype(), "Int64");
+        assert_eq!(ints.slice(0, 2).dtype(), "Int64");
+        assert_eq!(ints.take(&[]).dtype(), "Int64");
+        let cast = Index::new(vec![
+            IndexLabel::Float64(OrderedF64(2.0)),
+            IndexLabel::Float64(OrderedF64(f64::NAN)),
+        ])
+        .astype("Int32")
+        .unwrap();
+        assert_eq!(cast.dtype(), "Int32");
+        assert_eq!(cast.labels(), &[IndexLabel::Int64(2), missing]);
+        let floats = ints.astype("Float32").unwrap();
+        assert_eq!(
+            floats.masked(),
+            Some(MaskedDtype::Width(NumericWidth::Float32))
+        );
+        assert_eq!(floats.labels()[0], IndexLabel::Float64(OrderedF64(3.0)));
+        assert_eq!(ints.astype("float64").unwrap().dtype(), "float64");
+        // NEGATIVE: a fraction to an int, an int past a narrow width or a
+        // number to boolean is refused; labels of another kind (text) or a
+        // bool under an int dtype take no masked dtype; plain ints stay
+        // int64.
+        let half = Index::new(vec![IndexLabel::Float64(OrderedF64(0.5))]);
+        assert!(half.astype("Int64").is_err());
+        assert!(Index::from_i64_values(vec![300]).astype("Int8").is_err());
+        assert!(Index::from_i64_values(vec![1]).astype("boolean").is_err());
+        let text = Index::new(vec![IndexLabel::Utf8("a".to_owned())]);
+        assert_eq!(text.with_masked(MaskedDtype::Int64).masked(), None);
+        let flags = Index::new(vec![IndexLabel::Bool(true)]);
+        assert_eq!(flags.with_masked(MaskedDtype::Int64).masked(), None);
+        assert_eq!(Index::from_i64_values(vec![1, 2]).dtype(), "int64");
     }
 
     #[test]
