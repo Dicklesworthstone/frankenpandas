@@ -24853,7 +24853,10 @@ impl Series {
                     }
                 }
                 let validity = fp_columnar::ValidityMask::from_words(words, n);
-                let column = temporal_column(dtype, out, validity);
+                // Every missing row holds NaT already - a moved missing row
+                // its source's NaT, a vacated one the NaT fill - so nothing is
+                // filled in again (br-frankenpandas-vk7y9).
+                let column = Column::from_temporal_nanos_holding_nat(dtype, out, validity);
                 return Self::new(self.name.clone(), self.index.clone(), column);
             }
         }
@@ -63139,11 +63142,11 @@ impl DatetimeAccessor<'_> {
             // Bit-identical: same six directives (%Y/%m/%d/%H/%M/%S) with the same
             // zero-padded integer formatting, everything else literal; the digit
             // replacements never introduce new directives, so left-to-right token
-            // substitution equals the chained `.replace()`. Bails to the closure
-            // path on any NaT / non-dense backing.
-            if let Some(nanos) = self.series.column().as_datetime64_slice()
-                && !nanos.contains(&fp_types::Timestamp::NAT)
-            {
+            // substitution equals the chained `.replace()`. A NaT row is a NaN
+            // gap, as the closure path makes it (a column holding NaT took that
+            // path: d.dt.strftime('%Y-%m-%d') 0.91x pandas at 100k, 10% NaT;
+            // br-frankenpandas-vk7y9). Bails to it on a non-dense backing.
+            if let Some(nanos) = self.series.column().as_datetime64_slice() {
                 enum StrfTok {
                     Lit(Vec<u8>),
                     Year,
@@ -63186,7 +63189,14 @@ impl DatetimeAccessor<'_> {
                 let mut bytes: Vec<u8> = Vec::with_capacity(nanos.len() * fmt.len().max(8));
                 let mut offsets: Vec<usize> = Vec::with_capacity(nanos.len() + 1);
                 offsets.push(0);
-                for &ns in nanos {
+                let mut marks = ValidityWordWriter::new(nanos.len());
+                for (row, &ns) in nanos.iter().enumerate() {
+                    let present = ns != fp_types::Timestamp::NAT;
+                    marks.mark(row, present);
+                    if !present {
+                        offsets.push(bytes.len());
+                        continue;
+                    }
                     let (y, m, d) = Self::datetime64_civil_from_nanos(ns);
                     let secs_of_day =
                         ns.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
@@ -63213,7 +63223,9 @@ impl DatetimeAccessor<'_> {
                     offsets.push(bytes.len());
                 }
                 let index = self.series.index().clone();
-                let column = Column::from_utf8_contiguous(bytes, offsets);
+                let validity = marks.finish(nanos.len());
+                let column =
+                    Column::from_utf8_values_with_gap(bytes, offsets, validity, NullKind::NaN);
                 return Series::new(self.series.name(), index, column);
             }
             // Fast path: derive (y,m,d,h,mi,sec) ONCE per row via integer civil +
@@ -170008,6 +170020,56 @@ mod tests {
             result.values()[0],
             Scalar::Utf8("2024/03/15 14:30".to_owned())
         );
+    }
+
+    #[test]
+    fn dt_strftime_of_a_column_holding_nat_vk7y9() {
+        // The tokenized formatter takes a typed datetime column holding NaT
+        // (it fell to the per-row replace path): each NaT a NaN gap, as the
+        // Scalar construction marks it, the rest formatted
+        // (br-frankenpandas-vk7y9).
+        let nat = fp_types::Timestamp::NAT;
+        let day = 86_400_000_000_000_i64;
+        let nanos = vec![19_797 * day + 3_600_000_000_000, nat, 0, nat];
+        let dates = Series::new(
+            "d",
+            Index::from_range(0, 4, 1),
+            Column::from_temporal_nanos(DType::datetime64_naive(), nanos),
+        )
+        .unwrap();
+        let formatted = dates.dt().strftime("%Y-%m-%d %H").unwrap();
+        assert_eq!(
+            formatted.values(),
+            &[
+                Scalar::Utf8("2024-03-15 01".to_owned()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("1970-01-01 00".to_owned()),
+                Scalar::Null(NullKind::NaN),
+            ]
+        );
+        assert_eq!(formatted.column().dtype(), DType::Utf8);
+        // NEGATIVE: an all-NaT column is all gaps; one with none has none.
+        let gaps = Series::new(
+            "g",
+            Index::from_range(0, 2, 1),
+            Column::from_temporal_nanos(DType::datetime64_naive(), vec![nat, nat]),
+        )
+        .unwrap();
+        assert!(
+            gaps.dt()
+                .strftime("%Y")
+                .unwrap()
+                .values()
+                .iter()
+                .all(Scalar::is_missing)
+        );
+        let full = Series::new(
+            "f",
+            Index::from_range(0, 1, 1),
+            Column::from_temporal_nanos(DType::datetime64_naive(), vec![0]),
+        )
+        .unwrap();
+        assert!(full.dt().strftime("%Y").unwrap().column().validity().all());
     }
 
     #[test]

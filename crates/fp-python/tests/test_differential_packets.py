@@ -32868,3 +32868,50 @@ def test_drop_duplicates_takes_its_index_like_pandas_lsn8d(case: str) -> None:
         return ([repr(v) for v in out.tolist()], str(out.dtype), [str(label) for label in idx], type(idx).__name__, list(idx.names), getattr(idx, "freqstr", None))
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.59: a str method
+# over a 'string' column is typed by the method, as pandas types it, even
+# where no row says - every row missing, or none: a count (len, count, find,
+# rfind) Int64, a test (contains, startswith, is*, match, fullmatch) boolean,
+# text (upper, strip, replace, slice, get, pad, zfill, repeat, ...) string
+# (each was object); cat with others over a string column is string with
+# <NA> (it was object holding NaN), an na_rep row joined; a regex replace
+# Python runs is string too; a count over an object column of nothing but
+# None keeps those None cells, object (they were NaN floats). NEGATIVE: an
+# object column's other methods stay as they were, contains(na=False)
+# answers False, and a present row still decides.
+_FVSAO59_KIND_METHODS = {
+    "len": lambda s: s.str.len(), "count": lambda s: s.str.count("a"), "find": lambda s: s.str.find("a"),
+    "rfind": lambda s: s.str.rfind("a"), "upper": lambda s: s.str.upper(), "strip": lambda s: s.str.strip(),
+    "replace": lambda s: s.str.replace("a", "b"), "regex replace": lambda s: s.str.replace("(a)", r"\1\1", regex=True),
+    "slice": lambda s: s.str.slice(0, 1), "get": lambda s: s.str.get(0), "zfill": lambda s: s.str.zfill(3),
+    "pad": lambda s: s.str.pad(3), "repeat": lambda s: s.str.repeat(2), "title": lambda s: s.str.title(),
+    "contains": lambda s: s.str.contains("a"), "contains na=False": lambda s: s.str.contains("a", na=False),
+    "startswith": lambda s: s.str.startswith("a"), "isdigit": lambda s: s.str.isdigit(),
+    "isupper": lambda s: s.str.isupper(), "match": lambda s: s.str.match("a"), "fullmatch": lambda s: s.str.fullmatch("a"),
+    "cat others": lambda s: s.str.cat(s, sep="-"), "cat others na_rep": lambda s: s.str.cat(s, sep="-", na_rep="?"),
+}
+_FVSAO59_KIND_SOURCES = {
+    "all missing": lambda m: m.Series([None, None], dtype="string"),
+    "empty": lambda m: m.Series([], dtype="string"),
+    "some text": lambda m: m.Series(["ab", None, "Ca"], dtype="string"),
+    "object all missing": lambda m: m.Series([None, None], dtype=object),
+}
+_FVSAO59_KIND_CASES = [(source, method) for source in _FVSAO59_KIND_SOURCES for method in _FVSAO59_KIND_METHODS]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _FVSAO59_KIND_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_string_methods_typed_by_the_method_like_pandas_fvsao59(case: Any) -> None:
+    source, method = case
+
+    def run(m: Any) -> Any:
+        try:
+            out = _FVSAO59_KIND_METHODS[method](_FVSAO59_KIND_SOURCES[source](m))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        # repr, not the value: <NA> has no truth value to compare by.
+        return [str(out.dtype), [(type(v).__name__, repr(v)) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)

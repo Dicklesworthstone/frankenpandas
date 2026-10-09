@@ -60065,11 +60065,11 @@ pub struct PySeriesStringAccessor {
 #[pymethods]
 impl PySeriesStringAccessor {
     fn lower(&self) -> PyResult<PySeries> {
-        self.wrap(|s| s.lower())
+        self.wrap_as(StrKind::Text, |s| s.lower())
     }
 
     fn upper(&self) -> PyResult<PySeries> {
-        self.wrap(|s| s.upper())
+        self.wrap_as(StrKind::Text, |s| s.upper())
     }
 
     /// pandas' `strip(to_strip=None)`: whitespace, or the given characters
@@ -60077,29 +60077,29 @@ impl PySeriesStringAccessor {
     #[pyo3(signature = (to_strip=None))]
     fn strip(&self, to_strip: Option<&str>) -> PyResult<PySeries> {
         match to_strip {
-            Some(chars) => self.wrap(|s| s.strip_chars(chars)),
-            None => self.wrap(|s| s.strip()),
+            Some(chars) => self.wrap_as(StrKind::Text, |s| s.strip_chars(chars)),
+            None => self.wrap_as(StrKind::Text, |s| s.strip()),
         }
     }
 
     #[pyo3(signature = (to_strip=None))]
     fn lstrip(&self, to_strip: Option<&str>) -> PyResult<PySeries> {
         match to_strip {
-            Some(chars) => self.wrap(|s| s.lstrip_chars(chars)),
-            None => self.wrap(|s| s.lstrip()),
+            Some(chars) => self.wrap_as(StrKind::Text, |s| s.lstrip_chars(chars)),
+            None => self.wrap_as(StrKind::Text, |s| s.lstrip()),
         }
     }
 
     #[pyo3(signature = (to_strip=None))]
     fn rstrip(&self, to_strip: Option<&str>) -> PyResult<PySeries> {
         match to_strip {
-            Some(chars) => self.wrap(|s| s.rstrip_chars(chars)),
-            None => self.wrap(|s| s.rstrip()),
+            Some(chars) => self.wrap_as(StrKind::Text, |s| s.rstrip_chars(chars)),
+            None => self.wrap_as(StrKind::Text, |s| s.rstrip()),
         }
     }
 
     fn len(&self) -> PyResult<PySeries> {
-        self.wrap(|s| s.len())
+        self.wrap_as(StrKind::Count, |s| s.len())
     }
 
     /// pandas' `startswith(pat, na=None)`: `pat` a string or a tuple of them.
@@ -60107,7 +60107,7 @@ impl PySeriesStringAccessor {
     fn startswith(&self, pat: &Bound<'_, PyAny>, na: Option<bool>) -> PyResult<PySeries> {
         let pats = str_patterns(pat)?;
         let refs: Vec<&str> = pats.iter().map(String::as_str).collect();
-        self.wrap(|s| s.startswith_any_with_na(&refs, na))
+        self.wrap_as(StrKind::Test, |s| s.startswith_any_with_na(&refs, na))
     }
 
     /// pandas' `endswith(pat, na=None)`: `pat` a string or a tuple of them.
@@ -60115,7 +60115,7 @@ impl PySeriesStringAccessor {
     fn endswith(&self, pat: &Bound<'_, PyAny>, na: Option<bool>) -> PyResult<PySeries> {
         let pats = str_patterns(pat)?;
         let refs: Vec<&str> = pats.iter().map(String::as_str).collect();
-        self.wrap(|s| s.endswith_any_with_na(&refs, na))
+        self.wrap_as(StrKind::Test, |s| s.endswith_any_with_na(&refs, na))
     }
 
     /// pandas' `contains(pat, case=True, flags=0, na=None, regex=True)`.
@@ -60134,7 +60134,9 @@ impl PySeriesStringAccessor {
         } else {
             pat.to_owned()
         };
-        self.wrap(|s| s.contains_with_options(&pat, case, na, regex))
+        self.wrap_as(StrKind::Test, |s| {
+            s.contains_with_options(&pat, case, na, regex)
+        })
     }
 
     /// pandas' `replace(pat, repl, n=-1, case=None, flags=0, regex=False)`.
@@ -60170,7 +60172,7 @@ impl PySeriesStringAccessor {
                 regex && (flags != 0 || replacement.contains('\\') || replacement.contains('$'));
             if !python_only {
                 let n = usize::try_from(n).ok();
-                return self.wrap(|s| {
+                return self.wrap_as(StrKind::Text, |s| {
                     s.replace_with_options(&pattern, &replacement, n, case.unwrap_or(true), regex)
                 });
             }
@@ -60203,10 +60205,13 @@ impl PySeriesStringAccessor {
             })
             .collect::<PyResult<Vec<_>>>()?;
         let column = Column::from_values(values).map_err(column_error_to_py)?;
-        Ok(PySeries {
-            inner: Series::new(self.series.name(), self.series.index().clone(), column)
+        // Typed as the other str methods' results are (a `string` column's
+        // stayed object; fvsao.59).
+        self.finish_as(
+            Series::new(self.series.name(), self.series.index().clone(), column)
                 .map_err(frame_error_to_py)?,
-        })
+            StrKind::Text,
+        )
     }
 
     /// pandas' `str.join(sep)`: a list cell's items joined by `sep` (NaN when
@@ -60413,65 +60418,65 @@ impl PySeriesStringAccessor {
     // get_dummies/str[i] ... raised AttributeError
     // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.13).
     fn title(&self) -> PyResult<PySeries> {
-        self.wrap(|s| s.title())
+        self.wrap_as(StrKind::Text, |s| s.title())
     }
     fn capitalize(&self) -> PyResult<PySeries> {
-        self.wrap(|s| s.capitalize())
+        self.wrap_as(StrKind::Text, |s| s.capitalize())
     }
     fn swapcase(&self) -> PyResult<PySeries> {
-        self.wrap(|s| s.swapcase())
+        self.wrap_as(StrKind::Text, |s| s.swapcase())
     }
     fn casefold(&self) -> PyResult<PySeries> {
-        self.wrap(|s| s.casefold())
+        self.wrap_as(StrKind::Text, |s| s.casefold())
     }
     fn isdigit(&self) -> PyResult<PySeries> {
-        self.wrap(|s| s.isdigit())
+        self.wrap_as(StrKind::Test, |s| s.isdigit())
     }
     fn isalpha(&self) -> PyResult<PySeries> {
-        self.wrap(|s| s.isalpha())
+        self.wrap_as(StrKind::Test, |s| s.isalpha())
     }
     fn isalnum(&self) -> PyResult<PySeries> {
-        self.wrap(|s| s.isalnum())
+        self.wrap_as(StrKind::Test, |s| s.isalnum())
     }
     fn isspace(&self) -> PyResult<PySeries> {
-        self.wrap(|s| s.isspace())
+        self.wrap_as(StrKind::Test, |s| s.isspace())
     }
     fn islower(&self) -> PyResult<PySeries> {
-        self.wrap(|s| s.islower())
+        self.wrap_as(StrKind::Test, |s| s.islower())
     }
     fn isupper(&self) -> PyResult<PySeries> {
-        self.wrap(|s| s.isupper())
+        self.wrap_as(StrKind::Test, |s| s.isupper())
     }
     fn isnumeric(&self) -> PyResult<PySeries> {
-        self.wrap(|s| s.isnumeric())
+        self.wrap_as(StrKind::Test, |s| s.isnumeric())
     }
     fn isdecimal(&self) -> PyResult<PySeries> {
-        self.wrap(|s| s.isdecimal())
+        self.wrap_as(StrKind::Test, |s| s.isdecimal())
     }
     fn istitle(&self) -> PyResult<PySeries> {
-        self.wrap(|s| s.istitle())
+        self.wrap_as(StrKind::Test, |s| s.istitle())
     }
     fn zfill(&self, width: usize) -> PyResult<PySeries> {
-        self.wrap(|s| s.zfill(width))
+        self.wrap_as(StrKind::Text, |s| s.zfill(width))
     }
     #[pyo3(signature = (width, side="left", fillchar=' '))]
     fn pad(&self, width: usize, side: &str, fillchar: char) -> PyResult<PySeries> {
-        self.wrap(|s| s.pad(width, side, fillchar))
+        self.wrap_as(StrKind::Text, |s| s.pad(width, side, fillchar))
     }
     #[pyo3(signature = (width, fillchar=' '))]
     fn center(&self, width: usize, fillchar: char) -> PyResult<PySeries> {
-        self.wrap(|s| s.center(width, fillchar))
+        self.wrap_as(StrKind::Text, |s| s.center(width, fillchar))
     }
     #[pyo3(signature = (width, fillchar=' '))]
     fn ljust(&self, width: usize, fillchar: char) -> PyResult<PySeries> {
-        self.wrap(|s| s.ljust(width, fillchar))
+        self.wrap_as(StrKind::Text, |s| s.ljust(width, fillchar))
     }
     #[pyo3(signature = (width, fillchar=' '))]
     fn rjust(&self, width: usize, fillchar: char) -> PyResult<PySeries> {
-        self.wrap(|s| s.rjust(width, fillchar))
+        self.wrap_as(StrKind::Text, |s| s.rjust(width, fillchar))
     }
     fn repeat(&self, repeats: usize) -> PyResult<PySeries> {
-        self.wrap(|s| s.repeat(repeats))
+        self.wrap_as(StrKind::Text, |s| s.repeat(repeats))
     }
     /// pandas' `wrap(width, **kwargs)`: each string through the running
     /// Python's own `textwrap.TextWrapper(width=width, **kwargs)`, its lines
@@ -60506,27 +60511,27 @@ impl PySeriesStringAccessor {
         })
     }
     fn normalize(&self, form: &str) -> PyResult<PySeries> {
-        self.wrap(|s| s.normalize(form))
+        self.wrap_as(StrKind::Text, |s| s.normalize(form))
     }
     fn removeprefix(&self, prefix: &str) -> PyResult<PySeries> {
-        self.wrap(|s| s.removeprefix(prefix))
+        self.wrap_as(StrKind::Text, |s| s.removeprefix(prefix))
     }
     fn removesuffix(&self, suffix: &str) -> PyResult<PySeries> {
-        self.wrap(|s| s.removesuffix(suffix))
+        self.wrap_as(StrKind::Text, |s| s.removesuffix(suffix))
     }
     /// pandas' `count(pat, flags=0)`: regex matches per string.
     #[pyo3(signature = (pat, flags=0))]
     fn count(&self, pat: &str, flags: i64) -> PyResult<PySeries> {
         let pat = regex_with_flags(pat, flags)?;
-        self.wrap(|s| s.count(&pat))
+        self.wrap_as(StrKind::Count, |s| s.count(&pat))
     }
     #[pyo3(signature = (sub, start=0, end=None))]
     fn find(&self, sub: &str, start: i64, end: Option<i64>) -> PyResult<PySeries> {
-        self.wrap(|s| s.find_with_bounds(sub, start, end))
+        self.wrap_as(StrKind::Count, |s| s.find_with_bounds(sub, start, end))
     }
     #[pyo3(signature = (sub, start=0, end=None))]
     fn rfind(&self, sub: &str, start: i64, end: Option<i64>) -> PyResult<PySeries> {
-        self.wrap(|s| s.rfind_with_bounds(sub, start, end))
+        self.wrap_as(StrKind::Count, |s| s.rfind_with_bounds(sub, start, end))
     }
     /// pandas' `index(sub, start=0, end=None)`: `find`, a string without
     /// `sub` Python's ValueError (it was missing; br-frankenpandas-fvwrq).
@@ -60541,7 +60546,7 @@ impl PySeriesStringAccessor {
     }
     /// pandas' `get(i)`: the i-th character (NaN past the end).
     fn get(&self, i: i64) -> PyResult<PySeries> {
-        self.wrap(|s| s.get(i))
+        self.wrap_as(StrKind::Text, |s| s.get(i))
     }
     /// `s.str[i]` / `s.str[a:b:c]`.
     fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<PySeries> {
@@ -60562,7 +60567,7 @@ impl PySeriesStringAccessor {
             }
         };
         let (start, stop, step) = (bound("start")?, bound("stop")?, bound("step")?);
-        self.wrap(|s| s.slice(start, stop, step))
+        self.wrap_as(StrKind::Text, |s| s.slice(start, stop, step))
     }
     #[pyo3(signature = (start=None, stop=None, step=None))]
     fn slice(
@@ -60571,7 +60576,7 @@ impl PySeriesStringAccessor {
         stop: Option<i64>,
         step: Option<i64>,
     ) -> PyResult<PySeries> {
-        self.wrap(|s| s.slice(start, stop, step))
+        self.wrap_as(StrKind::Text, |s| s.slice(start, stop, step))
     }
     #[pyo3(signature = (start=None, stop=None, repl=""))]
     fn slice_replace(
@@ -60580,13 +60585,13 @@ impl PySeriesStringAccessor {
         stop: Option<i64>,
         repl: &str,
     ) -> PyResult<PySeries> {
-        self.wrap(|s| s.slice_replace(start, stop, repl))
+        self.wrap_as(StrKind::Text, |s| s.slice_replace(start, stop, repl))
     }
     /// pandas' `fullmatch(pat, case=True, flags=0, na=None)`.
     #[pyo3(signature = (pat, case=true, flags=0, na=None))]
     fn fullmatch(&self, pat: &str, case: bool, flags: i64, na: Option<bool>) -> PyResult<PySeries> {
         let pat = regex_with_flags(pat, flags)?;
-        self.wrap(|s| s.fullmatch_with_options(&pat, case, na))
+        self.wrap_as(StrKind::Test, |s| s.fullmatch_with_options(&pat, case, na))
     }
     /// pandas' `match(pat, case=True, flags=0, na=None)`: a match at the start.
     #[pyo3(name = "match", signature = (pat, case=true, flags=0, na=None))]
@@ -60598,7 +60603,9 @@ impl PySeriesStringAccessor {
         na: Option<bool>,
     ) -> PyResult<PySeries> {
         let pat = regex_with_flags(pat, flags)?;
-        self.wrap(|s| s.match_regex_with_options(&pat, case, na))
+        self.wrap_as(StrKind::Test, |s| {
+            s.match_regex_with_options(&pat, case, na)
+        })
     }
     /// pandas' `extract(pat, flags=0, expand=True)`: a DataFrame of the
     /// groups, or with `expand=False` and one group a Series.
@@ -60617,7 +60624,7 @@ impl PySeriesStringAccessor {
         }
         if !expand && df.num_columns() == 1 {
             let s = self.series.str().extract(pat).map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, self.finish(s)?)?.into_any());
+            return Ok(Py::new(py, self.finish_as(s, StrKind::Text)?)?.into_any());
         }
         let inner = self.string_frame(group_column_labels(df));
         Ok(Py::new(py, PyDataFrame { inner })?.into_any())
@@ -60847,13 +60854,34 @@ impl PySeriesStringAccessor {
                 .collect::<PyResult<Vec<_>>>()?
         };
         let refs: Vec<&Series> = others.iter().collect();
-        let joined = self
+        let mut joined = self
             .series
             .str()
             .cat_list(&refs, sep, na_rep)
             .map_err(frame_error_to_py)?;
+        // Over a `string` column the joined rows are `string`, a missing one
+        // <NA>, each row as it was joined - an na_rep row too (they were
+        // object holding NaN; fvsao.59).
+        if self.series.column().is_pandas_string() {
+            let column = Column::new(DType::Utf8, joined.values().to_vec())
+                .map_err(column_error_to_py)?
+                .as_pandas_string();
+            joined = Series::new(joined.name(), joined.index().clone(), column)
+                .map_err(frame_error_to_py)?;
+        }
         Ok(Py::new(py, PySeries { inner: joined })?.into_any())
     }
+}
+
+/// What a str method returns over a `string` column, as pandas types it by
+/// the method: text (`string`), a count (`Int64`), a test (`boolean`), or
+/// whatever its rows hold (`Infer`: split's lists, extract's groups).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StrKind {
+    Text,
+    Count,
+    Test,
+    Infer,
 }
 
 impl PySeriesStringAccessor {
@@ -60916,12 +60944,18 @@ impl PySeriesStringAccessor {
         .into_any())
     }
 
-    fn wrap(
+    /// A str method's result, typed as `kind` says ([`Self::finish_as`]).
+    fn wrap_as(
         &self,
+        kind: StrKind,
         op: impl FnOnce(&fp_frame::StringAccessor<'_>) -> Result<Series, FrameError>,
     ) -> PyResult<PySeries> {
         let inner = op(&self.series.str()).map_err(frame_error_to_py)?;
-        self.finish(inner)
+        self.finish_as(inner, kind)
+    }
+
+    fn finish(&self, inner: Series) -> PyResult<PySeries> {
+        self.finish_as(inner, StrKind::Infer)
     }
 
     /// A str method's result as pandas gives it over a `string` column
@@ -60931,13 +60965,29 @@ impl PySeriesStringAccessor {
     /// Over an object column a number, bool or date cell has no string
     /// method, so its result is NaN, as pandas' object loop gives it (it
     /// was passed through: Series(['a', 1]).str.upper() kept 1;
-    /// br-frankenpandas-fvwrq); any other result as it is.
-    fn finish(&self, inner: Series) -> PyResult<PySeries> {
+    /// br-frankenpandas-fvwrq); any other result as it is. Where no row
+    /// says what the result is - every source row missing, or none - the
+    /// method's `kind` does, as pandas types it by the method (an all-missing
+    /// or empty `string` column's len was object; fvsao.59).
+    fn finish_as(&self, inner: Series, kind: StrKind) -> PyResult<PySeries> {
         let source = self.series.column();
         if inner.len() != source.len() {
             return Ok(PySeries { inner });
         }
         if !source.is_pandas_string() {
+            // A count over an object column of nothing but missing values is
+            // those values, object, as pandas' masked loop leaves them (None
+            // stays None; they were NaN floats; fvsao.59).
+            if kind == StrKind::Count
+                && matches!(source.dtype(), DType::Utf8 | DType::Null)
+                && !source.is_empty()
+                && source.values().iter().all(Scalar::is_missing)
+            {
+                let column = Column::from_object_values(source.values().to_vec());
+                return Series::new(inner.name(), inner.index().clone(), column)
+                    .map(|inner| PySeries { inner })
+                    .map_err(frame_error_to_py);
+            }
             let not_text = |cell: &Scalar| {
                 !cell.is_missing()
                     && matches!(
@@ -60974,7 +61024,11 @@ impl PySeriesStringAccessor {
         let only = |test: fn(&Scalar) -> bool| {
             values.iter().all(|value| value.is_missing() || test(value))
         };
+        let unsaid = values.iter().all(Scalar::is_missing);
         let target = match inner.column().dtype() {
+            _ if unsaid && kind == StrKind::Count => Some(DType::Int64Nullable),
+            _ if unsaid && kind == StrKind::Test => Some(DType::BoolNullable),
+            _ if unsaid && kind == StrKind::Text => None,
             DType::Utf8 if only(|value| matches!(value, Scalar::Utf8(_))) => None,
             DType::Bool | DType::BoolNullable => Some(DType::BoolNullable),
             DType::Utf8 if only(|value| matches!(value, Scalar::Bool(_))) => {
@@ -61049,9 +61103,10 @@ impl PySeriesStringAccessor {
             })
             .collect::<PyResult<Vec<_>>>()?;
         let column = Column::from_values(values).map_err(column_error_to_py)?;
-        self.finish(
+        self.finish_as(
             Series::new(self.series.name(), self.series.index().clone(), column)
                 .map_err(frame_error_to_py)?,
+            StrKind::Text,
         )
     }
 

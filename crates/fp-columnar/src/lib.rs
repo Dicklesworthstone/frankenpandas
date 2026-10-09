@@ -14981,6 +14981,34 @@ impl Column {
             })
             .collect();
         let validity = ValidityMask::from_words(words, data.len());
+        Self::from_temporal_nanos_holding_nat(dtype, data, validity)
+    }
+
+    /// A datetime (`dtype`, its zone kept) or timedelta column over `data`
+    /// under `validity`, every invalid slot of which already holds NaT - a
+    /// move of an [`Self::as_temporal_nanos_with_validity`] buffer, whose
+    /// missing slots are NaT (a shift): nothing is filled in, where
+    /// [`Self::from_datetime64_values_with_validity`] fills NaT a call a
+    /// missing run (half of d.shift(1) over 10% NaT; br-frankenpandas-vk7y9).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_temporal_nanos_holding_nat(
+        dtype: DType,
+        data: Vec<i64>,
+        validity: ValidityMask,
+    ) -> Self {
+        debug_assert!(matches!(
+            dtype,
+            DType::Datetime64 { .. } | DType::Timedelta64
+        ));
+        debug_assert_eq!(data.len(), validity.len());
+        debug_assert!({
+            let mut held = true;
+            validity.for_each_invalid_range(|start, len| {
+                held &= data[start..start + len].iter().all(|&ns| ns == i64::MIN);
+            });
+            held
+        });
         let values = match (validity.all(), dtype == DType::Timedelta64) {
             (true, false) => ScalarValues::lazy_all_valid_datetime64_owned(data),
             (true, true) => ScalarValues::lazy_all_valid_timedelta64_owned(data),
@@ -15070,8 +15098,10 @@ impl Column {
 
     /// [`Self::from_utf8_values_with_validity`] whose invalid slots
     /// materialize `Scalar::Null(gap)`: NaN for the gaps a gather invents
-    /// from an all-valid source, as pandas marks them (br-frankenpandas-7u2td).
-    fn from_utf8_values_with_gap(
+    /// from an all-valid source, as pandas marks them (br-frankenpandas-7u2td),
+    /// or a datetime formatter its NaT rows.
+    #[doc(hidden)]
+    pub fn from_utf8_values_with_gap(
         bytes: Vec<u8>,
         offsets: Vec<usize>,
         validity: ValidityMask,
@@ -59378,6 +59408,55 @@ mod tests {
             let full = Column::from_temporal_nanos(DType::Timedelta64, vec![nat + 1, 0, 5]);
             assert!(full.validity().all());
             assert_eq!(full.count(), 3);
+        }
+
+        #[test]
+        fn temporal_nanos_holding_nat_take_the_mask_as_given_vk7y9() {
+            // A buffer whose gaps hold NaT under a given mask - a shifted
+            // column's - builds the column the filling constructors build,
+            // zone and kind kept, and an all-valid mask over a NaT datum stays
+            // all-valid as theirs does (br-frankenpandas-vk7y9).
+            let nat = i64::MIN;
+            let nanos = vec![nat, 7, nat, nat, -2, 9, nat];
+            let mask = ValidityMask::from_words(vec![0b011_0010], 7);
+            let zoned = DType::datetime64_tz("Asia/Tokyo");
+            let held =
+                Column::from_temporal_nanos_holding_nat(zoned.clone(), nanos.clone(), mask.clone());
+            let filled = Column::from_datetime64_values_with_validity(nanos.clone(), mask.clone())
+                .with_dtype(zoned.clone());
+            assert_eq!(held.dtype(), zoned);
+            assert_eq!(held.validity(), &mask);
+            assert_eq!(held.values(), filled.values());
+            let spans = Column::from_temporal_nanos_holding_nat(
+                DType::Timedelta64,
+                nanos.clone(),
+                mask.clone(),
+            );
+            assert_eq!(
+                spans.values(),
+                Column::from_timedelta64_values_with_validity(nanos, mask).values()
+            );
+            let valid_nat = Column::from_temporal_nanos_holding_nat(
+                DType::datetime64_naive(),
+                vec![nat, 3],
+                ValidityMask::all_valid(2),
+            );
+            assert!(valid_nat.validity().all());
+            assert_eq!(valid_nat.as_datetime64_slice(), Some([nat, 3].as_slice()));
+        }
+
+        #[test]
+        #[cfg(debug_assertions)]
+        #[should_panic(expected = "held")]
+        fn temporal_nanos_holding_nat_refuse_a_present_datum_in_a_gap_vk7y9() {
+            // NEGATIVE: a gap holding an instant is not this constructor's to
+            // build - the debug check catches the caller that would leave it.
+            let mask = ValidityMask::from_words(vec![0b01], 2);
+            let _ = Column::from_temporal_nanos_holding_nat(
+                DType::datetime64_naive(),
+                vec![1, 2],
+                mask,
+            );
         }
 
         #[test]
