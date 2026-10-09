@@ -28646,6 +28646,230 @@ def test_series_text_key_like_pandas_fvsao14(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+# br-frankenpandas-lsn8d: s.iloc[positions] normalizes them in their own
+# buffer and gathers an int64 index's labels back into it - a RangeIndex,
+# a stepped one, an int64 index, a text index, a daily range holding its
+# freq; positions as an int64 / int32 array or a list, negative, repeated,
+# consecutive; NEGATIVE: a position out of bounds is pandas' IndexError.
+def _lsn8d_iloc_index(m: Any, kind: str) -> Any:
+    if kind == "range":
+        return m.RangeIndex(40)
+    if kind == "stepped":
+        return m.RangeIndex(100, -20, -3)
+    if kind == "int":
+        return m.Index((np.arange(40) * 37) % 41 - 20)
+    if kind == "text":
+        return m.Index([f"r{k}" for k in range(40)])
+    return m.date_range("2021-01-01", periods=40, freq="D", name="when")
+
+
+_LSN8D_ILOC_POSITIONS = {
+    "shuffled": lambda: np.random.default_rng(7).permutation(40),
+    "int32 negative": lambda: (np.arange(40, dtype="int32") * 7) % 80 - 40,
+    "list repeated": lambda: [-1, 0, 5, 5, -40],
+    "consecutive": lambda: np.array([3, 4, 5]),
+    "out of bounds": lambda: np.array([0, 40]),
+}
+_LSN8D_ILOC_CASES = [
+    (kind, how) for kind in ("range", "stepped", "int", "text", "dated") for how in _LSN8D_ILOC_POSITIONS
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _LSN8D_ILOC_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_series_iloc_positions_like_pandas_lsn8d(case: Any) -> None:
+    kind, how = case
+
+    def run(m: Any) -> Any:
+        s = m.Series(np.arange(40) * 0.5, index=_lsn8d_iloc_index(m, kind), name="v")
+        try:
+            out = s.iloc[_LSN8D_ILOC_POSITIONS[how]()]
+        except Exception as error:  # noqa: BLE001
+            return type(error).__name__
+        return [repr(out.index), out.name, out.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-7zs0a / br-frankenpandas-yrjrc: a categorical's
+# categories as pandas' CategoricalDtype makes them - a category equal to
+# another by pandas' equality (1 / 1.0 / True, 'a' / 'a') or a missing one is
+# pandas' ValueError from Categorical, from_codes, CategoricalDtype and the
+# category editors; an int / float mix is float64 (constructors and editors);
+# NEGATIVE: unique categories of mixed kinds stay object, an int-only
+# addition stays int64, a text addition object.
+def _7zs0a_series(m: Any) -> Any:
+    return m.Series([3, 1, 3]).astype("category")
+
+
+_7ZS0A_CATEGORIES = {
+    "ctor 1 / 1.0": lambda m: m.Categorical([1, 1.0], categories=[1, 1.0]),
+    "ctor 1 / True": lambda m: m.Categorical([1], categories=[1, True]),
+    "ctor a / a": lambda m: m.Categorical(["a"], categories=["a", "a"]),
+    "ctor nan": lambda m: m.Categorical([1.0], categories=[np.nan, 1.0]),
+    "ctor floats": lambda m: m.Categorical([1.0, 2.0], categories=[1.0, 2.0]),
+    "ctor text and int": lambda m: m.Categorical(["a", 1], categories=["a", 1]),
+    "ctor int / float mix": lambda m: m.Categorical([1, 2.5], categories=[1, 2.5]),
+    "values 1 / 1.0 / 2.5": lambda m: m.Categorical([1, 1.0, 2.5]),
+    "values int / float": lambda m: m.Categorical([3, 2.5, 1]),
+    "from_codes 1 / 1.0": lambda m: m.Categorical.from_codes([0, 1, 0], categories=[1, 1.0]),
+    "dtype 1 / 1.0": lambda m: m.CategoricalDtype([1, 1.0]),
+    "dtype int / float": lambda m: m.CategoricalDtype([1, 2.5]),
+    "set dup": lambda m: _7zs0a_series(m).cat.set_categories([1, 1.0, 3]),
+    "set int / float": lambda m: _7zs0a_series(m).cat.set_categories([1, 2.5, 3]),
+    "add float": lambda m: _7zs0a_series(m).cat.add_categories([2.5]),
+    "float add int": lambda m: m.Series([1.5, 3.0]).astype("category").cat.add_categories([7]),
+    "add int": lambda m: _7zs0a_series(m).cat.add_categories([7]),
+    "add text": lambda m: _7zs0a_series(m).cat.add_categories(["x"]),
+    "add True": lambda m: _7zs0a_series(m).cat.add_categories([True]),
+    "rename int / float": lambda m: _7zs0a_series(m).cat.rename_categories([10, 2.5]),
+    "rename dup": lambda m: _7zs0a_series(m).cat.rename_categories([10, 10.0]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_7ZS0A_CATEGORIES))
+def test_categories_validate_and_infer_like_pandas_7zs0a(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _7ZS0A_CATEGORIES[case](m)
+        except Exception as error:  # noqa: BLE001
+            return type(error).__name__
+        holder = out.cat if hasattr(out, "cat") else out
+        categories = holder.categories
+        codes = list(holder.codes) if hasattr(holder, "codes") else None
+        return [repr(list(categories)), str(categories.dtype), codes]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-7zs0a / br-frankenpandas-yrjrc over a CategoricalIndex:
+# repeated categories by pandas' equality are its ValueError from the
+# constructor and the editors; an int / float mix makes categories and labels
+# floats; NEGATIVE: an int addition stays int64, a text one object, text with
+# an int object.
+def _7zs0a_index(m: Any) -> Any:
+    return m.CategoricalIndex([3, 1, 3], categories=[1, 3])
+
+
+_7ZS0A_INDEX = {
+    "ctor 1 / 1.0": lambda m: m.CategoricalIndex(["a"], categories=[1, 1.0]),
+    "ctor 1 / True": lambda m: m.CategoricalIndex([1], categories=[1, True]),
+    "ctor int / float": lambda m: m.CategoricalIndex([1, 3], categories=[1, 2.5, 3]),
+    "ctor int label, float categories": lambda m: m.CategoricalIndex([1], categories=[1.0]),
+    "values int / float": lambda m: m.CategoricalIndex([1, 2.5, 1]),
+    "values 1 / 1.0": lambda m: m.CategoricalIndex([1, 1.0, 2.5]),
+    "add float": lambda m: _7zs0a_index(m).add_categories([2.5]),
+    "float add int": lambda m: m.CategoricalIndex([1.5, 3.0]).add_categories([7]),
+    "add True": lambda m: _7zs0a_index(m).add_categories([True]),
+    "add int": lambda m: _7zs0a_index(m).add_categories([7]),
+    "add text": lambda m: _7zs0a_index(m).add_categories(["x"]),
+    "set dup": lambda m: _7zs0a_index(m).set_categories([1, 1.0]),
+    "set int / float": lambda m: _7zs0a_index(m).set_categories([1, 2.5, 3]),
+    "rename int / float": lambda m: _7zs0a_index(m).rename_categories([10, 2.5]),
+    "rename dup": lambda m: _7zs0a_index(m).rename_categories([10, 10.0]),
+    "ctor text and int": lambda m: m.CategoricalIndex(["a", 1], categories=["a", 1]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_7ZS0A_INDEX))
+def test_categorical_index_categories_like_pandas_7zs0a(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _7ZS0A_INDEX[case](m)
+        except Exception as error:  # noqa: BLE001
+            return type(error).__name__
+        return [repr(list(out)), repr(list(out.categories)), str(out.categories.dtype), list(out.codes)]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-knu1r: grouped shift / diff / pct_change by periods other
+# than 1 (each group's ring stepped by a cursor) - by an int key (the
+# key-offset kernels) and a text key (the group-id kernels), over floats
+# holding NaN, all-valid floats and ints, forward and backward;
+# NEGATIVE: a group's first |periods| rows are NaN and a NaN source stays
+# NaN.
+def _knu1r_ring_frame(m: Any, key: str, values: str) -> Any:
+    k = np.arange(120)
+    floats = (k * 7 % 13) / 4.0 - 1.0
+    if values == "nan floats":
+        floats[[0, 3, 4, 5, 33, 34, 60, 89, 118]] = np.nan
+    data = (k * 7 % 13) - 6 if values == "ints" else floats
+    keys = (k * 5) % 4 if key == "int" else [f"g{(v * 5) % 4}" for v in k]
+    return m.DataFrame({"k": keys, "v": data})
+
+
+_KNU1R_RING_OPS = {
+    "shift(2)": lambda g: g.shift(2),
+    "shift(-2)": lambda g: g.shift(-2),
+    "shift(3)": lambda g: g.shift(3),
+    "diff(2)": lambda g: g.diff(2),
+    "diff(-3)": lambda g: g.diff(-3),
+    "pct_change(2)": lambda g: g.pct_change(2, fill_method=None),
+}
+_KNU1R_RING_CASES = [
+    (op, key, values)
+    for op in _KNU1R_RING_OPS
+    for key in ("int", "text")
+    for values in ("nan floats", "floats", "ints")
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _KNU1R_RING_CASES, ids=lambda case: "-".join(case))
+def test_grouped_ring_periods_like_pandas_knu1r(case: Any) -> None:
+    op, key, values = case
+
+    def run(m: Any) -> Any:
+        out = _KNU1R_RING_OPS[op](_knu1r_ring_frame(m, key, values).groupby("k")["v"])
+        return [str(out.dtype), [None if v != v else round(float(v), 9) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-knu1r: unique of a float column builds its distinct
+# floats directly - first-seen order, every missing value one NaN where the
+# first is seen, -0.0 and 0.0 one value (the first seen kept), from numpy
+# NaN, by where, by a reindex adding a label, all NaN, empty, float32,
+# infinities; NEGATIVE: a nullable Float64's unique stays its FloatingArray
+# with <NA>, an int64 column's an int64 array.
+_KNU1R_UNIQUE = {
+    "numpy nan": lambda m: m.Series(np.array([1.5, np.nan, 2.5, 1.5, np.nan, 3.0, 2.5])),
+    "nan first": lambda m: m.Series(np.array([np.nan, 0.25, 0.25, np.nan])),
+    "signed zeros": lambda m: m.Series(np.array([-0.0, 0.0, np.nan, 0.0, -0.0])),
+    "zero first": lambda m: m.Series(np.array([0.0, np.nan, -0.0])),
+    "where": lambda m: m.Series([0.2, 0.7, 0.9, 0.1, 0.7]).where(m.Series([0.2, 0.7, 0.9, 0.1, 0.7]) > 0.5),
+    "reindex": lambda m: m.Series([1.0, 2.0, 1.0], index=[0, 1, 2]).reindex([2, 7, 0, 9]),
+    "all nan": lambda m: m.Series(np.array([np.nan, np.nan])),
+    "empty": lambda m: m.Series(np.array([], dtype="float64")),
+    "float32": lambda m: m.Series(np.array([0.1, np.nan, 0.1, 2.5], dtype="float32")),
+    "infinities": lambda m: m.Series(np.array([np.inf, -np.inf, np.nan, np.inf, 1.0])),
+    "no missing": lambda m: m.Series(np.array([3.5, 1.25, 3.5, -2.0, 1.25])),
+    "nullable Float64": lambda m: m.Series([1.5, None, 1.5, 2.0], dtype="Float64"),
+    "int64": lambda m: m.Series(np.array([3, 1, 3, 2])),
+}
+
+
+def _knu1r_unique_cell(v: Any) -> Any:
+    if type(v).__name__ == "NAType":
+        return "<NA>"
+    if isinstance(v, (float, np.floating)):
+        return "nan" if v != v else (float(v), bool(np.signbit(v)))
+    return int(v)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_KNU1R_UNIQUE))
+def test_float_unique_like_pandas_knu1r(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _KNU1R_UNIQUE[case](m).unique()
+        return [type(out).__name__, str(out.dtype), [_knu1r_unique_cell(v) for v in list(out)]]
+
+    assert run(fpd) == run(pd)
+
+
 # br-frankenpandas-knu1r: grouped cumsum / cumprod / cummax / cummin of a
 # float column holding NaN (a group's first value, runs of them) by an int
 # key (the key-offset kernel) and a text key (the group-id kernel);

@@ -1745,15 +1745,35 @@ fn normalize_iloc_position(position: i64, len: usize) -> Result<usize, FrameErro
 /// (`s.iloc[perm]` 0.64x pandas at 1M rows; br-frankenpandas-lsn8d).
 #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // checked into 0..len first
 fn normalize_iloc_positions(positions: &[i64], len: usize) -> Result<Vec<usize>, i64> {
+    let length = iloc_positions_length(positions, len)?;
+    Ok(positions
+        .iter()
+        .map(|&at| (at + ((at >> 63) & length)) as usize)
+        .collect())
+}
+
+/// [`normalize_iloc_positions`] in the positions' own buffer (an i64 and a
+/// usize share a layout): a second buffer was a page-faulted 8 MB a million
+/// rows (br-frankenpandas-lsn8d).
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // checked into 0..len first
+fn normalize_iloc_positions_owned(positions: Vec<i64>, len: usize) -> Result<Vec<usize>, i64> {
+    let length = iloc_positions_length(&positions, len)?;
+    Ok(positions
+        .into_iter()
+        .map(|at| (at + ((at >> 63) & length)) as usize)
+        .collect())
+}
+
+/// The length negative `positions` wrap at, when every one of them is in
+/// bounds over `len` rows (one min / max pass); `Err` is the first out of
+/// bounds.
+fn iloc_positions_length(positions: &[i64], len: usize) -> Result<i64, i64> {
     let length = i64::try_from(len).unwrap_or(i64::MAX);
     let (low, high) = positions.iter().fold((0_i64, -1_i64), |(low, high), &at| {
         (low.min(at), high.max(at))
     });
     if low >= -length && high < length {
-        return Ok(positions
-            .iter()
-            .map(|&at| (at + ((at >> 63) & length)) as usize)
-            .collect());
+        return Ok(length);
     }
     Err(positions
         .iter()
@@ -11327,6 +11347,67 @@ fn is_ordering_comparison(op: ComparisonOp) -> bool {
     )
 }
 
+/// A categorical's categories as pandas' CategoricalDtype makes them: an
+/// int / float mix is float64, every int its float, as pandas' Index infers
+/// it; none may be missing ("Categorical categories cannot be null") and none
+/// may equal another by pandas' equality - 1, 1.0 and True are one value -
+/// ("Categorical categories must be unique"). They were kept as given:
+/// Categorical([1, 1.0], categories=[1, 1.0]) built two categories where
+/// pandas raises (br-frankenpandas-7zs0a), and add_categories([2.5]) on int
+/// categories left them object (br-frankenpandas-yrjrc).
+///
+/// # Errors
+/// pandas' ValueError texts above, for a missing or a repeated category.
+pub fn normalize_categories(mut categories: Vec<Scalar>) -> Result<Vec<Scalar>, FrameError> {
+    if categories.iter().any(Scalar::is_missing) {
+        return Err(FrameError::CompatibilityRejected(
+            "Categorical categories cannot be null".to_owned(),
+        ));
+    }
+    if categories
+        .iter()
+        .any(|category| matches!(category, Scalar::Float64(_)))
+        && categories
+            .iter()
+            .all(|category| matches!(category, Scalar::Int64(_) | Scalar::Float64(_)))
+    {
+        for category in &mut categories {
+            if let Scalar::Int64(value) = *category {
+                *category = Scalar::Float64(value as f64);
+            }
+        }
+    }
+    let mut seen: FxHashSet<ScalarKey<'_>> =
+        FxHashSet::with_capacity_and_hasher(categories.len(), Default::default());
+    if !categories
+        .iter()
+        .all(|category| seen.insert(category_key(category)))
+    {
+        return Err(FrameError::CompatibilityRejected(
+            "Categorical categories must be unique".to_owned(),
+        ));
+    }
+    Ok(categories)
+}
+
+/// A category's key under pandas' equality: a bool, an int a float holds
+/// exactly and a float are one number (1 == 1.0 == True); anything else
+/// keys as itself.
+fn category_key(category: &Scalar) -> ScalarKey<'_> {
+    let number = match category {
+        Scalar::Bool(flag) => Some(f64::from(u8::from(*flag))),
+        Scalar::Int64(value) => {
+            let float = *value as f64;
+            (float as i128 == i128::from(*value)).then_some(float)
+        }
+        _ => None,
+    };
+    number.map_or_else(
+        || scalar_key_allow_missing(category),
+        |float| ScalarKey::FloatBits(if float == 0.0 { 0.0_f64 } else { float }.to_bits()),
+    )
+}
+
 fn categorical_categories_match(left: &CategoricalMetadata, right: &CategoricalMetadata) -> bool {
     left.categories.len() == right.categories.len()
         && left
@@ -15978,6 +16059,30 @@ impl Series {
         )
     }
 
+    /// [`Self::iloc`] of owned positions: they are normalized in their own
+    /// buffer and an int64 index's labels gathered back into it
+    /// ([`Index::take_owned`]) - a million-row shuffle wrote four 8 MB
+    /// buffers where pandas writes two (s.iloc[perm] of a RangeIndex 0.75x
+    /// pandas; br-frankenpandas-lsn8d).
+    ///
+    /// # Errors
+    /// Rejects a position out of bounds, as `iloc` does.
+    pub fn iloc_owned(&self, positions: Vec<i64>) -> Result<Self, FrameError> {
+        let len = self.len();
+        let normalized = normalize_iloc_positions_owned(positions, len).map_err(|position| {
+            FrameError::CompatibilityRejected(format!(
+                "iloc position {position} out of bounds for length {len}"
+            ))
+        })?;
+        let freq = fp_index::take_freq(self.index.freq().map(str::to_owned), &normalized);
+        let column = self.column.take_positions(&normalized);
+        Self::new(
+            self.name.clone(),
+            self.index.take_owned(normalized).with_freq(freq),
+            column,
+        )
+    }
+
     /// `len` rows from `start`, `step` apart (`step` negative for a backwards
     /// slice): `s.iloc[start::step]` as Python's `slice.indices` resolves it.
     ///
@@ -18635,6 +18740,55 @@ impl Series {
         Some(Column::from_temporal_nanos(self.column.dtype(), distinct))
     }
 
+    /// A float column's distinct values as floats, in first-seen order with
+    /// every missing value one NaN where the first is seen and -0.0 one value
+    /// with 0.0 (the first seen kept), as pandas' unique; None for any other
+    /// column. The binding's unique made a Scalar a distinct value and a
+    /// column back from them, two thirds of s.unique() of a million floats
+    /// holding NaN (64 ms, the hashing alone 23, pandas 57;
+    /// br-frankenpandas-knu1r).
+    #[must_use]
+    pub fn unique_f64_values(&self) -> Option<Vec<f64>> {
+        if self.categorical.is_some() {
+            return None;
+        }
+        // An all-valid column (`as_f64_slice`) holds no NaN: its f64 bits
+        // dedup with FxHash, keyed as ScalarKey::FloatBits keys them (0.0
+        // for either zero), spread against bucket clustering on
+        // floored / integer float data (br-frankenpandas-uqf64, mixf64).
+        if let Some(data) = self.column.as_f64_slice() {
+            let mut seen: rustc_hash::FxHashSet<u64> = rustc_hash::FxHashSet::default();
+            return Some(
+                data.iter()
+                    .copied()
+                    .filter(|&v| {
+                        seen.insert(spread_float_bits(
+                            (if v == 0.0 { 0.0 } else { v }).to_bits(),
+                        ))
+                    })
+                    .collect(),
+            );
+        }
+        // With missing values: the rows `First` keeps (the Scalar path was
+        // 0.13x pandas on round keys with NaN; br-frankenpandas-bss5q.3).
+        let (data, validity) = self.column.as_f64_slice_with_validity()?;
+        let flags = float_duplicate_flags(data, validity, DuplicateKeep::First);
+        Some(
+            data.iter()
+                .zip(flags)
+                .enumerate()
+                .filter(|(_, (_, repeat))| !repeat)
+                .map(|(row, (&value, _))| {
+                    if validity.get(row) && !value.is_nan() {
+                        value
+                    } else {
+                        f64::NAN
+                    }
+                })
+                .collect(),
+        )
+    }
+
     /// Return unique non-null values in first-seen order.
     ///
     /// Matches `pd.Series.unique()`.
@@ -18736,44 +18890,16 @@ impl Series {
             return out;
         }
 
-        // Typed Float64 fast path (br-frankenpandas-uqf64): an all-valid no-NaN Float64
-        // column (`as_f64_slice`) dedups its f64 bits with FxHash, first-seen order. The key
-        // is `(if v==0.0 {0.0} else {v}).to_bits()` — EXACTLY `ScalarKey::FloatBits` for
-        // non-NaN floats (see scalar_key_allow_missing), so bit-identical to the general
-        // ScalarKey path, but skips the values() Vec<Scalar> + per-row key match + enum hash.
-        if self.categorical.is_none()
-            && let Some(data) = self.column.as_f64_slice()
-        {
-            let mut seen: rustc_hash::FxHashSet<u64> = rustc_hash::FxHashSet::default();
-            let mut out: Vec<Scalar> = Vec::new();
-            for &v in data {
-                // Spread (bijective ⇒ membership identical) against bucket
-                // clustering on floored/integer float data (br-frankenpandas-mixf64).
-                let key = spread_float_bits((if v == 0.0 { 0.0 } else { v }).to_bits());
-                if seen.insert(key) {
-                    out.push(Scalar::Float64(v));
-                }
-            }
-            return out;
-        }
-        // A float column with missing values: the rows `First` keeps, every
-        // missing value one NaN where first seen, as pandas - the Scalar path
-        // below was 0.13x pandas on round keys with NaN
-        // (br-frankenpandas-bss5q.3).
-        if self.categorical.is_none()
-            && let Some((data, validity)) = self.column.as_f64_slice_with_validity()
-        {
-            let flags = float_duplicate_flags(data, validity, DuplicateKeep::First);
-            return data
-                .iter()
-                .zip(flags)
-                .enumerate()
-                .filter(|(_, (_, repeat))| !repeat)
-                .map(|(row, (&value, _))| {
-                    if validity.get(row) && !value.is_nan() {
-                        Scalar::Float64(value)
-                    } else {
+        // A float column's distinct floats ([`Self::unique_f64_values`]), the
+        // NaN that stands for its missing values a missing Scalar.
+        if let Some(values) = self.unique_f64_values() {
+            return values
+                .into_iter()
+                .map(|value| {
+                    if value.is_nan() {
                         Scalar::Null(NullKind::NaN)
+                    } else {
+                        Scalar::Float64(value)
                     }
                 })
                 .collect();
@@ -34443,6 +34569,12 @@ impl Series {
                 })
             })
             .collect::<Result<Vec<i32>, _>>()?;
+        // Every constructor and category editor arrives here: their
+        // categories as pandas' CategoricalDtype makes them (7zs0a, yrjrc).
+        let meta = CategoricalMetadata {
+            categories: normalize_categories(meta.categories)?,
+            ordered: meta.ordered,
+        };
         let column = Column::from_categorical_codes(codes, meta.clone());
         Ok(Self {
             name: name.into(),
@@ -34456,24 +34588,38 @@ impl Series {
     /// Each value's first-seen code among the distinct present values (-1
     /// where missing), and those values in that order: one hash lookup a
     /// row.
+    ///
+    /// Values equal by pandas' equality are one category (1, 1.0 and True;
+    /// [`category_key`]), and present values mixing ints and floats make
+    /// float categories, as pandas' array of them is float64 - [1, 1.0] made
+    /// two categories (br-frankenpandas-7zs0a), [1, 2.5] an object mix
+    /// (br-frankenpandas-yrjrc).
     fn first_seen_codes(values: &[Scalar]) -> Result<(Vec<i32>, Vec<Scalar>), FrameError> {
         let mut positions: FxHashMap<ScalarKey<'_>, i32> = FxHashMap::default();
         let mut categories: Vec<Scalar> = Vec::new();
         let mut codes = Vec::with_capacity(values.len());
+        let (mut floats, mut numbers) = (false, true);
         for value in values {
             if value.is_missing() {
                 codes.push(-1);
                 continue;
             }
+            floats |= matches!(value, Scalar::Float64(_));
+            numbers &= matches!(value, Scalar::Int64(_) | Scalar::Float64(_));
             let next = i32::try_from(categories.len())
                 .map_err(|_| FrameError::CompatibilityRejected("too many categories".to_owned()))?;
-            let code = *positions
-                .entry(scalar_key_allow_missing(value))
-                .or_insert_with(|| {
-                    categories.push(value.clone());
-                    next
-                });
+            let code = *positions.entry(category_key(value)).or_insert_with(|| {
+                categories.push(value.clone());
+                next
+            });
             codes.push(code);
+        }
+        if floats && numbers {
+            for category in &mut categories {
+                if let Scalar::Int64(value) = *category {
+                    *category = Scalar::Float64(value as f64);
+                }
+            }
         }
         Ok((codes, categories))
     }
@@ -45146,6 +45292,44 @@ std::thread_local! {
         const { std::cell::Cell::new(false) };
 }
 
+/// Each group's ring of its last `periods` values, as the dense shift / diff
+/// kernels keep it: [`Self::step`] gives the slot a group's next row reads
+/// and then writes - the group's value `periods` rows back once it has that
+/// many - and advances the group's cursor. The kernels took the slot as the
+/// group's row count `% periods`, an integer division a row (g.shift(2) of a
+/// 10% NaN column 0.40x pandas at 1M rows; br-frankenpandas-knu1r).
+struct ShiftRing {
+    periods: usize,
+    /// Per group: its rows seen so far and its cursor (that count
+    /// `% periods`).
+    groups: Vec<(usize, usize)>,
+}
+
+impl ShiftRing {
+    fn new(groups: usize, periods: usize) -> Self {
+        Self {
+            periods,
+            groups: vec![(0, 0); groups],
+        }
+    }
+
+    /// The group's slot, and whether it holds the group's value `periods`
+    /// rows back; the group then counts this row.
+    #[inline]
+    fn step(&mut self, group: usize) -> (usize, bool) {
+        let (seen, cursor) = &mut self.groups[group];
+        let slot = group * self.periods + *cursor;
+        let filled = *seen >= self.periods;
+        *seen += 1;
+        *cursor = if *cursor + 1 == self.periods {
+            0
+        } else {
+            *cursor + 1
+        };
+        (slot, filled)
+    }
+}
+
 /// Single-pass dense groupby `diff(periods)` over an all-valid no-NaN Float64
 /// value slice and a precomputed dense gid per row (br-frankenpandas-gbcum).
 /// Keeps a per-gid ring buffer of the last `periods` values so each output is
@@ -45187,20 +45371,18 @@ fn dense_groupby_diff_f64_by_key(
         return (out, fp_columnar::ValidityMask::from_words(words, n));
     }
     let mut hist = vec![0.0_f64; range.saturating_mul(periods)];
-    let mut cnt = vec![0usize; range];
+    let mut ring = ShiftRing::new(range, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     for row in 0..n {
         let off = (keys[row] as i128 - min as i128) as usize;
         let v = vals[row];
-        let c = cnt[off];
-        let slot = off * periods + (c % periods);
-        if c >= periods {
+        let (slot, filled) = ring.step(off);
+        if filled {
             out[row] = v - hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = v;
-        cnt[off] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45234,20 +45416,18 @@ fn dense_groupby_shift_f64_by_key(
         return (out, fp_columnar::ValidityMask::from_words(words, n));
     }
     let mut hist = vec![0.0_f64; range.saturating_mul(periods)];
-    let mut cnt = vec![0usize; range];
+    let mut ring = ShiftRing::new(range, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     for row in 0..n {
         let off = (keys[row] as i128 - min as i128) as usize;
         let v = vals[row];
-        let c = cnt[off];
-        let slot = off * periods + (c % periods);
-        if c >= periods {
+        let (slot, filled) = ring.step(off);
+        if filled {
             out[row] = hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = v;
-        cnt[off] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45260,21 +45440,18 @@ fn dense_groupby_diff_f64(
 ) -> (Vec<f64>, fp_columnar::ValidityMask) {
     let n = vals.len();
     let mut hist = vec![0.0_f64; ngroups.saturating_mul(periods)];
-    let mut cnt = vec![0usize; ngroups];
+    let mut ring = ShiftRing::new(ngroups, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     #[allow(clippy::needless_range_loop)] // row indexes vals, gids and out
     for row in 0..n {
-        let g = gid_per_row[row];
         let v = vals[row];
-        let c = cnt[g];
-        let slot = g * periods + (c % periods);
-        if c >= periods {
+        let (slot, filled) = ring.step(gid_per_row[row]);
+        if filled {
             out[row] = v - hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = v;
-        cnt[g] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45303,44 +45480,99 @@ fn dense_groupby_shift_nullable_f64_by_key(
     // the zeroed output were half of g.shift(1) over a 10% NaN column (0.50x
     // pandas at 1M rows; br-frankenpandas-knu1r). A group's slot is valid
     // only once written, so `seen` is its validity's initial false.
+    if periods != 1 {
+        return dense_groupby_shift_nullable_f64_ring_by_key(
+            keys, min, range, data, validity, periods,
+        );
+    }
     let n = data.len();
     let valid_words = validity.packed_words_for_scan();
     let source_valid = |row: usize| (valid_words[row / 64] >> (row % 64)) & 1 != 0;
-    let mut words = vec![0u64; n.div_ceil(64)];
-    if periods == 1 {
-        let mut last = vec![0.0_f64; range];
-        let mut last_valid = vec![false; range];
-        let out: Vec<f64> = (0..n)
-            .map(|row| {
-                let off = (keys[row] as i128 - min as i128) as usize;
-                let present = last_valid[off];
-                words[row / 64] |= u64::from(present) << (row % 64);
-                let value = if present { last[off] } else { 0.0 };
-                last[off] = data[row];
-                last_valid[off] = source_valid(row);
-                value
-            })
-            .collect();
-        return (out, fp_columnar::ValidityMask::from_words(words, n));
-    }
-    let mut hist = vec![0.0_f64; range.saturating_mul(periods)];
-    let mut hist_valid = vec![false; range.saturating_mul(periods)];
-    let mut cnt = vec![0usize; range];
+    let mut marks = ValidityWordWriter::new(n);
+    let mut last = vec![0.0_f64; range];
+    let mut last_valid = vec![false; range];
     let out: Vec<f64> = (0..n)
         .map(|row| {
             let off = (keys[row] as i128 - min as i128) as usize;
-            let c = cnt[off];
-            let slot = off * periods + (c % periods);
-            let present = c >= periods && hist_valid[slot];
-            words[row / 64] |= u64::from(present) << (row % 64);
-            let value = if present { hist[slot] } else { 0.0 };
-            hist[slot] = data[row];
-            hist_valid[slot] = source_valid(row);
-            cnt[off] = c + 1;
+            let present = last_valid[off];
+            marks.mark(row, present);
+            let value = if present { last[off] } else { 0.0 };
+            last[off] = data[row];
+            last_valid[off] = source_valid(row);
             value
         })
         .collect();
-    (out, fp_columnar::ValidityMask::from_words(words, n))
+    (out, marks.finish(n))
+}
+
+/// [`dense_groupby_shift_nullable_f64_by_key`] by more than one row: each
+/// group's ring stepped by its cursor ([`ShiftRing`]). Kept out of line: in
+/// the one-row kernel's body it slowed g.shift(1) 11%
+/// (br-frankenpandas-knu1r).
+#[inline(never)]
+fn dense_groupby_shift_nullable_f64_ring_by_key(
+    keys: &[i64],
+    min: i64,
+    range: usize,
+    data: &[f64],
+    validity: &fp_columnar::ValidityMask,
+    periods: usize,
+) -> (Vec<f64>, fp_columnar::ValidityMask) {
+    let n = data.len();
+    let valid_words = validity.packed_words_for_scan();
+    let source_valid = |row: usize| (valid_words[row / 64] >> (row % 64)) & 1 != 0;
+    let mut marks = ValidityWordWriter::new(n);
+    let mut hist = vec![0.0_f64; range.saturating_mul(periods)];
+    let mut hist_valid = vec![false; range.saturating_mul(periods)];
+    let mut ring = ShiftRing::new(range, periods);
+    let out: Vec<f64> = (0..n)
+        .map(|row| {
+            let off = (keys[row] as i128 - min as i128) as usize;
+            let (slot, filled) = ring.step(off);
+            let present = filled && hist_valid[slot];
+            marks.mark(row, present);
+            let value = if present { hist[slot] } else { 0.0 };
+            hist[slot] = data[row];
+            hist_valid[slot] = source_valid(row);
+            value
+        })
+        .collect();
+    (out, marks.finish(n))
+}
+
+/// A validity mask written a row at a time in row order, each word built in
+/// a register and stored once at its 64th row: an |= into words[row / 64] a
+/// row chained each row's store to the next row's load of the same word
+/// (br-frankenpandas-knu1r).
+struct ValidityWordWriter {
+    words: Vec<u64>,
+    word: u64,
+}
+
+impl ValidityWordWriter {
+    fn new(len: usize) -> Self {
+        Self {
+            words: vec![0u64; len.div_ceil(64)],
+            word: 0,
+        }
+    }
+
+    /// Row `row` (the next in order) is valid when `present`.
+    #[inline]
+    fn mark(&mut self, row: usize, present: bool) {
+        self.word |= u64::from(present) << (row % 64);
+        if row % 64 == 63 {
+            self.words[row / 64] = std::mem::take(&mut self.word);
+        }
+    }
+
+    /// The mask of `len` rows, its last partial word stored.
+    fn finish(mut self, len: usize) -> fp_columnar::ValidityMask {
+        if !len.is_multiple_of(64) {
+            self.words[len / 64] = self.word;
+        }
+        fp_columnar::ValidityMask::from_words(self.words, len)
+    }
 }
 
 /// Gid sister of [`dense_groupby_shift_nullable_f64_by_key`].
@@ -45354,21 +45586,18 @@ fn dense_groupby_shift_nullable_f64(
     let n = data.len();
     let mut hist = vec![0.0_f64; ngroups.saturating_mul(periods)];
     let mut hist_valid = vec![false; ngroups.saturating_mul(periods)];
-    let mut cnt = vec![0usize; ngroups];
+    let mut ring = ShiftRing::new(ngroups, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     #[allow(clippy::needless_range_loop)] // row indexes data, gids and out
     for row in 0..n {
-        let g = gid_per_row[row];
-        let c = cnt[g];
-        let slot = g * periods + (c % periods);
-        if c >= periods && hist_valid[slot] {
+        let (slot, filled) = ring.step(gid_per_row[row]);
+        if filled && hist_valid[slot] {
             out[row] = hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = data[row];
         hist_valid[slot] = validity.get(row);
-        cnt[g] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45408,20 +45637,18 @@ fn dense_groupby_shift_nullable_i64_by_key(
     }
     let mut hist = vec![0_i64; range.saturating_mul(periods)];
     let mut hist_valid = vec![false; range.saturating_mul(periods)];
-    let mut cnt = vec![0usize; range];
+    let mut ring = ShiftRing::new(range, periods);
     let mut out = vec![0_i64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     for row in 0..n {
         let off = (keys[row] as i128 - min as i128) as usize;
-        let c = cnt[off];
-        let slot = off * periods + (c % periods);
-        if c >= periods && hist_valid[slot] {
+        let (slot, filled) = ring.step(off);
+        if filled && hist_valid[slot] {
             out[row] = hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = data[row];
         hist_valid[slot] = validity.get(row);
-        cnt[off] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45437,21 +45664,18 @@ fn dense_groupby_shift_nullable_i64(
     let n = data.len();
     let mut hist = vec![0_i64; ngroups.saturating_mul(periods)];
     let mut hist_valid = vec![false; ngroups.saturating_mul(periods)];
-    let mut cnt = vec![0usize; ngroups];
+    let mut ring = ShiftRing::new(ngroups, periods);
     let mut out = vec![0_i64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     #[allow(clippy::needless_range_loop)] // row indexes data, gids and out
     for row in 0..n {
-        let g = gid_per_row[row];
-        let c = cnt[g];
-        let slot = g * periods + (c % periods);
-        if c >= periods && hist_valid[slot] {
+        let (slot, filled) = ring.step(gid_per_row[row]);
+        if filled && hist_valid[slot] {
             out[row] = hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = data[row];
         hist_valid[slot] = validity.get(row);
-        cnt[g] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45474,21 +45698,19 @@ fn dense_groupby_diff_nullable_f64_by_key(
     let n = data.len();
     let mut hist = vec![0.0_f64; range.saturating_mul(periods)];
     let mut hist_valid = vec![false; range.saturating_mul(periods)];
-    let mut cnt = vec![0usize; range];
+    let mut ring = ShiftRing::new(range, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     for row in 0..n {
         let off = (keys[row] as i128 - min as i128) as usize;
         let cur_valid = validity.get(row);
-        let c = cnt[off];
-        let slot = off * periods + (c % periods);
-        if c >= periods && cur_valid && hist_valid[slot] {
+        let (slot, filled) = ring.step(off);
+        if filled && cur_valid && hist_valid[slot] {
             out[row] = data[row] - hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = data[row];
         hist_valid[slot] = cur_valid;
-        cnt[off] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45504,22 +45726,19 @@ fn dense_groupby_diff_nullable_f64(
     let n = data.len();
     let mut hist = vec![0.0_f64; ngroups.saturating_mul(periods)];
     let mut hist_valid = vec![false; ngroups.saturating_mul(periods)];
-    let mut cnt = vec![0usize; ngroups];
+    let mut ring = ShiftRing::new(ngroups, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     #[allow(clippy::needless_range_loop)] // row indexes data, gids and out
     for row in 0..n {
-        let g = gid_per_row[row];
         let cur_valid = validity.get(row);
-        let c = cnt[g];
-        let slot = g * periods + (c % periods);
-        if c >= periods && cur_valid && hist_valid[slot] {
+        let (slot, filled) = ring.step(gid_per_row[row]);
+        if filled && cur_valid && hist_valid[slot] {
             out[row] = data[row] - hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = data[row];
         hist_valid[slot] = cur_valid;
-        cnt[g] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45543,22 +45762,20 @@ fn dense_groupby_diff_i64_to_f64_by_key(
     let n = data.len();
     let mut hist = vec![0.0_f64; range.saturating_mul(periods)];
     let mut hist_valid = vec![false; range.saturating_mul(periods)];
-    let mut cnt = vec![0usize; range];
+    let mut ring = ShiftRing::new(range, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     for row in 0..n {
         let off = (keys[row] as i128 - min as i128) as usize;
         let cur_valid = validity.get(row);
         let cur = data[row] as f64;
-        let c = cnt[off];
-        let slot = off * periods + (c % periods);
-        if c >= periods && cur_valid && hist_valid[slot] {
+        let (slot, filled) = ring.step(off);
+        if filled && cur_valid && hist_valid[slot] {
             out[row] = cur - hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = cur;
         hist_valid[slot] = cur_valid;
-        cnt[off] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45574,23 +45791,20 @@ fn dense_groupby_diff_i64_to_f64(
     let n = data.len();
     let mut hist = vec![0.0_f64; ngroups.saturating_mul(periods)];
     let mut hist_valid = vec![false; ngroups.saturating_mul(periods)];
-    let mut cnt = vec![0usize; ngroups];
+    let mut ring = ShiftRing::new(ngroups, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     #[allow(clippy::needless_range_loop)] // row indexes data, gids and out
     for row in 0..n {
-        let g = gid_per_row[row];
         let cur_valid = validity.get(row);
         let cur = data[row] as f64;
-        let c = cnt[g];
-        let slot = g * periods + (c % periods);
-        if c >= periods && cur_valid && hist_valid[slot] {
+        let (slot, filled) = ring.step(gid_per_row[row]);
+        if filled && cur_valid && hist_valid[slot] {
             out[row] = cur - hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = cur;
         hist_valid[slot] = cur_valid;
-        cnt[g] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45801,15 +46015,14 @@ fn dense_groupby_pct_change_f64_by_key(
         return (out, fp_columnar::ValidityMask::from_words(words, n));
     }
     let mut hist = vec![0.0_f64; range.saturating_mul(periods)];
-    let mut cnt = vec![0usize; range];
+    let mut ring = ShiftRing::new(range, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     for row in 0..n {
         let off = (keys[row] as i128 - min as i128) as usize;
         let v = vals[row];
-        let c = cnt[off];
-        let slot = off * periods + (c % periods);
-        if c >= periods {
+        let (slot, filled) = ring.step(off);
+        if filled {
             let ratio = v / hist[slot] - 1.0;
             out[row] = ratio;
             if !ratio.is_nan() {
@@ -45817,7 +46030,6 @@ fn dense_groupby_pct_change_f64_by_key(
             }
         }
         hist[slot] = v;
-        cnt[off] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45832,16 +46044,14 @@ fn dense_groupby_pct_change_f64(
 ) -> (Vec<f64>, fp_columnar::ValidityMask) {
     let n = vals.len();
     let mut hist = vec![0.0_f64; ngroups.saturating_mul(periods)];
-    let mut cnt = vec![0usize; ngroups];
+    let mut ring = ShiftRing::new(ngroups, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     #[allow(clippy::needless_range_loop)] // row indexes vals, gids and out
     for row in 0..n {
-        let g = gid_per_row[row];
         let v = vals[row];
-        let c = cnt[g];
-        let slot = g * periods + (c % periods);
-        if c >= periods {
+        let (slot, filled) = ring.step(gid_per_row[row]);
+        if filled {
             let ratio = v / hist[slot] - 1.0;
             out[row] = ratio;
             if !ratio.is_nan() {
@@ -45849,7 +46059,6 @@ fn dense_groupby_pct_change_f64(
             }
         }
         hist[slot] = v;
-        cnt[g] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45897,21 +46106,18 @@ fn dense_groupby_shift_f64(
 ) -> (Vec<f64>, fp_columnar::ValidityMask) {
     let n = vals.len();
     let mut hist = vec![0.0_f64; ngroups.saturating_mul(periods)];
-    let mut cnt = vec![0usize; ngroups];
+    let mut ring = ShiftRing::new(ngroups, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     #[allow(clippy::needless_range_loop)] // row indexes vals, gids and out
     for row in 0..n {
-        let g = gid_per_row[row];
         let v = vals[row];
-        let c = cnt[g];
-        let slot = g * periods + (c % periods);
-        if c >= periods {
+        let (slot, filled) = ring.step(gid_per_row[row]);
+        if filled {
             out[row] = hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = v;
-        cnt[g] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -51938,8 +52144,13 @@ impl SeriesGroupBy<'_> {
     }
 
     /// GroupBy difference within each group.
-    pub fn diff(&self, periods: usize) -> Result<Series, FrameError> {
-        let periods = periods.min(self.series.len());
+    pub fn diff(&self, periods: i64) -> Result<Series, FrameError> {
+        // A negative diff reads the row `-periods` ahead in its group, as
+        // pandas' (the periods were unsigned: g.diff(-1) raised
+        // OverflowError); the dense ring kernels below read back, so only a
+        // forward diff takes them.
+        let signed = clamp_periods(periods, self.series.len());
+        let periods = usize::try_from(signed).unwrap_or(0);
         if periods >= 1
             && !self.column_is_timedelta()
             && let Some(data) = self.series.column.as_f64_slice()
@@ -52035,10 +52246,13 @@ impl SeriesGroupBy<'_> {
             vals.iter()
                 .enumerate()
                 .map(|(idx, value)| {
-                    if idx < periods {
+                    let Some(previous) = i64::try_from(idx)
+                        .ok()
+                        .and_then(|idx| usize::try_from(idx - signed).ok())
+                        .and_then(|source| vals.get(source))
+                    else {
                         return null_scalar.clone();
-                    }
-                    let previous = &vals[idx - periods];
+                    };
                     if value.is_missing() || previous.is_missing() {
                         return null_scalar.clone();
                     }
@@ -118498,9 +118712,13 @@ impl DataFrameGroupBy<'_> {
     /// GroupBy diff within each group.
     ///
     /// Matches `df.groupby(col).diff(periods)`.
-    pub fn diff(&self, periods: usize) -> Result<DataFrame, FrameError> {
-        let periods = periods.min(self.df.len());
-        if let Some(df) = self.try_diff_dense(periods) {
+    pub fn diff(&self, periods: i64) -> Result<DataFrame, FrameError> {
+        // A negative diff reads ahead in each group ([`SeriesGroupBy::diff`]);
+        // the dense kernels take a forward one.
+        let signed = clamp_periods(periods, self.df.len());
+        if let Ok(periods) = usize::try_from(signed)
+            && let Some(df) = self.try_diff_dense(periods)
+        {
             return Ok(df);
         }
         self.transform_groups_with_column_dtype(|_col_name, col| {
@@ -118519,10 +118737,13 @@ impl DataFrameGroupBy<'_> {
                 vals.iter()
                     .enumerate()
                     .map(|(i, v)| {
-                        if i < periods {
+                        let Some(prev) = i64::try_from(i)
+                            .ok()
+                            .and_then(|i| usize::try_from(i - signed).ok())
+                            .and_then(|source| vals.get(source))
+                        else {
                             return null_scalar.clone();
-                        }
-                        let prev = &vals[i - periods];
+                        };
                         if v.is_missing() || prev.is_missing() {
                             return null_scalar.clone();
                         }
@@ -129839,6 +130060,97 @@ mod tests {
     }
 
     #[test]
+    fn unique_f64_values_keep_first_seen_floats_knu1r() {
+        // unique_f64_values equals a first-seen reference - every missing
+        // value (NaN, a cleared bit over a number) one NaN where the first is
+        // seen, -0.0 one value with 0.0 (the first kept) - over a column
+        // holding NaN, one masked by its validity, an all-valid one, an
+        // all-missing one and an empty one; unique's Scalars are those floats
+        // (br-frankenpandas-knu1r).
+        let reference = |data: &[f64], valid: &[bool]| -> Vec<u64> {
+            let mut out: Vec<f64> = Vec::new();
+            let mut missing_seen = false;
+            for (&v, &ok) in data.iter().zip(valid) {
+                if !ok || v.is_nan() {
+                    if !missing_seen {
+                        missing_seen = true;
+                        out.push(f64::NAN);
+                    }
+                } else if !out
+                    .iter()
+                    .any(|u| u.partial_cmp(&v) == Some(std::cmp::Ordering::Equal))
+                {
+                    out.push(v);
+                }
+            }
+            out.iter().map(|v| v.to_bits()).collect()
+        };
+        let nan = f64::NAN;
+        let inf = f64::INFINITY;
+        let cases: [(Vec<f64>, Vec<usize>); 5] = [
+            (
+                vec![1.5, nan, -0.0, 2.5, 0.0, nan, 1.5, -0.0, inf, -inf, inf],
+                vec![],
+            ),
+            (
+                vec![0.0, 4.0, -0.0, 4.0, 7.5, 9.0, 7.5, 0.25],
+                vec![1, 4, 5],
+            ),
+            (vec![3.5, 0.0, -0.0, 3.5, 1.25, -inf, 1.25], vec![]),
+            (vec![nan, 2.0, nan], vec![1]),
+            (Vec::new(), vec![]),
+        ];
+        for (data, masked) in cases {
+            let n = data.len();
+            let mut validity = fp_columnar::ValidityMask::all_valid(n);
+            for &row in &masked {
+                validity.set(row, false);
+            }
+            let valid: Vec<bool> = (0..n)
+                .map(|row| !masked.contains(&row) && !data[row].is_nan())
+                .collect();
+            let column = if masked.is_empty() {
+                Column::from_f64_values(data.clone())
+            } else {
+                Column::from_f64_values_with_validity(data.clone(), validity)
+            };
+            let rows = i64::try_from(n).unwrap();
+            let s = Series::new("v", Index::from_range(0, rows, 1), column).unwrap();
+            let got = s.unique_f64_values().unwrap();
+            let bits: Vec<u64> = got.iter().map(|v| v.to_bits()).collect();
+            assert_eq!(bits, reference(&data, &valid), "{data:?} masked {masked:?}");
+            let scalars: Vec<Scalar> = got
+                .iter()
+                .map(|&v| {
+                    if v.is_nan() {
+                        Scalar::Null(NullKind::NaN)
+                    } else {
+                        Scalar::Float64(v)
+                    }
+                })
+                .collect();
+            assert_eq!(format!("{:?}", s.unique()), format!("{scalars:?}"));
+        }
+        // NEGATIVE: an int column and a categorical of floats hold no floats
+        // of their own to give.
+        let ints = Series::from_values(
+            "i",
+            vec![0_i64.into(), 1_i64.into()],
+            vec![Scalar::Int64(3), Scalar::Int64(3)],
+        )
+        .unwrap();
+        assert!(ints.unique_f64_values().is_none());
+        let categorical = Series::from_categorical_codes(
+            "c",
+            vec![1, 0, 1],
+            vec![Scalar::Float64(0.5), Scalar::Float64(2.5)],
+            false,
+        )
+        .unwrap();
+        assert!(categorical.unique_f64_values().is_none());
+    }
+
+    #[test]
     fn series_nunique_counts_distinct_non_null() {
         let s = Series::from_values(
             "vals",
@@ -140639,7 +140951,8 @@ mod tests {
         for result in [
             grouped.shift(i64::MAX).unwrap(),
             grouped.shift(i64::MIN).unwrap(),
-            grouped.diff(usize::MAX).unwrap(),
+            grouped.diff(i64::MAX).unwrap(),
+            grouped.diff(i64::MIN).unwrap(),
             grouped.pct_change(i64::MAX).unwrap(),
         ] {
             assert!(result.values().iter().all(Scalar::is_missing));
@@ -177009,6 +177322,52 @@ mod tests {
         let empty = s.iloc(&[]).unwrap();
         assert!(empty.iloc(&[0]).is_err());
         assert!(empty.iloc(&[-1]).is_err());
+    }
+
+    #[test]
+    fn iloc_owned_equals_iloc_lsn8d() {
+        // iloc_owned - its positions normalized in place, an int64 index's
+        // labels gathered back into them - equals iloc over a RangeIndex, a
+        // typed int64 index, a text index and a named daily range holding
+        // its freq: shuffled, negative, repeated, consecutive, reversed and
+        // no positions (br-frankenpandas-lsn8d).
+        let day = 86_400_000_000_000_i64;
+        let values: Vec<f64> = (0..60_i32).map(|k| f64::from(k) * 0.5 - 3.0).collect();
+        let indexes = [
+            Index::from_range(0, 60, 1),
+            Index::from_i64_values((0..60).map(|k| (k * 37) % 61).collect()),
+            Index::new((0..60).map(|k| IndexLabel::Utf8(format!("r{k}"))).collect()),
+            Index::from_datetime64_affine_range(day, day, 60)
+                .unwrap()
+                .with_freq(Some("D".to_owned()))
+                .rename_index(Some("when")),
+        ];
+        for index in indexes {
+            let s = Series::new("v", index, Column::from_f64_values(values.clone())).unwrap();
+            for positions in [
+                (0..60_i64)
+                    .map(|k| (k * 7919) % 120 - 60)
+                    .collect::<Vec<i64>>(),
+                vec![-1, 0, 5, 5, -60],
+                vec![3, 4, 5],
+                (0..60).rev().collect(),
+                Vec::new(),
+            ] {
+                let owned = s.iloc_owned(positions.clone()).unwrap();
+                let borrowed = s.iloc(&positions).unwrap();
+                assert_eq!(owned.index().labels(), borrowed.index().labels());
+                assert_eq!(owned.index().name(), borrowed.index().name());
+                assert_eq!(owned.index().freq(), borrowed.index().freq());
+                assert_eq!(owned.values(), borrowed.values());
+            }
+            // NEGATIVE: a position out of bounds either side is iloc's error.
+            for bad in [vec![0, 60], vec![-61, 2]] {
+                assert_eq!(
+                    format!("{:?}", s.iloc_owned(bad.clone()).unwrap_err()),
+                    format!("{:?}", s.iloc(&bad).unwrap_err())
+                );
+            }
+        }
     }
 
     #[test]
@@ -237759,6 +238118,36 @@ mod test_select_columns_perf_76e1fd {
     }
 
     #[test]
+    fn shift_ring_steps_as_count_modulo_periods_knu1r() {
+        // ShiftRing::step gives a group's slot as group * periods + (its row
+        // count % periods), filled once that count reaches periods, for
+        // groups visited in any order - the arithmetic the dense shift /
+        // diff / pct_change kernels divided out a row (br-frankenpandas-knu1r).
+        for periods in 1..=5_usize {
+            let groups = 7;
+            let mut ring = crate::ShiftRing::new(groups, periods);
+            let mut counts = vec![0_usize; groups];
+            for row in 0..400_usize {
+                let group = (row * 13 + row / 7) % groups;
+                let (slot, filled) = ring.step(group);
+                assert_eq!(
+                    slot,
+                    group * periods + counts[group] % periods,
+                    "p={periods} row {row}"
+                );
+                assert_eq!(filled, counts[group] >= periods, "p={periods} row {row}");
+                counts[group] += 1;
+            }
+            // NEGATIVE: a fresh group's first `periods` rows hold nothing.
+            let mut fresh = crate::ShiftRing::new(1, periods);
+            for _ in 0..periods {
+                assert!(!fresh.step(0).1);
+            }
+            assert!(fresh.step(0).1);
+        }
+    }
+
+    #[test]
     fn groupby_shift_nullable_matches_reference_knu1r() {
         // The validity-carrying dense shift (a NaN-holding float column by a
         // bounded int key) equals a per-group, row-order reference for
@@ -237891,7 +238280,11 @@ mod test_select_columns_perf_76e1fd {
         )
         .unwrap();
         for periods in [1usize, 2] {
-            let got = value.groupby(&key).unwrap().diff(periods).unwrap();
+            let got = value
+                .groupby(&key)
+                .unwrap()
+                .diff(i64::try_from(periods).unwrap())
+                .unwrap();
             check(
                 &got.column,
                 &reference(&v0, periods),
@@ -237906,7 +238299,11 @@ mod test_select_columns_perf_76e1fd {
         let order = vec!["k".to_string(), "v0".to_string(), "v1".to_string()];
         let df = DataFrame::new_with_column_order(Index::new(labels), map, order).unwrap();
         for periods in [1usize, 2] {
-            let got = df.groupby(&["k"]).unwrap().diff(periods).unwrap();
+            let got = df
+                .groupby(&["k"])
+                .unwrap()
+                .diff(i64::try_from(periods).unwrap())
+                .unwrap();
             check(
                 &got.columns["v0"],
                 &reference(&v0, periods),
@@ -246415,6 +246812,107 @@ mod typed_index_labels_9m9zf {
             matches!(out.index().labels()[0], IndexLabel::Bool(_)),
             "bool category label must stay Bool, got {:?}",
             out.index().labels()[0]
+        );
+    }
+
+    #[test]
+    fn categories_validate_and_infer_like_pandas_7zs0a() {
+        // pandas' CategoricalDtype: a category equal to another by pandas'
+        // equality (1 / 1.0 / True, -0.0 / 0.0, 'a' / 'a') or a missing one
+        // is its ValueError, from the constructors and editors alike; an int /
+        // float mix is float64; categories made of values group them by the
+        // same equality (br-frankenpandas-7zs0a, br-frankenpandas-yrjrc).
+        let message = |categories: Vec<Scalar>| match crate::normalize_categories(categories) {
+            Err(crate::FrameError::CompatibilityRejected(message)) => message,
+            other => panic!("{other:?}"),
+        };
+        let unique = "Categorical categories must be unique";
+        assert_eq!(
+            message(vec![Scalar::Int64(1), Scalar::Float64(1.0)]),
+            unique
+        );
+        assert_eq!(message(vec![Scalar::Int64(1), Scalar::Bool(true)]), unique);
+        assert_eq!(
+            message(vec![Scalar::Float64(-0.0), Scalar::Float64(0.0)]),
+            unique
+        );
+        assert_eq!(
+            message(vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("a".to_owned())
+            ]),
+            unique
+        );
+        assert_eq!(
+            message(vec![Scalar::Float64(f64::NAN), Scalar::Float64(1.0)]),
+            "Categorical categories cannot be null"
+        );
+        assert_eq!(
+            crate::normalize_categories(vec![
+                Scalar::Int64(1),
+                Scalar::Float64(2.5),
+                Scalar::Int64(3)
+            ])
+            .unwrap(),
+            vec![
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.5),
+                Scalar::Float64(3.0)
+            ]
+        );
+        // NEGATIVE: unique categories pandas keeps as given stay so - ints
+        // alone, text with an int, a bool beside numbers (object).
+        for kept in [
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            vec![Scalar::Utf8("a".to_owned()), Scalar::Int64(1)],
+            vec![Scalar::Int64(2), Scalar::Bool(false), Scalar::Float64(2.5)],
+        ] {
+            assert_eq!(crate::normalize_categories(kept.clone()).unwrap(), kept);
+        }
+        // Categories of values: 1 and 1.0 one category, a float among ints
+        // makes them floats, True and 1 one category (the first seen).
+        let cats = |values: Vec<Scalar>| {
+            Series::from_categorical("c", values, false)
+                .unwrap()
+                .cat()
+                .unwrap()
+                .categories()
+                .to_vec()
+        };
+        assert_eq!(
+            cats(vec![
+                Scalar::Int64(1),
+                Scalar::Float64(1.0),
+                Scalar::Float64(2.5)
+            ]),
+            vec![Scalar::Float64(1.0), Scalar::Float64(2.5)]
+        );
+        assert_eq!(
+            cats(vec![Scalar::Bool(true), Scalar::Int64(1)]),
+            vec![Scalar::Bool(true)]
+        );
+        // Editors: a float added to int categories makes them floats; True
+        // added beside 1 is a repeat.
+        let ints =
+            Series::from_categorical("c", vec![Scalar::Int64(3), Scalar::Int64(1)], false).unwrap();
+        let added = ints
+            .cat()
+            .unwrap()
+            .add_categories(vec![Scalar::Float64(2.5)])
+            .unwrap();
+        assert_eq!(
+            added.cat().unwrap().categories(),
+            &[
+                Scalar::Float64(1.0),
+                Scalar::Float64(3.0),
+                Scalar::Float64(2.5)
+            ]
+        );
+        assert!(
+            ints.cat()
+                .unwrap()
+                .add_categories(vec![Scalar::Bool(true)])
+                .is_err()
         );
     }
 

@@ -23865,7 +23865,10 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || msg == "Unordered Categoricals can only compare equality or not"
                 || msg == "Categoricals can only be compared if 'categories' are the same."
                 || msg.starts_with("Cannot compare a Categorical for op ")
-                || msg.starts_with("Invalid comparison between dtype=category and ");
+                || msg.starts_with("Invalid comparison between dtype=category and ")
+                // pandas' CategoricalDtype.validate_categories (7zs0a).
+                || msg == "Categorical categories must be unique"
+                || msg == "Categorical categories cannot be null";
             let text = if pandas_verbatim {
                 msg.clone()
             } else {
@@ -32775,6 +32778,13 @@ impl PySeries {
                 .keeping_dtype_of(source);
             return extension_array(py, distinct);
         }
+        // A float column's distinct floats, its missing values one NaN: a
+        // Scalar a distinct value and a column inferred back from them were
+        // two thirds of s.unique() (br-frankenpandas-knu1r).
+        if let Some(values) = self.inner.unique_f64_values() {
+            let column = Column::from_f64_values(values).keeping_dtype_of(source);
+            return Ok(column_ndarray(py, &column)?.unbind());
+        }
         // The distinct values are the column's own: an int32 column's are an
         // int32 array (fvsao.23); missing values alone (or none) keep the
         // column's dtype - a float64 column's [nan] and an empty int64
@@ -38724,7 +38734,7 @@ impl PySeriesILoc {
         if let Ok(Positions(positions)) = key.extract::<Positions>() {
             let s = self
                 .inner
-                .iloc(&positions)
+                .iloc_owned(positions)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
@@ -70357,9 +70367,9 @@ impl PyGroupBy {
     /// pandas' `diff(periods=1, axis=<no_default>)`: the deprecated axis
     /// ([`groupby_axis`]; it was unexpected - br-frankenpandas-n57tz).
     #[pyo3(signature = (periods=1, axis=Passed(None)))]
-    fn diff(&self, py: Python<'_>, periods: usize, axis: Passed<'_>) -> PyResult<PyDataFrame> {
+    fn diff(&self, py: Python<'_>, periods: i64, axis: Passed<'_>) -> PyResult<PyDataFrame> {
         groupby_axis(py, "DataFrameGroupBy", "diff", &axis, false)?;
-        require_c_int_periods(i128::try_from(periods).unwrap_or(i128::MAX))?;
+        require_c_int_periods(i128::from(periods))?;
         let result = self
             .grouped()
             .map_err(frame_error_to_py)?
@@ -73223,9 +73233,9 @@ impl PySeriesGroupBy {
     /// pandas' `diff(periods=1, axis=<no_default>)`: the deprecated axis
     /// ([`groupby_axis`]; it was unexpected - br-frankenpandas-n57tz).
     #[pyo3(signature = (periods=1, axis=Passed(None)))]
-    fn diff(&self, py: Python<'_>, periods: usize, axis: Passed<'_>) -> PyResult<PySeries> {
+    fn diff(&self, py: Python<'_>, periods: i64, axis: Passed<'_>) -> PyResult<PySeries> {
         groupby_axis(py, "SeriesGroupBy", "diff", &axis, false)?;
-        require_c_int_periods(i128::try_from(periods).unwrap_or(i128::MAX))?;
+        require_c_int_periods(i128::from(periods))?;
         let res = self.grouped()?.diff(periods).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
@@ -85837,10 +85847,15 @@ impl PyCategoricalDtype {
         categories: Option<&Bound<'_, PyAny>>,
         ordered: Option<bool>,
     ) -> PyResult<Self> {
+        // Validated and inferred as pandas' CategoricalDtype makes them
+        // (repeated or missing categories raise; br-frankenpandas-7zs0a).
         Ok(Self {
             categories: categories
                 .filter(|categories| !categories.is_none())
-                .map(|categories| py_categories(py, categories))
+                .map(|categories| {
+                    fp_frame::normalize_categories(py_categories(py, categories)?)
+                        .map_err(frame_error_to_py)
+                })
                 .transpose()?,
             ordered: ordered.unwrap_or(false),
         })

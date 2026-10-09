@@ -2122,6 +2122,47 @@ impl IndexLabels {
 
         None
     }
+
+    /// [`Self::take_i64_values`] of a unit range or a typed buffer gathered
+    /// into the positions' own buffer (a usize and an i64 share a layout);
+    /// any other backing, or a position past the labels, hands the positions
+    /// back as they came.
+    fn take_i64_values_owned(&self, indices: Vec<usize>) -> Result<Vec<i64>, Vec<usize>> {
+        if let Some(range) = self.int64_unit_range {
+            // Wrapping arithmetic undoes exactly, so a position past the
+            // range is handed back without a bounds pass ahead of the gather
+            // (in bounds, start + position is a label: it cannot wrap).
+            let mut past = 0_usize;
+            let labels: Vec<i64> = indices
+                .into_iter()
+                .map(|position| {
+                    past += usize::from(position >= range.len);
+                    range
+                        .start
+                        .wrapping_add_unsigned(u64::try_from(position).unwrap_or(u64::MAX))
+                })
+                .collect();
+            if past == 0 {
+                return Ok(labels);
+            }
+            return Err(labels
+                .into_iter()
+                .map(|label| {
+                    usize::try_from(label.wrapping_sub(range.start).cast_unsigned())
+                        .unwrap_or(usize::MAX)
+                })
+                .collect());
+        }
+        if let Some(Some(values)) = self.int64_typed.get()
+            && indices.iter().all(|&position| position < values.len())
+        {
+            return Ok(indices
+                .into_iter()
+                .map(|position| values[position])
+                .collect());
+        }
+        Err(indices)
+    }
 }
 
 impl Clone for IndexLabels {
@@ -5325,6 +5366,25 @@ impl Index {
         {
             Some(Ok(levels)) => taken.attach_row_multiindex(levels),
             _ => taken,
+        }
+    }
+
+    /// [`Self::take`] of owned positions: an int64 index's labels (a
+    /// RangeIndex's arithmetic, a typed buffer's values) gathered into the
+    /// positions' own buffer, where take wrote a second one - a page-faulted
+    /// 8 MB a million rows (s.iloc[perm] 0.75x pandas;
+    /// br-frankenpandas-lsn8d). Any other index takes as [`Self::take`].
+    #[must_use]
+    pub fn take_owned(&self, indices: Vec<usize>) -> Self {
+        if self.row_multiindex.is_some() || self.freq.is_some() {
+            return self.take(&indices);
+        }
+        if let Some(taken) = self.take_affine_positions(&indices) {
+            return taken;
+        }
+        match self.labels.take_i64_values_owned(indices) {
+            Ok(values) => self.propagate_name(Self::from_i64_values(values)),
+            Err(indices) => self.take(&indices),
         }
     }
 
@@ -16613,6 +16673,84 @@ fn mark_category_rank(seen_ranks: &mut [u64], rank: usize) -> bool {
     is_new
 }
 
+/// A CategoricalIndex's categories as pandas' CategoricalDtype makes them
+/// (fp-frame's `normalize_categories` over labels): an int / float mix is
+/// float64, every int its float; a missing category ("Categorical categories
+/// cannot be null") or one equal to another by pandas' equality - 1, 1.0 and
+/// True one value - ("Categorical categories must be unique") is pandas'
+/// ValueError (br-frankenpandas-7zs0a, br-frankenpandas-yrjrc).
+fn normalized_index_categories(
+    mut categories: Vec<IndexLabel>,
+) -> Result<Vec<IndexLabel>, IndexError> {
+    if categories.iter().any(IndexLabel::is_missing) {
+        return Err(IndexError::InvalidArgument(
+            "Categorical categories cannot be null".to_owned(),
+        ));
+    }
+    if categories
+        .iter()
+        .any(|category| matches!(category, IndexLabel::Float64(_)))
+        && categories
+            .iter()
+            .all(|category| matches!(category, IndexLabel::Int64(_) | IndexLabel::Float64(_)))
+    {
+        categories = categories.into_iter().map(floated_label).collect();
+    }
+    let mut seen = FxHashSet::<CategoryLabelKey<'_>>::default();
+    let unique = categories
+        .iter()
+        .all(|category| seen.insert(category_label_key(category)));
+    drop(seen);
+    if !unique {
+        return Err(IndexError::InvalidArgument(
+            "Categorical categories must be unique".to_owned(),
+        ));
+    }
+    Ok(categories)
+}
+
+/// An int label as its float, where every category is a float: a label is
+/// the category it equals (pandas' CategoricalIndex([1], categories=[1.0])
+/// holds 1.0; the label was missing).
+fn floated_label(label: IndexLabel) -> IndexLabel {
+    match label {
+        IndexLabel::Int64(value) => IndexLabel::Float64(OrderedF64(value as f64)),
+        other => other,
+    }
+}
+
+/// Whether labels over `categories` are floats: every category is one.
+fn float_categories(categories: &[IndexLabel]) -> bool {
+    !categories.is_empty()
+        && categories
+            .iter()
+            .all(|category| matches!(category, IndexLabel::Float64(_)))
+}
+
+/// A category label under pandas' equality: a bool, an int a float holds
+/// exactly and a float are one number (1 == 1.0 == True); anything else is
+/// itself.
+#[derive(Hash, PartialEq, Eq)]
+enum CategoryLabelKey<'a> {
+    Number(u64),
+    Label(&'a IndexLabel),
+}
+
+fn category_label_key(label: &IndexLabel) -> CategoryLabelKey<'_> {
+    let number = match label {
+        IndexLabel::Bool(flag) => Some(f64::from(u8::from(*flag))),
+        IndexLabel::Int64(value) => {
+            let float = *value as f64;
+            (float as i128 == i128::from(*value)).then_some(float)
+        }
+        IndexLabel::Float64(value) => Some(value.0),
+        _ => None,
+    };
+    number.map_or(CategoryLabelKey::Label(label), |float| {
+        CategoryLabelKey::Number(if float == 0.0 { 0.0_f64 } else { float }.to_bits())
+    })
+}
+
 impl CategoricalIndex {
     fn category_codes_for(labels: &[IndexLabel], categories: &[IndexLabel]) -> Option<Vec<usize>> {
         let map = {
@@ -16661,10 +16799,19 @@ impl CategoricalIndex {
         // First-seen dedup in O(n): a side hash set tracks membership while the
         // categories Vec preserves insertion order, replacing the O(n·k)
         // `categories.contains` linear rescan per label.
-        let labels: Vec<IndexLabel> = labels
+        let mut labels: Vec<IndexLabel> = labels
             .into_iter()
             .map(|label| Self::held(label.into()))
             .collect();
+        // Present labels mixing ints and floats are floats, as pandas' array
+        // of them is float64 ([1, 1.0] one category, [1, 2.5] float64; 7zs0a,
+        // yrjrc).
+        let present = || labels.iter().filter(|label| !label.is_missing());
+        if present().any(|label| matches!(label, IndexLabel::Float64(_)))
+            && present().all(|label| matches!(label, IndexLabel::Int64(_) | IndexLabel::Float64(_)))
+        {
+            labels = labels.into_iter().map(floated_label).collect();
+        }
         let mut categories = Vec::<IndexLabel>::new();
         let mut ranks = FxHashMap::<&IndexLabel, usize>::default();
         let mut category_codes = Vec::<usize>::with_capacity(labels.len());
@@ -16701,30 +16848,26 @@ impl CategoricalIndex {
         categories: Vec<C>,
         ordered: bool,
     ) -> Result<Self, IndexError> {
-        let categories: Vec<IndexLabel> = categories.into_iter().map(Into::into).collect();
-        if categories.iter().any(IndexLabel::is_missing) {
-            return Err(IndexError::InvalidArgument(
-                "Categorical categories cannot be null".to_owned(),
-            ));
-        }
+        let categories =
+            normalized_index_categories(categories.into_iter().map(Into::into).collect())?;
+        let floats = float_categories(&categories);
         // O(n+k) membership: hash the category set once, then place each
         // label in original order.
-        let mut category_map = FxHashMap::<&IndexLabel, usize>::default();
-        let mut unique = true;
-        for (rank, category) in categories.iter().enumerate() {
-            unique &= category_map.insert(category, rank).is_none();
-        }
-        if !unique {
-            return Err(IndexError::InvalidArgument(
-                "Categorical categories must be unique".to_owned(),
-            ));
-        }
+        let category_map: FxHashMap<&IndexLabel, usize> = categories
+            .iter()
+            .enumerate()
+            .map(|(rank, category)| (category, rank))
+            .collect();
         let mut category_codes = Vec::<usize>::with_capacity(labels.len());
         let mut complete = true;
         let labels: Vec<IndexLabel> = labels
             .into_iter()
             .map(|label| {
-                let label = label.into();
+                let label = if floats {
+                    floated_label(label.into())
+                } else {
+                    label.into()
+                };
                 match category_map.get(&label).copied() {
                     Some(rank) => {
                         category_codes.push(rank);
@@ -17789,8 +17932,16 @@ impl CategoricalIndex {
         }
         let mut categories = self.categories.clone();
         categories.extend(new);
+        // As pandas' dtype makes them: True beside 1 a repeat, a float among
+        // ints making every category and label a float (7zs0a, yrjrc).
+        let categories = normalized_index_categories(categories)?;
+        let labels = if float_categories(&categories) {
+            self.labels.iter().cloned().map(floated_label).collect()
+        } else {
+            self.labels.clone()
+        };
         Ok(Self::from_parts(
-            self.labels.clone(),
+            labels,
             categories,
             self.ordered,
             self.name.clone(),
@@ -17823,13 +17974,19 @@ impl CategoricalIndex {
     /// This index over `categories`: a label no longer among them is NaN,
     /// as pandas' `set_categories` / `remove_categories`.
     fn recategorized(&self, categories: Vec<IndexLabel>, ordered: bool) -> Self {
+        let floats = float_categories(&categories);
         let kept: FxHashSet<&IndexLabel> = categories.iter().collect();
         let labels: Vec<IndexLabel> = self
             .labels
             .iter()
             .map(|label| {
-                if kept.contains(label) {
+                let label = if floats {
+                    floated_label(label.clone())
+                } else {
                     label.clone()
+                };
+                if kept.contains(&label) {
+                    label
                 } else {
                     IndexLabel::Null(fp_types::NullKind::NaN)
                 }
@@ -17865,14 +18022,8 @@ impl CategoricalIndex {
         &self,
         new_categories: Vec<L>,
     ) -> Result<Self, IndexError> {
-        let new_categories: Vec<IndexLabel> = new_categories.into_iter().map(Into::into).collect();
-        let mut seen = FxHashSet::<&IndexLabel>::default();
-        if !new_categories.iter().all(|cat| seen.insert(cat)) {
-            return Err(IndexError::InvalidArgument(
-                "Categorical categories must be unique".to_owned(),
-            ));
-        }
-        drop(seen);
+        let new_categories =
+            normalized_index_categories(new_categories.into_iter().map(Into::into).collect())?;
         Ok(self.recategorized(new_categories, self.ordered))
     }
 
@@ -17881,6 +18032,13 @@ impl CategoricalIndex {
     /// new list has a different length; a missing label stays missing.
     pub fn rename_categories<L: Into<IndexLabel>>(&self, new: Vec<L>) -> Result<Self, IndexError> {
         let new: Vec<IndexLabel> = new.into_iter().map(Into::into).collect();
+        // As pandas' dtype makes them (repeats and nulls raise, an int /
+        // float mix floats; 7zs0a, yrjrc): each label renamed to its new one.
+        let new = if new.len() == self.categories.len() {
+            normalized_index_categories(new)?
+        } else {
+            new
+        };
         if new.len() != self.categories.len() {
             return Err(IndexError::InvalidArgument(format!(
                 "rename_categories: expected {} new names, got {}",
@@ -26259,6 +26417,53 @@ mod tests {
         assert_eq!(
             ranged.take_owned(vec![2, 4, 6]).unwrap().freq().as_deref(),
             Some("2D")
+        );
+    }
+
+    #[test]
+    fn take_owned_gathers_int64_labels_into_their_positions_lsn8d() {
+        // take_owned equals take over a named RangeIndex (the unit range),
+        // a stepped range, a typed int64 index, a text index and a dated
+        // range holding a freq: shuffled, reversed, repeated, stepped and no
+        // positions (br-frankenpandas-lsn8d).
+        let day = 86_400_000_000_000_i64;
+        let unit = Index::from_range(5, 45, 1).rename_index(Some("r"));
+        let stepped = Index::from_range(100, -20, -3);
+        let typed = Index::from_i64_values((0..40).map(|k| (k * 7919) % 101 - 50).collect());
+        let text = Index::new((0..40).map(|k| IndexLabel::Utf8(format!("k{k}"))).collect());
+        let dated = Index::from_datetime64_affine_range(3 * day, day, 40)
+            .unwrap()
+            .with_freq(Some("D".to_owned()));
+        for index in [&unit, &stepped, &typed, &text, &dated] {
+            let len = index.len();
+            for positions in [
+                (0..len).map(|k| (k * 17) % len).collect::<Vec<usize>>(),
+                (0..len).rev().collect(),
+                vec![len - 1, 0, 7, 7, 31],
+                vec![2, 3, 4],
+                Vec::new(),
+            ] {
+                let owned = index.take_owned(positions.clone());
+                let borrowed = index.take(&positions);
+                assert_eq!(owned.labels(), borrowed.labels());
+                assert_eq!(owned.name(), borrowed.name());
+                assert_eq!(owned.freq(), borrowed.freq());
+            }
+        }
+        assert_eq!(
+            unit.labels.take_i64_values_owned(vec![3, 39, 0]),
+            Ok(vec![8, 44, 5])
+        );
+        // NEGATIVE: a position past the range - or past every usize - is
+        // handed back as it came, never made a label; a text index's too.
+        assert_eq!(
+            unit.labels
+                .take_i64_values_owned(vec![3, 40, 0, usize::MAX]),
+            Err(vec![3, 40, 0, usize::MAX])
+        );
+        assert_eq!(
+            text.labels.take_i64_values_owned(vec![1, 2]),
+            Err(vec![1, 2])
         );
     }
 
@@ -38568,6 +38773,82 @@ mod tests {
         );
         assert!(super::CategoricalIndex::with_categories(vec!["a"], vec![nan()], false).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn categorical_index_categories_like_pandas_7zs0a() {
+        // pandas' CategoricalDtype over a CategoricalIndex: categories equal
+        // by pandas' equality (1 / 1.0 / True) are its ValueError from the
+        // constructor and the editors; an int / float mix makes every
+        // category and label a float; labels of values mixing ints and
+        // floats are floats (br-frankenpandas-7zs0a, br-frankenpandas-yrjrc).
+        use super::CategoricalIndex;
+        let float = |value: f64| IndexLabel::Float64(OrderedF64(value));
+        let unique = |result: Result<CategoricalIndex, super::IndexError>| {
+            matches!(result, Err(super::IndexError::InvalidArgument(message))
+                if message == "Categorical categories must be unique")
+        };
+        assert!(unique(CategoricalIndex::with_categories(
+            vec![IndexLabel::Int64(1)],
+            vec![IndexLabel::Int64(1), float(1.0)],
+            false
+        )));
+        assert!(unique(CategoricalIndex::with_categories(
+            vec![IndexLabel::Int64(1)],
+            vec![IndexLabel::Int64(1), IndexLabel::Bool(true)],
+            false
+        )));
+        let mixed = CategoricalIndex::with_categories(
+            vec![IndexLabel::Int64(1), IndexLabel::Int64(3)],
+            vec![IndexLabel::Int64(1), float(2.5), IndexLabel::Int64(3)],
+            false,
+        )
+        .unwrap();
+        assert_eq!(mixed.categories(), &[float(1.0), float(2.5), float(3.0)]);
+        assert_eq!(mixed.labels(), &[float(1.0), float(3.0)]);
+        let ints =
+            CategoricalIndex::from_values(vec![IndexLabel::Int64(3), IndexLabel::Int64(1)], false);
+        let added = ints.add_categories(vec![float(2.5)]).unwrap();
+        assert_eq!(added.categories(), &[float(3.0), float(1.0), float(2.5)]);
+        assert_eq!(added.labels(), &[float(3.0), float(1.0)]);
+        assert!(unique(ints.add_categories(vec![IndexLabel::Bool(true)])));
+        assert!(unique(
+            ints.set_categories(vec![IndexLabel::Int64(1), float(1.0)])
+        ));
+        let set = ints
+            .set_categories(vec![IndexLabel::Int64(1), float(2.5), IndexLabel::Int64(3)])
+            .unwrap();
+        assert_eq!(set.labels(), &[float(3.0), float(1.0)]);
+        let renamed = ints
+            .rename_categories(vec![IndexLabel::Int64(10), float(2.5)])
+            .unwrap();
+        assert_eq!(renamed.labels(), &[float(10.0), float(2.5)]);
+        assert!(unique(
+            ints.rename_categories(vec![IndexLabel::Int64(10), float(10.0)])
+        ));
+        let values = CategoricalIndex::from_values(
+            vec![IndexLabel::Int64(1), float(1.0), float(2.5)],
+            false,
+        );
+        assert_eq!(values.categories(), &[float(1.0), float(2.5)]);
+        // NEGATIVE: ints alone and text with an int stay as given.
+        let kept = CategoricalIndex::with_categories(
+            vec![IndexLabel::Int64(2)],
+            vec![IndexLabel::Int64(1), IndexLabel::Int64(2)],
+            false,
+        )
+        .unwrap();
+        assert_eq!(kept.labels(), &[IndexLabel::Int64(2)]);
+        let text = CategoricalIndex::with_categories(
+            vec![IndexLabel::from("a")],
+            vec![IndexLabel::from("a"), IndexLabel::Int64(1)],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            text.categories(),
+            &[IndexLabel::from("a"), IndexLabel::Int64(1)]
+        );
     }
 
     #[test]
