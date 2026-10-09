@@ -33896,3 +33896,92 @@ def test_row_reads_take_the_interleaved_dtype_like_pandas_05cm6(frame: str, read
             return ("raise", type(error).__name__)
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-zgx6u: np.exp / log / sin ... of a plain float64 / int64
+# Series computes on the column's own kernel where numpy's float64 loop is
+# the same libm function - the same bits as pandas', name and index kept.
+# Under numpy's default error state a result numpy flags (overflow, log(0),
+# log(-1), sin(inf)) warns as pandas' does, and np.errstate(all='raise')
+# raises FloatingPointError as pandas' does. NEGATIVE: a masked Float64, a
+# float32 and a categorical Series keep numpy's dtype rules, and tanh (not
+# libm's in numpy) answers as pandas'.
+_ZGX6ULIBM_UFUNCS = ["exp", "expm1", "log", "log2", "log10", "log1p", "sin", "cos", "tan", "sinh", "cosh", "tanh"]
+_ZGX6ULIBM_SERIES = {
+    "float": lambda m: m.Series(np.linspace(0.01, 37.5, 2001), name="v", index=np.arange(2001) * 3),
+    "float NaN": lambda m: m.Series(np.where(np.arange(1500) % 7 == 0, np.nan, np.linspace(-20.0, 20.0, 1500)), name="v"),
+    "int": lambda m: m.Series(np.arange(-40, 41), name="k"),
+    "overflow": lambda m: m.Series([1.0, 1000.0, -2.0], name="v"),
+    "pole and domain": lambda m: m.Series([0.0, -1.0, 2.0], name="v"),
+    "inf": lambda m: m.Series([float("inf"), 1.0], name="v"),
+    "Float64 (NEGATIVE)": lambda m: m.Series(m.array([0.5, None, 2.0], dtype="Float64"), name="v"),
+    "float32 (NEGATIVE)": lambda m: m.Series(np.array([0.5, 1.5, 2.0], dtype="float32"), name="v"),
+    "category (NEGATIVE)": lambda m: m.Series([1.0, 2.0, 1.0], dtype="category", name="v"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(("series", "ufunc"), [(series, ufunc) for series in _ZGX6ULIBM_SERIES for ufunc in _ZGX6ULIBM_UFUNCS])
+def test_libm_ufuncs_of_a_series_like_pandas_zgx6u(series: str, ufunc: str) -> None:
+    def run(m: Any) -> Any:
+        s = _ZGX6ULIBM_SERIES[series](m)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            try:
+                result = getattr(np, ufunc)(s)
+            except Exception as error:  # noqa: BLE001 - the exception is the outcome
+                return ("raise", type(error).__name__)
+        shown = ("Series", str(result.dtype), result.name, [repr(i) for i in result.index], [repr(x) for x in result.tolist()])
+        return shown, sorted({(w.category.__name__, str(w.message)) for w in caught})
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("ufunc", ["exp", "log", "sin", "cosh"])
+def test_libm_ufuncs_raise_under_errstate_like_pandas_zgx6u(ufunc: str) -> None:
+    values = {"exp": [1.0, 1000.0], "log": [1.0, 0.0], "sin": [1.0, float("inf")], "cosh": [1.0, 1000.0]}[ufunc]
+
+    def run(m: Any) -> Any:
+        with np.errstate(all="raise"):
+            try:
+                return ("value", repr(getattr(np, ufunc)(m.Series(values)).tolist()))
+            except Exception as error:  # noqa: BLE001 - the exception is the outcome
+                return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+    # And a finite answer under errstate('raise') is a value, as pandas'.
+    with np.errstate(all="raise"):
+        assert repr(getattr(np, ufunc)(fpd.Series([0.5, 1.5])).tolist()) == repr(getattr(np, ufunc)(pd.Series([0.5, 1.5])).tolist())
+
+
+# br-frankenpandas-fk877: an int64 Index takes its labels in one bounds pass
+# and a gather (a unit range, an affine range, a typed buffer), and positions
+# of two or more dimensions are numpy's ValueError as in pandas' take.
+# NEGATIVE: a position past the end is IndexError; a negative one counts
+# from the end; an empty take is an empty int64 Index.
+_FK877B_PERM = np.random.default_rng(7).permutation(1000)
+_FK877B_CASES = {
+    "Index(arange) permuted": lambda m: m.Index(np.arange(1000)).take(_FK877B_PERM),
+    "Index affine": lambda m: m.Index(np.arange(0, 30, 3), name="a").take(np.array([7, 2, 9, 0])),
+    "Index typed": lambda m: m.Index(np.array([5, -3, 99, 7, 7])).take(np.array([4, 0, 2, 2])),
+    "Index negative": lambda m: m.Index(np.arange(10, 15)).take(np.array([-1, -5, 0])),
+    "Index empty": lambda m: m.Index(np.arange(5)).take(np.array([], dtype="int64")),
+    "Index past the end (NEGATIVE: IndexError)": lambda m: m.Index(np.arange(5)).take(np.array([5])),
+    "Series.take 2-D": lambda m: m.Series([1.5, 2.5, 3.5]).take(np.array([[0, 1]])),
+    "Series.take a column of positions": lambda m: m.Series([1.5, 2.5, 3.5]).take(np.array([[0], [1]])),
+    "Series.take a nested list": lambda m: m.Series([1.5, 2.5, 3.5]).take([[0, 1]]),
+    "DataFrame.take 2-D": lambda m: m.DataFrame({"a": [1, 2, 3]}).take(np.array([[0, 1]])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FK877B_CASES))
+def test_index_take_and_position_dimensions_like_pandas_fk877(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            return _fk877_shown(_FK877B_CASES[case](m))
+        except (IndexError, ValueError, TypeError) as error:
+            return (type(error).__name__, str(error) if isinstance(error, ValueError) else "")
+
+    assert shown(fpd) == shown(pd)

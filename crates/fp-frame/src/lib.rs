@@ -1585,6 +1585,16 @@ fn column_workers(ncols: usize, rows: usize, par_min_values: usize) -> usize {
         .min(cells.div_ceil(per_worker))
 }
 
+/// Cells from which a frame's missing-value mask (isna / notna) is built a
+/// column a worker. A mask costs hundredths of a nanosecond a cell, so the
+/// fan-out cost more than it saved at hundreds of thousands of cells - 4 x
+/// 100k 17 us on one core, 73-181 us threaded - while 4M cells that fit in
+/// one L3 build 1.6-3x faster on its domain's pool. A million cells is a
+/// toss-up that follows the host's load (1000 x 1000: 156-172 us on one
+/// core vs 194-207 threaded at load 60, 170-200 vs 155-190 at load 4), so it
+/// stays threaded (br-frankenpandas-rc0923-epic-zero-certified-losses-bss5q.4).
+const MASK_PAR_MIN_CELLS: usize = 1 << 19;
+
 /// Where a column-parallel pass's workers run (br-frankenpandas-41ma0). On a
 /// host whose allowed CPUs span several L3 caches, a pass whose cells fit in
 /// one L3 keeps its workers in the caller's L3 domain: spread over the others
@@ -83257,14 +83267,18 @@ impl DataFrame {
     ///
     /// Matches `df.isna()`.
     pub fn isna(&self) -> Result<Self, FrameError> {
-        self.with_columns_mapped(|_, column| Ok(column_na_mask(column, true)))
+        self.with_columns_mapped_min(MASK_PAR_MIN_CELLS, |_, column| {
+            Ok(column_na_mask(column, true))
+        })
     }
 
     /// Return a DataFrame of booleans indicating non-missing values.
     ///
     /// Matches `df.notna()`.
     pub fn notna(&self) -> Result<Self, FrameError> {
-        self.with_columns_mapped(|_, column| Ok(column_na_mask(column, false)))
+        self.with_columns_mapped_min(MASK_PAR_MIN_CELLS, |_, column| {
+            Ok(column_na_mask(column, false))
+        })
     }
 
     /// Alias for `isna`.
@@ -86792,7 +86806,18 @@ impl DataFrame {
         &self,
         map: impl Fn(usize, &Column) -> Result<Column, FrameError> + Sync,
     ) -> Result<Self, FrameError> {
-        let mapped = self.par_map_column_positions_min(16_384, |pos| {
+        self.with_columns_mapped_min(16_384, map)
+    }
+
+    /// [`Self::with_columns_mapped`] threaded only from `par_min_cells`
+    /// cells: a map far cheaper a cell than the usual (a missing-value mask)
+    /// pays more to fan out than it saves below millions of cells.
+    fn with_columns_mapped_min(
+        &self,
+        par_min_cells: usize,
+        map: impl Fn(usize, &Column) -> Result<Column, FrameError> + Sync,
+    ) -> Result<Self, FrameError> {
+        let mapped = self.par_map_column_positions_min(par_min_cells, |pos| {
             Ok(map(pos, self.column_at(pos).expect("column in bounds")))
         })?;
         let columns = mapped
@@ -104445,8 +104470,11 @@ impl DataFrame {
             Some(f64_path(&self.take_columns(&rest)?)?)
         };
         let broadcast = Column::from_i64_values(vec![integer; self.len()]);
-        // The integer columns run in parallel, as the f64 kernels do.
-        let mut columns = self.par_map_column_positions_min(16_384, |pos| {
+        // The integer columns run in parallel from the f64 kernels' 3M cells
+        // (typed_scalar_arith): at 16k a 4 x 100k frame's one int column
+        // woke the pool for a 15 us add (df + 1 0.65-0.87x pandas;
+        // br-frankenpandas-rc0923-epic-zero-certified-losses-bss5q.4).
+        let mut columns = self.par_map_column_positions_min(3 << 20, |pos| {
             if !integral[pos] {
                 return Ok(None);
             }

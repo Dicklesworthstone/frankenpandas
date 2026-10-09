@@ -12673,7 +12673,35 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Positions {
                 }
             }
         }
-        obj.extract::<Vec<i64>>().map(Self)
+        obj.extract::<Vec<i64>>().map(Self).map_err(|error| {
+            // Positions of two or more dimensions (a 2-D array, a nested
+            // list) are numpy's ValueError in pandas' take, not a TypeError
+            // (br-frankenpandas-fk877). Only an array or a list / tuple of
+            // sequences is asked: any other key keeps its error unpriced.
+            let is_array = |item: &Bound<'_, PyAny>| {
+                item.get_type().name().is_ok_and(|name| name == "ndarray")
+            };
+            let nested = (obj.is_instance_of::<PyList>() || obj.is_instance_of::<PyTuple>())
+                && obj.get_item(0).is_ok_and(|first| {
+                    first.is_instance_of::<PyList>()
+                        || first.is_instance_of::<PyTuple>()
+                        || is_array(&first)
+                });
+            if !nested && !is_array(&obj) {
+                return error;
+            }
+            let ndim = obj
+                .py()
+                .import("numpy")
+                .and_then(|np| np.call_method1("ndim", (&*obj,)))
+                .and_then(|ndim| ndim.extract::<usize>());
+            match ndim {
+                Ok(ndim) if ndim > 1 => PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Buffer has wrong number of dimensions (expected 1, got {ndim})"
+                )),
+                _ => error,
+            }
+        })
     }
 }
 
@@ -14143,10 +14171,11 @@ impl PyIndex {
         let Some(missing) = missing else {
             // numpy's take of the labels: typed ints stay typed, the name
             // and dtype with them (each label was cloned into a new index;
-            // br-frankenpandas-fk877).
+            // br-frankenpandas-fk877), gathered into the positions' own
+            // buffer (a second 8 MB one a million positions).
             let positions = take_positions(indices, self.inner.len())?;
             return Ok(PyIndex {
-                inner: self.inner.take(&positions),
+                inner: self.inner.take_owned(positions),
             });
         };
         let labels = self.inner.labels();
@@ -30305,6 +30334,160 @@ fn ufunc_result_column(
     Column::new(dtype, values).map_err(column_error_to_py)
 }
 
+/// A column-to-column kernel ([`Column::exp`], [`Column::log`], ...).
+type ColumnKernel = fn(&Column) -> Result<Column, fp_columnar::ColumnError>;
+
+/// The column kernel of a one-input float ufunc whose float64 loop numpy may
+/// run through libm: each kernel calls the `f64` function of that name.
+fn libm_column_kernel(name: &str) -> Option<ColumnKernel> {
+    Some(match name {
+        "exp" => Column::exp,
+        "expm1" => Column::expm1,
+        "log" => Column::log,
+        "log2" => Column::log2,
+        "log10" => Column::log10,
+        "log1p" => Column::log1p,
+        "sin" => Column::sin,
+        "cos" => Column::cos,
+        "tan" => Column::tan,
+        "sinh" => Column::sinh,
+        "cosh" => Column::cosh,
+        _ => return None,
+    })
+}
+
+const LIBM_UFUNCS: [&str; 11] = [
+    "exp", "expm1", "log", "log2", "log10", "log1p", "sin", "cos", "tan", "sinh", "cosh",
+];
+
+static LIBM_UFUNCS_NUMPY_SHARES: pyo3::sync::PyOnceLock<Vec<&'static str>> =
+    pyo3::sync::PyOnceLock::new();
+
+/// Whether numpy's float64 loop of ufunc `name` gives exactly what
+/// [`libm_column_kernel`]'s kernel gives, on this host. numpy runs its own
+/// SIMD loops (exp, log) or SVML's (the rest) only on AVX512F; below it they
+/// call glibc's libm, as the kernels do - measured bit-identical over
+/// 0.4-0.8M inputs each on ts1 (numpy 2.3.5, AVX2), where numpy's tanh is
+/// its own and is left out. Settled once a process: the AVX512F flags read
+/// and each function compared with numpy's over a probe of values; a
+/// mismatch, or any error, keeps that ufunc on numpy's loop.
+fn numpy_ufunc_is_libm(py: Python<'_>, name: &str) -> bool {
+    LIBM_UFUNCS_NUMPY_SHARES
+        .get_or_init(py, || libm_ufuncs_numpy_shares(py).unwrap_or_default())
+        .contains(&name)
+}
+
+fn libm_ufuncs_numpy_shares(py: Python<'_>) -> PyResult<Vec<&'static str>> {
+    let features = py
+        .import("numpy._core._multiarray_umath")
+        .or_else(|_| py.import("numpy.core._multiarray_umath"))?
+        .getattr("__cpu_features__")?;
+    for flag in ["AVX512F", "AVX512_SKX"] {
+        if features.get_item(flag)?.is_truthy()? {
+            return Ok(Vec::new());
+        }
+    }
+    let probe: Vec<f64> = (-160..=160)
+        .map(|step| f64::from(step) * 0.731)
+        .chain([
+            0.0, -0.0, 1e-300, 5e-324, 0.5, 1.5, 1e22, 1e300, -1e300, 700.0, -745.0, 3e5,
+        ])
+        .collect();
+    let np = py.import("numpy")?;
+    let quiet = PyDict::new(py);
+    quiet.set_item("all", "ignore")?;
+    let errstate = np.call_method("errstate", (), Some(&quiet))?;
+    errstate.call_method0("__enter__")?;
+    let compared = LIBM_UFUNCS
+        .iter()
+        .map(|&name| {
+            let ours = libm_column_kernel(name)
+                .map(|kernel| kernel(&Column::from_f64_values(probe.clone())));
+            let Some(Ok(ours)) = ours else {
+                return Ok(None);
+            };
+            let theirs: Vec<f64> = np
+                .getattr(name)?
+                .call1((np.call_method1("asarray", (probe.clone(),))?,))?
+                .call_method0("tolist")?
+                .extract()?;
+            let same = ours.values().len() == theirs.len()
+                && ours
+                    .values()
+                    .iter()
+                    .zip(&theirs)
+                    .all(|(ours, theirs)| match ours {
+                        Scalar::Float64(ours) => {
+                            ours.to_bits() == theirs.to_bits() || (ours.is_nan() && theirs.is_nan())
+                        }
+                        other => other.is_missing() && theirs.is_nan(),
+                    });
+            Ok(same.then_some(name))
+        })
+        .collect::<PyResult<Vec<_>>>();
+    errstate.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+    Ok(compared?.into_iter().flatten().collect())
+}
+
+/// Whether numpy's error state is its default (divide / over / invalid
+/// warn, under ignored): the only one under which a native loop that
+/// raised no flag answers as numpy's would.
+fn numpy_errstate_is_default(py: Python<'_>) -> PyResult<bool> {
+    let state = py.import("numpy")?.call_method0("geterr")?;
+    for (key, want) in [
+        ("divide", "warn"),
+        ("over", "warn"),
+        ("under", "ignore"),
+        ("invalid", "warn"),
+    ] {
+        if state.get_item(key)?.extract::<String>()? != want {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether numpy would have raised no floating-point flag computing `out`
+/// from `input`: every value present in `input` (valid and not NaN) gave a
+/// finite result. An overflow (exp(1000)), a pole (log(0)) or a domain
+/// error (log(-1), sin(inf)) is `false`; numpy's own loop then warns or
+/// raises as its error state says.
+fn ufunc_result_unflagged(input: &Column, out: &Column) -> bool {
+    let Some((results, _)) = out.as_f64_slice_with_validity() else {
+        return false;
+    };
+    // The usual answer, one vectorized pass: every result finite.
+    if results.iter().fold(0_u64, |count, result| {
+        count + u64::from(!result.is_finite())
+    }) == 0
+    {
+        return true;
+    }
+    let Some((values, validity)) = input.as_f64_slice_with_validity() else {
+        return false;
+    };
+    if values.len() != results.len() {
+        return false;
+    }
+    // A NaN-holding input's NaN results come from its NaNs: counted in one
+    // vectorized pass too, the positions visited only when one did not.
+    if values
+        .iter()
+        .zip(results)
+        .fold(0_u64, |count, (value, result)| {
+            count + u64::from(!result.is_finite()) * u64::from(!value.is_nan())
+        })
+        == 0
+    {
+        return true;
+    }
+    values
+        .iter()
+        .zip(results)
+        .enumerate()
+        .all(|(at, (value, result))| result.is_finite() || value.is_nan() || !validity.get(at))
+}
+
 /// numpy's ufunc protocol for a Series or DataFrame, as pandas'
 /// `arraylike.array_ufunc`: a binary operator ufunc is the operator
 /// (`np.add(s, x)` is `s + x`); `ufunc.reduce` of add / multiply / maximum
@@ -30347,6 +30530,34 @@ fn array_ufunc<'py>(
         && series.inner.column().width().is_none()
     {
         let result = wrap_series(series.inner.sqrt())?;
+        return Ok(Py::new(py, result)?.into_bound(py).into_any());
+    }
+    // np.exp / np.log / np.sin ... of a plain float64 / int64 Series: the
+    // column's own kernel where numpy's float64 loop is the same libm
+    // function (`numpy_ufunc_is_libm`), where the values went out to numpy
+    // and back (np.exp of a million rows 4.9 ms, pandas 3.8;
+    // br-frankenpandas-zgx6u). Under a non-default np.seterr, or for a
+    // result numpy flags (an overflow, a pole, a domain error), numpy's own
+    // loop below answers, warning or raising as it does.
+    if method == "__call__"
+        && no_kwargs
+        && inputs.len() == 1
+        && inputs.get_item(0)?.is(this)
+        && let Some(kernel) = libm_column_kernel(&name)
+        && let Ok(series) = this.extract::<PyRef<'_, PySeries>>()
+        && matches!(series.inner.dtype(), DType::Float64 | DType::Int64)
+        && series.inner.column().width().is_none()
+        && (series.inner.dtype() == DType::Float64 || series.inner.column().validity().all())
+        && numpy_ufunc_is_libm(py, &name)
+        && numpy_errstate_is_default(py)?
+        && let Ok(column) = kernel(series.inner.column())
+        && ufunc_result_unflagged(series.inner.column(), &column)
+    {
+        let result = wrap_series(Series::new(
+            series.inner.name(),
+            series.inner.index().clone(),
+            column,
+        ))?;
         return Ok(Py::new(py, result)?.into_bound(py).into_any());
     }
     let has_series = inputs.iter().any(|x| x.is_instance_of::<PySeries>());
@@ -38303,7 +38514,13 @@ impl PySeries {
             )));
         }
         take_bounds(&indices.0, self.inner.len())?;
-        let s = self.inner.take(&indices.0).map_err(frame_error_to_py)?;
+        // As s.iloc[positions]: normalized in the positions' own buffer and
+        // an int64 index gathered back into it - Series.take wrote two more
+        // 8 MB buffers a million positions (br-frankenpandas-fk877).
+        let s = self
+            .inner
+            .iloc_owned(indices.0)
+            .map_err(frame_error_to_py)?;
         Ok(PySeries { inner: s })
     }
 

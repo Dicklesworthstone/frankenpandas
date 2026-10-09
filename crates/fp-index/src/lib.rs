@@ -2151,30 +2151,54 @@ impl IndexLabels {
     }
 
     fn take_i64_values(&self, indices: &[usize]) -> Option<Vec<i64>> {
-        let mut out = Vec::with_capacity(indices.len());
-
+        // A unit range, an affine range and a typed buffer: one bounds pass (a
+        // max, vectorized), then the gather collected rather than pushed - a
+        // push a position kept the loop's state in memory and reloaded the
+        // buffer through two pointers each time (Index(arange).take of a
+        // million random positions 3.3 ms, pandas 0.95; br-frankenpandas-fk877).
+        // In bounds, each value is one of these labels: no overflow.
+        let in_bounds = |len: usize| {
+            indices
+                .iter()
+                .fold(0_usize, |most, &idx| most.max(idx))
+                .checked_add(1)
+                .is_some_and(|end| indices.is_empty() || end <= len)
+        };
         if let Some(range) = self.int64_unit_range {
-            for &idx in indices {
-                if idx >= range.len {
-                    return None;
-                }
-                let offset = i64::try_from(idx).ok()?;
-                out.push(range.start.checked_add(offset)?);
+            if !in_bounds(range.len) {
+                return None;
             }
-            return Some(out);
+            return Some(
+                indices
+                    .iter()
+                    .map(|&idx| range.start.wrapping_add_unsigned(idx as u64))
+                    .collect(),
+            );
+        }
+        if let Some(range) = self.int64_affine {
+            if !in_bounds(range.len) {
+                return None;
+            }
+            return Some(
+                indices
+                    .iter()
+                    .map(|&idx| {
+                        range
+                            .start
+                            .wrapping_add(range.step.wrapping_mul(idx as i64))
+                    })
+                    .collect(),
+            );
+        }
+        if let Some(Some(values)) = self.int64_typed.get() {
+            let values = values.as_slice();
+            if !in_bounds(values.len()) {
+                return None;
+            }
+            return Some(indices.iter().map(|&idx| values[idx]).collect());
         }
 
-        if let Some(range) = self.int64_affine {
-            for &idx in indices {
-                if idx >= range.len {
-                    return None;
-                }
-                let offset = i64::try_from(idx).ok()?;
-                let delta = range.step.checked_mul(offset)?;
-                out.push(range.start.checked_add(delta)?);
-            }
-            return Some(out);
-        }
+        let mut out = Vec::with_capacity(indices.len());
 
         if let Some(runs) = &self.int64_two_affine {
             let runs = **runs;
@@ -2195,16 +2219,6 @@ impl IndexLabels {
                 let offset = strided.step.checked_mul(idx)?;
                 let pos = strided.start.checked_add(offset)?;
                 out.push(*strided.values.get(pos)?);
-            }
-            return Some(out);
-        }
-
-        if let Some(Some(values)) = self.int64_typed.get() {
-            for &idx in indices {
-                if idx >= values.len() {
-                    return None;
-                }
-                out.push(*values.get(idx)?);
             }
             return Some(out);
         }
@@ -2242,8 +2256,14 @@ impl IndexLabels {
                 })
                 .collect());
         }
+        // The bounds as a max, which vectorizes (`all` stops early, so it
+        // cannot; br-frankenpandas-fk877).
         if let Some(Some(values)) = self.int64_typed.get()
-            && indices.iter().all(|&position| position < values.len())
+            && indices
+                .iter()
+                .fold(0_usize, |most, &position| most.max(position))
+                .checked_add(1)
+                .is_some_and(|end| indices.is_empty() || end <= values.len())
         {
             return Ok(indices
                 .into_iter()
