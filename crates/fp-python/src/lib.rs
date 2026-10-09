@@ -24936,6 +24936,12 @@ fn limited_fill(
             out.push(v.clone());
         }
     }
+    // An object column's cells stay as they are: Column::new over text
+    // storage stringified a column of numbers, None becoming 'None'
+    // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.24).
+    if is_object_column(col) {
+        return Ok(Column::from_object_values(out));
+    }
     Column::new(col.dtype().clone(), out).map_err(fp_frame::FrameError::Column)
 }
 
@@ -24974,6 +24980,63 @@ fn refuse_masked_int_fill(py: Python<'_>, col: &Column, value: &Bound<'_, PyAny>
         "Invalid value '{}' for dtype {dtype}",
         value.str()?
     )))
+}
+
+/// pandas 2.2's FutureWarning for the downcast that follows a fill of an
+/// object array.
+const OBJECT_FILL_DOWNCAST: &std::ffi::CStr = c"Downcasting object dtype arrays on .fillna, .ffill, .bfill is deprecated and will change in a future version. Call result.infer_objects(copy=False) instead. To opt-in to the future behavior, set `pd.set_option('future.no_silent_downcasting', True)`";
+
+/// A fill of an object Series as pandas 2.2 returns it: the filled values
+/// inferred as `infer_objects` infers them (Block._maybe_downcast,
+/// caller="fillna"), with pandas' FutureWarning when the dtype moves - the
+/// filled object array was kept (Series([1, None], dtype=object).fillna(0)
+/// is int64 in pandas; br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.24).
+fn downcast_object_fill(source: &Series, filled: Series) -> PyResult<Series> {
+    if !is_object_column(source.column()) || !is_object_column(filled.column()) {
+        return Ok(filled);
+    }
+    let inferred = filled.infer_objects().map_err(frame_error_to_py)?;
+    if is_object_column(inferred.column()) {
+        return Ok(filled);
+    }
+    warn_object_fill_downcast()?;
+    Ok(inferred)
+}
+
+/// [`downcast_object_fill`] of a frame: its object columns' fills inferred
+/// (`infer_objects`), one FutureWarning when any moves.
+fn downcast_object_fill_frame(source: &DataFrame, filled: DataFrame) -> PyResult<DataFrame> {
+    let objects: Vec<&String> = source
+        .column_names()
+        .into_iter()
+        .filter(|name| source.column(name).is_some_and(is_object_column))
+        .collect();
+    if objects.is_empty() {
+        return Ok(filled);
+    }
+    let inferred = filled.infer_objects().map_err(frame_error_to_py)?;
+    let moved = objects.iter().any(|name| {
+        filled.column(name).is_some_and(is_object_column)
+            && inferred
+                .column(name)
+                .is_some_and(|column| !is_object_column(column))
+    });
+    if !moved {
+        return Ok(filled);
+    }
+    warn_object_fill_downcast()?;
+    Ok(inferred)
+}
+
+fn warn_object_fill_downcast() -> PyResult<()> {
+    Python::attach(|py| {
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            OBJECT_FILL_DOWNCAST,
+            1,
+        )
+    })
 }
 
 fn fill_column_with_scalar(
@@ -33000,6 +33063,9 @@ impl PySeries {
             .map_err(frame_error_to_py)?;
             Ok(PySeries { inner: out_s })
         })()?;
+        let result = PySeries {
+            inner: downcast_object_fill(&self.inner, result.inner)?,
+        };
         Ok(series_inplace(&mut self.inner, result, inplace))
     }
 
@@ -34553,8 +34619,9 @@ impl PySeries {
             };
             let res = self.inner.ffill(limit_usize).map_err(frame_error_to_py)?;
             let res = keep_masked_dtype(self.inner.column(), res)?;
+            let res = series_fill_area(&self.inner, res, inside)?;
             Ok(PySeries {
-                inner: series_fill_area(&self.inner, res, inside)?,
+                inner: downcast_object_fill(&self.inner, res)?,
             })
         })()?;
         Ok(series_inplace(&mut self.inner, result, inplace))
@@ -34590,8 +34657,9 @@ impl PySeries {
             };
             let res = self.inner.bfill(limit_usize).map_err(frame_error_to_py)?;
             let res = keep_masked_dtype(self.inner.column(), res)?;
+            let res = series_fill_area(&self.inner, res, inside)?;
             Ok(PySeries {
-                inner: series_fill_area(&self.inner, res, inside)?,
+                inner: downcast_object_fill(&self.inner, res)?,
             })
         })()?;
         Ok(series_inplace(&mut self.inner, result, inplace))
@@ -46285,6 +46353,10 @@ impl PyDataFrame {
                 }
             }
         })()?;
+        // pandas' downcast of the filled object columns (fvsao.24).
+        let result = PyDataFrame {
+            inner: downcast_object_fill_frame(&self.inner, result.inner)?,
+        };
         Ok(frame_inplace(&mut self.inner, result, inplace))
     }
 
@@ -49573,8 +49645,9 @@ impl PyDataFrame {
                     )));
                 }
             };
+            let res = frame_fill_area(&self.inner, res, inside)?;
             Ok(PyDataFrame {
-                inner: frame_fill_area(&self.inner, res, inside)?,
+                inner: downcast_object_fill_frame(&self.inner, res)?,
             })
         })()?;
         Ok(frame_inplace(&mut self.inner, result, inplace))
@@ -49618,8 +49691,9 @@ impl PyDataFrame {
                     )));
                 }
             };
+            let res = frame_fill_area(&self.inner, res, inside)?;
             Ok(PyDataFrame {
-                inner: frame_fill_area(&self.inner, res, inside)?,
+                inner: downcast_object_fill_frame(&self.inner, res)?,
             })
         })()?;
         Ok(frame_inplace(&mut self.inner, result, inplace))

@@ -28785,6 +28785,57 @@ def test_categorical_index_categories_like_pandas_7zs0a(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.24: fillna / ffill /
+# bfill of an object column keep the fill and the values as they are (a fill
+# was made text, and a column of numbers stringified), then downcast as pandas
+# 2.2 does with its FutureWarning; NEGATIVE: text stays object with no warning,
+# text beside numbers stays object.
+_FVSAO24_FILLS = {
+    "ints fillna 0": lambda m: m.Series([1, None, 2], dtype=object).fillna(0),
+    "ints ffill": lambda m: m.Series([1, None, 2], dtype=object).ffill(),
+    "ints bfill": lambda m: m.Series([1, None, 2], dtype=object).bfill(),
+    "leading None ffill": lambda m: m.Series([None, 1, 2], dtype=object).ffill(),
+    "floats fillna": lambda m: m.Series([1.5, None], dtype=object).fillna(0.5),
+    "bools fillna": lambda m: m.Series([True, None], dtype=object).fillna(False),
+    "int and float fillna": lambda m: m.Series([1, None, 2.5], dtype=object).fillna(0),
+    "nothing missing fillna": lambda m: m.Series([1, 2], dtype=object).fillna(0),
+    "limit fillna": lambda m: m.Series([1, None, None], dtype=object).fillna(0, limit=1),
+    "text fillna": lambda m: m.Series(["a", None], dtype=object).fillna("z"),
+    "text and int fillna": lambda m: m.Series(["a", None, 1], dtype=object).fillna(0),
+    "frame fillna": lambda m: m.DataFrame(
+        {"a": m.Series([1, None], dtype=object), "b": m.Series(["x", None], dtype=object)}
+    ).fillna(0),
+    "frame ffill": lambda m: m.DataFrame({"a": m.Series([1, None], dtype=object)}).ffill(),
+    "frame bfill": lambda m: m.DataFrame({"a": m.Series([None, 2.5], dtype=object)}).bfill(),
+}
+
+
+def _fvsao24_cell(v: Any) -> Any:
+    if v is None or (isinstance(v, float) and v != v):
+        return "missing"
+    return (type(v).__name__, v)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FVSAO24_FILLS))
+def test_object_fills_like_pandas_fvsao24(case: str) -> None:
+    def run(m: Any) -> Any:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            out = _FVSAO24_FILLS[case](m)
+        downcast = sorted(
+            {w.category.__name__ for w in caught if "Downcasting object dtype" in str(w.message)}
+        )
+        if hasattr(out, "columns"):
+            return [
+                downcast,
+                [(str(out[c].dtype), [_fvsao24_cell(v) for v in out[c].tolist()]) for c in out.columns],
+            ]
+        return [downcast, str(out.dtype), [_fvsao24_cell(v) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
 # br-frankenpandas-knu1r: grouped shift / diff / pct_change by periods other
 # than 1 (each group's ring stepped by a cursor) - by an int key (the
 # key-offset kernels) and a text key (the group-id kernels), over floats
