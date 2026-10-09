@@ -70059,6 +70059,24 @@ pub fn show_versions() -> String {
 #[cfg(feature = "lazy-transpose-view")]
 const LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN: usize = 256;
 
+/// The column name a transposed frame gives the row labelled `label` (its
+/// typed label is kept on the column axis beside it). Not feature-gated: the
+/// materialized transpose uses it with `lazy-transpose-view` off.
+fn transposed_column_name(label: &IndexLabel) -> String {
+    match label {
+        IndexLabel::Int64(v) => v.to_string(),
+        IndexLabel::Utf8(v) => v.clone(),
+        IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
+        IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
+        f @ (IndexLabel::Float64(_)
+        | IndexLabel::Bool(_)
+        | IndexLabel::Period(_)
+        | IndexLabel::Interval(_)) => f.to_string(),
+        IndexLabel::Object(object) => object.to_string(),
+        null @ IndexLabel::Null(_) => null.to_string(),
+    }
+}
+
 /// The lazy-transpose page length actually in force, overridable for measurement
 /// by `FP_LAZY_TRANSPOSE_PAGE_LEN`.
 ///
@@ -70084,23 +70102,6 @@ const LAZY_TRANSPOSE_COLUMN_SLOT_PAGE_LEN: usize = 256;
 /// The default is unchanged at 256, so a process that sets nothing behaves exactly
 /// as before.
 #[cfg(feature = "lazy-transpose-view")]
-/// The column name a transposed frame gives the row labelled `label` (its
-/// typed label is kept on the column axis beside it).
-fn transposed_column_name(label: &IndexLabel) -> String {
-    match label {
-        IndexLabel::Int64(v) => v.to_string(),
-        IndexLabel::Utf8(v) => v.clone(),
-        IndexLabel::Timedelta64(ns) => Timedelta::format(*ns),
-        IndexLabel::Datetime64(ns) => format_datetime_ns(*ns),
-        f @ (IndexLabel::Float64(_)
-        | IndexLabel::Bool(_)
-        | IndexLabel::Period(_)
-        | IndexLabel::Interval(_)) => f.to_string(),
-        IndexLabel::Object(object) => object.to_string(),
-        null @ IndexLabel::Null(_) => null.to_string(),
-    }
-}
-
 fn lazy_transpose_page_len() -> usize {
     static PAGE_LEN: OnceLock<usize> = OnceLock::new();
     *PAGE_LEN.get_or_init(|| {
