@@ -32915,3 +32915,155 @@ def test_string_methods_typed_by_the_method_like_pandas_fvsao59(case: Any) -> No
         return [str(out.dtype), [(type(v).__name__, repr(v)) for v in out.tolist()]]
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-rc0923-epic-full-surface-conformance-j0lg5.7: between with
+# bounds the values do not compare with raises pandas' TypeError (it was
+# ValueError) - text, an object mix and datetimes against numbers;
+# NEGATIVE: comparable bounds answer.
+_J0LG57_BETWEEN_CASES = {
+    "text against numbers": lambda m: m.Series(["a", None, "c"]).between(0, 2),
+    "mixed against numbers": lambda m: m.Series([1, "a", 2.5, None], dtype=object).between(0, 2),
+    "datetimes against numbers": lambda m: m.Series(m.to_datetime(["2024-01-01", "2024-01-02"])).between(0, 2),
+    "timedeltas against numbers": lambda m: m.Series(m.to_timedelta(["1D", "2D"])).between(0, 2),
+    "text against text": lambda m: m.Series(["a", None, "c"]).between("a", "b"),
+    "numbers against numbers": lambda m: m.Series([1.5, None, 3.0]).between(1, 2),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_J0LG57_BETWEEN_CASES))
+def test_between_incomparable_bounds_raise_like_pandas_j0lg5_7(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _J0LG57_BETWEEN_CASES[case](m).tolist()
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-7v4wf: an object column's modes that do not compare - text
+# beside numbers - keep their first-seen order, as numpy's sort leaves them
+# (they were sorted numbers first); NEGATIVE: numbers alone, text alone and
+# a float column's modes are sorted.
+_7V4WF_MODE_ORDER = {
+    "text beside numbers": lambda m: m.Series([1, "a", 2.5, None], dtype=object).mode(),
+    "repeats": lambda m: m.Series(["b", 2, "b", 2, 1.5], dtype=object).mode(),
+    "numbers": lambda m: m.Series([3, 1.5, 2], dtype=object).mode(),
+    "text": lambda m: m.Series(["b", "a"], dtype=object).mode(),
+    "floats": lambda m: m.Series([3.0, 1.5, 2.0]).mode(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_7V4WF_MODE_ORDER))
+def test_object_mode_order_like_pandas_7v4wf(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _7V4WF_MODE_ORDER[case](m)
+        return [str(out.dtype), [(type(v).__name__, repr(v)) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-7v4wf: sorting an object column of text beside numbers is
+# pandas' TypeError (Python's < cannot order them; fp sorted numbers first) -
+# sort_values either way, argsort; an object column's ints and floats sort by
+# value (every int came before every float); NEGATIVE: text alone and a key
+# mapping the cells to numbers sort.
+_7V4WF_SORT_MIXED = {
+    "sort_values": lambda m: m.Series([1, "a", 2.5, None], dtype=object).sort_values(),
+    "sort_values descending": lambda m: m.Series([1, "a", 2.5], dtype=object).sort_values(ascending=False),
+    "argsort": lambda m: m.Series([1, "a", 2.5], dtype=object).argsort(),
+    "text": lambda m: m.Series(["b", None, "a"], dtype=object).sort_values(),
+    "numbers": lambda m: m.Series([3, 1.5, None, 2], dtype=object).sort_values(),
+    "key to numbers": lambda m: m.Series([1, "a", 2.5], dtype=object).sort_values(key=lambda s: s.map(lambda v: len(str(v)))),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_7V4WF_SORT_MIXED))
+def test_object_sort_of_mixed_cells_like_pandas_7v4wf(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _7V4WF_SORT_MIXED[case](m)
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        return [list(out.index), [(type(v).__name__, repr(v)) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-1qj7z (the scalar): pd.Interval of Timestamps or of
+# Timedeltas holds them exactly (it raised 'must be real number, not
+# Timestamp') - repr / str, left / right / length / mid and their types, a
+# nanosecond endpoint, contains, overlaps, equality, hashing, order, pickle,
+# a zone; NEGATIVE: a Timestamp beside a number and a Timestamp beside a
+# Timedelta are Python's TypeError, reversed endpoints pandas' ValueError, a
+# number tested against Timestamps raises. An Index / IntervalIndex of them
+# is refused with NotImplementedError until the core interval holds them; a
+# Series holds the Interval objects themselves (object, where pandas has
+# interval[datetime64[ns], right]), exact.
+def _1qj7z_days(m: Any, closed: str = "right") -> Any:
+    return m.Interval(m.Timestamp("2024-01-01"), m.Timestamp("2024-02-01"), closed=closed)
+
+
+def _1qj7z_spans(m: Any) -> Any:
+    return m.Interval(m.Timedelta("1D"), m.Timedelta("2D 3h"))
+
+
+_1QJ7Z_SCALAR_CASES = {
+    "repr": lambda m: repr(_1qj7z_days(m)),
+    "str": lambda m: str(_1qj7z_days(m)),
+    "closed both repr": lambda m: repr(_1qj7z_days(m, "both")),
+    "endpoint types": lambda m: [type(_1qj7z_days(m).left).__name__, type(_1qj7z_days(m).right).__name__, type(_1qj7z_days(m).length).__name__],
+    "nanosecond endpoint": lambda m: str(m.Interval(m.Timestamp("2024-01-01"), m.Timestamp("2024-01-01 00:00:00.000000001")).right),
+    "length": lambda m: str(_1qj7z_days(m).length),
+    "mid": lambda m: str(_1qj7z_days(m).mid),
+    "contains": lambda m: [m.Timestamp(t) in _1qj7z_days(m) for t in ["2024-01-01", "2024-01-15", "2024-02-01", "2024-03-01"]],
+    "contains closed left": lambda m: [m.Timestamp(t) in _1qj7z_days(m, "left") for t in ["2024-01-01", "2024-02-01"]],
+    "overlaps": lambda m: [_1qj7z_days(m).overlaps(m.Interval(m.Timestamp(a), m.Timestamp(b))) for a, b in [("2024-01-20", "2024-03-01"), ("2024-02-01", "2024-03-01"), ("2023-01-01", "2023-06-01")]],
+    "equality": lambda m: [_1qj7z_days(m) == _1qj7z_days(m), _1qj7z_days(m) == _1qj7z_days(m, "left")],
+    "hash": lambda m: len({_1qj7z_days(m), _1qj7z_days(m), _1qj7z_days(m, "both")}),
+    "order": lambda m: [_1qj7z_days(m) < m.Interval(m.Timestamp("2024-01-02"), m.Timestamp("2024-01-03")), _1qj7z_days(m) > _1qj7z_days(m, "left")],
+    "pickle": lambda m: repr(pickle.loads(pickle.dumps(_1qj7z_days(m)))),
+    "zone": lambda m: repr(m.Interval(m.Timestamp("2024-01-01", tz="UTC"), m.Timestamp("2024-01-02", tz="UTC"))),
+    "zone left": lambda m: str(m.Interval(m.Timestamp("2024-01-01", tz="UTC"), m.Timestamp("2024-01-02", tz="UTC")).left),
+    "timedelta repr": lambda m: repr(_1qj7z_spans(m)),
+    "timedelta str": lambda m: str(_1qj7z_spans(m)),
+    "timedelta length": lambda m: str(_1qj7z_spans(m).length),
+    "timedelta mid": lambda m: str(_1qj7z_spans(m).mid),
+    "timedelta contains": lambda m: [m.Timedelta(t) in _1qj7z_spans(m) for t in ["1D", "1D 1h", "2D 3h", "3D"]],
+    "timestamp beside a number": lambda m: m.Interval(m.Timestamp("2024-01-01"), 5),
+    "timestamp beside a timedelta": lambda m: m.Interval(m.Timestamp("2024-01-01"), m.Timedelta("1D")),
+    "reversed": lambda m: m.Interval(m.Timestamp("2024-02-01"), m.Timestamp("2024-01-01")),
+    "number in timestamps": lambda m: 5 in _1qj7z_days(m),
+    "numeric still": lambda m: [repr(m.Interval(0, 3)), str(m.Interval(0.5, 1.5)), 1 in m.Interval(0, 3)],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_1QJ7Z_SCALAR_CASES))
+def test_interval_of_timestamps_and_timedeltas_like_pandas_1qj7z(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _1QJ7Z_SCALAR_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_index_of_timestamp_intervals_refused_until_held_1qj7z() -> None:
+    # Not parity: pandas builds interval[datetime64[ns]]. An Index says it
+    # cannot yet rather than rounding the nanoseconds into float intervals;
+    # a Series keeps the exact Interval objects, as object cells.
+    with pytest.raises(NotImplementedError, match="1qj7z"):
+        fpd.IntervalIndex([_1qj7z_days(fpd)])
+    with pytest.raises(NotImplementedError, match="1qj7z"):
+        fpd.Index([_1qj7z_days(fpd)])
+    held = fpd.Series([_1qj7z_days(fpd)])
+    assert str(held.dtype) == "object"
+    assert held.iloc[0] == _1qj7z_days(fpd)
+    assert str(held.iloc[0].right) == "2024-02-01 00:00:00"

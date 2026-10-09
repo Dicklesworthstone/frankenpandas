@@ -7248,7 +7248,7 @@ fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     // An Interval cell (Series([Interval(0, 1), ...]) raised "Cannot convert
     // Interval to Scalar").
     if let Ok(interval) = obj.extract::<PyRef<'_, PyInterval>>() {
-        return Ok(Scalar::Interval(interval.core()));
+        return Ok(Scalar::Interval(interval.core()?));
     }
     if let Ok(type_name) = obj.get_type().name() {
         if type_name == "Timedelta"
@@ -10291,7 +10291,7 @@ fn py_to_index_label(obj: &Bound<'_, PyAny>) -> PyResult<IndexLabel> {
         return Ok(if interval.is_missing() {
             IndexLabel::Null(NullKind::NaN)
         } else {
-            IndexLabel::Interval(interval.core())
+            IndexLabel::Interval(interval.core()?)
         });
     }
     // A naive datetime.datetime / a datetime.timedelta is the instant /
@@ -33000,7 +33000,8 @@ impl PySeries {
         Ok(column_ndarray(py, &column)?.unbind())
     }
 
-    /// Sort the Series by value, returning a new Series.
+    /// Sort the Series by value, returning a new Series. An object column of
+    /// text beside numbers is pandas' TypeError (refuse_unorderable_object).
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (axis=None, ascending=true, inplace=false, kind=None, na_position="last", ignore_index=false, key=None))]
     fn sort_values(
@@ -33029,10 +33030,12 @@ impl PySeries {
                     },))?;
                     self.keyed_sort(py, &keyed, ascending, na_position)?
                 }
-                None => self
-                    .inner
-                    .sort_values_na(ascending, na_position)
-                    .map_err(frame_error_to_py)?,
+                None => {
+                    refuse_unorderable_object(&self.inner)?;
+                    self.inner
+                        .sort_values_na(ascending, na_position)
+                        .map_err(frame_error_to_py)?
+                }
             };
             let final_series = if ignore_index {
                 match sorted.reset_index(true).map_err(frame_error_to_py)? {
@@ -34383,7 +34386,29 @@ impl PySeries {
         let res = self
             .inner
             .between(&left_scalar, &right_scalar, inclusive)
-            .map_err(frame_error_to_py)?;
+            .map_err(|error| match error {
+                // Bounds the values do not compare with are pandas'
+                // TypeError, as its comparison raises it (it was ValueError).
+                FrameError::CompatibilityRejected(message)
+                    if message.contains("cannot compare") =>
+                {
+                    let bound_type = left
+                        .get_type()
+                        .name()
+                        .map_or_else(|_| "object".to_owned(), |name| name.to_string());
+                    let dtype = self.inner.dtype();
+                    let text = if matches!(dtype, DType::Datetime64 { .. } | DType::Timedelta64) {
+                        format!(
+                            "Invalid comparison between dtype={} and {bound_type}",
+                            pandas_dtype_name(&dtype)
+                        )
+                    } else {
+                        format!("'>=' not supported between instances of 'str' and '{bound_type}'")
+                    };
+                    PyErr::new::<pyo3::exceptions::PyTypeError, _>(text)
+                }
+                other => frame_error_to_py(other),
+            })?;
         Ok(PySeries { inner: res })
     }
 
@@ -36059,6 +36084,7 @@ impl PySeries {
                 "sort kind must be one of 'quick', 'heap', or 'stable' (got '{kind}')"
             )));
         }
+        refuse_unorderable_object(&self.inner)?;
         if self.inner.column().has_any_missing() {
             PyErr::warn(
                 py,
@@ -63221,6 +63247,31 @@ fn window_ddof(ddof: i64) -> PyResult<usize> {
     usize::try_from(ddof).map_err(|_| not_implemented("a negative ddof for a window method"))
 }
 
+/// pandas' TypeError for sorting an object column of text beside numbers:
+/// it orders the values with Python's `<`, which cannot compare them (they
+/// were sorted numbers first; br-frankenpandas-7v4wf).
+fn refuse_unorderable_object(series: &Series) -> PyResult<()> {
+    let column = series.column();
+    if column.dtype() != DType::Utf8 || column.is_pandas_string() {
+        return Ok(());
+    }
+    let values = column.values();
+    let number = values.iter().find_map(|value| match value {
+        Scalar::Int64(_) => Some("int"),
+        Scalar::Float64(float) if !float.is_nan() => Some("float"),
+        Scalar::Bool(_) => Some("bool"),
+        _ => None,
+    });
+    match number {
+        Some(number) if values.iter().any(|value| matches!(value, Scalar::Utf8(_))) => {
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "'<' not supported between instances of 'str' and '{number}'"
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// pandas' ValueError for `idxmax` / `idxmin` / `argmax` / `argmin` that
 /// skip the missing values of a datetime or timedelta Series holding none
 /// else: numpy's empty-sequence error (a float one answers NaN / -1, which
@@ -87220,6 +87271,115 @@ pub struct PyInterval {
     /// `.length` are ints and print without '.0' (fvsao.54: they were
     /// floats).
     pub int_endpoints: bool,
+    /// Timestamp or Timedelta endpoints, held exactly; `left` / `right`
+    /// then approximate them and no numeric path reads them.
+    pub(crate) temporal: Option<IntervalTemporal>,
+}
+
+/// An Interval's Timestamp or Timedelta endpoints, as pandas'
+/// `interval[datetime64[ns]]` / `interval[timedelta64[ns]]` holds them -
+/// they were refused ('must be real number, not Timestamp';
+/// br-frankenpandas-1qj7z).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct IntervalTemporal {
+    /// The endpoints in nanoseconds: instants, or durations.
+    left: i64,
+    right: i64,
+    /// The Timestamps' zone and resolution; `None` for Timedelta endpoints.
+    stamps: Option<(Option<String>, StampUnit)>,
+}
+
+impl IntervalTemporal {
+    /// Both endpoints read from Python when either is a Timestamp or a
+    /// Timedelta: the two the same kind (a Timestamp beside a number, or
+    /// beside a Timedelta, is Python's TypeError at pandas' `<=` check) and
+    /// in order (pandas' ValueError). None when neither is.
+    fn of(left: &Bound<'_, PyAny>, right: &Bound<'_, PyAny>) -> PyResult<Option<Self>> {
+        let stamp = |value: &Bound<'_, PyAny>| {
+            value
+                .extract::<PyRef<'_, PyTimestamp>>()
+                .ok()
+                .map(|stamp| (stamp.inner.clone(), stamp.unit))
+        };
+        let duration = |value: &Bound<'_, PyAny>| -> PyResult<Option<i64>> {
+            if value.is_instance_of::<PyNaTType>() {
+                return Ok(None);
+            }
+            duration_operand(value)
+        };
+        let unordered = || -> PyResult<Option<Self>> {
+            let name = |value: &Bound<'_, PyAny>| {
+                value
+                    .get_type()
+                    .name()
+                    .map_or_else(|_| "object".to_owned(), |name| name.to_string())
+            };
+            Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "'<=' not supported between instances of '{}' and '{}'",
+                name(left),
+                name(right)
+            )))
+        };
+        let temporal = match (stamp(left), stamp(right)) {
+            (Some((first, first_unit)), Some((second, second_unit))) => {
+                if first.tz != second.tz {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "left and right must have the same time zone",
+                    ));
+                }
+                Self {
+                    left: first.nanos,
+                    right: second.nanos,
+                    stamps: Some((first.tz, first_unit.max(second_unit))),
+                }
+            }
+            (Some(_), None) | (None, Some(_)) => return unordered(),
+            (None, None) => match (duration(left)?, duration(right)?) {
+                (Some(first), Some(second)) => Self {
+                    left: first,
+                    right: second,
+                    stamps: None,
+                },
+                (Some(_), None) | (None, Some(_)) => return unordered(),
+                (None, None) => return Ok(None),
+            },
+        };
+        if temporal.left > temporal.right {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "left side of interval must be <= right side",
+            ));
+        }
+        Ok(Some(temporal))
+    }
+
+    /// An endpoint in nanoseconds as Python holds it: a Timestamp in the
+    /// zone, or a Timedelta.
+    fn endpoint<'py>(&self, py: Python<'py>, nanos: i64) -> PyResult<Bound<'py, PyAny>> {
+        match &self.stamps {
+            Some((tz, unit)) => Py::new(
+                py,
+                PyTimestamp {
+                    inner: Timestamp {
+                        nanos,
+                        tz: tz.clone(),
+                    },
+                    unit: *unit,
+                },
+            )?
+            .into_bound_py_any(py),
+            None => Py::new(py, PyTimedelta { nanos })?.into_bound_py_any(py),
+        }
+    }
+
+    /// Whether `other` holds endpoints of this kind (Timestamps of the zone,
+    /// or Timedeltas).
+    fn same_kind(&self, other: &Self) -> bool {
+        match (&self.stamps, &other.stamps) {
+            (Some((tz, _)), Some((other_tz, _))) => tz == other_tz,
+            (None, None) => true,
+            _ => false,
+        }
+    }
 }
 
 impl PyInterval {
@@ -87235,14 +87395,37 @@ impl PyInterval {
         let Ok(other) = other.extract::<PyRef<'_, Self>>() else {
             return Ok(py.NotImplemented());
         };
-        let order = match self.left.partial_cmp(&other.left) {
-            Some(std::cmp::Ordering::Equal) => self
-                .right
-                .partial_cmp(&other.right)
-                .map(|right| right.then_with(|| self.closed.cmp(&other.closed))),
-            order => order,
+        let order = match (&self.temporal, &other.temporal) {
+            (None, None) => match self.left.partial_cmp(&other.left) {
+                Some(std::cmp::Ordering::Equal) => self
+                    .right
+                    .partial_cmp(&other.right)
+                    .map(|right| right.then_with(|| self.closed.cmp(&other.closed))),
+                order => order,
+            },
+            // Timestamp / Timedelta endpoints compare exactly, and only
+            // with their own kind.
+            (Some(this), Some(that)) if this.same_kind(that) => Some(
+                this.left
+                    .cmp(&that.left)
+                    .then(this.right.cmp(&that.right))
+                    .then_with(|| self.closed.cmp(&other.closed)),
+            ),
+            _ => return Ok(py.NotImplemented()),
         };
         order.is_some_and(test).into_py_any(py)
+    }
+
+    /// Whether `value` lies in an interval from `left` to `right` closed on
+    /// `closed`'s sides.
+    fn holds<T: PartialOrd>(closed: &str, left: T, right: T, value: T) -> bool {
+        match closed {
+            "right" => value > left && value <= right,
+            "left" => value >= left && value < right,
+            "both" => value >= left && value <= right,
+            "neither" => value > left && value < right,
+            _ => false,
+        }
     }
 
     /// A float64 interval from Rust endpoints, the closed side checked.
@@ -87257,11 +87440,27 @@ impl PyInterval {
             right,
             closed: closed.to_owned(),
             int_endpoints: false,
+            temporal: None,
         })
     }
 
     /// The core interval this Python Interval is, its endpoint type kept.
-    fn core(&self) -> fp_types::Interval {
+    /// One of Timestamps or Timedeltas has no core interval yet - its
+    /// float endpoints would round nanoseconds - so a Series or Index of
+    /// them is refused (br-frankenpandas-1qj7z).
+    fn core(&self) -> PyResult<fp_types::Interval> {
+        if self.temporal.is_some() {
+            return Err(not_implemented(
+                "a Series or Index of Intervals of Timestamps / Timedeltas (br-frankenpandas-1qj7z)",
+            ));
+        }
+        Ok(self.numeric_core())
+    }
+
+    /// [`Self::core`] of a numeric Interval (an IntervalIndex holds only
+    /// these: its constructor refuses the others).
+    fn numeric_core(&self) -> fp_types::Interval {
+        debug_assert!(self.temporal.is_none());
         let closed = match self.closed.as_str() {
             "left" => fp_types::IntervalClosed::Left,
             "both" => fp_types::IntervalClosed::Both,
@@ -87283,6 +87482,7 @@ impl PyInterval {
             right: interval.right,
             closed: interval.closed.to_string(),
             int_endpoints: interval.subtype == fp_types::IntervalSubtype::Int64,
+            temporal: None,
         }
     }
 
@@ -87314,7 +87514,55 @@ impl PyInterval {
             right: f64::NAN,
             closed: closed.to_owned(),
             int_endpoints: false,
+            temporal: None,
         }
+    }
+
+    /// The endpoints' text: numbers as [`Self::endpoint_text`] has them;
+    /// Timestamps as their str, Timedeltas as their repr in a repr and
+    /// their str in a str, as pandas' Interval prints them.
+    fn endpoint_texts(&self, py: Python<'_>, repr: bool) -> PyResult<(String, String)> {
+        let Some(temporal) = &self.temporal else {
+            return Ok((
+                self.endpoint_text(self.left),
+                self.endpoint_text(self.right),
+            ));
+        };
+        let text = |nanos: i64| -> PyResult<String> {
+            let endpoint = temporal.endpoint(py, nanos)?;
+            let shown = if repr && temporal.stamps.is_none() {
+                endpoint.repr()?
+            } else {
+                endpoint.str()?
+            };
+            Ok(shown.to_string())
+        };
+        Ok((text(temporal.left)?, text(temporal.right)?))
+    }
+
+    /// The brackets of this interval's closed sides.
+    fn brackets(&self) -> (char, char) {
+        match self.closed.as_str() {
+            "right" => ('(', ']'),
+            "left" => ('[', ')'),
+            "both" => ('[', ']'),
+            _ => ('(', ')'),
+        }
+    }
+
+    /// A numeric interval's text, as an IntervalIndex lists it.
+    fn numeric_str(&self) -> String {
+        let (l_bracket, r_bracket) = self.brackets();
+        format!(
+            "{l_bracket}{}, {}{r_bracket}",
+            self.endpoint_text(self.left),
+            self.endpoint_text(self.right)
+        )
+    }
+
+    /// A numeric interval's midpoint (an IntervalIndex's intervals are).
+    fn numeric_mid(&self) -> f64 {
+        (self.left + self.right) / 2.0
     }
 
     /// Whether this is a missing interval (NaN endpoints).
@@ -87326,8 +87574,16 @@ impl PyInterval {
     /// endpoints compare exactly, as its left / right arrays do).
     fn same_interval(&self, other: &Self) -> bool {
         self.closed == other.closed
-            && self.left.total_cmp(&other.left).is_eq()
-            && self.right.total_cmp(&other.right).is_eq()
+            && match (&self.temporal, &other.temporal) {
+                (None, None) => {
+                    self.left.total_cmp(&other.left).is_eq()
+                        && self.right.total_cmp(&other.right).is_eq()
+                }
+                (Some(this), Some(that)) => {
+                    this.same_kind(that) && this.left == that.left && this.right == that.right
+                }
+                _ => false,
+            }
     }
 
     /// The order pandas sorts intervals in: by left, then right endpoint.
@@ -87369,6 +87625,17 @@ impl PyInterval {
                 "closed must be one of 'right', 'left', 'both', 'neither'",
             ));
         }
+        // Timestamp / Timedelta endpoints, held exactly (they were refused:
+        // 'must be real number, not Timestamp'; br-frankenpandas-1qj7z).
+        if let Some(temporal) = IntervalTemporal::of(left, right)? {
+            return Ok(Self {
+                left: temporal.left as f64,
+                right: temporal.right as f64,
+                closed: closed_str.to_string(),
+                int_endpoints: false,
+                temporal: Some(temporal),
+            });
+        }
         let integer = |value: &Bound<'_, PyAny>| {
             value.is_instance_of::<pyo3::types::PyInt>()
                 && !value.is_instance_of::<pyo3::types::PyBool>()
@@ -87378,27 +87645,45 @@ impl PyInterval {
             right: right.extract::<f64>()?,
             closed: closed_str.to_string(),
             int_endpoints: integer(left) && integer(right),
+            temporal: None,
         })
     }
 
     #[getter]
     fn left<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if let Some(temporal) = &self.temporal {
+            return temporal.endpoint(py, temporal.left);
+        }
         self.endpoint(py, self.left)
     }
 
     #[getter]
     fn right<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if let Some(temporal) = &self.temporal {
+            return temporal.endpoint(py, temporal.right);
+        }
         self.endpoint(py, self.right)
     }
 
+    /// `right - left`: a Timedelta for Timestamp / Timedelta endpoints.
     #[getter]
     fn length<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if let Some(temporal) = &self.temporal {
+            let nanos = temporal.right.saturating_sub(temporal.left);
+            return Py::new(py, PyTimedelta { nanos })?.into_bound_py_any(py);
+        }
         self.endpoint(py, self.right - self.left)
     }
 
+    /// `left + length / 2`: a Timestamp or Timedelta for those endpoints
+    /// (the half length truncated to a nanosecond, as pandas' Timedelta).
     #[getter]
-    fn mid(&self) -> f64 {
-        (self.left + self.right) / 2.0
+    fn mid<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if let Some(temporal) = &self.temporal {
+            let half = temporal.right.saturating_sub(temporal.left) / 2;
+            return temporal.endpoint(py, temporal.left.saturating_add(half));
+        }
+        ((self.left + self.right) / 2.0).into_bound_py_any(py)
     }
 
     /// Whether the left end is closed ('left' / 'both').
@@ -87435,31 +87720,55 @@ impl PyInterval {
                     .map_or_else(|_| "object".to_owned(), |n| n.to_string())
             ))
         })?;
-        let before = |a: f64, b: f64, closed: bool| if closed { a <= b } else { a < b };
-        Ok(before(
-            self.left,
-            other.right,
-            self.closed_left() && other.closed_right(),
-        ) && before(
-            other.left,
-            self.right,
-            other.closed_left() && self.closed_right(),
-        ))
+        let left_touch = self.closed_left() && other.closed_right();
+        let right_touch = other.closed_left() && self.closed_right();
+        match (&self.temporal, &other.temporal) {
+            (None, None) => {
+                let before = |a: f64, b: f64, closed: bool| if closed { a <= b } else { a < b };
+                Ok(before(self.left, other.right, left_touch)
+                    && before(other.left, self.right, right_touch))
+            }
+            // Timestamp / Timedelta endpoints exactly, against their kind.
+            (Some(this), Some(that)) if this.same_kind(that) => {
+                let before = |a: i64, b: i64, closed: bool| if closed { a <= b } else { a < b };
+                Ok(before(this.left, that.right, left_touch)
+                    && before(that.left, this.right, right_touch))
+            }
+            _ => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "'<' not supported between the two Intervals' endpoints",
+            )),
+        }
     }
 
     /// Equal ends and closed side, as pandas' Interval (it compared by
-    /// identity).
+    /// identity); Timestamp / Timedelta ends exactly.
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
         other.extract::<PyRef<'_, Self>>().is_ok_and(|other| {
-            other.left == self.left && other.right == self.right && other.closed == self.closed
+            match (&self.temporal, &other.temporal) {
+                (None, None) => {
+                    other.left == self.left
+                        && other.right == self.right
+                        && other.closed == self.closed
+                }
+                (Some(this), Some(that)) => this == that && other.closed == self.closed,
+                _ => false,
+            }
         })
     }
 
     fn __hash__(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.left.to_bits().hash(&mut hasher);
-        self.right.to_bits().hash(&mut hasher);
+        match &self.temporal {
+            Some(temporal) => {
+                temporal.left.hash(&mut hasher);
+                temporal.right.hash(&mut hasher);
+            }
+            None => {
+                self.left.to_bits().hash(&mut hasher);
+                self.right.to_bits().hash(&mut hasher);
+            }
+        }
         self.closed.hash(&mut hasher);
         hasher.finish()
     }
@@ -87484,40 +87793,54 @@ impl PyInterval {
         self.ordered(py, other, std::cmp::Ordering::is_ge)
     }
 
-    fn __contains__(&self, val: f64) -> bool {
-        match self.closed.as_str() {
-            "right" => val > self.left && val <= self.right,
-            "left" => val >= self.left && val < self.right,
-            "both" => val >= self.left && val <= self.right,
-            "neither" => val > self.left && val < self.right,
-            _ => false,
+    /// A point in the interval: a number, or for Timestamp / Timedelta
+    /// endpoints a Timestamp of the zone / a Timedelta, exactly (any other
+    /// point Python's TypeError at pandas' comparison).
+    fn __contains__(&self, val: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if let Some(temporal) = &self.temporal {
+            let point = match &temporal.stamps {
+                Some((tz, _)) => val
+                    .extract::<PyRef<'_, PyTimestamp>>()
+                    .ok()
+                    .filter(|stamp| &stamp.inner.tz == tz)
+                    .map(|stamp| stamp.inner.nanos),
+                None if val.is_instance_of::<PyNaTType>() => None,
+                None => duration_operand(val)?,
+            };
+            let Some(point) = point else {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                    "'<' not supported between instances of '{}' and the Interval's endpoints",
+                    val.get_type()
+                        .name()
+                        .map_or_else(|_| "object".to_owned(), |name| name.to_string())
+                )));
+            };
+            return Ok(Self::holds(
+                &self.closed,
+                temporal.left,
+                temporal.right,
+                point,
+            ));
         }
+        let val: f64 = val.extract()?;
+        Ok(Self::holds(&self.closed, self.left, self.right, val))
     }
 
     /// pandas' repr: `Interval(0, 3, closed='right')` for integer
     /// endpoints, `Interval(0.0, 3.0, ...)` for float ones (a float's '.0'
-    /// was dropped).
-    fn __repr__(&self) -> String {
-        format!(
-            "Interval({}, {}, closed='{}')",
-            self.endpoint_text(self.left),
-            self.endpoint_text(self.right),
+    /// was dropped); Timestamps as their text, Timedeltas as their repr.
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let (left, right) = self.endpoint_texts(py, true)?;
+        Ok(format!(
+            "Interval({left}, {right}, closed='{}')",
             self.closed
-        )
+        ))
     }
 
-    fn __str__(&self) -> String {
-        let (l_bracket, r_bracket) = match self.closed.as_str() {
-            "right" => ('(', ']'),
-            "left" => ('[', ')'),
-            "both" => ('[', ']'),
-            _ => ('(', ')'),
-        };
-        format!(
-            "{l_bracket}{}, {}{r_bracket}",
-            self.endpoint_text(self.left),
-            self.endpoint_text(self.right)
-        )
+    fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+        let (l_bracket, r_bracket) = self.brackets();
+        let (left, right) = self.endpoint_texts(py, false)?;
+        Ok(format!("{l_bracket}{left}, {right}{r_bracket}"))
     }
 }
 
@@ -87603,6 +87926,14 @@ impl PyIntervalIndex {
                     }
                 }
             }
+        }
+        // Intervals of Timestamps / Timedeltas have no IntervalIndex yet
+        // (br-frankenpandas-1qj7z).
+        if let Some(interval) = intervals
+            .iter()
+            .find(|interval| interval.temporal.is_some())
+        {
+            interval.core()?;
         }
         Ok(Self {
             intervals,
@@ -87988,7 +88319,7 @@ impl PyIntervalIndex {
                 if iv.is_missing() {
                     "nan".to_owned()
                 } else {
-                    iv.__str__()
+                    iv.numeric_str()
                 }
             })
             .collect();
@@ -88081,7 +88412,7 @@ impl PyIntervalIndex {
         let labels = self
             .intervals
             .iter()
-            .map(|iv| IndexLabel::Float64(fp_index::OrderedF64(iv.mid())))
+            .map(|iv| IndexLabel::Float64(fp_index::OrderedF64(iv.numeric_mid())))
             .collect();
         PyIndex {
             inner: Index::new(labels),
@@ -88399,8 +88730,15 @@ impl PyIntervalIndex {
     }
 
     /// Whether each interval overlaps `other`, a numpy bool array as pandas'
-    /// (it was a list).
-    fn overlaps(&self, other: &PyInterval) -> BoolArray {
+    /// (it was a list). An Interval of Timestamps / Timedeltas does not
+    /// compare with these numeric intervals: Python's TypeError, as pandas'
+    /// (its float endpoints were compared; br-frankenpandas-1qj7z).
+    fn overlaps(&self, other: &PyInterval) -> PyResult<BoolArray> {
+        if other.temporal.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "'<' not supported between the IntervalIndex's endpoints and the Interval's",
+            ));
+        }
         let other_closed = match other.closed.as_str() {
             "left" => fp_types::IntervalClosed::Left,
             "both" => fp_types::IntervalClosed::Both,
@@ -88408,7 +88746,7 @@ impl PyIntervalIndex {
             _ => fp_types::IntervalClosed::Right,
         };
         let other_iv = fp_types::Interval::new(other.left, other.right, other_closed);
-        BoolArray::from(self.to_rust().overlaps(&other_iv))
+        Ok(BoolArray::from(self.to_rust().overlaps(&other_iv)))
     }
 
     fn to_index(&self) -> PyIndex {
@@ -88441,7 +88779,7 @@ impl PyIntervalIndex {
                 if interval.is_missing() {
                     IndexLabel::Null(NullKind::NaN)
                 } else {
-                    IndexLabel::Interval(interval.core())
+                    IndexLabel::Interval(interval.numeric_core())
                 }
             })
             .collect();
@@ -99997,12 +100335,14 @@ mod tests {
                     right: 1.5,
                     closed: "right".to_string(),
                     int_endpoints: false,
+                    temporal: None,
                 },
                 PyInterval {
                     left: 1.5,
                     right: 3.0,
                     closed: "right".to_string(),
                     int_endpoints: false,
+                    temporal: None,
                 },
             ],
             name: Some("iv_idx".to_string()),
@@ -100053,8 +100393,11 @@ mod tests {
             right: 2.0,
             closed: "both".to_string(),
             int_endpoints: false,
+            temporal: None,
         };
-        assert_eq!(pii.overlaps(&other).0, vec![true, true]);
+        // TEST-CHANGE (1qj7z): overlaps answers a PyResult now (an Interval
+        // of Timestamps is pandas' TypeError); the same numeric answer.
+        assert_eq!(pii.overlaps(&other).unwrap().0, vec![true, true]);
 
         let closed_both = pii.set_closed("both").unwrap();
         assert_eq!(closed_both.closed(), "both");

@@ -10229,6 +10229,16 @@ fn compare_non_missing_scalars_for_sort(left: &Scalar, right: &Scalar) -> Orderi
         // Object cells (dates from s.dt.date) in Python's order; they share
         // the Utf8 dtype, so the fallback called every pair Equal (fvsao.66).
         (Scalar::Object(lhs), Scalar::Object(rhs)) => lhs.cmp(rhs),
+        // An object column's ints, floats and bools by value, as Python's <
+        // orders them: by dtype every int came before every float ([3, 1.5,
+        // 2] sorted [2, 3, 1.5]; br-frankenpandas-7v4wf).
+        (
+            Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Bool(_),
+            Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Bool(_),
+        ) => match (left.to_f64(), right.to_f64()) {
+            (Ok(lhs), Ok(rhs)) => lhs.partial_cmp(&rhs).unwrap_or(Ordering::Equal),
+            _ => Ordering::Equal,
+        },
         // Columns are dtype-homogeneous; this fallback is only for defensive
         // ordering when malformed mixed values leak in.
         _ => left.dtype().cmp(&right.dtype()),
@@ -24444,12 +24454,29 @@ impl Series {
                 .map(|(v, _)| v)
                 .collect()
         };
-        modes.sort_by(|left, right| {
-            scalar_key_cmp(
-                &scalar_key_allow_missing(left),
-                &scalar_key_allow_missing(right),
-            )
+        // pandas sorts the modes with numpy, which leaves an object column's
+        // in their first-seen order when they do not compare - text beside
+        // numbers, a missing value beside either (np.sort raises TypeError);
+        // they were sorted numbers first (br-frankenpandas-7v4wf).
+        let object = self.column.dtype() == DType::Utf8 && !self.column.is_pandas_string();
+        let kind = |value: &Scalar| match value {
+            _ if value.is_missing() => 0,
+            Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Bool(_) => 1,
+            Scalar::Utf8(_) => 2,
+            _ => 3,
+        };
+        let comparable = modes.first().is_none_or(|first| {
+            let first = kind(first);
+            first != 0 && modes.iter().all(|mode| kind(mode) == first)
         });
+        if !object || comparable {
+            modes.sort_by(|left, right| {
+                scalar_key_cmp(
+                    &scalar_key_allow_missing(left),
+                    &scalar_key_allow_missing(right),
+                )
+            });
+        }
 
         let labels: Vec<IndexLabel> = (0..modes.len()).map(|i| (i as i64).into()).collect();
         // The modes are the column's own values (or its missing marker), so
@@ -125929,6 +125956,88 @@ mod tests {
         assert_eq!(
             text.mode().unwrap().values(),
             &[Scalar::Utf8("b".to_owned())]
+        );
+    }
+
+    #[test]
+    fn object_modes_that_do_not_compare_keep_their_order_7v4wf() {
+        // An object column's modes that do not compare - text beside
+        // numbers - stay in first-seen order, as numpy's sort leaves them
+        // (br-frankenpandas-7v4wf); ones that do are sorted.
+        let object = |cells: Vec<Scalar>| {
+            Series::new(
+                "o",
+                Index::from_range(0, cells.len() as i64, 1),
+                Column::from_object_values(cells),
+            )
+            .unwrap()
+        };
+        let mixed = object(vec![
+            Scalar::Int64(1),
+            Scalar::Utf8("a".to_owned()),
+            Scalar::Float64(2.5),
+        ]);
+        assert_eq!(
+            mixed.mode().unwrap().values(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Float64(2.5)
+            ]
+        );
+        // NEGATIVE: numbers alone, and text alone, are sorted.
+        let numbers = object(vec![
+            Scalar::Int64(3),
+            Scalar::Float64(1.5),
+            Scalar::Int64(2),
+        ]);
+        assert_eq!(
+            numbers.mode().unwrap().values(),
+            &[Scalar::Float64(1.5), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+        let text = object(vec![
+            Scalar::Utf8("b".to_owned()),
+            Scalar::Utf8("a".to_owned()),
+        ]);
+        assert_eq!(
+            text.mode().unwrap().values(),
+            &[Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())]
+        );
+    }
+
+    #[test]
+    fn object_numbers_sort_by_value_7v4wf() {
+        // An object column's ints and floats sort by value, as Python's <
+        // orders them; by dtype every int came before every float
+        // (br-frankenpandas-7v4wf).
+        let numbers = Series::new(
+            "o",
+            Index::from_range(0, 4, 1),
+            Column::from_object_values(vec![
+                Scalar::Int64(3),
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(2),
+            ]),
+        )
+        .unwrap();
+        let sorted = numbers.sort_values(true).unwrap();
+        assert_eq!(
+            sorted.values()[..3],
+            [Scalar::Float64(1.5), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+        assert!(sorted.values()[3].is_missing());
+        // NEGATIVE: descending orders the present values the other way.
+        let descending = numbers.sort_values(false).unwrap();
+        let present: Vec<Scalar> = descending
+            .values()
+            .iter()
+            .filter(|value| !value.is_missing())
+            .cloned()
+            .collect();
+        assert_eq!(
+            present,
+            vec![Scalar::Int64(3), Scalar::Int64(2), Scalar::Float64(1.5)]
         );
     }
 
