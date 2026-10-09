@@ -3106,8 +3106,11 @@ impl Index {
     }
 
     /// Whether every label (a missing one aside) is one of `categories`.
+    /// FxHash (a float label hashes its spread bits): SipHash of 500k text
+    /// categories was a third of c.value_counts() of them
+    /// (br-frankenpandas-89sri).
     fn labels_within(&self, categories: &IndexCategories) -> bool {
-        let known: std::collections::HashSet<&IndexLabel> = categories.categories.iter().collect();
+        let known: FxHashSet<&IndexLabel> = categories.categories.iter().collect();
         self.labels()
             .iter()
             .all(|label| label.is_missing() || known.contains(label))

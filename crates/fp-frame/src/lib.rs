@@ -1737,6 +1737,31 @@ fn normalize_iloc_position(position: i64, len: usize) -> Result<usize, FrameErro
     })
 }
 
+/// `positions` over `len` rows as `iloc` / `take` read them, negative from
+/// the end; `Err` is the first position out of bounds. The bounds come in
+/// one min / max pass, then each negative position wraps without a branch:
+/// [`normalize_iloc_position`] a position at a time kept the collect from
+/// vectorizing, its callers asking the index's length each row
+/// (`s.iloc[perm]` 0.64x pandas at 1M rows; br-frankenpandas-lsn8d).
+#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // checked into 0..len first
+fn normalize_iloc_positions(positions: &[i64], len: usize) -> Result<Vec<usize>, i64> {
+    let length = i64::try_from(len).unwrap_or(i64::MAX);
+    let (low, high) = positions.iter().fold((0_i64, -1_i64), |(low, high), &at| {
+        (low.min(at), high.max(at))
+    });
+    if low >= -length && high < length {
+        return Ok(positions
+            .iter()
+            .map(|&at| (at + ((at >> 63) & length)) as usize)
+            .collect());
+    }
+    Err(positions
+        .iter()
+        .copied()
+        .find(|&at| at < -length || at >= length)
+        .unwrap_or(high))
+}
+
 fn dtype_memory_width(dtype: DType) -> usize {
     match dtype {
         DType::Bool | DType::BoolNullable => 1,
@@ -9695,6 +9720,112 @@ fn true_positions(mask: &[bool]) -> Vec<usize> {
     positions
 }
 
+/// The rows below `len` whose bit is set in `words` (row `r` at bit
+/// `r % 64` of word `r / 64`), in order. Its own small loop over a buffer
+/// sized by the bits' count: DataFrame::dropna pushed them into a Vec the
+/// whole function shares, its pointer and length reloaded from the stack
+/// every row (39% of df.dropna() at 1M rows; br-frankenpandas-knu1r).
+fn set_bit_positions(mut words: Vec<u64>, len: usize) -> Vec<usize> {
+    clear_bits_past(&mut words, len);
+    let count = words.iter().map(|word| word.count_ones() as usize).sum();
+    let mut positions = Vec::with_capacity(count);
+    // A word's positions are written to a stack buffer and appended at once
+    // (a whole word as a range): a push a position still reloaded the
+    // Vec's pointer and length from the stack (30% of an all-float
+    // df.dropna()).
+    let mut buffer = [0_usize; 64];
+    for (k, &word) in words.iter().enumerate() {
+        let base = k * 64;
+        if word == u64::MAX {
+            positions.extend(base..base + 64);
+            continue;
+        }
+        let mut bits = word;
+        let mut filled = 0;
+        while bits != 0 {
+            buffer[filled] = base + bits.trailing_zeros() as usize;
+            filled += 1;
+            bits &= bits - 1;
+        }
+        positions.extend_from_slice(&buffer[..filled]);
+    }
+    positions
+}
+
+/// `words` cut to the words `len` rows fill, the bits past row `len - 1`
+/// cleared.
+fn clear_bits_past(words: &mut Vec<u64>, len: usize) {
+    words.truncate(len.div_ceil(64));
+    if !len.is_multiple_of(64)
+        && let Some(last) = words.last_mut()
+    {
+        *last &= (1_u64 << (len % 64)) - 1;
+    }
+}
+
+/// The runs of consecutive set bits in `words` (bits past the rows
+/// cleared, see [`clear_bits_past`]): a run starts at a set bit whose
+/// predecessor is clear.
+fn set_bit_run_count(words: &[u64]) -> usize {
+    let mut carry = 0_u64;
+    words
+        .iter()
+        .map(|&word| {
+            let starts = word & !((word << 1) | carry);
+            carry = word >> 63;
+            starts.count_ones() as usize
+        })
+        .sum()
+}
+
+/// The runs of consecutive set bits in `words` (bits past the rows
+/// cleared, see [`clear_bits_past`]) as (first row, length), in order.
+fn set_bit_runs(words: &[u64]) -> Vec<(usize, usize)> {
+    let mut runs = Vec::new();
+    let mut open: Option<usize> = None;
+    for (k, &word) in words.iter().enumerate() {
+        let base = k * 64;
+        let mut bit = 0_usize;
+        while bit < 64 {
+            let rest = word >> bit;
+            if let Some(start) = open {
+                // The set bits from `bit` on (the zeros shifted in end them).
+                let ones = (!rest).trailing_zeros() as usize;
+                if bit + ones >= 64 {
+                    break;
+                }
+                runs.push((start, base + bit + ones - start));
+                open = None;
+                bit += ones;
+            } else {
+                if rest == 0 {
+                    break;
+                }
+                bit += rest.trailing_zeros() as usize;
+                open = Some(base + bit);
+            }
+        }
+    }
+    if let Some(start) = open {
+        runs.push((start, words.len() * 64 - start));
+    }
+    runs
+}
+
+/// A float column's present rows as mask words: its valid bits less its
+/// NaN rows, a word of 64 values at a time.
+fn present_f64_words(data: &[f64], validity: &ValidityMask) -> Vec<u64> {
+    let mut words = validity.packed_words_for_scan();
+    for (word, chunk) in words.iter_mut().zip(data.chunks(64)) {
+        let not_nan = chunk
+            .iter()
+            .enumerate()
+            .fold(0_u64, |bits, (i, x)| bits | (u64::from(!x.is_nan()) << i));
+        *word &= not_nan;
+    }
+    words
+}
+
 /// The rows of `labels` a boolean `mask` whose index differs from them
 /// keeps: pandas reindexes the mask to the labels, so each row takes its
 /// label's value, and a label repeated in the rows keeps each of its rows
@@ -15821,10 +15952,12 @@ impl Series {
         // then gather labels + the typed column buffer via Column::take_positions
         // — no 32 B Scalar clone per row and no Column::new re-validation. Output
         // is bit-identical to the prior Scalar loop (same gather, same dtype).
-        let normalized = positions
-            .iter()
-            .map(|&position| normalize_iloc_position(position, self.len()))
-            .collect::<Result<Vec<usize>, _>>()?;
+        let len = self.len();
+        let normalized = normalize_iloc_positions(positions, len).map_err(|position| {
+            FrameError::CompatibilityRejected(format!(
+                "iloc position {position} out of bounds for length {len}"
+            ))
+        })?;
         // Series::new mirrors the prior with_labels_and_values_preserving_name
         // construction (categorical/sparse reset to None) — only the column
         // gather changes from a Scalar loop to the typed take_positions.
@@ -17707,68 +17840,84 @@ impl Series {
             .as_ref()
             .expect("categorical value_counts requires categorical metadata")
             .categories;
-        let mut counts: Vec<(Scalar, usize)> = categories
-            .iter()
-            .cloned()
-            .map(|category| (category, 0))
-            .collect();
-        let mut null_count = 0_usize;
-
+        // A count a category, the missing rows' in the slot after them.
         // Counted off the codes themselves: their column's Scalar view was
-        // built for this loop (br-frankenpandas-5oup5).
+        // built for this loop (br-frankenpandas-5oup5); a (category, count)
+        // pair of 40 bytes a category - each category's value cloned - was
+        // the table (c.value_counts() of 500k categories 0.06x pandas at 1M
+        // rows; br-frankenpandas-89sri).
+        let missing = categories.len();
+        let mut counts = vec![0_usize; missing + 1];
         let codes = self.category_codes().ok_or_else(|| {
             FrameError::CompatibilityRejected("the Series is not categorical".to_owned())
         })?;
         for (idx, &code) in codes.iter().enumerate() {
-            let Ok(position) = usize::try_from(code) else {
-                null_count += 1;
-                continue;
+            let slot = match usize::try_from(code) {
+                Ok(position) if position < missing => position,
+                Ok(_) => {
+                    return Err(FrameError::CompatibilityRejected(format!(
+                        "categorical value_counts encountered out-of-bounds code {code} at idx={idx}"
+                    )));
+                }
+                Err(_) => missing,
             };
-            let (_, count) = counts.get_mut(position).ok_or_else(|| {
-                FrameError::CompatibilityRejected(format!(
-                    "categorical value_counts encountered out-of-bounds code {code} at idx={idx}"
-                ))
-            })?;
-            *count += 1;
+            counts[slot] += 1;
         }
 
-        if !dropna && null_count > 0 {
-            counts.push((Scalar::Null(NullKind::NaN), null_count));
+        let mut tally: Vec<(usize, usize)> =
+            (0..missing).map(|slot| (slot, counts[slot])).collect();
+        if !dropna && counts[missing] > 0 {
+            tally.push((missing, counts[missing]));
         }
 
         if sort {
             if ascending {
-                counts.sort_by_key(|(_, count)| *count);
+                tally.sort_by_key(|&(_, count)| count);
             } else {
-                counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+                tally.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
             }
         }
 
         let total = if normalize {
-            counts.iter().map(|(_, count)| *count).sum::<usize>() as f64
+            tally.iter().map(|&(_, count)| count).sum::<usize>() as f64
         } else {
             1.0
         };
 
-        let mut labels = Vec::with_capacity(counts.len());
-        let mut values = Vec::with_capacity(counts.len());
-        for (value, count) in counts {
-            // br-frankenpandas-9m9zf: categorical value_counts keeps pandas'
-            // types too — Series(Categorical([1.5, 2.5])).value_counts() has
-            // float labels (index dtype category), and the bool sibling has bool
-            // labels. This used the stringifying mapper.
-            labels.push(scalar_to_typed_index_label(&value));
-            if normalize {
-                let normalized = if total == 0.0 {
-                    0.0
-                } else {
-                    count as f64 / total
-                };
-                values.push(Scalar::Float64(normalized));
-            } else {
-                values.push(Scalar::Int64(i64::try_from(count).unwrap_or(i64::MAX)));
-            }
-        }
+        // br-frankenpandas-9m9zf: categorical value_counts keeps pandas'
+        // types too — Series(Categorical([1.5, 2.5])).value_counts() has
+        // float labels (index dtype category), and the bool sibling has bool
+        // labels. This used the stringifying mapper.
+        let labels: Vec<IndexLabel> = tally
+            .iter()
+            .map(|&(slot, _)| match categories.get(slot) {
+                Some(category) => scalar_to_typed_index_label(category),
+                None => scalar_to_typed_index_label(&Scalar::Null(NullKind::NaN)),
+            })
+            .collect();
+        let column = if tally.is_empty() {
+            Column::from_values(Vec::new())?
+        } else if normalize {
+            Column::from_f64_values(
+                tally
+                    .iter()
+                    .map(|&(_, count)| {
+                        if total == 0.0 {
+                            0.0
+                        } else {
+                            count as f64 / total
+                        }
+                    })
+                    .collect(),
+            )
+        } else {
+            Column::from_i64_values_owned(
+                tally
+                    .iter()
+                    .map(|&(_, count)| i64::try_from(count).unwrap_or(i64::MAX))
+                    .collect(),
+            )
+        };
 
         // Per br-frankenpandas-uuwb1: pandas Series.value_counts returns a
         // Series named "count" whose index.name == self.name. Propagate the
@@ -17780,7 +17929,6 @@ impl Series {
             Some(source_name)
         };
         let index = Index::new(labels).rename_index(idx_name);
-        let column = Column::from_values(values)?;
         // pandas names a normalized count 'proportion' (fvsao.30).
         let name = if normalize { "proportion" } else { "count" };
         Self::new(name, index, column)
@@ -28091,16 +28239,11 @@ impl Series {
         // 32 B Scalar per row + Column::from_values. Series::new matches the
         // prior with_labels_and_values_preserving_name semantics (categorical/
         // sparse reset to None), so the result is bit-identical.
-        let normalized = indices
-            .iter()
-            .map(|&idx| {
-                normalize_iloc_position(idx, n).map_err(|_| {
-                    FrameError::CompatibilityRejected(format!(
-                        "take index {idx} out of bounds for length {n}"
-                    ))
-                })
-            })
-            .collect::<Result<Vec<usize>, _>>()?;
+        let normalized = normalize_iloc_positions(indices, n).map_err(|idx| {
+            FrameError::CompatibilityRejected(format!(
+                "take index {idx} out of bounds for length {n}"
+            ))
+        })?;
         // perf (br-frankenpandas-3v7o8): gather the result index via Index::take
         // (preserves the lazy/typed backing — zero-copy for affine) instead of a
         // per-label clone + Index::new rescan. Bit-identical labels (2bgtq).
@@ -44975,42 +45118,49 @@ fn dense_groupby_shift_nullable_f64_by_key(
     validity: &fp_columnar::ValidityMask,
     periods: usize,
 ) -> (Vec<f64>, fp_columnar::ValidityMask) {
+    // The source's validity a word at a time and every row's value written
+    // in order (0.0 where the shifted-in source is missing, as the zeroed
+    // buffer held it): a ValidityMask::get call a row, a branch on it and
+    // the zeroed output were half of g.shift(1) over a 10% NaN column (0.50x
+    // pandas at 1M rows; br-frankenpandas-knu1r). A group's slot is valid
+    // only once written, so `seen` is its validity's initial false.
     let n = data.len();
+    let valid_words = validity.packed_words_for_scan();
+    let source_valid = |row: usize| (valid_words[row / 64] >> (row % 64)) & 1 != 0;
+    let mut words = vec![0u64; n.div_ceil(64)];
     if periods == 1 {
         let mut last = vec![0.0_f64; range];
         let mut last_valid = vec![false; range];
-        let mut seen = vec![0_u8; range];
-        let mut out = vec![0.0_f64; n];
-        let mut words = vec![0u64; n.div_ceil(64)];
-        for row in 0..n {
-            let off = (keys[row] as i128 - min as i128) as usize;
-            if seen[off] != 0 && last_valid[off] {
-                out[row] = last[off];
-                words[row / 64] |= 1u64 << (row % 64);
-            }
-            last[off] = data[row];
-            last_valid[off] = validity.get(row);
-            seen[off] = 1;
-        }
+        let out: Vec<f64> = (0..n)
+            .map(|row| {
+                let off = (keys[row] as i128 - min as i128) as usize;
+                let present = last_valid[off];
+                words[row / 64] |= u64::from(present) << (row % 64);
+                let value = if present { last[off] } else { 0.0 };
+                last[off] = data[row];
+                last_valid[off] = source_valid(row);
+                value
+            })
+            .collect();
         return (out, fp_columnar::ValidityMask::from_words(words, n));
     }
     let mut hist = vec![0.0_f64; range.saturating_mul(periods)];
     let mut hist_valid = vec![false; range.saturating_mul(periods)];
     let mut cnt = vec![0usize; range];
-    let mut out = vec![0.0_f64; n];
-    let mut words = vec![0u64; n.div_ceil(64)];
-    for row in 0..n {
-        let off = (keys[row] as i128 - min as i128) as usize;
-        let c = cnt[off];
-        let slot = off * periods + (c % periods);
-        if c >= periods && hist_valid[slot] {
-            out[row] = hist[slot];
-            words[row / 64] |= 1u64 << (row % 64);
-        }
-        hist[slot] = data[row];
-        hist_valid[slot] = validity.get(row);
-        cnt[off] = c + 1;
-    }
+    let out: Vec<f64> = (0..n)
+        .map(|row| {
+            let off = (keys[row] as i128 - min as i128) as usize;
+            let c = cnt[off];
+            let slot = off * periods + (c % periods);
+            let present = c >= periods && hist_valid[slot];
+            words[row / 64] |= u64::from(present) << (row % 64);
+            let value = if present { hist[slot] } else { 0.0 };
+            hist[slot] = data[row];
+            hist_valid[slot] = source_valid(row);
+            cnt[off] = c + 1;
+            value
+        })
+        .collect();
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
 
@@ -76822,6 +76972,18 @@ impl DataFrame {
     /// controlled sources (argsort, filter positions).
     /// Per br-frankenpandas-otwd1 perf optimization.
     fn take_rows_by_positions_unchecked(&self, positions: &[usize]) -> Result<Self, FrameError> {
+        self.take_rows_by_positions_with_present(positions, &[])
+    }
+
+    /// [`Self::take_rows_by_positions_unchecked`], each float column flagged
+    /// in `present` (by column position; none when empty) gathered as
+    /// all-valid: the caller has proven it holds a value at every one of
+    /// `positions` (dropna's kept rows of the columns it checked).
+    fn take_rows_by_positions_with_present(
+        &self,
+        positions: &[usize],
+        present: &[bool],
+    ) -> Result<Self, FrameError> {
         let n = positions.len();
 
         // Typed Int64 index gather (br-frankenpandas-dxqpm): when the source
@@ -76905,10 +77067,19 @@ impl DataFrame {
         } else {
             1
         };
+        let gather = |i: usize, col: &Column| -> Column {
+            if present.get(i).copied().unwrap_or(false)
+                && let Some(gathered) = col.take_present_f64_positions_unchecked(positions)
+            {
+                return gathered;
+            }
+            col.take_positions(positions)
+        };
         let gathered: Vec<Column> = if worker_count < 2 {
             col_refs
                 .iter()
-                .map(|(_, col)| col.take_positions(positions))
+                .enumerate()
+                .map(|(i, (_, col))| gather(i, col))
                 .collect()
         } else {
             let next = std::sync::atomic::AtomicUsize::new(0);
@@ -76918,6 +77089,7 @@ impl DataFrame {
                 for _ in 0..worker_count {
                     let next = &next;
                     let col_refs = &col_refs;
+                    let gather = &gather;
                     handles.push(scope.spawn(move || {
                         let mut out = Vec::new();
                         loop {
@@ -76925,7 +77097,7 @@ impl DataFrame {
                             if i >= col_refs.len() {
                                 break;
                             }
-                            out.push((i, col_refs[i].1.take_positions(positions)));
+                            out.push((i, gather(i, col_refs[i].1)));
                         }
                         out
                     }));
@@ -81976,7 +82148,7 @@ impl DataFrame {
         }
 
         let row_count = self.len();
-        let mut keep_positions = Vec::with_capacity(row_count);
+        let keep_positions: Vec<usize>;
         // Typed Float64 fast path (br-frankenpandas-dropf): when every selected column is
         // Float64, gather (data, validity) once per column and test each row typed —
         // `!validity.get(row) || data[row].is_nan()` is EXACTLY `Scalar::is_missing()` for a
@@ -82018,42 +82190,38 @@ impl DataFrame {
                 DropNaHow::All if missing_columns.len() < ncols => return Ok(self.clone()),
                 _ => {}
             }
-            let mut runs = Vec::new();
-            let mut run_start = None;
-            let mut run_len = 0usize;
-            let mut keep_count = 0usize;
-            for row_position in 0..row_count {
-                let mut missing_count = 0_usize;
-                for (data, validity) in &missing_columns {
-                    if !validity.get(row_position) || data[row_position].is_nan() {
-                        missing_count += 1;
+            // Each column's present rows as mask words, combined a word at a
+            // time ('any': every column's, 'all': one's - here every selected
+            // column can miss a value): the row loop asked ValidityMask::get
+            // of each column a row (a quarter of df.dropna() of NaN floats;
+            // br-frankenpandas-knu1r).
+            let mut kept: Option<Vec<u64>> = None;
+            for &(data, validity) in &missing_columns {
+                let words = present_f64_words(data, validity);
+                kept = Some(match kept {
+                    None => words,
+                    Some(mut kept) => {
+                        for (word, other) in kept.iter_mut().zip(&words) {
+                            *word = match how {
+                                DropNaHow::Any => *word & other,
+                                DropNaHow::All => *word | other,
+                            };
+                        }
+                        kept
                     }
-                }
-                let row_keep = match how {
-                    DropNaHow::Any => missing_count == 0,
-                    DropNaHow::All => missing_count < ncols,
-                };
-                if row_keep {
-                    if !run_gather_ready {
-                        keep_positions.push(row_position);
-                    }
-                    keep_count += 1;
-                    if run_start.is_none() {
-                        run_start = Some(row_position);
-                    }
-                    run_len += 1;
-                } else if let Some(start) = run_start.take() {
-                    runs.push((start, run_len));
-                    run_len = 0;
-                }
+                });
             }
-            if let Some(start) = run_start {
-                runs.push((start, run_len));
-            }
-            if run_gather_ready {
+            let mut kept = kept.unwrap_or_default();
+            clear_bits_past(&mut kept, row_count);
+            let keep_count: usize = kept.iter().map(|word| word.count_ones() as usize).sum();
+            // Views of the kept runs only when they are long: a view a run
+            // of ~7 rows (10% NaN) made 135k chunks a column, slower than a
+            // gather of the rows.
+            if run_gather_ready && keep_count >= 32 * set_bit_run_count(&kept) {
                 if keep_count == row_count {
                     return Ok(self.clone());
                 }
+                let runs = set_bit_runs(&kept);
                 let all_valid_f64_names: Vec<String>;
                 let all_valid_f64_columns = if matches!(how, DropNaHow::Any) {
                     all_valid_f64_names = selected_positions
@@ -82070,6 +82238,7 @@ impl DataFrame {
                     all_valid_f64_columns,
                 );
             }
+            keep_positions = set_bit_positions(kept, row_count);
         } else {
             // Each selected column's present rows as mask words - a typed
             // float's valid bits less its NaN rows, a typed int's valid bits,
@@ -82082,9 +82251,7 @@ impl DataFrame {
                 if column.dtype() == DType::Float64
                     && let Some((data, validity)) = column.as_f64_slice_with_validity()
                 {
-                    return validity
-                        .and_mask(&ValidityMask::from_f64(data))
-                        .packed_words_for_scan();
+                    return present_f64_words(data, validity);
                 }
                 if column.dtype() == DType::Int64
                     && let Some((_, validity)) = column.as_i64_slice_with_validity()
@@ -82099,9 +82266,32 @@ impl DataFrame {
                 }
                 words
             };
-            let mut kept: Option<Vec<u64>> = None;
+            // A column missing nothing (an all-valid int, a float without
+            // NaN) drops no row under 'any' and keeps every row under 'all':
+            // its words were built and combined for nothing (df.dropna() of
+            // a NaN float, an int and a float column 0.62x pandas at 1M rows;
+            // br-frankenpandas-knu1r).
+            let missing_free = |column: &Column| {
+                (column.dtype() == DType::Float64 && column.as_f64_slice().is_some())
+                    || (column.dtype() == DType::Int64 && column.as_i64_slice().is_some())
+            };
+            let mut scanned = Vec::with_capacity(selected_positions.len());
             for &pos in &selected_positions {
-                let words = present_words(self.column_at(pos).expect("selected column must exist"));
+                let column = self.column_at(pos).expect("selected column must exist");
+                if missing_free(column) {
+                    if matches!(how, DropNaHow::All) {
+                        return Ok(self.clone());
+                    }
+                } else {
+                    scanned.push(column);
+                }
+            }
+            if scanned.is_empty() {
+                return Ok(self.clone());
+            }
+            let mut kept: Option<Vec<u64>> = None;
+            for column in scanned {
+                let words = present_words(column);
                 kept = Some(match kept {
                     None => words,
                     Some(mut kept) => {
@@ -82115,23 +82305,22 @@ impl DataFrame {
                     }
                 });
             }
-            for (k, &word) in kept.unwrap_or_default().iter().enumerate() {
-                let mut bits = word;
-                while bits != 0 {
-                    let row = k * 64 + bits.trailing_zeros() as usize;
-                    if row < row_count {
-                        keep_positions.push(row);
-                    }
-                    bits &= bits - 1;
-                }
-            }
+            keep_positions = set_bit_positions(kept.unwrap_or_default(), row_count);
         }
 
         if keep_positions.len() == row_count {
             return Ok(self.clone());
         }
 
-        self.take_rows_by_positions_unchecked(&keep_positions)
+        // Under 'any' each selected column holds a value in every kept row:
+        // its floats are gathered as all-valid (br-frankenpandas-knu1r).
+        let mut present = vec![false; self.num_columns()];
+        if matches!(how, DropNaHow::Any) {
+            for &pos in &selected_positions {
+                present[pos] = true;
+            }
+        }
+        self.take_rows_by_positions_with_present(&keep_positions, &present)
     }
 
     /// Drop rows by minimum non-missing value count.
@@ -84816,11 +85005,13 @@ impl DataFrame {
         positions: &[i64],
         column_selector: Option<&[String]>,
     ) -> Result<Self, FrameError> {
-        let normalized_positions = positions
-            .iter()
-            .copied()
-            .map(|position| normalize_iloc_position(position, self.len()))
-            .collect::<Result<Vec<_>, _>>()?;
+        let len = self.len();
+        let normalized_positions =
+            normalize_iloc_positions(positions, len).map_err(|position| {
+                FrameError::CompatibilityRejected(format!(
+                    "iloc position {position} out of bounds for length {len}"
+                ))
+            })?;
 
         // Fast path (br-frankenpandas-2tr7w): a strictly-ascending arithmetic
         // progression of positions — the common `iloc[a:b]` contiguous slice
@@ -117309,6 +117500,45 @@ impl DataFrameGroupBy<'_> {
                 return Series::new("size", index.rename_index(None::<LabelName>), sizes);
             }
         }
+        // One category key held as codes: a count per code, the groups in
+        // the categories' order (build_groups' sort ranks a category by its
+        // position, its code) or as first seen, each labelled by its
+        // category. build_groups made a key, a map entry and a row list a
+        // group, and each group's label came off the key column's Scalars
+        // (500k categories 0.40x pandas at 1M rows;
+        // br-frankenpandas-89sri). A missing key's group (dropna=False)
+        // stays build_groups'.
+        if self.as_index
+            && let [name] = self.by.as_slice()
+            && let Some(codes) = self.df.columns[name].categorical_codes()
+            && let Some(meta) = self.df.columns[name].categorical()
+            && (self.dropna || !codes.contains(&-1))
+        {
+            let mut counts = vec![0_i64; meta.categories.len()];
+            let mut first_seen = Vec::new();
+            for &code in codes {
+                let Ok(slot) = usize::try_from(code) else {
+                    continue;
+                };
+                if let Some(count) = counts.get_mut(slot) {
+                    if *count == 0 && !self.sort {
+                        first_seen.push(slot);
+                    }
+                    *count += 1;
+                }
+            }
+            let order: Vec<usize> = if self.sort {
+                (0..counts.len()).filter(|&code| counts[code] > 0).collect()
+            } else {
+                first_seen
+            };
+            let labels = order
+                .iter()
+                .map(|&code| Self::group_key_scalar_label(&meta.categories[code]))
+                .collect();
+            let sizes = Column::from_i64_values(order.iter().map(|&code| counts[code]).collect());
+            return Series::new("size", Index::new(labels), sizes);
+        }
 
         let (group_order, groups) = self.build_groups();
         let mut labels = Vec::with_capacity(group_order.len());
@@ -134282,6 +134512,236 @@ mod tests {
             .unwrap();
         assert_eq!(dropped.len(), 1);
         assert_eq!(dropped.index().labels(), &[IndexLabel::from(1_i64)]);
+    }
+
+    #[test]
+    fn dataframe_dropna_skips_missing_free_columns_knu1r() {
+        // A frame of an all-valid int, a NaN-free float, a NaN-holding float
+        // and a text column holding None, 130 rows (the NaN rows across word
+        // edges and the last row): dropna keeps the rows a per-cell check
+        // keeps, for 'any' and 'all' and each subset (br-frankenpandas-knu1r).
+        let n = 130_i64;
+        let nan_rows = [0_i64, 5, 63, 64, 100, 127, 129];
+        let text_none_rows = [7_i64, 64, 128];
+        let names = ["i", "clean", "nan", "text"];
+        let df = DataFrame::from_dict(
+            &names,
+            vec![
+                ("i", (0..n).map(Scalar::Int64).collect()),
+                (
+                    "clean",
+                    (0..n).map(|r| Scalar::Float64(r as f64 * 0.5)).collect(),
+                ),
+                (
+                    "nan",
+                    (0..n)
+                        .map(|r| {
+                            Scalar::Float64(if nan_rows.contains(&r) {
+                                f64::NAN
+                            } else {
+                                r as f64
+                            })
+                        })
+                        .collect(),
+                ),
+                (
+                    "text",
+                    (0..n)
+                        .map(|r| {
+                            if text_none_rows.contains(&r) {
+                                Scalar::Null(NullKind::Null)
+                            } else {
+                                Scalar::Utf8(format!("t{r}"))
+                            }
+                        })
+                        .collect(),
+                ),
+            ],
+        )
+        .unwrap();
+        // The columns are the shapes the skip reads (non-vacuity).
+        assert!(df.column("i").unwrap().as_i64_slice().is_some());
+        assert!(df.column("clean").unwrap().as_f64_slice().is_some());
+        assert!(df.column("nan").unwrap().as_f64_slice().is_none());
+        let subsets: [&[&str]; 5] = [
+            &["i", "clean", "nan", "text"],
+            &["i", "clean"],
+            &["nan"],
+            &["clean", "text"],
+            &["nan", "text"],
+        ];
+        for subset in subsets {
+            for how in [DropNaHow::Any, DropNaHow::All] {
+                let subset_names: Vec<String> =
+                    subset.iter().map(|&name| name.to_owned()).collect();
+                let kept: Vec<i64> = (0..n)
+                    .filter(|&r| {
+                        let missing = subset
+                            .iter()
+                            .filter(|&&name| match name {
+                                "nan" => nan_rows.contains(&r),
+                                "text" => text_none_rows.contains(&r),
+                                _ => false,
+                            })
+                            .count();
+                        match how {
+                            DropNaHow::Any => missing == 0,
+                            DropNaHow::All => missing < subset.len(),
+                        }
+                    })
+                    .collect();
+                let dropped = df.dropna_with_options(how, Some(&subset_names)).unwrap();
+                let labels: Vec<IndexLabel> = kept.iter().map(|&r| IndexLabel::from(r)).collect();
+                assert_eq!(dropped.index().labels(), labels.as_slice(), "{subset:?}");
+                for name in names {
+                    let source = df.column(name).unwrap().values();
+                    let want: Vec<Scalar> = kept
+                        .iter()
+                        .map(|&r| source[usize::try_from(r).unwrap()].clone())
+                        .collect();
+                    assert_eq!(
+                        format!("{:?}", dropped.column(name).unwrap().values()),
+                        format!("{want:?}"),
+                        "{subset:?} {name}"
+                    );
+                }
+            }
+        }
+        // NEGATIVE: a text column's None rows drop although every numeric
+        // column is missing-free, and the NaN float is never skipped.
+        let dropped = df.dropna_with_options(DropNaHow::Any, None).unwrap();
+        assert_eq!(
+            dropped.len(),
+            130 - nan_rows.len() - text_none_rows.len() + 1,
+            "row 64 holds both"
+        );
+    }
+
+    #[test]
+    fn set_bit_runs_and_positions_read_words_knu1r() {
+        // The kept rows' runs, run count and positions off mask words equal
+        // a bit-by-bit scan, at lengths around word edges and for patterns
+        // with runs crossing words (br-frankenpandas-knu1r).
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for len in [0_usize, 1, 63, 64, 65, 127, 128, 130, 1000] {
+            let patterns: Vec<Vec<u64>> = vec![
+                vec![u64::MAX; len.div_ceil(64) + 1],
+                vec![0; len.div_ceil(64)],
+                vec![0x5555_5555_5555_5555; len.div_ceil(64)],
+                vec![0xFFFF_0000_0000_FFFF; len.div_ceil(64)],
+                (0..len.div_ceil(64)).map(|_| next() | next()).collect(),
+                (0..len.div_ceil(64)).map(|_| next() & next()).collect(),
+            ];
+            for mut words in patterns {
+                // NEGATIVE: bits past the rows (set in the all-ones pattern
+                // and its extra word) are never reported.
+                let raw = words.clone();
+                crate::clear_bits_past(&mut words, len);
+                let bit = |row: usize| (raw[row / 64] >> (row % 64)) & 1 == 1;
+                let positions: Vec<usize> = (0..len).filter(|&row| bit(row)).collect();
+                let mut runs: Vec<(usize, usize)> = Vec::new();
+                for &row in &positions {
+                    match runs.last_mut() {
+                        Some((start, run)) if *start + *run == row => *run += 1,
+                        _ => runs.push((row, 1)),
+                    }
+                }
+                assert_eq!(crate::set_bit_runs(&words), runs, "len {len}");
+                assert_eq!(crate::set_bit_run_count(&words), runs.len(), "len {len}");
+                assert_eq!(crate::set_bit_positions(raw, len), positions, "len {len}");
+            }
+        }
+    }
+
+    #[test]
+    fn dataframe_dropna_of_floats_reads_words_knu1r() {
+        // An all-float frame's dropna (the typed path) keeps the rows a
+        // per-cell check keeps: sparse missing values (long kept runs, the
+        // run views) and dense ones (short runs, a gather of the rows), NaN
+        // and a validity-cleared row over a 0.0 datum alike, 'any' / 'all'
+        // over subsets (br-frankenpandas-knu1r).
+        let n = 1000_usize;
+        let names = ["x", "y", "z"];
+        for (every, label) in [(397_usize, "sparse"), (6, "dense")] {
+            let missing = |r: usize, column: usize| (r * (column + 3) + column) % every == 0;
+            let build = |column: usize| {
+                let data: Vec<f64> = (0..n)
+                    .map(|r| match (missing(r, column), column) {
+                        (false, _) => r as f64 + column as f64 / 4.0,
+                        (true, 1) => 0.0,
+                        (true, _) => f64::NAN,
+                    })
+                    .collect();
+                if column != 1 {
+                    return Column::from_f64_values(data);
+                }
+                // NEGATIVE: column y's missing rows hold a 0.0 datum under a
+                // cleared bit - a check of NaN alone would keep them.
+                let mut words = vec![0_u64; n.div_ceil(64)];
+                for r in (0..n).filter(|&r| !missing(r, 1)) {
+                    words[r / 64] |= 1 << (r % 64);
+                }
+                Column::from_f64_values_with_validity(
+                    data,
+                    fp_columnar::ValidityMask::from_words(words, n),
+                )
+            };
+            let columns: BTreeMap<String, Column> = names
+                .iter()
+                .enumerate()
+                .map(|(column, name)| ((*name).to_owned(), build(column)))
+                .collect();
+            let order: Vec<String> = names.iter().map(|&name| name.to_owned()).collect();
+            let df =
+                DataFrame::new_with_column_order(Index::default_range(n), columns, order).unwrap();
+            // The columns are the typed shapes both of the path's gathers read.
+            for name in names {
+                let column = df.column(name).unwrap();
+                assert!(
+                    column.as_f64_slice_with_validity().is_some(),
+                    "{label} {name}"
+                );
+                assert!(column.supports_fast_position_run_gather(), "{label} {name}");
+            }
+            let subsets: [&[usize]; 4] = [&[0, 1, 2], &[0], &[1, 2], &[2, 0]];
+            for subset in subsets {
+                for how in [DropNaHow::Any, DropNaHow::All] {
+                    let subset_names: Vec<String> = subset
+                        .iter()
+                        .map(|&column| names[column].to_owned())
+                        .collect();
+                    let kept: Vec<usize> = (0..n)
+                        .filter(|&r| {
+                            let gone = subset.iter().filter(|&&column| missing(r, column)).count();
+                            match how {
+                                DropNaHow::Any => gone == 0,
+                                DropNaHow::All => gone < subset.len(),
+                            }
+                        })
+                        .collect();
+                    let dropped = df.dropna_with_options(how, Some(&subset_names)).unwrap();
+                    let case = format!("{label} {subset:?} {how:?}");
+                    let labels: Vec<IndexLabel> =
+                        kept.iter().map(|&r| IndexLabel::from(r as i64)).collect();
+                    assert_eq!(dropped.index().labels(), labels.as_slice(), "{case}");
+                    for name in names {
+                        let source = df.column(name).unwrap().values();
+                        let want: Vec<Scalar> = kept.iter().map(|&r| source[r].clone()).collect();
+                        assert_eq!(
+                            format!("{:?}", dropped.column(name).unwrap().values()),
+                            format!("{want:?}"),
+                            "{case} {name}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -176308,6 +176768,49 @@ mod tests {
     }
 
     #[test]
+    fn iloc_positions_normalize_in_bulk_lsn8d() {
+        // iloc / take of many positions, negative ones from the end, equal a
+        // position-at-a-time reference; the error names the first position
+        // out of bounds, as the per-position check did
+        // (br-frankenpandas-lsn8d).
+        let n = 300_i64;
+        let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::from(i + 1000)).collect();
+        let values: Vec<Scalar> = (0..n).map(|i| Scalar::Int64(i * 10)).collect();
+        let s = Series::from_values("v", labels, values.clone()).unwrap();
+        let df = DataFrame::from_series(vec![s.clone()]).unwrap();
+        let positions: Vec<i64> = (0..3 * n).map(|k| (k * 7919) % (2 * n) - n).collect();
+        let expected: Vec<Scalar> = positions
+            .iter()
+            .map(|&p| values[usize::try_from(if p < 0 { p + n } else { p }).unwrap()].clone())
+            .collect();
+        assert_eq!(s.iloc(&positions).unwrap().values(), expected.as_slice());
+        assert_eq!(s.take(&positions).unwrap().values(), expected.as_slice());
+        let rows = df.iloc(&positions).unwrap();
+        assert_eq!(rows.column("v").unwrap().values(), expected.as_slice());
+        assert_eq!(s.iloc(&[]).unwrap().len(), 0);
+        // NEGATIVE: the first position out of bounds is named, either side.
+        let message = |err: FrameError| match err {
+            FrameError::CompatibilityRejected(message) => message,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            message(s.iloc(&[0, -1, 300, -301]).unwrap_err()),
+            "iloc position 300 out of bounds for length 300"
+        );
+        assert_eq!(
+            message(df.iloc(&[5, -301, 300]).unwrap_err()),
+            "iloc position -301 out of bounds for length 300"
+        );
+        assert_eq!(
+            message(s.take(&[-300, i64::MIN]).unwrap_err()),
+            format!("take index {} out of bounds for length 300", i64::MIN)
+        );
+        let empty = s.iloc(&[]).unwrap();
+        assert!(empty.iloc(&[0]).is_err());
+        assert!(empty.iloc(&[-1]).is_err());
+    }
+
+    #[test]
     fn time_of_day_selection_reads_the_instants_lsn8d() {
         // between_time / at_time over a DatetimeIndex holding its instants
         // equal those over the same instants held as labels, an aware
@@ -176831,6 +177334,98 @@ mod tests {
                             "{func} {column} sort {sort} missing {with_missing}"
                         );
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn categorical_key_frame_size_counts_codes_89sri() {
+        // br-frankenpandas-89sri: a frame grouped by a category key held as
+        // codes counts each code - its groups in the categories' order (an
+        // unsorted one, an unused category among them) or as first seen -
+        // as the same key held by value counts its build_groups groups.
+        let n = 300_usize;
+        let labels: Vec<IndexLabel> = (0..n).map(|i| IndexLabel::Int64(i as i64)).collect();
+        let categories: Vec<Scalar> = ["g3", "g0", "unused", "g2", "g1"]
+            .iter()
+            .map(|name| Scalar::Utf8((*name).to_owned()))
+            .collect();
+        for with_missing in [true, false] {
+            let codes: Vec<i64> = (0..n)
+                .map(|i| match i % 7 {
+                    3 if with_missing => -1,
+                    k => [0, 1, 3, 4][(k * 5 + i / 50) % 4],
+                })
+                .collect();
+            let coded = Series::from_categorical_codes("k", codes, categories.clone(), false)
+                .unwrap()
+                .column()
+                .clone();
+            assert!(coded.categorical_codes().is_some());
+            let by_value = Column::new(DType::Categorical, coded.values().to_vec())
+                .unwrap()
+                .with_categorical(coded.categorical().cloned());
+            assert!(by_value.categorical_codes().is_none());
+            let frame = |key: &Column| {
+                DataFrame::from_series(vec![
+                    Series::from_values(
+                        "v",
+                        labels.clone(),
+                        (0..n).map(|i| Scalar::Int64(i as i64)).collect(),
+                    )
+                    .unwrap(),
+                ])
+                .unwrap()
+                .with_column("k", key.clone())
+                .unwrap()
+            };
+            let (coded_frame, value_frame) = (frame(&coded), frame(&by_value));
+            for sort in [true, false] {
+                for dropna in [true, false] {
+                    let case = format!("sort {sort} dropna {dropna} missing {with_missing}");
+                    let got = coded_frame
+                        .groupby_full_options(&["k"], true, sort, dropna)
+                        .unwrap()
+                        .size()
+                        .unwrap();
+                    let want = value_frame
+                        .groupby_full_options(&["k"], true, sort, dropna)
+                        .unwrap()
+                        .size()
+                        .unwrap();
+                    assert_eq!(got.index().labels(), want.index().labels(), "{case}");
+                    assert_eq!(got.values(), want.values(), "{case}");
+                    assert_eq!(got.name(), want.name(), "{case}");
+                    // NEGATIVE: a missing key's rows count in no category's
+                    // group (a -1 code read as a category would), and form
+                    // their own only with dropna off.
+                    let total: i64 = got
+                        .values()
+                        .iter()
+                        .map(|count| match count {
+                            Scalar::Int64(count) => *count,
+                            other => panic!("size is {other:?}"),
+                        })
+                        .sum();
+                    let missing = if with_missing {
+                        (0..n).filter(|i| i % 7 == 3).count()
+                    } else {
+                        0
+                    };
+                    let counted = if dropna { n - missing } else { n };
+                    assert_eq!(total, counted as i64, "{case}");
+                    assert_eq!(
+                        got.index().labels().iter().any(IndexLabel::is_missing),
+                        with_missing && !dropna,
+                        "{case}"
+                    );
+                    assert!(
+                        !got.index()
+                            .labels()
+                            .contains(&IndexLabel::Utf8("unused".to_owned())),
+                        "{case}"
+                    );
                 }
             }
         }
@@ -236596,6 +237191,71 @@ mod test_select_columns_perf_76e1fd {
     }
 
     #[test]
+    fn groupby_shift_nullable_matches_reference_knu1r() {
+        // The validity-carrying dense shift (a NaN-holding float column by a
+        // bounded int key) equals a per-group, row-order reference for
+        // periods 1 - 3: the value `periods` rows earlier in the group, missing
+        // at a group's head or where that value was missing
+        // (br-frankenpandas-knu1r).
+        let n = 300_usize;
+        let keys: Vec<i64> = (0..n).map(|i| ((i * 5) % 7) as i64).collect();
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 9 == 4 {
+                    f64::NAN
+                } else {
+                    i as f64 * 0.5 - 3.0
+                }
+            })
+            .collect();
+        let labels: Vec<IndexLabel> = (0..n as i64).map(IndexLabel::Int64).collect();
+        let value = Series::new(
+            "v".to_owned(),
+            Index::new(labels.clone()),
+            Column::from_f64_values(values.clone()),
+        )
+        .unwrap();
+        assert!(value.column().as_f64_slice_with_validity().is_some());
+        let key = Series::new(
+            "k".to_owned(),
+            Index::new(labels),
+            Column::from_i64_values_owned(keys.clone()),
+        )
+        .unwrap();
+        for periods in [1_usize, 2, 3] {
+            let mut history: std::collections::HashMap<i64, Vec<f64>> =
+                std::collections::HashMap::new();
+            let want: Vec<Option<u64>> = (0..n)
+                .map(|i| {
+                    let list = history.entry(keys[i]).or_default();
+                    let back = list.len().checked_sub(periods).map(|at| list[at]);
+                    list.push(values[i]);
+                    back.filter(|v| !v.is_nan()).map(f64::to_bits)
+                })
+                .collect();
+            let got = value
+                .groupby(&key)
+                .unwrap()
+                .shift(i64::try_from(periods).unwrap())
+                .unwrap();
+            for (row, (expected, cell)) in want.iter().zip(got.values()).enumerate() {
+                match (expected, cell) {
+                    (None, cell) => assert!(cell.is_missing(), "p={periods} row {row}: {cell:?}"),
+                    (Some(bits), Scalar::Float64(v)) => {
+                        assert_eq!(v.to_bits(), *bits, "p={periods} row {row}");
+                    }
+                    (Some(_), other) => panic!("p={periods} row {row}: {other:?}"),
+                }
+            }
+            // NEGATIVE: more rows are missing than the 7 groups' heads - a
+            // NaN source shifted in stays missing (a kernel copying its datum
+            // would show it as a value there).
+            let missing = want.iter().filter(|expected| expected.is_none()).count();
+            assert!(missing > 7 * periods, "p={periods}");
+        }
+    }
+
+    #[test]
     fn groupby_diff_dense_matches_reference_gbcum() {
         // SeriesGroupBy + DataFrameGroupBy dense diff(periods) must equal a
         // per-group, row-order windowed-difference reference, with the first
@@ -245188,6 +245848,87 @@ mod typed_index_labels_9m9zf {
             "bool category label must stay Bool, got {:?}",
             out.index().labels()[0]
         );
+    }
+
+    #[test]
+    fn categorical_value_counts_tally_by_code_89sri() {
+        // Every option of a categorical's value_counts equals a tally of its
+        // codes in category order, stably sorted by count, the missing rows'
+        // count after the categories (br-frankenpandas-89sri).
+        use super::DType;
+        let check = |codes: Vec<i64>, categories: usize| {
+            let names: Vec<Scalar> = (0..categories)
+                .map(|k| Scalar::Utf8(format!("c{k}")))
+                .collect();
+            let s = Series::from_categorical_codes("s", codes.clone(), names, false).unwrap();
+            for (normalize, sort, ascending, dropna) in
+                (0..16_u8).map(|bits| (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0))
+            {
+                let mut tally: Vec<(Option<String>, usize)> = (0..categories)
+                    .map(|k| {
+                        let code = i64::try_from(k).unwrap();
+                        let count = codes.iter().filter(|&&c| c == code).count();
+                        (Some(format!("c{k}")), count)
+                    })
+                    .collect();
+                let missing = codes.iter().filter(|&&c| c == -1).count();
+                if !dropna && missing > 0 {
+                    tally.push((None, missing));
+                }
+                if sort {
+                    tally.sort_by_key(
+                        |&(_, count)| if ascending { count } else { usize::MAX - count },
+                    );
+                }
+                let total: usize = tally.iter().map(|&(_, count)| count).sum();
+                let out = s
+                    .value_counts_with_options(normalize, sort, ascending, dropna)
+                    .unwrap();
+                let case = (normalize, sort, ascending, dropna);
+                assert_eq!(out.len(), tally.len(), "{case:?}");
+                for ((name, count), (label, value)) in tally
+                    .iter()
+                    .zip(out.index().labels().iter().zip(out.values()))
+                {
+                    match name {
+                        Some(name) => {
+                            assert_eq!(label, &IndexLabel::Utf8(name.clone()), "{case:?}");
+                        }
+                        None => assert!(label.is_missing(), "{case:?}"),
+                    }
+                    let expected = if normalize {
+                        Scalar::Float64(if total == 0 {
+                            0.0
+                        } else {
+                            *count as f64 / total as f64
+                        })
+                    } else {
+                        Scalar::Int64(i64::try_from(*count).unwrap())
+                    };
+                    assert_eq!(value, &expected, "{case:?}");
+                }
+                if !tally.is_empty() {
+                    let dtype = if normalize {
+                        DType::Float64
+                    } else {
+                        DType::Int64
+                    };
+                    assert_eq!(out.column().dtype(), dtype, "{case:?}");
+                }
+            }
+        };
+        // Ties, an unused category and missing rows.
+        check(
+            (0..60_i64)
+                .map(|k| if k % 11 == 0 { -1 } else { (k * 5) % 6 })
+                .collect(),
+            7,
+        );
+        // NEGATIVE: no rows (every category counted 0, no missing row
+        // under dropna=False), and only missing rows (their count first
+        // when sorted descending).
+        check(Vec::new(), 3);
+        check(vec![-1; 5], 2);
     }
 
     #[test]

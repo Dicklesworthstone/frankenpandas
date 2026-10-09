@@ -28372,6 +28372,128 @@ def test_categorical_codes_like_pandas_5oup5(case: Any) -> None:
     assert _5oup5_shown(run(fpd)) == _5oup5_shown(run(pd))
 
 
+# br-frankenpandas-89sri: a categorical's value_counts tallies its codes - every
+# option, on 300 categories each counted a different number of times (no tie,
+# whose order is kbnmj's), one unused and a missing value's count beside them;
+# NEGATIVE: the same values not categorical keep a plain index.
+def _89sri_values(kind: str) -> Any:
+    k = np.repeat(np.arange(300), np.arange(1, 301))[np.random.default_rng(89).permutation(45150)]
+    values = [f"t{v}" for v in k] if kind == "text" else list(k)
+    return values + [None] * 400
+
+
+def _89sri_shown(obj: Any) -> Any:
+    index = obj.index
+    categories = getattr(index, "categories", None)
+    return [
+        str(obj.dtype),
+        obj.name,
+        [repr(v) for v in obj.tolist()],
+        type(index).__name__,
+        [repr(v) for v in index.tolist()],
+        None if categories is None else [repr(v) for v in categories.tolist()],
+        getattr(index, "ordered", None),
+    ]
+
+
+_89SRI_CASES = [
+    (kind, op)
+    for kind in ("text", "int", "plain")
+    for op in (
+        "counts",
+        "normalize",
+        "unsorted",
+        "ascending",
+        "dropna_false",
+        "dropna_false_normalize",
+        "unused",
+        "gb_size",
+        "gb_size_unsorted",
+        "gb_size_dropna_false",
+    )
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _89SRI_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_categorical_value_counts_like_pandas_89sri(case: Any) -> None:
+    kind, op = case
+
+    def run(m: Any) -> Any:
+        s = m.Series(_89sri_values("int" if kind == "plain" else kind), name="k")
+        if kind != "plain":
+            s = s.astype("category")
+        if op == "unused":
+            if kind == "plain":
+                return s.value_counts()
+            # 999.0: the int values beside None make float64 categories, and
+            # an int added to them stays an int in fp (br-frankenpandas-yrjrc).
+            return s.cat.add_categories(["unused"] if kind == "text" else [999.0]).value_counts()
+        if op.startswith("gb_size"):
+            frame = m.DataFrame({"k": s, "v": np.arange(len(s))})
+            sort = op != "gb_size_unsorted"
+            dropna = op != "gb_size_dropna_false"
+            return frame.groupby("k", observed=True, sort=sort, dropna=dropna).size()
+        return {
+            "counts": lambda: s.value_counts(),
+            "normalize": lambda: s.value_counts(normalize=True),
+            "unsorted": lambda: s.value_counts(sort=False),
+            "ascending": lambda: s.value_counts(ascending=True),
+            "dropna_false": lambda: s.value_counts(dropna=False),
+            "dropna_false_normalize": lambda: s.value_counts(dropna=False, normalize=True),
+        }[op]()
+
+    assert _89sri_shown(run(fpd)) == _89sri_shown(run(pd))
+
+
+# br-frankenpandas-knu1r: df.dropna over an all-valid int, a NaN-free float, a
+# NaN float, a text column holding None and a datetime holding NaT (the
+# missing rows across 64-row words and the last row) - how, subset, thresh;
+# NEGATIVE: a subset of only missing-free columns drops nothing, and the
+# text / NaT columns' missing rows drop though every numeric one is whole.
+def _knu1r_frame(m: Any) -> Any:
+    k = np.arange(200)
+    nan = np.where(np.isin(k % 67, [0, 5, 63, 64]) | (k == 199), np.nan, k * 0.5)
+    stamps = np.datetime64("2020-01-01", "ns") + k.astype("timedelta64[h]")
+    stamps = np.where(k % 41 == 3, np.datetime64("NaT"), stamps)
+    return m.DataFrame(
+        {
+            "i": k,
+            "clean": k * 0.25,
+            "nan": nan,
+            "text": [None if v % 53 == 7 else f"t{v}" for v in k],
+            "when": stamps,
+        }
+    )
+
+
+_KNU1R_CASES = {
+    "any": lambda df: df.dropna(),
+    "all": lambda df: df.dropna(how="all"),
+    "subset nan": lambda df: df.dropna(subset=["nan"]),
+    "subset clean i": lambda df: df.dropna(subset=["i", "clean"]),
+    "subset text when": lambda df: df.dropna(subset=["text", "when"]),
+    "subset all nan text": lambda df: df.dropna(subset=["nan", "text"], how="all"),
+    "numeric only": lambda df: df[["i", "clean", "nan"]].dropna(),
+    "floats all": lambda df: df[["clean", "nan"]].dropna(how="all"),
+    "thresh 5": lambda df: df.dropna(thresh=5),
+    "text only missing": lambda df: df[["i", "clean", "text"]].dropna(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_KNU1R_CASES))
+def test_frame_dropna_like_pandas_knu1r(case: str) -> None:
+    def shown(df: Any) -> Any:
+        return [
+            [str(d) for d in df.dtypes],
+            df.index.tolist(),
+            [[repr(v) for v in df[c].tolist()] for c in df.columns],
+        ]
+
+    assert shown(_KNU1R_CASES[case](_knu1r_frame(fpd))) == shown(_KNU1R_CASES[case](_knu1r_frame(pd)))
+
+
 # br-frankenpandas-vriq2: a category key's groups are a CategoricalIndex - its
 # categories and ordered flag - for size() and the dropna=False reductions
 # too, as for its other reductions (they were a plain Index); a missing key's

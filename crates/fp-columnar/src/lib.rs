@@ -17368,6 +17368,26 @@ impl Column {
         Some(Self::from_f64_all_valid_chunks(chunks, out_len).keeping_dtype_of(self))
     }
 
+    /// Gather `positions` of a Float64 column (all-valid or holding missing
+    /// values) as an all-valid column when the caller has proven every
+    /// selected row present and not NaN - dropna's kept rows of a column it
+    /// checked: one collect of the values, where the general gather pushed
+    /// each value and packed its validity bit (an all-float df.dropna()
+    /// 0.66x pandas at 1M rows; br-frankenpandas-knu1r). None for any other
+    /// column.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn take_present_f64_positions_unchecked(&self, positions: &[usize]) -> Option<Self> {
+        let (data, validity) = self.as_f64_slice_with_validity()?;
+        debug_assert!(
+            positions
+                .iter()
+                .all(|&pos| validity.get(pos) && !data[pos].is_nan())
+        );
+        let gathered: Vec<f64> = positions.iter().map(|&pos| data[pos]).collect();
+        Some(Self::from_f64_values_all_valid_unchecked(gathered).keeping_dtype_of(self))
+    }
+
     /// Gather a contiguous row range without first materializing
     /// `start..start + len` as a positions vector.
     ///

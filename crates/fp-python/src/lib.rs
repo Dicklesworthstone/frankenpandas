@@ -13900,7 +13900,7 @@ impl PyIndex {
             // numpy's take of the labels: typed ints stay typed, the name
             // and dtype with them (each label was cloned into a new index;
             // br-frankenpandas-fk877).
-            let positions = take_positions(&indices, self.inner.len())?;
+            let positions = take_positions(indices, self.inner.len())?;
             return Ok(PyIndex {
                 inner: self.inner.take(&positions),
             });
@@ -16076,7 +16076,7 @@ impl PyDatetimeIndex {
             let run = positions.windows(2).all(|pair| pair[1] == pair[0] + 1);
             (positions, run)
         } else if let Ok(Positions(requested)) = key.extract::<Positions>() {
-            (take_positions(&requested, len)?, false)
+            (take_positions(requested, len)?, false)
         } else {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Index indices must be integers, slices, boolean masks or integer arrays",
@@ -16982,7 +16982,7 @@ impl PyDatetimeIndex {
     /// range is pandas' IndexError (it became NaT). Positions in one constant
     /// step keep the freq scaled by it, as pandas.
     fn take(&self, indices: Positions) -> PyResult<Self> {
-        let positions = take_positions(&indices.0, self.inner.len())?;
+        let positions = take_positions(indices.0, self.inner.len())?;
         let inner = self.inner.take(&positions).map_err(index_error_to_py)?;
         Ok(Self { inner })
     }
@@ -20574,7 +20574,7 @@ impl PyTimedeltaIndex {
     /// range is pandas' IndexError (it became NaT). Positions in one constant
     /// step keep the freq scaled by it, as pandas.
     fn take(&self, indices: Positions) -> PyResult<Self> {
-        let positions = take_positions(&indices.0, self.inner.len())?;
+        let positions = take_positions(indices.0, self.inner.len())?;
         let inner = self.inner.take(&positions).map_err(index_error_to_py)?;
         Ok(Self { inner })
     }
@@ -94150,18 +94150,21 @@ fn take_bounds(indices: &[i64], len: usize) -> PyResult<()> {
 /// `take` positions over `len` rows, negative from the end, as numpy reads
 /// them; one out of range is its IndexError.
 #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)] // checked into 0..len first
-fn take_positions(indices: &[i64], len: usize) -> PyResult<Vec<usize>> {
+fn take_positions(indices: Vec<i64>, len: usize) -> PyResult<Vec<usize>> {
     let length = i64::try_from(len).unwrap_or(i64::MAX);
     // The bounds in one pass, then each negative position wrapped without a
     // branch: a Result a position kept the collect from vectorizing
-    // (idx.take(perm) 0.19x pandas at 1M; br-frankenpandas-lsn8d).
+    // (idx.take(perm) 0.19x pandas at 1M; br-frankenpandas-lsn8d). The
+    // positions are collected into the given buffer (an i64 and a usize
+    // share a layout): a second one was a million-entry page-faulted
+    // allocation.
     let (low, high) = indices.iter().fold((0_i64, -1_i64), |(low, high), &at| {
         (low.min(at), high.max(at))
     });
     if low >= -length && high < length {
         return Ok(indices
-            .iter()
-            .map(|&at| (at + ((at >> 63) & length)) as usize)
+            .into_iter()
+            .map(|at| (at + ((at >> 63) & length)) as usize)
             .collect());
     }
     let index = indices
