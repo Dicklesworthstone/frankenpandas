@@ -66,8 +66,16 @@ fn gb_shift_diff_int64_bykey_matches_utf8_gid() {
                 .unwrap()
                 .shift(periods as i64)
                 .unwrap();
-            let d_i = value.groupby(&key_i64).unwrap().diff(periods).unwrap();
-            let d_u = value.groupby(&key_str).unwrap().diff(periods).unwrap();
+            let d_i = value
+                .groupby(&key_i64)
+                .unwrap()
+                .diff(periods as i64)
+                .unwrap();
+            let d_u = value
+                .groupby(&key_str)
+                .unwrap()
+                .diff(periods as i64)
+                .unwrap();
             for r in 0..n {
                 assert_eq!(
                     bits(&s_i.values()[r]),

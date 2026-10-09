@@ -28691,6 +28691,50 @@ def test_series_iloc_positions_like_pandas_lsn8d(case: Any) -> None:
     assert run(fpd) == run(pd)
 
 
+# br-frankenpandas-knu1r: grouped shift / diff / pct_change by periods other
+# than 1 (each group's ring stepped by a cursor) - by an int key (the
+# key-offset kernels) and a text key (the group-id kernels), over floats
+# holding NaN, all-valid floats and ints, forward and backward;
+# NEGATIVE: a group's first |periods| rows are NaN and a NaN source stays
+# NaN.
+def _knu1r_ring_frame(m: Any, key: str, values: str) -> Any:
+    k = np.arange(120)
+    floats = (k * 7 % 13) / 4.0 - 1.0
+    if values == "nan floats":
+        floats[[0, 3, 4, 5, 33, 34, 60, 89, 118]] = np.nan
+    data = (k * 7 % 13) - 6 if values == "ints" else floats
+    keys = (k * 5) % 4 if key == "int" else [f"g{(v * 5) % 4}" for v in k]
+    return m.DataFrame({"k": keys, "v": data})
+
+
+_KNU1R_RING_OPS = {
+    "shift(2)": lambda g: g.shift(2),
+    "shift(-2)": lambda g: g.shift(-2),
+    "shift(3)": lambda g: g.shift(3),
+    "diff(2)": lambda g: g.diff(2),
+    "diff(-3)": lambda g: g.diff(-3),
+    "pct_change(2)": lambda g: g.pct_change(2, fill_method=None),
+}
+_KNU1R_RING_CASES = [
+    (op, key, values)
+    for op in _KNU1R_RING_OPS
+    for key in ("int", "text")
+    for values in ("nan floats", "floats", "ints")
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _KNU1R_RING_CASES, ids=lambda case: "-".join(case))
+def test_grouped_ring_periods_like_pandas_knu1r(case: Any) -> None:
+    op, key, values = case
+
+    def run(m: Any) -> Any:
+        out = _KNU1R_RING_OPS[op](_knu1r_ring_frame(m, key, values).groupby("k")["v"])
+        return [str(out.dtype), [None if v != v else round(float(v), 9) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
 # br-frankenpandas-knu1r: grouped cumsum / cumprod / cummax / cummin of a
 # float column holding NaN (a group's first value, runs of them) by an int
 # key (the key-offset kernel) and a text key (the group-id kernel);

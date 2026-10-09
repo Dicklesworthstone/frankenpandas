@@ -73,7 +73,11 @@ fn main() {
         let k = Series::new("k", idx.clone(), df.column("k").unwrap().clone()).unwrap();
         for periods in [1usize, 2, 3, 7] {
             let s = Series::new("iv", idx.clone(), df.column("iv").unwrap().clone()).unwrap();
-            let fast = s.groupby(&k).unwrap().diff(periods).unwrap();
+            let fast = s
+                .groupby(&k)
+                .unwrap()
+                .diff(i64::try_from(periods).unwrap())
+                .unwrap();
             let refc = ref_diff(&iv, &keys, periods);
             let fc = fast.column();
             let dt_ok = fc.dtype() == refc.dtype();

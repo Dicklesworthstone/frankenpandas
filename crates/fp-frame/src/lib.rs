@@ -45190,6 +45190,44 @@ std::thread_local! {
         const { std::cell::Cell::new(false) };
 }
 
+/// Each group's ring of its last `periods` values, as the dense shift / diff
+/// kernels keep it: [`Self::step`] gives the slot a group's next row reads
+/// and then writes - the group's value `periods` rows back once it has that
+/// many - and advances the group's cursor. The kernels took the slot as the
+/// group's row count `% periods`, an integer division a row (g.shift(2) of a
+/// 10% NaN column 0.40x pandas at 1M rows; br-frankenpandas-knu1r).
+struct ShiftRing {
+    periods: usize,
+    /// Per group: its rows seen so far and its cursor (that count
+    /// `% periods`).
+    groups: Vec<(usize, usize)>,
+}
+
+impl ShiftRing {
+    fn new(groups: usize, periods: usize) -> Self {
+        Self {
+            periods,
+            groups: vec![(0, 0); groups],
+        }
+    }
+
+    /// The group's slot, and whether it holds the group's value `periods`
+    /// rows back; the group then counts this row.
+    #[inline]
+    fn step(&mut self, group: usize) -> (usize, bool) {
+        let (seen, cursor) = &mut self.groups[group];
+        let slot = group * self.periods + *cursor;
+        let filled = *seen >= self.periods;
+        *seen += 1;
+        *cursor = if *cursor + 1 == self.periods {
+            0
+        } else {
+            *cursor + 1
+        };
+        (slot, filled)
+    }
+}
+
 /// Single-pass dense groupby `diff(periods)` over an all-valid no-NaN Float64
 /// value slice and a precomputed dense gid per row (br-frankenpandas-gbcum).
 /// Keeps a per-gid ring buffer of the last `periods` values so each output is
@@ -45231,20 +45269,18 @@ fn dense_groupby_diff_f64_by_key(
         return (out, fp_columnar::ValidityMask::from_words(words, n));
     }
     let mut hist = vec![0.0_f64; range.saturating_mul(periods)];
-    let mut cnt = vec![0usize; range];
+    let mut ring = ShiftRing::new(range, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     for row in 0..n {
         let off = (keys[row] as i128 - min as i128) as usize;
         let v = vals[row];
-        let c = cnt[off];
-        let slot = off * periods + (c % periods);
-        if c >= periods {
+        let (slot, filled) = ring.step(off);
+        if filled {
             out[row] = v - hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = v;
-        cnt[off] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45278,20 +45314,18 @@ fn dense_groupby_shift_f64_by_key(
         return (out, fp_columnar::ValidityMask::from_words(words, n));
     }
     let mut hist = vec![0.0_f64; range.saturating_mul(periods)];
-    let mut cnt = vec![0usize; range];
+    let mut ring = ShiftRing::new(range, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     for row in 0..n {
         let off = (keys[row] as i128 - min as i128) as usize;
         let v = vals[row];
-        let c = cnt[off];
-        let slot = off * periods + (c % periods);
-        if c >= periods {
+        let (slot, filled) = ring.step(off);
+        if filled {
             out[row] = hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = v;
-        cnt[off] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45304,21 +45338,18 @@ fn dense_groupby_diff_f64(
 ) -> (Vec<f64>, fp_columnar::ValidityMask) {
     let n = vals.len();
     let mut hist = vec![0.0_f64; ngroups.saturating_mul(periods)];
-    let mut cnt = vec![0usize; ngroups];
+    let mut ring = ShiftRing::new(ngroups, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     #[allow(clippy::needless_range_loop)] // row indexes vals, gids and out
     for row in 0..n {
-        let g = gid_per_row[row];
         let v = vals[row];
-        let c = cnt[g];
-        let slot = g * periods + (c % periods);
-        if c >= periods {
+        let (slot, filled) = ring.step(gid_per_row[row]);
+        if filled {
             out[row] = v - hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = v;
-        cnt[g] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45347,44 +45378,99 @@ fn dense_groupby_shift_nullable_f64_by_key(
     // the zeroed output were half of g.shift(1) over a 10% NaN column (0.50x
     // pandas at 1M rows; br-frankenpandas-knu1r). A group's slot is valid
     // only once written, so `seen` is its validity's initial false.
+    if periods != 1 {
+        return dense_groupby_shift_nullable_f64_ring_by_key(
+            keys, min, range, data, validity, periods,
+        );
+    }
     let n = data.len();
     let valid_words = validity.packed_words_for_scan();
     let source_valid = |row: usize| (valid_words[row / 64] >> (row % 64)) & 1 != 0;
-    let mut words = vec![0u64; n.div_ceil(64)];
-    if periods == 1 {
-        let mut last = vec![0.0_f64; range];
-        let mut last_valid = vec![false; range];
-        let out: Vec<f64> = (0..n)
-            .map(|row| {
-                let off = (keys[row] as i128 - min as i128) as usize;
-                let present = last_valid[off];
-                words[row / 64] |= u64::from(present) << (row % 64);
-                let value = if present { last[off] } else { 0.0 };
-                last[off] = data[row];
-                last_valid[off] = source_valid(row);
-                value
-            })
-            .collect();
-        return (out, fp_columnar::ValidityMask::from_words(words, n));
-    }
-    let mut hist = vec![0.0_f64; range.saturating_mul(periods)];
-    let mut hist_valid = vec![false; range.saturating_mul(periods)];
-    let mut cnt = vec![0usize; range];
+    let mut marks = ValidityWordWriter::new(n);
+    let mut last = vec![0.0_f64; range];
+    let mut last_valid = vec![false; range];
     let out: Vec<f64> = (0..n)
         .map(|row| {
             let off = (keys[row] as i128 - min as i128) as usize;
-            let c = cnt[off];
-            let slot = off * periods + (c % periods);
-            let present = c >= periods && hist_valid[slot];
-            words[row / 64] |= u64::from(present) << (row % 64);
-            let value = if present { hist[slot] } else { 0.0 };
-            hist[slot] = data[row];
-            hist_valid[slot] = source_valid(row);
-            cnt[off] = c + 1;
+            let present = last_valid[off];
+            marks.mark(row, present);
+            let value = if present { last[off] } else { 0.0 };
+            last[off] = data[row];
+            last_valid[off] = source_valid(row);
             value
         })
         .collect();
-    (out, fp_columnar::ValidityMask::from_words(words, n))
+    (out, marks.finish(n))
+}
+
+/// [`dense_groupby_shift_nullable_f64_by_key`] by more than one row: each
+/// group's ring stepped by its cursor ([`ShiftRing`]). Kept out of line: in
+/// the one-row kernel's body it slowed g.shift(1) 11%
+/// (br-frankenpandas-knu1r).
+#[inline(never)]
+fn dense_groupby_shift_nullable_f64_ring_by_key(
+    keys: &[i64],
+    min: i64,
+    range: usize,
+    data: &[f64],
+    validity: &fp_columnar::ValidityMask,
+    periods: usize,
+) -> (Vec<f64>, fp_columnar::ValidityMask) {
+    let n = data.len();
+    let valid_words = validity.packed_words_for_scan();
+    let source_valid = |row: usize| (valid_words[row / 64] >> (row % 64)) & 1 != 0;
+    let mut marks = ValidityWordWriter::new(n);
+    let mut hist = vec![0.0_f64; range.saturating_mul(periods)];
+    let mut hist_valid = vec![false; range.saturating_mul(periods)];
+    let mut ring = ShiftRing::new(range, periods);
+    let out: Vec<f64> = (0..n)
+        .map(|row| {
+            let off = (keys[row] as i128 - min as i128) as usize;
+            let (slot, filled) = ring.step(off);
+            let present = filled && hist_valid[slot];
+            marks.mark(row, present);
+            let value = if present { hist[slot] } else { 0.0 };
+            hist[slot] = data[row];
+            hist_valid[slot] = source_valid(row);
+            value
+        })
+        .collect();
+    (out, marks.finish(n))
+}
+
+/// A validity mask written a row at a time in row order, each word built in
+/// a register and stored once at its 64th row: an |= into words[row / 64] a
+/// row chained each row's store to the next row's load of the same word
+/// (br-frankenpandas-knu1r).
+struct ValidityWordWriter {
+    words: Vec<u64>,
+    word: u64,
+}
+
+impl ValidityWordWriter {
+    fn new(len: usize) -> Self {
+        Self {
+            words: vec![0u64; len.div_ceil(64)],
+            word: 0,
+        }
+    }
+
+    /// Row `row` (the next in order) is valid when `present`.
+    #[inline]
+    fn mark(&mut self, row: usize, present: bool) {
+        self.word |= u64::from(present) << (row % 64);
+        if row % 64 == 63 {
+            self.words[row / 64] = std::mem::take(&mut self.word);
+        }
+    }
+
+    /// The mask of `len` rows, its last partial word stored.
+    fn finish(mut self, len: usize) -> fp_columnar::ValidityMask {
+        if !len.is_multiple_of(64) {
+            self.words[len / 64] = self.word;
+        }
+        fp_columnar::ValidityMask::from_words(self.words, len)
+    }
 }
 
 /// Gid sister of [`dense_groupby_shift_nullable_f64_by_key`].
@@ -45398,21 +45484,18 @@ fn dense_groupby_shift_nullable_f64(
     let n = data.len();
     let mut hist = vec![0.0_f64; ngroups.saturating_mul(periods)];
     let mut hist_valid = vec![false; ngroups.saturating_mul(periods)];
-    let mut cnt = vec![0usize; ngroups];
+    let mut ring = ShiftRing::new(ngroups, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     #[allow(clippy::needless_range_loop)] // row indexes data, gids and out
     for row in 0..n {
-        let g = gid_per_row[row];
-        let c = cnt[g];
-        let slot = g * periods + (c % periods);
-        if c >= periods && hist_valid[slot] {
+        let (slot, filled) = ring.step(gid_per_row[row]);
+        if filled && hist_valid[slot] {
             out[row] = hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = data[row];
         hist_valid[slot] = validity.get(row);
-        cnt[g] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45452,20 +45535,18 @@ fn dense_groupby_shift_nullable_i64_by_key(
     }
     let mut hist = vec![0_i64; range.saturating_mul(periods)];
     let mut hist_valid = vec![false; range.saturating_mul(periods)];
-    let mut cnt = vec![0usize; range];
+    let mut ring = ShiftRing::new(range, periods);
     let mut out = vec![0_i64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     for row in 0..n {
         let off = (keys[row] as i128 - min as i128) as usize;
-        let c = cnt[off];
-        let slot = off * periods + (c % periods);
-        if c >= periods && hist_valid[slot] {
+        let (slot, filled) = ring.step(off);
+        if filled && hist_valid[slot] {
             out[row] = hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = data[row];
         hist_valid[slot] = validity.get(row);
-        cnt[off] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45481,21 +45562,18 @@ fn dense_groupby_shift_nullable_i64(
     let n = data.len();
     let mut hist = vec![0_i64; ngroups.saturating_mul(periods)];
     let mut hist_valid = vec![false; ngroups.saturating_mul(periods)];
-    let mut cnt = vec![0usize; ngroups];
+    let mut ring = ShiftRing::new(ngroups, periods);
     let mut out = vec![0_i64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     #[allow(clippy::needless_range_loop)] // row indexes data, gids and out
     for row in 0..n {
-        let g = gid_per_row[row];
-        let c = cnt[g];
-        let slot = g * periods + (c % periods);
-        if c >= periods && hist_valid[slot] {
+        let (slot, filled) = ring.step(gid_per_row[row]);
+        if filled && hist_valid[slot] {
             out[row] = hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = data[row];
         hist_valid[slot] = validity.get(row);
-        cnt[g] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45518,21 +45596,19 @@ fn dense_groupby_diff_nullable_f64_by_key(
     let n = data.len();
     let mut hist = vec![0.0_f64; range.saturating_mul(periods)];
     let mut hist_valid = vec![false; range.saturating_mul(periods)];
-    let mut cnt = vec![0usize; range];
+    let mut ring = ShiftRing::new(range, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     for row in 0..n {
         let off = (keys[row] as i128 - min as i128) as usize;
         let cur_valid = validity.get(row);
-        let c = cnt[off];
-        let slot = off * periods + (c % periods);
-        if c >= periods && cur_valid && hist_valid[slot] {
+        let (slot, filled) = ring.step(off);
+        if filled && cur_valid && hist_valid[slot] {
             out[row] = data[row] - hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = data[row];
         hist_valid[slot] = cur_valid;
-        cnt[off] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45548,22 +45624,19 @@ fn dense_groupby_diff_nullable_f64(
     let n = data.len();
     let mut hist = vec![0.0_f64; ngroups.saturating_mul(periods)];
     let mut hist_valid = vec![false; ngroups.saturating_mul(periods)];
-    let mut cnt = vec![0usize; ngroups];
+    let mut ring = ShiftRing::new(ngroups, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     #[allow(clippy::needless_range_loop)] // row indexes data, gids and out
     for row in 0..n {
-        let g = gid_per_row[row];
         let cur_valid = validity.get(row);
-        let c = cnt[g];
-        let slot = g * periods + (c % periods);
-        if c >= periods && cur_valid && hist_valid[slot] {
+        let (slot, filled) = ring.step(gid_per_row[row]);
+        if filled && cur_valid && hist_valid[slot] {
             out[row] = data[row] - hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = data[row];
         hist_valid[slot] = cur_valid;
-        cnt[g] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45587,22 +45660,20 @@ fn dense_groupby_diff_i64_to_f64_by_key(
     let n = data.len();
     let mut hist = vec![0.0_f64; range.saturating_mul(periods)];
     let mut hist_valid = vec![false; range.saturating_mul(periods)];
-    let mut cnt = vec![0usize; range];
+    let mut ring = ShiftRing::new(range, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     for row in 0..n {
         let off = (keys[row] as i128 - min as i128) as usize;
         let cur_valid = validity.get(row);
         let cur = data[row] as f64;
-        let c = cnt[off];
-        let slot = off * periods + (c % periods);
-        if c >= periods && cur_valid && hist_valid[slot] {
+        let (slot, filled) = ring.step(off);
+        if filled && cur_valid && hist_valid[slot] {
             out[row] = cur - hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = cur;
         hist_valid[slot] = cur_valid;
-        cnt[off] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45618,23 +45689,20 @@ fn dense_groupby_diff_i64_to_f64(
     let n = data.len();
     let mut hist = vec![0.0_f64; ngroups.saturating_mul(periods)];
     let mut hist_valid = vec![false; ngroups.saturating_mul(periods)];
-    let mut cnt = vec![0usize; ngroups];
+    let mut ring = ShiftRing::new(ngroups, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     #[allow(clippy::needless_range_loop)] // row indexes data, gids and out
     for row in 0..n {
-        let g = gid_per_row[row];
         let cur_valid = validity.get(row);
         let cur = data[row] as f64;
-        let c = cnt[g];
-        let slot = g * periods + (c % periods);
-        if c >= periods && cur_valid && hist_valid[slot] {
+        let (slot, filled) = ring.step(gid_per_row[row]);
+        if filled && cur_valid && hist_valid[slot] {
             out[row] = cur - hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = cur;
         hist_valid[slot] = cur_valid;
-        cnt[g] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45845,15 +45913,14 @@ fn dense_groupby_pct_change_f64_by_key(
         return (out, fp_columnar::ValidityMask::from_words(words, n));
     }
     let mut hist = vec![0.0_f64; range.saturating_mul(periods)];
-    let mut cnt = vec![0usize; range];
+    let mut ring = ShiftRing::new(range, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     for row in 0..n {
         let off = (keys[row] as i128 - min as i128) as usize;
         let v = vals[row];
-        let c = cnt[off];
-        let slot = off * periods + (c % periods);
-        if c >= periods {
+        let (slot, filled) = ring.step(off);
+        if filled {
             let ratio = v / hist[slot] - 1.0;
             out[row] = ratio;
             if !ratio.is_nan() {
@@ -45861,7 +45928,6 @@ fn dense_groupby_pct_change_f64_by_key(
             }
         }
         hist[slot] = v;
-        cnt[off] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45876,16 +45942,14 @@ fn dense_groupby_pct_change_f64(
 ) -> (Vec<f64>, fp_columnar::ValidityMask) {
     let n = vals.len();
     let mut hist = vec![0.0_f64; ngroups.saturating_mul(periods)];
-    let mut cnt = vec![0usize; ngroups];
+    let mut ring = ShiftRing::new(ngroups, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     #[allow(clippy::needless_range_loop)] // row indexes vals, gids and out
     for row in 0..n {
-        let g = gid_per_row[row];
         let v = vals[row];
-        let c = cnt[g];
-        let slot = g * periods + (c % periods);
-        if c >= periods {
+        let (slot, filled) = ring.step(gid_per_row[row]);
+        if filled {
             let ratio = v / hist[slot] - 1.0;
             out[row] = ratio;
             if !ratio.is_nan() {
@@ -45893,7 +45957,6 @@ fn dense_groupby_pct_change_f64(
             }
         }
         hist[slot] = v;
-        cnt[g] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -45941,21 +46004,18 @@ fn dense_groupby_shift_f64(
 ) -> (Vec<f64>, fp_columnar::ValidityMask) {
     let n = vals.len();
     let mut hist = vec![0.0_f64; ngroups.saturating_mul(periods)];
-    let mut cnt = vec![0usize; ngroups];
+    let mut ring = ShiftRing::new(ngroups, periods);
     let mut out = vec![0.0_f64; n];
     let mut words = vec![0u64; n.div_ceil(64)];
     #[allow(clippy::needless_range_loop)] // row indexes vals, gids and out
     for row in 0..n {
-        let g = gid_per_row[row];
         let v = vals[row];
-        let c = cnt[g];
-        let slot = g * periods + (c % periods);
-        if c >= periods {
+        let (slot, filled) = ring.step(gid_per_row[row]);
+        if filled {
             out[row] = hist[slot];
             words[row / 64] |= 1u64 << (row % 64);
         }
         hist[slot] = v;
-        cnt[g] = c + 1;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -51982,8 +52042,13 @@ impl SeriesGroupBy<'_> {
     }
 
     /// GroupBy difference within each group.
-    pub fn diff(&self, periods: usize) -> Result<Series, FrameError> {
-        let periods = periods.min(self.series.len());
+    pub fn diff(&self, periods: i64) -> Result<Series, FrameError> {
+        // A negative diff reads the row `-periods` ahead in its group, as
+        // pandas' (the periods were unsigned: g.diff(-1) raised
+        // OverflowError); the dense ring kernels below read back, so only a
+        // forward diff takes them.
+        let signed = clamp_periods(periods, self.series.len());
+        let periods = usize::try_from(signed).unwrap_or(0);
         if periods >= 1
             && !self.column_is_timedelta()
             && let Some(data) = self.series.column.as_f64_slice()
@@ -52079,10 +52144,13 @@ impl SeriesGroupBy<'_> {
             vals.iter()
                 .enumerate()
                 .map(|(idx, value)| {
-                    if idx < periods {
+                    let Some(previous) = i64::try_from(idx)
+                        .ok()
+                        .and_then(|idx| usize::try_from(idx - signed).ok())
+                        .and_then(|source| vals.get(source))
+                    else {
                         return null_scalar.clone();
-                    }
-                    let previous = &vals[idx - periods];
+                    };
                     if value.is_missing() || previous.is_missing() {
                         return null_scalar.clone();
                     }
@@ -118542,9 +118610,13 @@ impl DataFrameGroupBy<'_> {
     /// GroupBy diff within each group.
     ///
     /// Matches `df.groupby(col).diff(periods)`.
-    pub fn diff(&self, periods: usize) -> Result<DataFrame, FrameError> {
-        let periods = periods.min(self.df.len());
-        if let Some(df) = self.try_diff_dense(periods) {
+    pub fn diff(&self, periods: i64) -> Result<DataFrame, FrameError> {
+        // A negative diff reads ahead in each group ([`SeriesGroupBy::diff`]);
+        // the dense kernels take a forward one.
+        let signed = clamp_periods(periods, self.df.len());
+        if let Ok(periods) = usize::try_from(signed)
+            && let Some(df) = self.try_diff_dense(periods)
+        {
             return Ok(df);
         }
         self.transform_groups_with_column_dtype(|_col_name, col| {
@@ -118563,10 +118635,13 @@ impl DataFrameGroupBy<'_> {
                 vals.iter()
                     .enumerate()
                     .map(|(i, v)| {
-                        if i < periods {
+                        let Some(prev) = i64::try_from(i)
+                            .ok()
+                            .and_then(|i| usize::try_from(i - signed).ok())
+                            .and_then(|source| vals.get(source))
+                        else {
                             return null_scalar.clone();
-                        }
-                        let prev = &vals[i - periods];
+                        };
                         if v.is_missing() || prev.is_missing() {
                             return null_scalar.clone();
                         }
@@ -140683,7 +140758,8 @@ mod tests {
         for result in [
             grouped.shift(i64::MAX).unwrap(),
             grouped.shift(i64::MIN).unwrap(),
-            grouped.diff(usize::MAX).unwrap(),
+            grouped.diff(i64::MAX).unwrap(),
+            grouped.diff(i64::MIN).unwrap(),
             grouped.pct_change(i64::MAX).unwrap(),
         ] {
             assert!(result.values().iter().all(Scalar::is_missing));
@@ -237849,6 +237925,36 @@ mod test_select_columns_perf_76e1fd {
     }
 
     #[test]
+    fn shift_ring_steps_as_count_modulo_periods_knu1r() {
+        // ShiftRing::step gives a group's slot as group * periods + (its row
+        // count % periods), filled once that count reaches periods, for
+        // groups visited in any order - the arithmetic the dense shift /
+        // diff / pct_change kernels divided out a row (br-frankenpandas-knu1r).
+        for periods in 1..=5_usize {
+            let groups = 7;
+            let mut ring = crate::ShiftRing::new(groups, periods);
+            let mut counts = vec![0_usize; groups];
+            for row in 0..400_usize {
+                let group = (row * 13 + row / 7) % groups;
+                let (slot, filled) = ring.step(group);
+                assert_eq!(
+                    slot,
+                    group * periods + counts[group] % periods,
+                    "p={periods} row {row}"
+                );
+                assert_eq!(filled, counts[group] >= periods, "p={periods} row {row}");
+                counts[group] += 1;
+            }
+            // NEGATIVE: a fresh group's first `periods` rows hold nothing.
+            let mut fresh = crate::ShiftRing::new(1, periods);
+            for _ in 0..periods {
+                assert!(!fresh.step(0).1);
+            }
+            assert!(fresh.step(0).1);
+        }
+    }
+
+    #[test]
     fn groupby_shift_nullable_matches_reference_knu1r() {
         // The validity-carrying dense shift (a NaN-holding float column by a
         // bounded int key) equals a per-group, row-order reference for
@@ -237981,7 +238087,11 @@ mod test_select_columns_perf_76e1fd {
         )
         .unwrap();
         for periods in [1usize, 2] {
-            let got = value.groupby(&key).unwrap().diff(periods).unwrap();
+            let got = value
+                .groupby(&key)
+                .unwrap()
+                .diff(i64::try_from(periods).unwrap())
+                .unwrap();
             check(
                 &got.column,
                 &reference(&v0, periods),
@@ -237996,7 +238106,11 @@ mod test_select_columns_perf_76e1fd {
         let order = vec!["k".to_string(), "v0".to_string(), "v1".to_string()];
         let df = DataFrame::new_with_column_order(Index::new(labels), map, order).unwrap();
         for periods in [1usize, 2] {
-            let got = df.groupby(&["k"]).unwrap().diff(periods).unwrap();
+            let got = df
+                .groupby(&["k"])
+                .unwrap()
+                .diff(i64::try_from(periods).unwrap())
+                .unwrap();
             check(
                 &got.columns["v0"],
                 &reference(&v0, periods),

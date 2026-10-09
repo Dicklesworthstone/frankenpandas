@@ -70357,9 +70357,9 @@ impl PyGroupBy {
     /// pandas' `diff(periods=1, axis=<no_default>)`: the deprecated axis
     /// ([`groupby_axis`]; it was unexpected - br-frankenpandas-n57tz).
     #[pyo3(signature = (periods=1, axis=Passed(None)))]
-    fn diff(&self, py: Python<'_>, periods: usize, axis: Passed<'_>) -> PyResult<PyDataFrame> {
+    fn diff(&self, py: Python<'_>, periods: i64, axis: Passed<'_>) -> PyResult<PyDataFrame> {
         groupby_axis(py, "DataFrameGroupBy", "diff", &axis, false)?;
-        require_c_int_periods(i128::try_from(periods).unwrap_or(i128::MAX))?;
+        require_c_int_periods(i128::from(periods))?;
         let result = self
             .grouped()
             .map_err(frame_error_to_py)?
@@ -73223,9 +73223,9 @@ impl PySeriesGroupBy {
     /// pandas' `diff(periods=1, axis=<no_default>)`: the deprecated axis
     /// ([`groupby_axis`]; it was unexpected - br-frankenpandas-n57tz).
     #[pyo3(signature = (periods=1, axis=Passed(None)))]
-    fn diff(&self, py: Python<'_>, periods: usize, axis: Passed<'_>) -> PyResult<PySeries> {
+    fn diff(&self, py: Python<'_>, periods: i64, axis: Passed<'_>) -> PyResult<PySeries> {
         groupby_axis(py, "SeriesGroupBy", "diff", &axis, false)?;
-        require_c_int_periods(i128::try_from(periods).unwrap_or(i128::MAX))?;
+        require_c_int_periods(i128::from(periods))?;
         let res = self.grouped()?.diff(periods).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: res })
     }
