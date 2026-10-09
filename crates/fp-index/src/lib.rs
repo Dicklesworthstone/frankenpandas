@@ -1970,6 +1970,40 @@ impl IndexLabels {
         self.materialized.get().map(|labels| labels.as_slice())
     }
 
+    /// The label at `position`, a lazy backing's built from its one value
+    /// (no other label made); `None` past the end.
+    fn label_at(&self, position: usize) -> Option<IndexLabel> {
+        if position >= self.len() {
+            return None;
+        }
+        if let Some(labels) = self.held() {
+            return labels.get(position).cloned();
+        }
+        let int = |value: i64| Some(IndexLabel::Int64(value));
+        if let Some(range) = self.int64_unit_range {
+            return int(range.start.checked_add(i64::try_from(position).ok()?)?);
+        }
+        if let Some(range) = self.int64_affine {
+            return int(range.value_at(position));
+        }
+        if let Some(runs) = &self.int64_two_affine {
+            return int(runs.value_at(position));
+        }
+        if let Some(strided) = &self.int64_strided {
+            return int(strided.value_at(position));
+        }
+        if let Some(range) = self.datetime64_affine {
+            return Some(IndexLabel::Datetime64(range.value_at(position)));
+        }
+        if let Some(TemporalStridedLabels { kind, view }) = &self.temporal_strided {
+            return Some(kind.label(view.value_at(position)));
+        }
+        if let Some(Some(values)) = self.int64_typed.get() {
+            return values.get(position).copied().and_then(int);
+        }
+        self.as_slice().get(position).cloned()
+    }
+
     fn int64_unit_range(&self) -> Option<Int64UnitRangeLabels> {
         self.int64_unit_range
     }
@@ -3132,6 +3166,15 @@ impl Index {
     #[must_use]
     pub fn labels(&self) -> &[IndexLabel] {
         self.labels.as_slice()
+    }
+
+    /// The label at `position` (`None` past the end), a lazy index's - a
+    /// range, typed instants or durations - built from its one value: no
+    /// other label is made (`s.index[5]` made a million;
+    /// br-frankenpandas-e186m).
+    #[must_use]
+    pub fn label_at(&self, position: usize) -> Option<IndexLabel> {
+        self.labels.label_at(position)
     }
 
     #[must_use]
@@ -24662,6 +24705,40 @@ mod tests {
                 .as_deref(),
             Some(&[][..])
         );
+    }
+
+    #[test]
+    fn label_at_reads_one_label_of_each_backing_e186m() {
+        // label_at answers as labels()[i] on every backing, a lazy one's
+        // labels never made for it (br-frankenpandas-e186m).
+        const NAT: i64 = i64::MIN;
+        let indexes = [
+            Index::default_range(5),
+            Index::from_range(3, 30, 7),
+            Index::from_range(10, -5, -4),
+            Index::from_i64_values(vec![4, -1, 9]),
+            Index::from_datetime64_affine_range(1_000, 60, 4).unwrap(),
+            Index::from_datetime64_values(vec![5, NAT, 3]),
+            Index::from_timedelta64_values(vec![NAT, 7, 2]),
+            Index::from_timedelta64_values(vec![1, 2, 3, 4, 5, 6])
+                .stepped_view(1, 2, 3)
+                .unwrap(),
+            Index::new(vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(3)]),
+        ];
+        for index in &indexes {
+            let lazy = index.labels.held().is_none();
+            let read: Vec<Option<IndexLabel>> =
+                (0..index.len()).map(|at| index.label_at(at)).collect();
+            if lazy {
+                assert!(index.labels.held().is_none(), "label_at made the labels");
+            }
+            let expected: Vec<Option<IndexLabel>> =
+                index.labels().iter().cloned().map(Some).collect();
+            assert_eq!(read, expected);
+            // NEGATIVE: past the end there is none.
+            assert_eq!(index.label_at(index.len()), None);
+        }
+        assert_eq!(Index::default_range(0).label_at(0), None);
     }
 
     #[test]

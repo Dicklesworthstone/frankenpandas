@@ -13276,18 +13276,26 @@ impl PyIndex {
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        // A bool is numpy's new axis to pandas' Index (it was position 0 / 1).
+        if key.is_instance_of::<pyo3::types::PyBool>() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Multi-dimensional indexing (e.g. `obj[:, None]`) is no longer supported. Convert to a numpy array before indexing instead.",
+            ));
+        }
         if let Ok(idx) = key.extract::<i64>() {
             let pos = if idx < 0 {
                 (self.inner.len() as i64 + idx) as usize
             } else {
                 idx as usize
             };
-            if pos >= self.inner.len() {
+            // The one label, not a lazy index's every label (s.index[5] 9 ms
+            // a million rows, pandas 0.012; br-frankenpandas-e186m).
+            let Some(label) = self.inner.label_at(pos) else {
                 return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
                     "index out of bounds",
                 ));
-            }
-            return index_scalar_to_py(py, &self.inner, &self.inner.labels()[pos]);
+            };
+            return index_scalar_to_py(py, &self.inner, &label);
         }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
             let s_idx = slice.indices(self.inner.len() as isize)?;
@@ -21045,6 +21053,13 @@ impl PyRangeIndex {
             if let Some(span) = index.sliced_range_span(rows.start, rows.stop, rows.step) {
                 return Self::object(py, span, index.name().cloned());
             }
+        }
+        // A bool is no position to a range, pandas' IndexError (it read
+        // position 0 / 1; br-frankenpandas-e186m).
+        if key.is_instance_of::<pyo3::types::PyBool>() {
+            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "only integers, slices (`:`), ellipsis (`...`), numpy.newaxis (`None`) and integer or boolean arrays are valid indices",
+            ));
         }
         slf.as_super().__getitem__(py, key)
     }
@@ -44244,9 +44259,17 @@ impl PyDataFrame {
                         .collect::<PyResult<Vec<_>>>()?,
                 };
                 let pairs: Vec<(String, Column)> = names.iter().cloned().zip(columns).collect();
-                let labels = extract_index_labels(index, rows)?;
+                // No index= is the default range, built as one, as the dict
+                // form builds it (1ze1o): a label a row was made and held,
+                // and the frame's transpose could not be the lazy view
+                // (DataFrame(ndarray).T of 1M x 10 504 ms, pandas 0.04; of
+                // 200k x 10 82 ms, the dict form's 0.004; br-frankenpandas-e186m).
+                let rows_index = match index {
+                    None => Index::default_range(rows),
+                    Some(_) => Index::new(extract_index_labels(index, rows)?),
+                };
                 let df = DataFrame::new_with_column_order(
-                    Index::new(labels),
+                    rows_index,
                     fp_frame::ColumnStore::from_pairs(pairs),
                     names,
                 )

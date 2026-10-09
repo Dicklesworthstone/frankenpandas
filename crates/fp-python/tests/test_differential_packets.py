@@ -33231,3 +33231,67 @@ def test_timedelta_index_slices_and_reads_like_pandas_5s8nr(case: str) -> None:
         return repr(out) if not isinstance(out, list) else repr(out)
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: DataFrame(2-D ndarray) without index= builds the
+# default range as one (its labels were made a row at a time, and the frame's
+# transpose could not be the lazy view); its index and transpose answer as
+# pandas', NEGATIVE: an explicit index of each kind as before.
+_E186M_GRID_INDEX = np.arange(12.0).reshape(4, 3)
+
+_E186M_INDEX_CASES = {
+    "default": lambda m: m.DataFrame(_E186M_GRID_INDEX),
+    "default with columns": lambda m: m.DataFrame(_E186M_GRID_INDEX, columns=["a", "b", "c"]),
+    "index list": lambda m: m.DataFrame(_E186M_GRID_INDEX, index=[10, 20, 30, 40]),
+    "index range": lambda m: m.DataFrame(_E186M_GRID_INDEX, index=range(4)),
+    "index text": lambda m: m.DataFrame(_E186M_GRID_INDEX, index=["w", "x", "y", "z"]),
+    "index wrong length": lambda m: m.DataFrame(_E186M_GRID_INDEX, index=[1, 2]),
+    "no rows": lambda m: m.DataFrame(np.empty((0, 3))),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186M_INDEX_CASES))
+@pytest.mark.parametrize("view", ["frame", "T", "T.T"])
+def test_frame_of_an_ndarray_index_and_transpose_e186m(case: str, view: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            frame = _E186M_INDEX_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        out = {"frame": frame, "T": frame.T, "T.T": frame.T.T}[view]
+        return (
+            type(out.index).__name__,
+            [repr(label) for label in out.index],
+            type(out.columns).__name__,
+            [repr(label) for label in out.columns],
+            repr(out.to_numpy().tolist()),
+        )
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a RangeIndex position is the range's value there,
+# computed (every label was made to read one: s.index[5] 9 ms a million rows);
+# NEGATIVE: a bool and a position past either end raise as pandas.
+_E186M_RANGES = {
+    "default": lambda m: m.Series(np.arange(6.0)).index,
+    "start step": lambda m: m.RangeIndex(2, 20, 3),
+    "negative step": lambda m: m.RangeIndex(10, -5, -4),
+    "empty": lambda m: m.RangeIndex(0),
+    "plain ints": lambda m: m.Index([5, 6, 7, 8, 9, 10]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("rng", list(_E186M_RANGES))
+@pytest.mark.parametrize("key", ["0", "3", "-1", "-4", "5", "6", "-7", "True", "np.int64(2)", "np.int64(-2)"])
+def test_range_index_position_like_pandas_e186m(rng: str, key: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            value = _E186M_RANGES[rng](m)[eval(key)]
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        return (type(value).__name__, value)
+
+    assert run(fpd) == run(pd)
