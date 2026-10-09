@@ -8982,6 +8982,28 @@ fn typed_index_of(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
     )?)))
 }
 
+/// The nanoseconds of a one-dimensional timedelta64 numpy array of any unit,
+/// through an int64 view (numpy's NaT is i64::MIN, as fp's); None for
+/// anything else.
+fn timedelta64_ndarray_nanos(data: &Bound<'_, PyAny>) -> PyResult<Option<Vec<i64>>> {
+    if !data.get_type().name().is_ok_and(|name| name == "ndarray")
+        || data.getattr("ndim")?.extract::<usize>()? != 1
+    {
+        return Ok(None);
+    }
+    let kind = data
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?;
+    if kind != "m" {
+        return Ok(None);
+    }
+    let nanos = data
+        .call_method1("astype", ("timedelta64[ns]",))?
+        .call_method1("view", ("int64",))?;
+    ndarray_elements::<i64>(data.py(), &nanos).map(Some)
+}
+
 /// A numpy array of `dtype` (int64, datetime64[ns], ...) over `values`, its
 /// bytes written once into a bytearray numpy reads in place: a Vec<i64>
 /// handed to Python became a list of a million ints (DatetimeIndex.asi8
@@ -12499,6 +12521,39 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Positions {
             }
         }
         obj.extract::<Vec<i64>>().map(Self)
+    }
+}
+
+/// The buffer of a native one-dimensional int64 numpy array, for reading
+/// `take` positions in place; None for anything else.
+fn native_int64_buffer(obj: &Bound<'_, PyAny>) -> PyResult<Option<pyo3::buffer::PyBuffer<i64>>> {
+    if !obj.get_type().name().is_ok_and(|name| name == "ndarray") {
+        return Ok(None);
+    }
+    let dtype = obj.getattr("dtype")?;
+    if dtype.getattr("isnative")?.extract::<bool>()?
+        && obj.getattr("ndim")?.extract::<usize>()? == 1
+        && dtype.getattr("name")?.extract::<String>()? == "int64"
+    {
+        return pyo3::buffer::PyBuffer::<i64>::get(obj).map(Some);
+    }
+    Ok(None)
+}
+
+/// A `take_signed` of `len` labels (DatetimeIndex, TimedeltaIndex) as
+/// pandas' take answers it: a position out of range is numpy's IndexError.
+fn signed_take<T, I>(len: usize, positions: I, take: impl FnOnce(I) -> Option<T>) -> PyResult<T>
+where
+    I: ExactSizeIterator<Item = i64> + Clone,
+{
+    match take(positions.clone()) {
+        Some(taken) => Ok(taken),
+        None => {
+            take_bounds(&positions.collect::<Vec<i64>>(), len)?;
+            Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                "take positions are out of bounds",
+            ))
+        }
     }
 }
 
@@ -17002,12 +17057,21 @@ impl PyDatetimeIndex {
     /// pandas' `take(indices)`: positions, negative from the end; one out of
     /// range is pandas' IndexError (it became NaT). Positions in one constant
     /// step keep the freq scaled by it, as pandas.
-    fn take(&self, indices: Positions) -> PyResult<Self> {
-        let positions = take_positions(indices.0, self.inner.len())?;
-        let inner = self
-            .inner
-            .take_owned(positions)
-            .map_err(index_error_to_py)?;
+    fn take(&self, py: Python<'_>, indices: &Bound<'_, PyAny>) -> PyResult<Self> {
+        // An int64 array's positions are read in place, each wrapped,
+        // checked and gathered in one pass (they were copied out, then
+        // passed over four times; br-frankenpandas-lsn8d).
+        let len = self.inner.len();
+        if let Some(buffer) = native_int64_buffer(indices)?
+            && let Some(cells) = buffer.as_slice(py)
+        {
+            let positions = cells.iter().map(pyo3::buffer::ReadOnlyCell::get);
+            let inner = signed_take(len, positions, |at| self.inner.take_signed(at))?;
+            return Ok(Self { inner });
+        }
+        let indices: Positions = indices.extract()?;
+        let positions = indices.0.iter().copied();
+        let inner = signed_take(len, positions, |at| self.inner.take_signed(at))?;
         Ok(Self { inner })
     }
 
@@ -19401,6 +19465,12 @@ impl PyTimedeltaIndex {
                         _ => nanos.push(Timedelta::NAT),
                     }
                 }
+            } else if let Some(durations) = timedelta64_ndarray_nanos(obj)? {
+                // A timedelta64 array of any unit (timedelta_range(..).values)
+                // through an int64 view: each was read a numpy scalar at a
+                // time (TimedeltaIndex of a million 1.9 s, pandas 0.01 ms;
+                // br-frankenpandas-lsn8d).
+                nanos = durations;
             } else if let Ok(list) = obj.extract::<Vec<Bound<'_, PyAny>>>() {
                 for item in list {
                     if item.is_none() {
@@ -19452,7 +19522,12 @@ impl PyTimedeltaIndex {
                 }
             }
         }
-        let mut inner = TimedeltaIndex::new(nanos.clone());
+        // Only a freq= reads the durations again.
+        let mut inner = TimedeltaIndex::new(if freq.is_some() {
+            nanos.clone()
+        } else {
+            std::mem::take(&mut nanos)
+        });
         if let Some(n) = name {
             inner = inner.set_name(n);
         } else if series_name.is_some() {
@@ -20597,9 +20672,21 @@ impl PyTimedeltaIndex {
     /// pandas' `take(indices)`: positions, negative from the end; one out of
     /// range is pandas' IndexError (it became NaT). Positions in one constant
     /// step keep the freq scaled by it, as pandas.
-    fn take(&self, indices: Positions) -> PyResult<Self> {
-        let positions = take_positions(indices.0, self.inner.len())?;
-        let inner = self.inner.take(&positions).map_err(index_error_to_py)?;
+    fn take(&self, py: Python<'_>, indices: &Bound<'_, PyAny>) -> PyResult<Self> {
+        // An int64 array's positions are read in place, and the freq is
+        // that of the positions as given: a negative one keeps none, as
+        // pandas (br-frankenpandas-lsn8d).
+        let len = self.inner.len();
+        if let Some(buffer) = native_int64_buffer(indices)?
+            && let Some(cells) = buffer.as_slice(py)
+        {
+            let positions = cells.iter().map(pyo3::buffer::ReadOnlyCell::get);
+            let inner = signed_take(len, positions, |at| self.inner.take_signed(at))?;
+            return Ok(Self { inner });
+        }
+        let indices: Positions = indices.extract()?;
+        let positions = indices.0.iter().copied();
+        let inner = signed_take(len, positions, |at| self.inner.take_signed(at))?;
         Ok(Self { inner })
     }
 

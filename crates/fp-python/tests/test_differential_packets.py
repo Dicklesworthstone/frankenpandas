@@ -32707,3 +32707,94 @@ def test_resampler_reuse_like_pandas_xmwso() -> None:
         ]
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-lsn8d: DatetimeIndex.take of an int64 array reads its
+# positions in place, each wrapped (negative from the end), checked and
+# gathered in one pass - over a typed index, a date_range (a steady step keeps
+# the freq, scaled), a zone and a name, NaT, an empty take; pandas reads the
+# positions as given for the freq, so a negative one keeps none (fp scaled the
+# freq by the wrapped positions' step); NEGATIVE: a position past either end
+# is numpy's IndexError (not NaT), and the arrays read the other way (a
+# strided view, byte-swapped, int32, a list) agree.
+def _lsn8d_take_stamps(m: Any) -> Any:
+    days = np.array([0, 3, 4, 9, 11, 30, 31, 45], dtype="int64") * 86_400_000_000_000
+    return m.DatetimeIndex(np.datetime64("2021-03-01", "ns") + days.astype("timedelta64[ns]"), name="t")
+
+
+_LSN8D_TAKE_CASES = {
+    "permutation": lambda m: _lsn8d_take_stamps(m).take(np.array([7, 0, 3, 3, 5], dtype="int64")),
+    "negative": lambda m: _lsn8d_take_stamps(m).take(np.array([-1, -8, 2], dtype="int64")),
+    "steady step keeps the freq": lambda m: m.date_range("2024-01-01", periods=9, freq="h").take(np.array([1, 4, 7], dtype="int64")),
+    "descending steady step": lambda m: m.date_range("2024-01-01", periods=9, freq="D").take(np.array([8, 6, 4], dtype="int64")),
+    "negative steady step keeps no freq": lambda m: m.date_range("2024-01-01", periods=9, freq="D").take(np.array([-1, -3, -5], dtype="int64")),
+    "one negative keeps no freq": lambda m: m.date_range("2024-01-01", periods=9, freq="D").take(np.array([-1], dtype="int64")),
+    "negative end keeps no freq": lambda m: m.date_range("2024-01-01", periods=9, freq="D").take([0, -8]),
+    "zone and name": lambda m: m.date_range("2024-01-01", periods=4, tz="US/Eastern", name="z").take(np.array([3, 1], dtype="int64")),
+    "NaT kept": lambda m: m.DatetimeIndex(["2024-01-01", None, "2024-01-03"]).take(np.array([1, 2, 1], dtype="int64")),
+    "empty": lambda m: m.date_range("2024-01-01", periods=3, freq="D").take(np.array([], dtype="int64")),
+    "past the end raises": lambda m: _lsn8d_take_stamps(m).take(np.array([1, 8], dtype="int64")),
+    "past the start raises": lambda m: _lsn8d_take_stamps(m).take(np.array([-9, 1], dtype="int64")),
+    "strided view": lambda m: _lsn8d_take_stamps(m).take(np.arange(8, dtype="int64")[::-3]),
+    "byte-swapped": lambda m: _lsn8d_take_stamps(m).take(np.array([6, -2], dtype=">i8")),
+    "int32": lambda m: _lsn8d_take_stamps(m).take(np.array([6, -2], dtype="int32")),
+    "list": lambda m: _lsn8d_take_stamps(m).take([6, -2]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LSN8D_TAKE_CASES))
+def test_datetime_index_take_in_place_like_pandas_lsn8d(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _LSN8D_TAKE_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__, str(error))
+        return ([str(stamp) for stamp in out], out.freqstr, out.name, str(out.tz))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-lsn8d: TimedeltaIndex of a timedelta64 array of any unit
+# reads its durations through an int64 view (each was read a numpy scalar at a
+# time), NaT included (a byte-swapped array is left out: pandas 2.2.3 reads
+# its bytes as native and shows nonsense durations); its take of an int64 array is
+# read in place, the freq that of the positions as given (a negative one keeps
+# none - fp scaled it by the wrapped positions' step); NEGATIVE: an int array
+# with a unit, a list of strings and an empty array build as before, and a
+# position past the end is numpy's IndexError. The dtype is compared by kind:
+# pandas 2.2 keeps a non-nanosecond unit, fp holds nanoseconds only
+# (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.16).
+def _lsn8d_td_spans(unit: str) -> Any:
+    return np.array([0, 90, -3, 7200, 86_400], dtype="int64").astype(f"timedelta64[{unit}]")
+
+
+_LSN8D_TD_CASES = {
+    **{f"from timedelta64[{unit}]": (lambda unit: lambda m: m.TimedeltaIndex(_lsn8d_td_spans(unit), name="d"))(unit)
+       for unit in ["ns", "us", "ms", "s", "m", "h", "D"]},
+    "from timedelta64 with NaT": lambda m: m.TimedeltaIndex(np.array([1, "NaT", 3], dtype="timedelta64[s]")),
+    "from a strided view": lambda m: m.TimedeltaIndex(_lsn8d_td_spans("ms")[::-2]),
+    "from timedelta64 with a freq": lambda m: m.TimedeltaIndex(np.arange(4).astype("timedelta64[h]"), freq="h"),
+    "from timedelta64 not following its freq": lambda m: m.TimedeltaIndex(_lsn8d_td_spans("s"), freq="h"),
+    "from ints with a unit": lambda m: m.TimedeltaIndex(np.array([1, 2, 3]), unit="s"),
+    "from strings": lambda m: m.TimedeltaIndex(["1 days", "2h"]),
+    "from an empty array": lambda m: m.TimedeltaIndex(np.array([], dtype="timedelta64[ns]")),
+    "take": lambda m: m.timedelta_range("1D", periods=9, freq="h", name="t").take(np.array([8, 0, -1, 3], dtype="int64")),
+    "take steady step": lambda m: m.timedelta_range("1D", periods=9, freq="h").take(np.array([1, 4, 7], dtype="int64")),
+    "take negative steady step keeps no freq": lambda m: m.timedelta_range("1D", periods=9, freq="h").take(np.array([-1, -3], dtype="int64")),
+    "take a list with a negative": lambda m: m.timedelta_range("1D", periods=9, freq="h").take([-1]),
+    "take past the end raises": lambda m: m.timedelta_range("1D", periods=9, freq="h").take(np.array([9], dtype="int64")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LSN8D_TD_CASES))
+def test_timedelta_index_from_arrays_and_take_like_pandas_lsn8d(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _LSN8D_TD_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        return ([str(span) for span in out], out.dtype.kind, out.freqstr, out.name)
+
+    assert run(fpd) == run(pd)

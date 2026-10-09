@@ -8794,6 +8794,16 @@ pub fn take_freq(freq: Option<String>, positions: &[usize]) -> Option<String> {
     scale_freq(&freq, step)
 }
 
+/// [`take_freq`] of numpy's signed take positions as pandas reads them - as
+/// given (`maybe_indices_to_slice`), so a negative one keeps no freq: [-1, -3]
+/// of 'D' was '-2D' and [-1] 'D' from the wrapped positions
+/// (br-frankenpandas-lsn8d). Only an index with a freq reads them.
+fn signed_take_freq(freq: Option<String>, positions: impl Iterator<Item = i64>) -> Option<String> {
+    let freq = freq?;
+    let given: Option<Vec<usize>> = positions.map(|at| usize::try_from(at).ok()).collect();
+    take_freq(Some(freq), &given?)
+}
+
 /// pandas' month-position check: whether every date is a calendar ('ce') or
 /// business ('be') month end, a calendar ('cs') or business ('bs') month
 /// start, in that order of preference.
@@ -9587,6 +9597,43 @@ impl DatetimeIndex {
         Ok(self
             .with_instants(self.nanos_at_owned(positions))
             .with_freq(freq))
+    }
+
+    /// [`Self::take_owned`] of numpy's signed positions (negative from the
+    /// end), each wrapped, checked and gathered in one pass as numpy's take
+    /// does: wrapping them into a buffer, checking it twice and gathering
+    /// were four passes over a million positions (idx.take(perm) 0.60x
+    /// pandas; br-frankenpandas-lsn8d). `None` when a position is out of
+    /// range.
+    pub fn take_signed<I>(&self, positions: I) -> Option<Self>
+    where
+        I: ExactSizeIterator<Item = i64> + Clone,
+    {
+        let length = i64::try_from(self.index.len()).ok()?;
+        let wrap = |at: i64| usize::try_from(at + ((at >> 63) & length)).ok();
+        let nanos = if let Some(held) = self.index.labels.datetime64_nanos() {
+            let mut missed = 0_usize;
+            let gather = |at: i64| match wrap(at).and_then(|position| held.get(position)) {
+                Some(&nanos) => nanos,
+                None => {
+                    missed += 1;
+                    i64::MIN
+                }
+            };
+            let nanos: Vec<i64> = positions.clone().map(gather).collect();
+            if missed > 0 {
+                return None;
+            }
+            nanos
+        } else {
+            let checked: Option<Vec<usize>> = positions
+                .clone()
+                .map(|at| wrap(at).filter(|&position| position < self.index.len()))
+                .collect();
+            self.nanos_at_owned(checked?)
+        };
+        let freq = signed_take_freq(self.freq(), positions);
+        Some(self.with_instants(nanos).with_freq(freq))
     }
 
     /// Repeat each label `repeats` times, matching `pd.DatetimeIndex.repeat()`.
@@ -12268,6 +12315,23 @@ impl TimedeltaIndex {
             out = out.set_name(name);
         }
         Ok(out.with_freq(take_freq(self.freq(), positions)))
+    }
+
+    /// [`Self::take`] of numpy's signed positions (negative from the end),
+    /// its freq that of the positions as given (a negative one keeps none,
+    /// as pandas; br-frankenpandas-lsn8d). `None` when a position is out of
+    /// range.
+    pub fn take_signed<I>(&self, positions: I) -> Option<Self>
+    where
+        I: ExactSizeIterator<Item = i64> + Clone,
+    {
+        let length = i64::try_from(self.len()).ok()?;
+        let wrapped: Option<Vec<usize>> = positions
+            .clone()
+            .map(|at| usize::try_from(at + ((at >> 63) & length)).ok())
+            .collect();
+        let taken = self.take(&wrapped?).ok()?;
+        Some(taken.with_freq(signed_take_freq(self.freq(), positions)))
     }
 
     /// Repeat each label `repeats` times, matching
@@ -26456,6 +26520,93 @@ mod tests {
             ranged.take_owned(vec![2, 4, 6]).unwrap().freq().as_deref(),
             Some("2D")
         );
+    }
+
+    #[test]
+    fn datetime_take_signed_wraps_checks_and_gathers_lsn8d() {
+        // take_signed of numpy's positions (negative from the end) equals
+        // take_owned of them wrapped, over a typed index, a date_range's
+        // range (freq scaled by a steady step) and labels holding NaT
+        // (br-frankenpandas-lsn8d).
+        let day = 86_400_000_000_000_i64;
+        let typed = super::DatetimeIndex::new((0..50).map(|k| k * day + 7).collect());
+        let ranged = super::DatetimeIndex::from_index(
+            Index::from_datetime64_affine_range(3 * day, day, 50)
+                .unwrap()
+                .with_freq(Some("D".to_owned())),
+        )
+        .unwrap();
+        let labelled = super::DatetimeIndex::from_index(Index::new(
+            (0..50_i64)
+                .map(|k| {
+                    if k % 9 == 4 {
+                        IndexLabel::Datetime64(i64::MIN)
+                    } else {
+                        IndexLabel::Datetime64(k * day)
+                    }
+                })
+                .collect(),
+        ))
+        .unwrap();
+        for index in [&typed, &ranged, &labelled] {
+            let signed = [49_i64, -50, 7, -1, 31, 0];
+            let wrapped = vec![49_usize, 0, 7, 49, 31, 0];
+            let taken = index.take_signed(signed.iter().copied()).unwrap();
+            let owned = index.take_owned(wrapped).unwrap();
+            assert_eq!(taken.values(), owned.values());
+            assert_eq!(taken.name(), owned.name());
+            let steady = index.take_signed([2_i64, 4, 6].into_iter()).unwrap();
+            assert_eq!(
+                steady.freq(),
+                index.take_owned(vec![2, 4, 6]).unwrap().freq()
+            );
+            assert!(index.take_signed(std::iter::empty()).unwrap().is_empty());
+            // NEGATIVE: one position past either end is out of range.
+            assert!(index.take_signed([1_i64, 50].into_iter()).is_none());
+            assert!(index.take_signed([-51_i64, 1].into_iter()).is_none());
+            assert!(index.take_signed([i64::MIN].into_iter()).is_none());
+        }
+        let freq_of = |positions: &[i64]| {
+            ranged
+                .take_signed(positions.iter().copied())
+                .unwrap()
+                .freq()
+        };
+        assert_eq!(freq_of(&[2, 4, 6]).as_deref(), Some("2D"));
+        assert_eq!(freq_of(&[6, 4, 2]).as_deref(), Some("-2D"));
+        assert_eq!(freq_of(&[3]).as_deref(), Some("D"));
+        // NEGATIVE: pandas reads a negative position as given - no slice, no
+        // freq - though its wrapped positions step evenly.
+        assert_eq!(freq_of(&[-48, -46, -44]), None);
+        assert_eq!(freq_of(&[-1]), None);
+    }
+
+    #[test]
+    fn timedelta_take_signed_wraps_checks_and_gathers_lsn8d() {
+        // take_signed of numpy's positions equals take of them wrapped (NaT
+        // kept, the name kept), its freq that of the positions as given
+        // (br-frankenpandas-lsn8d).
+        let hour = 3_600_000_000_000_i64;
+        let index = super::TimedeltaIndex::new(
+            (0..12_i64)
+                .map(|k| if k == 5 { i64::MIN } else { k * hour })
+                .collect(),
+        )
+        .set_name("d")
+        .with_freq(Some("h".to_owned()));
+        let taken = index.take_signed([11_i64, -12, 5, -1].into_iter()).unwrap();
+        let wrapped = index.take(&[11, 0, 5, 11]).unwrap();
+        assert_eq!(taken.asi8(), wrapped.asi8());
+        assert_eq!(taken.name(), wrapped.name());
+        let freq_of =
+            |positions: &[i64]| index.take_signed(positions.iter().copied()).unwrap().freq();
+        assert_eq!(freq_of(&[1, 3, 5]).as_deref(), Some("2h"));
+        assert_eq!(freq_of(&[]).as_deref(), Some("h"));
+        // NEGATIVE: a negative position keeps no freq, though the wrapped
+        // positions step evenly; one past either end is out of range.
+        assert_eq!(freq_of(&[-11, -9, -7]), None);
+        assert!(index.take_signed([12_i64].into_iter()).is_none());
+        assert!(index.take_signed([-13_i64].into_iter()).is_none());
     }
 
     #[test]
