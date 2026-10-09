@@ -1118,7 +1118,28 @@ fn categories_index(py: Python<'_>, categories: &[Scalar]) -> PyResult<Py<PyAny>
 /// floats 28.7 ms, pandas 20.2; br-frankenpandas-zsm50). None for any other
 /// column.
 fn typed_column_list(py: Python<'_>, column: &Column) -> PyResult<Option<Py<PyAny>>> {
-    if !column.validity().all() || column.is_pandas_string() {
+    if column.is_pandas_string() {
+        return Ok(None);
+    }
+    if !column.validity().all() {
+        // A float64 column holding missing values: its floats with NaN in
+        // their place, as pandas' (numpy's) tolist gives them - a Scalar a
+        // row was boxed (s.tolist() of a 10% NaN column 0.69x pandas;
+        // br-frankenpandas-knu1r). Any other column holding missing values
+        // (a nullable one's pd.NA, NaT, None) keeps its cells.
+        if column.dtype() == DType::Float64
+            && let Some((data, validity)) = column.as_f64_slice_with_validity()
+        {
+            let words = validity.packed_words_for_scan();
+            let values = data.iter().enumerate().map(|(i, &x)| {
+                if (words[i / 64] >> (i % 64)) & 1 == 1 {
+                    x
+                } else {
+                    f64::NAN
+                }
+            });
+            return Ok(Some(PyList::new(py, values)?.into_any().unbind()));
+        }
         return Ok(None);
     }
     let list = match column.dtype() {
@@ -16082,7 +16103,7 @@ impl PyDatetimeIndex {
                 "Index indices must be integers, slices, boolean masks or integer arrays",
             ));
         };
-        let picked = self.inner.nanos_at(&positions);
+        let picked = self.inner.nanos_at_owned(positions);
         let freq = self.inner.freq().filter(|_| run);
         let inner = self.with_nanos(picked).inner.with_freq(freq);
         Ok(Py::new(py, Self { inner })?.into_any())
@@ -16983,7 +17004,10 @@ impl PyDatetimeIndex {
     /// step keep the freq scaled by it, as pandas.
     fn take(&self, indices: Positions) -> PyResult<Self> {
         let positions = take_positions(indices.0, self.inner.len())?;
-        let inner = self.inner.take(&positions).map_err(index_error_to_py)?;
+        let inner = self
+            .inner
+            .take_owned(positions)
+            .map_err(index_error_to_py)?;
         Ok(Self { inner })
     }
 
@@ -31161,6 +31185,13 @@ impl PySeries {
                 .of_series(&self.inner)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+        }
+        // A text key is a label, as below: the checks between failed on it
+        // one by one, two of them raising and formatting a TypeError
+        // (r['a'] in a row-wise apply 0.82x pandas;
+        // br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.14).
+        if key.is_instance_of::<pyo3::types::PyString>() {
+            return series_label_get(py, &self.inner, key);
         }
         if let Ok(idx) = plain_index_ref(key) {
             let labels = idx.inner.labels().to_vec();
@@ -56385,16 +56416,28 @@ fn series_label_get(
     // its lookup: the label was counted among every row first (s.loc[ts] of
     // a million-row DatetimeIndex 4.9 ms, pandas 0.007;
     // br-frankenpandas-lsn8d).
-    let matches = if series.index().is_unique() {
-        usize::from(series.index().position(&label).is_some())
-    } else {
-        series
-            .index()
-            .labels()
-            .iter()
-            .filter(|l| **l == label)
-            .count()
-    };
+    // ... and its row's cell is read at that position (series.at looked
+    // the label up again; s['k7'] 0.83x pandas; fvsao.14).
+    if series.index().is_unique() {
+        return match series.index().position(&label) {
+            Some(row) => element_to_py(
+                py,
+                series.column(),
+                &series
+                    .iat(i64::try_from(row).unwrap_or(i64::MAX))
+                    .map_err(loc_key_error)?,
+            ),
+            None => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                key.clone().unbind(),
+            )),
+        };
+    }
+    let matches = series
+        .index()
+        .labels()
+        .iter()
+        .filter(|l| **l == label)
+        .count();
     match matches {
         0 => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
             key.clone().unbind(),
