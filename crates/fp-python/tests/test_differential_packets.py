@@ -28494,6 +28494,156 @@ def test_frame_dropna_like_pandas_knu1r(case: str) -> None:
     assert shown(_KNU1R_CASES[case](_knu1r_frame(fpd))) == shown(_KNU1R_CASES[case](_knu1r_frame(pd)))
 
 
+# br-frankenpandas-knu1r: a text (object) column == / != a string compares
+# each row to it - a missing value (None, NaN) unequal - over text holding
+# None, NaN, ints, empty and non-ASCII strings, all missing, and a
+# categorical; NEGATIVE: pandas' `string` dtype answers its nullable boolean
+# (<NA> where missing), and a non-string operand takes the general path.
+_KNU1R_TEXT = {
+    "none": ["beta", None, "alpha", "beta", "", "Beta"],
+    "nan": ["beta", np.nan, "alpha", "beta", "", "beta "],
+    "mixed": ["beta", 3, None, "beta", 2.5, "3"],
+    "unicode": ["béta", "beta", None, "ß", "béta", "z"],
+    "all missing": [None, None, None],
+}
+_KNU1R_EQ_CASES = [
+    (kind, op, operand)
+    for kind in [*_KNU1R_TEXT, "categorical", "string dtype"]
+    for op in ("==", "!=")
+    for operand in ("beta", "béta", "", "3")
+] + [("none", "==", 3), ("mixed", "==", 3), ("mixed", "!=", 2.5)]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _KNU1R_EQ_CASES, ids=lambda case: f"{case[0]}{case[1]}{case[2]!r}")
+def test_text_equality_like_pandas_knu1r(case: Any) -> None:
+    kind, op, operand = case
+
+    def run(m: Any) -> Any:
+        if kind == "categorical":
+            s = m.Series(_KNU1R_TEXT["none"]).astype("category")
+        elif kind == "string dtype":
+            s = m.Series(_KNU1R_TEXT["none"], dtype="string")
+        else:
+            s = m.Series(_KNU1R_TEXT[kind])
+        out = s == operand if op == "==" else s != operand
+        return [str(out.dtype), [repr(v) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-knu1r: isin over text holding missing values (the general
+# membership path, its flags a typed bool column) - string needles, None /
+# NaN needles, a number among them, none matching; NEGATIVE: an absent needle
+# matches no row, and pandas' `string` dtype keeps its own result.
+_KNU1R_ISIN_CASES = [
+    (kind, needles)
+    for kind in ("none", "nan", "mixed", "all missing", "string dtype")
+    for needles in (("beta", "alpha"), ("beta", None), (np.nan,), (3, "3"), ("absent",), ())
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _KNU1R_ISIN_CASES, ids=lambda case: f"{case[0]}-{case[1]!r}")
+def test_text_isin_like_pandas_knu1r(case: Any) -> None:
+    kind, needles = case
+
+    def run(m: Any) -> Any:
+        if kind == "string dtype":
+            s = m.Series(_KNU1R_TEXT["none"], dtype="string")
+        else:
+            s = m.Series(_KNU1R_TEXT[kind])
+        out = s.isin(list(needles))
+        return [str(out.dtype), [repr(v) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-vk7y9: value_counts of a datetime / timedelta column holding
+# NaT (day stamps, each counted a different number of times) - the default
+# options tally the nanos; normalize, ascending, unsorted and dropna=False
+# beside them; NEGATIVE: a zoned column (the general path) and dropna=False
+# (NaT's row kept) answer as pandas too.
+def _vk7y9vc_series(m: Any, kind: str) -> Any:
+    k = np.repeat(np.arange(9), np.arange(1, 10))[np.random.default_rng(7).permutation(45)]
+    stamps = np.datetime64("2021-03-01", "ns") + k.astype("timedelta64[D]")
+    stamps = np.concatenate([stamps, np.array(["NaT"] * 4, dtype="datetime64[ns]")])
+    s = m.Series(stamps, name="when")
+    if kind == "timedelta":
+        return s - m.Timestamp("2021-01-01")
+    if kind == "aware":
+        return s.dt.tz_localize("UTC")
+    return s
+
+
+_VK7Y9VC_CASES = [
+    (kind, options)
+    for kind in ("datetime", "timedelta", "aware")
+    for options in ("default", "normalize", "ascending", "unsorted", "dropna=False")
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _VK7Y9VC_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_temporal_value_counts_like_pandas_vk7y9(case: Any) -> None:
+    kind, options = case
+    keywords = {
+        "default": {},
+        "normalize": {"normalize": True},
+        "ascending": {"ascending": True},
+        "unsorted": {"sort": False},
+        "dropna=False": {"dropna": False},
+    }[options]
+
+    def run(m: Any) -> Any:
+        out = _vk7y9vc_series(m, kind).value_counts(**keywords)
+        return [
+            str(out.dtype),
+            out.name,
+            out.tolist(),
+            [str(v) for v in out.index],
+            str(out.index.dtype),
+            out.index.name,
+        ]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-vk7y9: mode of datetimes / durations holding NaT - with
+# dropna=False NaT is a value of its own, sorted first among tied modes as
+# pandas sorts them; NEGATIVE: dropna=True leaves it out.
+_VK7Y9MODE_VALUES = {
+    "ties": ["2021-03-01", "NaT", "2021-03-02"],
+    "NaT most": ["2021-03-01", "NaT", "NaT", "2021-03-02"],
+    "tie with NaT": ["2021-03-02", "NaT", "NaT", "2021-03-02", "2021-03-01"],
+    "all NaT": ["NaT", "NaT"],
+    "no NaT": ["2021-03-02", "2021-03-01", "2021-03-02"],
+}
+_VK7Y9MODE_CASES = [
+    (values, kind, dropna)
+    for values in _VK7Y9MODE_VALUES
+    for kind in ("datetime", "timedelta", "aware")
+    for dropna in (False, True)
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _VK7Y9MODE_CASES, ids=lambda case: f"{case[0]}-{case[1]}-dropna={case[2]}")
+def test_temporal_mode_like_pandas_vk7y9(case: Any) -> None:
+    values, kind, dropna = case
+
+    def run(m: Any) -> Any:
+        s = m.Series(np.array(_VK7Y9MODE_VALUES[values], dtype="datetime64[ns]"), name="w")
+        if kind == "timedelta":
+            s = s - m.Timestamp("2021-01-01")
+        elif kind == "aware":
+            s = s.dt.tz_localize("UTC")
+        out = s.mode(dropna=dropna)
+        return [str(out.dtype), out.name, [str(v) for v in out]]
+
+    assert run(fpd) == run(pd)
+
+
 # br-frankenpandas-vriq2: a category key's groups are a CategoricalIndex - its
 # categories and ordered flag - for size() and the dropna=False reductions
 # too, as for its other reductions (they were a plain Index); a missing key's

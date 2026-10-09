@@ -2383,17 +2383,22 @@ struct TemporalValueCount {
 }
 
 fn temporal_value_counts(data: &[i64], nat: i64) -> Vec<TemporalValueCount> {
-    let mut index_by_ns: FxHashMap<i64, usize> =
-        FxHashMap::with_capacity_and_hasher(data.len(), Default::default());
-    let mut counts: Vec<TemporalValueCount> = Vec::with_capacity(data.len());
+    // Keyed by the instant's bits spread (bijective): FxHash of the raw nanos
+    // keeps a day-aligned instant's trailing zeros where the table takes its
+    // bucket from, and a table and a list sized to every row were allocated
+    // for the dozen days a column may hold (d.dt.floor('D').value_counts()
+    // of dates holding NaT 0.60x pandas at 1M rows; br-frankenpandas-vk7y9).
+    let mut index_by_ns: FxHashMap<u64, usize> =
+        FxHashMap::with_capacity_and_hasher(data.len().min(4096), Default::default());
+    let mut counts: Vec<TemporalValueCount> = Vec::new();
     for &ns in data {
         if ns == nat {
             continue;
         }
-        match index_by_ns.get(&ns) {
-            Some(&idx) => counts[idx].count += 1,
-            None => {
-                index_by_ns.insert(ns, counts.len());
+        match index_by_ns.entry(spread_float_bits(ns.cast_unsigned())) {
+            std::collections::hash_map::Entry::Occupied(slot) => counts[*slot.get()].count += 1,
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(counts.len());
                 counts.push(TemporalValueCount { ns, count: 1 });
             }
         }
@@ -18274,12 +18279,17 @@ impl Series {
         // same count-descending first-seen order, labels and counts, where
         // the tally below keyed a ScalarKey per row over the materialized
         // cells (nx.value_counts() 23.9 ms a million rows, pandas 7.2;
-        // br-frankenpandas-d9b5z).
+        // br-frankenpandas-d9b5z). A naive datetime / timedelta column's too:
+        // its nanos tallied, NaT left out (d.dt.floor('D').value_counts() of
+        // dates holding NaT 0.42x pandas at 1M rows; br-frankenpandas-vk7y9).
         if !normalize
             && sort
             && !ascending
             && dropna
-            && matches!(self.column.dtype(), DType::Float64 | DType::Int64)
+            && matches!(
+                self.column.dtype(),
+                DType::Float64 | DType::Int64 | DType::Datetime64 { .. } | DType::Timedelta64
+            )
             && self.column.timezone().is_none()
         {
             return self.value_counts();
@@ -18394,6 +18404,13 @@ impl Series {
             // (pandas' DatetimeIndex / TimedeltaIndex), not their texts - the
             // same containment.
             labels.push(match &value {
+                // A datetime column's missing bucket is the NaT instant, as a
+                // DatetimeIndex holds it, which keeps a zoned column's counts
+                // a DatetimeIndex in its zone, as pandas' - a null label among
+                // the instants made a naive one (vk7y9).
+                Scalar::Null(_) if matches!(self.column.dtype(), DType::Datetime64 { .. }) => {
+                    IndexLabel::Datetime64(fp_types::Timestamp::NAT)
+                }
                 Scalar::Null(kind) => IndexLabel::Null(*kind),
                 Scalar::Float64(v) => IndexLabel::Float64(fp_index::OrderedF64(*v)),
                 Scalar::Bool(v) => IndexLabel::Bool(*v),
@@ -18415,8 +18432,7 @@ impl Series {
             Some(&self.name)
         };
         let index = Index::new(labels).rename_index(index_name);
-        // A tz-aware column's values label the counts in its zone (a NaN
-        // bucket leaves them naive).
+        // A tz-aware column's values label the counts in its zone.
         let index = match self.column.timezone() {
             Some(zone) => index.clone().with_tz(Some(zone)).unwrap_or(index),
             None => index,
@@ -20085,6 +20101,25 @@ impl Series {
             )));
         }
         let mode = parse_quantile_interpolation(interpolation)?;
+        // A datetime column's quantile is its present nanos' (NaT left out)
+        // read as an instant: the column was copied into a timedelta Series
+        // first, a validity bit read a row (d.quantile(.5) of dates holding
+        // NaT 0.73x pandas at 1M; br-frankenpandas-vk7y9). No present value
+        // keeps that path.
+        if matches!(self.column.dtype(), DType::Datetime64 { .. })
+            && let Some((data, _)) = self.column.as_temporal_nanos_with_validity()
+        {
+            let present: Vec<i64> = data
+                .iter()
+                .copied()
+                .filter(|&ns| ns != fp_types::Timestamp::NAT)
+                .collect();
+            if !present.is_empty() {
+                return Ok(datetime_from_timedelta_result(timedelta_quantile(
+                    present, q, mode,
+                )));
+            }
+        }
         if let Some(nanos) = self.datetime_as_timedelta()? {
             return nanos
                 .quantile_with_interpolation(q, interpolation)
@@ -24198,12 +24233,16 @@ impl Series {
         let Some((nanos, _)) = self.column.as_temporal_nanos_with_validity() else {
             return Ok(None);
         };
-        // NaT by the datum (an all-valid column built over NaT holds one).
-        if !dropna && nanos.contains(&i64::MIN) {
-            return Ok(None);
-        }
+        // NaT by the datum (an all-valid column built over NaT holds one). With
+        // dropna off it is a value of its own, the smallest: pandas' sorted
+        // modes put it first (the general path put it last; vk7y9).
         let key = |ns: i64| spread_float_bits(ns.cast_unsigned());
-        let present = || nanos.iter().copied().filter(|&ns| ns != i64::MIN);
+        let present = || {
+            nanos
+                .iter()
+                .copied()
+                .filter(move |&ns| !dropna || ns != i64::MIN)
+        };
         let sample: FxHashSet<u64> = present().take(4096).map(key).collect();
         let repeats = sample.len() * 2 <= present().take(4096).count();
         let modes: Vec<i64> = if repeats {
@@ -24234,7 +24273,8 @@ impl Series {
                 .collect()
         };
         let count = modes.len();
-        let column = temporal_column(self.column.dtype(), modes, ValidityMask::all_valid(count));
+        // A NaT mode (dropna off) is missing: the mask read off the datum.
+        let column = Column::from_temporal_nanos(self.column.dtype(), modes);
         Self::new(self.name.clone(), Index::default_range(count), column).map(Some)
     }
 
@@ -26757,6 +26797,22 @@ impl Series {
         if let Some(categorical) = self.cat() {
             return categorical.to_values()?.isin(test_values);
         }
+        // pandas' `string` dtype tests its strings against the string
+        // needles alone (StringArray.isin keeps the values that are str): a
+        // missing value matches no needle - a None needle matched <NA>
+        // (found writing br-frankenpandas-knu1r's pytest).
+        if self.column.is_pandas_string()
+            && test_values
+                .iter()
+                .any(|value| !matches!(value, Scalar::Utf8(_)))
+        {
+            let strings: Vec<Scalar> = test_values
+                .iter()
+                .filter(|value| matches!(value, Scalar::Utf8(_)))
+                .cloned()
+                .collect();
+            return self.isin_flags(&strings);
+        }
         // Direct-address membership fast path: an all-valid Int64 column tested
         // against all-Int64 needles in a bounded span probes a dense bitset
         // (1 load/elem) instead of the SipHash HashSet. Bit-identical because
@@ -26956,16 +27012,19 @@ impl Series {
         }
 
         // Per br-frankenpandas-f7201: O(n + m) — build the membership
-        // index ONCE, then do O(1) lookup per element.
+        // index ONCE, then do O(1) lookup per element. The flags are a typed
+        // Bool column: a Scalar::Bool a row went through Column::from_values'
+        // dtype inference, half of t.isin(...) over text holding None (0.73x
+        // pandas; br-frankenpandas-knu1r).
         let idx = IsinIndex::build(test_values);
-        let values: Vec<Scalar> = self
+        let flags: Vec<bool> = self
             .column
             .values()
             .iter()
-            .map(|value| Scalar::Bool(idx.contains(value)))
+            .map(|value| idx.contains(value))
             .collect();
 
-        self.with_values_preserving_index(values)
+        self.bool_mask_preserving_name(flags)
     }
 
     /// Test whether each element falls within a range.
@@ -177004,6 +177063,113 @@ mod tests {
     }
 
     #[test]
+    fn temporal_value_counts_tally_spread_instants_vk7y9() {
+        // value_counts of day-aligned instants holding NaT equals a tally in
+        // first-seen order, stably sorted by count (the table keyed by the
+        // spread bits; br-frankenpandas-vk7y9).
+        let day = 86_400_000_000_000_i64;
+        let nat = i64::MIN;
+        // NEGATIVE: instants equal in their low 32 bits stay distinct (a
+        // key folding them together would merge their counts).
+        let high = [1_i64 << 32, 2_i64 << 32, 3_i64 << 32];
+        let nanos: Vec<i64> = (0..400_i64)
+            .map(|i| match i % 17 {
+                4 => nat,
+                9 => high[usize::try_from(i % 3).unwrap()],
+                k => (k * 7 % 12) * day,
+            })
+            .collect();
+        let mut order: Vec<i64> = Vec::new();
+        let mut counts: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+        for &ns in nanos.iter().filter(|&&ns| ns != nat) {
+            if !counts.contains_key(&ns) {
+                order.push(ns);
+            }
+            *counts.entry(ns).or_insert(0) += 1;
+        }
+        order.sort_by_key(|ns| std::cmp::Reverse(counts[ns]));
+        for dtype in [DType::datetime64_naive(), DType::Timedelta64] {
+            let s = Series::new(
+                "d",
+                Index::default_range(nanos.len()),
+                Column::from_temporal_nanos(dtype.clone(), nanos.clone()),
+            )
+            .unwrap();
+            let out = s.value_counts().unwrap();
+            let labels: Vec<IndexLabel> = order
+                .iter()
+                .map(|&ns| {
+                    if dtype == DType::Timedelta64 {
+                        IndexLabel::Timedelta64(ns)
+                    } else {
+                        IndexLabel::Datetime64(ns)
+                    }
+                })
+                .collect();
+            assert_eq!(out.index().labels(), labels.as_slice(), "{dtype:?}");
+            let values: Vec<Scalar> = order.iter().map(|ns| Scalar::Int64(counts[ns])).collect();
+            assert_eq!(out.values(), values.as_slice(), "{dtype:?}");
+            // NEGATIVE: NaT is no value counted.
+            assert_eq!(
+                out.values()
+                    .iter()
+                    .map(|count| match count {
+                        Scalar::Int64(count) => *count,
+                        other => panic!("{other:?}"),
+                    })
+                    .sum::<i64>(),
+                400 - (0..400).filter(|i| i % 17 == 4).count() as i64
+            );
+        }
+    }
+
+    #[test]
+    fn datetime_quantile_reads_present_nanos_vk7y9() {
+        // A datetime column's quantile off its present nanos equals the same
+        // nanos held as durations, read as an instant, for every
+        // interpolation and q (br-frankenpandas-vk7y9).
+        let nat = i64::MIN;
+        let nanos: Vec<i64> = (0..301_i64)
+            .map(|i| {
+                if i % 7 == 2 {
+                    nat
+                } else {
+                    (i * 7919 % 1000) * 3_600_000_000_123
+                }
+            })
+            .collect();
+        let dates = Series::new(
+            "d",
+            Index::default_range(nanos.len()),
+            Column::from_temporal_nanos(DType::datetime64_naive(), nanos.clone()),
+        )
+        .unwrap();
+        let spans = Series::new(
+            "d",
+            Index::default_range(nanos.len()),
+            Column::from_temporal_nanos(DType::Timedelta64, nanos),
+        )
+        .unwrap();
+        for mode in ["linear", "lower", "higher", "nearest", "midpoint"] {
+            for q in [0.0, 0.1, 0.5, 0.75, 0.999, 1.0] {
+                let want = match spans.quantile_with_interpolation(q, mode).unwrap() {
+                    Scalar::Timedelta64(ns) => Scalar::Datetime64(ns),
+                    other => panic!("{mode} {q}: {other:?}"),
+                };
+                assert_eq!(dates.quantile_with_interpolation(q, mode).unwrap(), want);
+            }
+        }
+        // NEGATIVE: no present instant answers NaT.
+        let all_nat = Series::new(
+            "d",
+            Index::default_range(3),
+            Column::from_temporal_nanos(DType::datetime64_naive(), vec![nat; 3]),
+        )
+        .unwrap();
+        assert!(all_nat.quantile(0.5).unwrap().is_missing());
+    }
+
+    #[test]
     fn temporal_mode_equals_a_counted_reference_vk7y9() {
         // The modes of a datetime / timedelta column (NaT left out) are the
         // present values of the greatest count, ascending, by the tally
@@ -177051,13 +177217,26 @@ mod tests {
                 assert_eq!(modes.len(), expected.len());
             }
         }
-        // NEGATIVE: a NaT counted as a value (dropna=False) and any other
-        // column are the tally's.
+        // TEST-CHANGE (vk7y9, c79): with dropna off temporal_mode answers too -
+        // NaT a value of its own, the smallest, sorted first as pandas'
+        // modes; it bailed to the general path, which sorted a NaT tie last
+        // (pandas [NaT, 2021-03-02], fp [2021-03-02, NaT]).
         let with_nat = series(DType::datetime64_naive(), &[1, nat, nat]);
-        assert!(with_nat.temporal_mode(false).unwrap().is_none());
-        let counted = with_nat.mode_with_dropna(false).unwrap();
+        let counted = with_nat
+            .temporal_mode(false)
+            .unwrap()
+            .expect("a typed mode");
         assert_eq!(counted.len(), 1);
         assert!(counted.column.values()[0].is_missing());
+        let tie = series(DType::datetime64_naive(), &[2, nat, 2, nat, 1]);
+        let modes = tie.mode_with_dropna(false).unwrap();
+        assert_eq!(modes.len(), 2);
+        assert!(modes.column.values()[0].is_missing());
+        assert_eq!(modes.column.values()[1], Scalar::Datetime64(2));
+        // NEGATIVE: with dropna on the NaT rows are no value, and any other
+        // column is the tally's.
+        let modes = tie.mode_with_dropna(true).unwrap();
+        assert_eq!(modes.column.values(), &[Scalar::Datetime64(2)]);
         let ints = Series::from_values("i", vec![0_i64.into()], vec![Scalar::Int64(4)]).unwrap();
         assert!(ints.temporal_mode(true).unwrap().is_none());
     }

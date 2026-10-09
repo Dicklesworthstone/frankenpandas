@@ -30110,6 +30110,21 @@ impl PySeries {
             let scalar = py_to_scalar(py, other)?;
             return wrap_series(self.inner.compare_scalar(&scalar, op));
         }
+        // A text (object) column against a string compares each row to it
+        // (Column::compare_scalar: a missing row false, true under !=, as
+        // pandas' object comparison) - the string was broadcast to a Series
+        // of a String a row and the two compared a pair at a time (t ==
+        // 'beta' 0.75x pandas over 200k rows holding None;
+        // br-frankenpandas-knu1r). pandas' `string` dtype answers its own
+        // nullable boolean through the broadcast.
+        if self.inner.dtype() == DType::Utf8
+            && !self.inner.is_categorical()
+            && !self.inner.column().is_pandas_string()
+            && let Ok(text) = other.cast::<pyo3::types::PyString>()
+        {
+            let scalar = Scalar::Utf8(text.to_str()?.to_owned());
+            return wrap_series(self.inner.compare_scalar(&scalar, op));
+        }
         if let Some(result) = temporal_scalar_comparison(py, &self.inner, other, op)? {
             return Ok(result);
         }
