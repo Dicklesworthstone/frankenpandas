@@ -3671,31 +3671,66 @@ fn percentile_with_interpolation(
 /// duplicated() of a float Series took the Scalar path (0.11x pandas on
 /// round keys; br-frankenpandas-bss5q.3).
 fn float_duplicate_flags(data: &[f64], validity: &ValidityMask, keep: DuplicateKeep) -> Vec<bool> {
-    let n = data.len();
-    let missing = |i: usize| !validity.get(i) || data[i].is_nan();
+    // A column with no invalid row is missing only at its NaN; any other
+    // reads its validity a word at a time (a get a row was a tenth of a
+    // dedup; br-frankenpandas-lsn8d).
     let key = |i: usize| spread_float_bits(if data[i] == 0.0 { 0 } else { data[i].to_bits() });
+    if validity.count_invalid() == 0 {
+        return float_duplicate_flags_by(data.len(), |i| data[i].is_nan(), key, keep);
+    }
+    let words = validity.packed_words_for_scan();
+    let missing = |i: usize| (words[i / 64] >> (i % 64)) & 1 == 0 || data[i].is_nan();
+    float_duplicate_flags_by(data.len(), missing, key, keep)
+}
+
+/// [`float_duplicate_flags`] of `n` rows by their `missing` test and `key`.
+/// The table is sized for the rows - as pandas sizes its hashtable, min(n,
+/// 2**20) - once the first PROBE rows show them mostly distinct: growing it
+/// rehashed a fifth of s.drop_duplicates() at a million, and sizing it up
+/// front cost a column of few values the allocation (br-frankenpandas-lsn8d).
+fn float_duplicate_flags_by(
+    n: usize,
+    missing: impl Fn(usize) -> bool,
+    key: impl Fn(usize) -> u64,
+    keep: DuplicateKeep,
+) -> Vec<bool> {
+    // The rows whose distinct values decide the table's size.
+    const PROBE: usize = 1 << 14;
+    let capacity = n.min(1 << 20);
     let mut flags = vec![false; n];
     match keep {
         DuplicateKeep::First | DuplicateKeep::Last => {
             let mut seen: FxHashSet<u64> = FxHashSet::default();
             let mut seen_missing = false;
-            let mut mark = |i: usize| {
-                flags[i] = if missing(i) {
-                    std::mem::replace(&mut seen_missing, true)
+            let repeat = |i: usize, seen: &mut FxHashSet<u64>, seen_missing: &mut bool| {
+                if missing(i) {
+                    std::mem::replace(seen_missing, true)
                 } else {
                     !seen.insert(key(i))
-                };
+                }
             };
-            if matches!(keep, DuplicateKeep::Last) {
-                (0..n).rev().for_each(&mut mark);
-            } else {
-                (0..n).for_each(&mut mark);
+            // The rows in the order their kept row is met: the first PROBE,
+            // the table sized by what they show, then the rest.
+            let last = matches!(keep, DuplicateKeep::Last);
+            let row = |k: usize| if last { n - 1 - k } else { k };
+            let probed = n.min(PROBE);
+            for k in 0..probed {
+                flags[row(k)] = repeat(row(k), &mut seen, &mut seen_missing);
+            }
+            if seen.len() > PROBE / 2 {
+                seen.reserve(capacity.saturating_sub(seen.len()));
+            }
+            for k in probed..n {
+                flags[row(k)] = repeat(row(k), &mut seen, &mut seen_missing);
             }
         }
         DuplicateKeep::None => {
             let mut counts: FxHashMap<u64, usize> = FxHashMap::default();
             let mut missing_count = 0_usize;
             for i in 0..n {
+                if i == PROBE && counts.len() > PROBE / 2 {
+                    counts.reserve(capacity.saturating_sub(counts.len()));
+                }
                 if missing(i) {
                     missing_count += 1;
                 } else {
@@ -32198,16 +32233,18 @@ impl Series {
                 .column
                 .as_i64_slice()
                 .expect("flags imply an i64 slice");
-            let labels_src = self.index.labels();
-            let mut labels: Vec<IndexLabel> = Vec::new();
+            let mut positions: Vec<usize> = Vec::new();
             let mut kept: Vec<i64> = Vec::new();
             for (i, &is_dup) in flags.iter().enumerate() {
                 if !is_dup {
-                    labels.push(labels_src[i].clone());
+                    positions.push(i);
                     kept.push(data[i]);
                 }
             }
-            let index = self.index.relabeled(labels);
+            // The index taken at the kept rows: a row MultiIndex stays one
+            // and a run keeps its freq, as pandas' mask getitem (relabeling
+            // made a MultiIndex text labels; br-frankenpandas-lsn8d).
+            let index = self.index.take_owned(positions);
             return Self::new(
                 self.name.clone(),
                 index,
@@ -32226,19 +32263,17 @@ impl Series {
                 .column
                 .as_datetime64_slice()
                 .expect("flags imply a datetime64 slice");
-            let labels_src = self.index.labels();
-            let mut labels: Vec<IndexLabel> = Vec::new();
+            let mut positions: Vec<usize> = Vec::new();
             let mut kept: Vec<i64> = Vec::new();
             for (i, &is_dup) in flags.iter().enumerate() {
                 if !is_dup {
-                    labels.push(labels_src[i].clone());
+                    positions.push(i);
                     kept.push(data[i]);
                 }
             }
-            let index = self.index.relabeled(labels);
             return Self::new(
                 self.name.clone(),
-                index,
+                self.index.take_owned(positions),
                 Column::from_datetime64_values(kept),
             );
         }
@@ -32251,19 +32286,17 @@ impl Series {
                 .column
                 .as_timedelta64_slice()
                 .expect("flags imply a timedelta64 slice");
-            let labels_src = self.index.labels();
-            let mut labels: Vec<IndexLabel> = Vec::new();
+            let mut positions: Vec<usize> = Vec::new();
             let mut kept: Vec<Scalar> = Vec::new();
             for (i, &is_dup) in flags.iter().enumerate() {
                 if !is_dup {
-                    labels.push(labels_src[i].clone());
+                    positions.push(i);
                     kept.push(Scalar::Timedelta64(data[i]));
                 }
             }
-            let index = self.index.relabeled(labels);
             return Self::new(
                 self.name.clone(),
-                index,
+                self.index.take_owned(positions),
                 Column::new(DType::Timedelta64, kept)?,
             );
         }
@@ -32330,11 +32363,8 @@ impl Series {
                     }
                 }
             }
-            let labels_src = self.index.labels();
-            let labels: Vec<IndexLabel> = indices.iter().map(|&i| labels_src[i].clone()).collect();
-            let index = self.index.relabeled(labels);
             let column = self.column.take_positions(&indices);
-            return Self::new(self.name.clone(), index, column);
+            return Self::new(self.name.clone(), self.index.take_owned(indices), column);
         }
 
         // Typed Float64 dedup (all-valid OR nullable): the generic path below
@@ -32354,10 +32384,10 @@ impl Series {
         {
             let flags = float_duplicate_flags(data, validity, keep);
             let indices: Vec<usize> = (0..data.len()).filter(|&i| !flags[i]).collect();
-            let labels_src = self.index.labels();
-            let labels: Vec<IndexLabel> = indices.iter().map(|&i| labels_src[i].clone()).collect();
-            let index = self.index.relabeled(labels);
+            // The kept rows' labels taken by position (a RangeIndex's by its
+            // arithmetic), where each was cloned out of the made labels.
             let column = self.column.take_positions(&indices);
+            let index = self.index.take_owned(indices);
             return Self::new(self.name.clone(), index, column);
         }
 
@@ -33018,13 +33048,13 @@ impl Series {
         // (s.rolling('1D') over a fresh index 0.68x pandas at 200k;
         // br-frankenpandas-lsn8d).
         let bounds = if let Some(nanos) = self.index().datetime64_label_values() {
-            offset_window(window, nanos.iter().map(|&ns| Some(ns)), closed, center)?
+            offset_window(window, &nanos, closed, center)?
         } else {
-            let times = self.index().labels().iter().map(|label| match label {
+            let times = axis_times(self.index().labels().iter().map(|label| match label {
                 IndexLabel::Datetime64(v) | IndexLabel::Timedelta64(v) => Some(*v),
                 _ => None,
-            });
-            offset_window(window, times, closed, center)?
+            }));
+            offset_window(window, &times, closed, center)?
         };
         // pandas defaults min_periods to 1 for offset windows.
         Ok(Rolling::with_bounds(self, bounds, min_periods.unwrap_or(1)))
@@ -35334,20 +35364,29 @@ pub fn offset_window_bounds(
 ) -> Vec<(usize, usize)> {
     let left_closed = closed.left_closed();
     let right_closed = closed.right_closed();
-    let mut bounds = Vec::with_capacity(ts.len());
     let (mut start, mut first_at) = (0_usize, 0_usize);
-    for (i, &t) in ts.iter().enumerate() {
-        let start_bound = t.saturating_sub(offset);
-        while start < i && (ts[start] < start_bound || (!left_closed && ts[start] == start_bound)) {
-            start += 1;
-        }
-        while ts[first_at] < t {
-            first_at += 1;
-        }
-        let end = if right_closed { i + 1 } else { first_at };
-        bounds.push((start.min(end), end));
-    }
-    bounds
+    ts.iter()
+        .enumerate()
+        .map(|(i, &t)| {
+            let start_bound = t.saturating_sub(offset);
+            while start < i
+                && (ts[start] < start_bound || (!left_closed && ts[start] == start_bound))
+            {
+                start += 1;
+            }
+            // Only a window open on the right reads the first row at `t`
+            // (every row was scanned for it).
+            let end = if right_closed {
+                i + 1
+            } else {
+                while ts[first_at] < t {
+                    first_at += 1;
+                }
+                first_at
+            };
+            (start.min(end), end)
+        })
+        .collect()
 }
 
 /// pandas' variable-window indexer centred (`rolling('3D', center=True)`)
@@ -35410,10 +35449,18 @@ pub fn centered_offset_window_bounds(
         .collect()
 }
 
-/// A time-based window's per-row bounds over `times` (a datetime-like axis,
-/// `None` where a value is not one), as pandas' `rolling('7D', closed=)`:
-/// `window` a positive duration ('180D', '12h', '90min', ISO-8601, ... as
-/// [`fp_types::Timedelta::parse`] reads them) over monotonic times.
+/// The times of a datetime-like axis read a value at a time for
+/// [`offset_window`]: i64::MIN (its missing time) where a value is not one.
+fn axis_times(times: impl Iterator<Item = Option<i64>>) -> Vec<i64> {
+    times.map(|time| time.unwrap_or(i64::MIN)).collect()
+}
+
+/// A time-based window's per-row bounds over `ts` (a datetime-like axis's
+/// instants, i64::MIN where a time is missing or not one), as pandas'
+/// `rolling('7D', closed=)`: `window` a positive duration ('180D', '12h',
+/// '90min', ISO-8601, ... as [`fp_types::Timedelta::parse`] reads them) over
+/// monotonic times. A typed axis's instants are read where they are (they
+/// were pushed into a fresh Vec one at a time; br-frankenpandas-lsn8d).
 ///
 /// Errors (as `CompatibilityRejected`) when the window does not parse or is
 /// not strictly positive, when a time is missing or not datetime-like
@@ -35422,7 +35469,7 @@ pub fn centered_offset_window_bounds(
 /// values must be monotonic`).
 fn offset_window(
     window: &str,
-    times: impl IntoIterator<Item = Option<i64>>,
+    ts: &[i64],
     closed: IntervalClosed,
     center: bool,
 ) -> Result<Vec<(usize, usize)>, FrameError> {
@@ -35434,18 +35481,12 @@ fn offset_window(
             "rolling: offset window '{window}' must be a positive duration"
         )));
     }
-    let mut ts: Vec<i64> = Vec::new();
-    for time in times {
-        match time {
-            Some(v) if v != i64::MIN => ts.push(v),
-            _ => {
-                return Err(FrameError::CompatibilityRejected(format!(
-                    "rolling: offset window '{window}' requires a datetime-like \
-                     (Datetime64/Timedelta64, non-NaT) index; pandas raises \
-                     'window must be an integer 0 or greater'"
-                )));
-            }
-        }
+    if ts.contains(&i64::MIN) {
+        return Err(FrameError::CompatibilityRejected(format!(
+            "rolling: offset window '{window}' requires a datetime-like \
+             (Datetime64/Timedelta64, non-NaT) index; pandas raises \
+             'window must be an integer 0 or greater'"
+        )));
     }
     if ts.windows(2).any(|w| w[0] > w[1]) {
         return Err(FrameError::CompatibilityRejected(
@@ -35453,9 +35494,9 @@ fn offset_window(
         ));
     }
     if center {
-        return Ok(centered_offset_window_bounds(&ts, offset_nanos, closed));
+        return Ok(centered_offset_window_bounds(ts, offset_nanos, closed));
     }
-    Ok(offset_window_bounds(&ts, offset_nanos, closed))
+    Ok(offset_window_bounds(ts, offset_nanos, closed))
 }
 
 /// Which scalar the compensated online variance state emits: raw variance,
@@ -45478,21 +45519,9 @@ fn dense_groupby_diff_f64_by_key(
         }
         return (out, fp_columnar::ValidityMask::from_words(words, n));
     }
-    let mut hist = vec![0.0_f64; range.saturating_mul(periods)];
-    let mut ring = ShiftRing::new(range, periods);
-    let mut out = vec![0.0_f64; n];
-    let mut words = vec![0u64; n.div_ceil(64)];
-    for row in 0..n {
-        let off = (keys[row] as i128 - min as i128) as usize;
-        let v = vals[row];
-        let (slot, filled) = ring.step(off);
-        if filled {
-            out[row] = v - hist[slot];
-            words[row / 64] |= 1u64 << (row % 64);
-        }
-        hist[slot] = v;
-    }
-    (out, fp_columnar::ValidityMask::from_words(words, n))
+    // The values hold no NaN, so the NaN ring reads an unfilled slot as
+    // missing (br-frankenpandas-knu1r).
+    dense_groupby_diff_nan_f64_ring_by_key(keys, min, range, vals, periods)
 }
 
 /// Key-offset sibling of [`dense_groupby_shift_f64`] (see
@@ -45523,21 +45552,9 @@ fn dense_groupby_shift_f64_by_key(
         }
         return (out, fp_columnar::ValidityMask::from_words(words, n));
     }
-    let mut hist = vec![0.0_f64; range.saturating_mul(periods)];
-    let mut ring = ShiftRing::new(range, periods);
-    let mut out = vec![0.0_f64; n];
-    let mut words = vec![0u64; n.div_ceil(64)];
-    for row in 0..n {
-        let off = (keys[row] as i128 - min as i128) as usize;
-        let v = vals[row];
-        let (slot, filled) = ring.step(off);
-        if filled {
-            out[row] = hist[slot];
-            words[row / 64] |= 1u64 << (row % 64);
-        }
-        hist[slot] = v;
-    }
-    (out, fp_columnar::ValidityMask::from_words(words, n))
+    // The values hold no NaN, so the NaN ring reads an unfilled slot as
+    // missing (br-frankenpandas-knu1r).
+    dense_groupby_shift_nan_f64_ring_by_key(keys, min, range, vals, periods)
 }
 
 fn dense_groupby_diff_f64(
@@ -45681,6 +45698,75 @@ impl ValidityWordWriter {
         }
         fp_columnar::ValidityMask::from_words(self.words, len)
     }
+}
+
+/// Grouped `shift(periods)` by an int64 key's offset over a float column
+/// missing exactly at its NaN (all-valid, or nullable with
+/// `nan_missing_exact`): each group's ring holds NaN until written, so an
+/// unfilled slot and a missing source read alike as missing, and the ring
+/// keeps a cursor a group and nothing else - [`ShiftRing`]'s count, a
+/// validity a slot and the source's mask a row made g.shift(2) 0.56x
+/// pandas at 1M rows (br-frankenpandas-knu1r). A missing row's datum is
+/// 0.0, as the other kernels write it.
+#[inline(never)]
+fn dense_groupby_shift_nan_f64_ring_by_key(
+    keys: &[i64],
+    min: i64,
+    range: usize,
+    data: &[f64],
+    periods: usize,
+) -> (Vec<f64>, fp_columnar::ValidityMask) {
+    let n = data.len();
+    let mut marks = ValidityWordWriter::new(n);
+    let mut hist = vec![f64::NAN; range.saturating_mul(periods)];
+    let mut cursors = vec![0_usize; range];
+    let out: Vec<f64> = keys
+        .iter()
+        .zip(data)
+        .enumerate()
+        .map(|(row, (&key, &value))| {
+            let off = (key as i128 - min as i128) as usize;
+            let at = cursors[off];
+            cursors[off] = if at + 1 == periods { 0 } else { at + 1 };
+            let held = std::mem::replace(&mut hist[off * periods + at], value);
+            let present = !held.is_nan();
+            marks.mark(row, present);
+            if present { held } else { 0.0 }
+        })
+        .collect();
+    (out, marks.finish(n))
+}
+
+/// [`dense_groupby_shift_nan_f64_ring_by_key`]'s `diff(periods)`: a row is
+/// present when it and the row `periods` back in its group both are (an
+/// inf - inf stays a present NaN, as the generic diff makes it).
+#[inline(never)]
+fn dense_groupby_diff_nan_f64_ring_by_key(
+    keys: &[i64],
+    min: i64,
+    range: usize,
+    data: &[f64],
+    periods: usize,
+) -> (Vec<f64>, fp_columnar::ValidityMask) {
+    let n = data.len();
+    let mut marks = ValidityWordWriter::new(n);
+    let mut hist = vec![f64::NAN; range.saturating_mul(periods)];
+    let mut cursors = vec![0_usize; range];
+    let out: Vec<f64> = keys
+        .iter()
+        .zip(data)
+        .enumerate()
+        .map(|(row, (&key, &value))| {
+            let off = (key as i128 - min as i128) as usize;
+            let at = cursors[off];
+            cursors[off] = if at + 1 == periods { 0 } else { at + 1 };
+            let held = std::mem::replace(&mut hist[off * periods + at], value);
+            let present = !held.is_nan() && !value.is_nan();
+            marks.mark(row, present);
+            if present { value - held } else { 0.0 }
+        })
+        .collect();
+    (out, marks.finish(n))
 }
 
 /// Gid sister of [`dense_groupby_shift_nullable_f64_by_key`].
@@ -52172,8 +52258,13 @@ impl SeriesGroupBy<'_> {
             if let Some(keys) = self.by.column.as_i64_slice()
                 && let Some((min, range)) = i64_dense_histogram_range(keys)
             {
-                let (out, mask) =
-                    dense_groupby_shift_nullable_f64_by_key(keys, min, range, data, validity, p);
+                // A column missing exactly at its NaN shifts through the NaN
+                // ring (br-frankenpandas-knu1r).
+                let (out, mask) = if self.series.column.nan_missing_exact() {
+                    dense_groupby_shift_nan_f64_ring_by_key(keys, min, range, data, p)
+                } else {
+                    dense_groupby_shift_nullable_f64_by_key(keys, min, range, data, validity, p)
+                };
                 let index = self.series.index.clone();
                 let column = Column::from_f64_values_with_validity(out, mask);
                 return Series::new(self.series.name(), index, column);
@@ -52291,9 +52382,15 @@ impl SeriesGroupBy<'_> {
             if let Some(keys) = self.by.column.as_i64_slice()
                 && let Some((min, range)) = i64_dense_histogram_range(keys)
             {
-                let (out, mask) = dense_groupby_diff_nullable_f64_by_key(
-                    keys, min, range, data, validity, periods,
-                );
+                // A column missing exactly at its NaN diffs through the NaN
+                // ring (br-frankenpandas-knu1r).
+                let (out, mask) = if self.series.column.nan_missing_exact() {
+                    dense_groupby_diff_nan_f64_ring_by_key(keys, min, range, data, periods)
+                } else {
+                    dense_groupby_diff_nullable_f64_by_key(
+                        keys, min, range, data, validity, periods,
+                    )
+                };
                 let index = self.series.index.clone();
                 let column = Column::from_f64_values_with_validity(out, mask);
                 return Series::new(self.series.name(), index, column);
@@ -95316,24 +95413,22 @@ impl DataFrame {
             None => self.index.datetime64_label_values(),
         };
         let bounds = match (nanos, on_column) {
-            (Some(nanos), _) => {
-                offset_window(window, nanos.iter().map(|&ns| Some(ns)), closed, center)?
-            }
+            (Some(nanos), _) => offset_window(window, &nanos, closed, center)?,
             (None, Some(column)) => offset_window(
                 window,
-                column.values().iter().map(|value| match value {
+                &axis_times(column.values().iter().map(|value| match value {
                     Scalar::Datetime64(v) | Scalar::Timedelta64(v) => Some(*v),
                     _ => None,
-                }),
+                })),
                 closed,
                 center,
             )?,
             (None, None) => offset_window(
                 window,
-                self.index.labels().iter().map(|label| match label {
+                &axis_times(self.index.labels().iter().map(|label| match label {
                     IndexLabel::Datetime64(v) | IndexLabel::Timedelta64(v) => Some(*v),
                     _ => None,
-                }),
+                })),
                 closed,
                 center,
             )?,
@@ -117608,9 +117703,13 @@ impl DataFrameGroupBy<'_> {
                     }
                     dense_groupby_diff_f64_by_key(keys, min, range, vals, periods)
                 } else if let Some((data, validity)) = col.as_f64_slice_with_validity() {
-                    dense_groupby_diff_nullable_f64_by_key(
-                        keys, min, range, data, validity, periods,
-                    )
+                    if col.nan_missing_exact() {
+                        dense_groupby_diff_nan_f64_ring_by_key(keys, min, range, data, periods)
+                    } else {
+                        dense_groupby_diff_nullable_f64_by_key(
+                            keys, min, range, data, validity, periods,
+                        )
+                    }
                 } else if let Some((data, validity)) = col.as_i64_slice_with_validity() {
                     // Int64 diff → Float64 (NaN at group starts), same as the
                     // Series i64 diff arm; was falling to the generic Scalar path
@@ -117697,9 +117796,13 @@ impl DataFrameGroupBy<'_> {
                         dense_groupby_shift_f64_by_key(keys, min, range, vals, periods);
                     Some(Column::from_f64_values_with_validity(out, mask))
                 } else if let Some((data, validity)) = col.as_f64_slice_with_validity() {
-                    let (out, mask) = dense_groupby_shift_nullable_f64_by_key(
-                        keys, min, range, data, validity, periods,
-                    );
+                    let (out, mask) = if col.nan_missing_exact() {
+                        dense_groupby_shift_nan_f64_ring_by_key(keys, min, range, data, periods)
+                    } else {
+                        dense_groupby_shift_nullable_f64_by_key(
+                            keys, min, range, data, validity, periods,
+                        )
+                    };
                     Some(Column::from_f64_values_with_validity(out, mask))
                 } else if let Some((data, validity)) = col.as_i64_slice_with_validity() {
                     let (out, mask) = dense_groupby_shift_nullable_i64_by_key(
@@ -134213,6 +134316,60 @@ mod tests {
             offset_window_bounds(&ts, 3 * day, IntervalClosed::Right)[2],
             (1, 3)
         );
+    }
+
+    #[test]
+    fn offset_window_bounds_match_a_naive_scan_lsn8d() {
+        // The two-pointer bounds equal their definition row by row for each
+        // `closed` over times holding repeats - a window open on the right
+        // ends before the first row at its time, a closed one at the row
+        // itself (only the open end scans for that row now;
+        // br-frankenpandas-lsn8d).
+        let minute = 60_000_000_000_i64;
+        let ts = [0, 60, 60, 60, 120, 150, 150, 240, 600].map(|m| m * minute);
+        for offset in [60 * minute, 90 * minute] {
+            for closed in [
+                IntervalClosed::Right,
+                IntervalClosed::Left,
+                IntervalClosed::Both,
+                IntervalClosed::Neither,
+            ] {
+                let naive: Vec<(usize, usize)> = (0..ts.len())
+                    .map(|i| {
+                        let bound = ts[i] - offset;
+                        let end = if closed.right_closed() {
+                            i + 1
+                        } else {
+                            ts.iter().position(|&t| t >= ts[i]).unwrap()
+                        };
+                        let start = (0..i)
+                            .find(|&j| {
+                                if closed.left_closed() {
+                                    ts[j] >= bound
+                                } else {
+                                    ts[j] > bound
+                                }
+                            })
+                            .unwrap_or(i);
+                        (start.min(end), end)
+                    })
+                    .collect();
+                assert_eq!(offset_window_bounds(&ts, offset, closed), naive);
+            }
+        }
+        // NEGATIVE: NaT in a typed DatetimeIndex is a missing time - the
+        // window is refused (pandas: window must be an integer 0 or greater).
+        let day = 86_400_000_000_000_i64;
+        let with_nat = Series::new(
+            "x",
+            Index::from_datetime64_values(vec![0, i64::MIN, 2 * day]),
+            Column::from_f64_values(vec![1.0, 2.0, 3.0]),
+        )
+        .unwrap();
+        assert!(matches!(
+            with_nat.rolling_offset("1D", None),
+            Err(FrameError::CompatibilityRejected(message)) if message.contains("datetime-like")
+        ));
     }
 
     #[test]
@@ -238488,6 +238645,60 @@ mod test_select_columns_perf_76e1fd {
             let missing = want.iter().filter(|expected| expected.is_none()).count();
             assert!(missing > 7 * periods, "p={periods}");
         }
+    }
+
+    #[test]
+    fn nan_ring_kernels_equal_the_validity_rings_knu1r() {
+        // Over a column missing exactly at its NaN, the NaN-ring shift / diff
+        // equal the validity-carrying ring kernels datum for datum and bit for
+        // bit, keys offset from a nonzero min, periods 1 - 5, an inf - inf a
+        // present NaN (br-frankenpandas-knu1r).
+        let n = 500_usize;
+        let keys: Vec<i64> = (0..n).map(|i| 40 + ((i * 7 + i / 11) % 9) as i64).collect();
+        let data: Vec<f64> = (0..n)
+            .map(|i| match i % 13 {
+                3 | 8 => f64::NAN,
+                5 => f64::INFINITY,
+                _ => i as f64 * 0.25 - 7.0,
+            })
+            .collect();
+        let validity = ValidityMask::from_words(
+            (0..n.div_ceil(64))
+                .map(|word| {
+                    (0..64)
+                        .filter(|bit| word * 64 + bit < n && !data[word * 64 + bit].is_nan())
+                        .fold(0_u64, |acc, bit| acc | (1 << bit))
+                })
+                .collect(),
+            n,
+        );
+        let same = |(a, am): (Vec<f64>, ValidityMask), (b, bm): (Vec<f64>, ValidityMask)| {
+            assert_eq!(am.packed_words_for_scan(), bm.packed_words_for_scan());
+            assert_eq!(
+                a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                b.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        };
+        for periods in 1..=5_usize {
+            same(
+                crate::dense_groupby_shift_nan_f64_ring_by_key(&keys, 40, 9, &data, periods),
+                crate::dense_groupby_shift_nullable_f64_ring_by_key(
+                    &keys, 40, 9, &data, &validity, periods,
+                ),
+            );
+            same(
+                crate::dense_groupby_diff_nan_f64_ring_by_key(&keys, 40, 9, &data, periods),
+                crate::dense_groupby_diff_nullable_f64_by_key(
+                    &keys, 40, 9, &data, &validity, periods,
+                ),
+            );
+        }
+        // NEGATIVE: a ring slot first read is missing - the first `periods`
+        // rows of each of the 9 groups and every NaN source - so more rows
+        // than the groups' heads are cleared.
+        let (_, mask) = crate::dense_groupby_shift_nan_f64_ring_by_key(&keys, 40, 9, &data, 3);
+        let cleared = (0..n).filter(|&row| !mask.get(row)).count();
+        assert!(cleared > 9 * 3, "{cleared}");
     }
 
     #[test]

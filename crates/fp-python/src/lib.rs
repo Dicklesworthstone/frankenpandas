@@ -63436,13 +63436,13 @@ fn time_selection_axis(axis: Option<&Bound<'_, PyAny>>, kind: &str, method: &str
 }
 
 /// Whether every label of `index` is a datetime or timedelta.
+/// Whether every label is a datetime or a duration, by the index's kinds -
+/// answered without its labels for a typed DatetimeIndex (each rolling by a
+/// time window made and scanned a label a row; br-frankenpandas-lsn8d).
 fn datetime_like_labels(index: &Index) -> bool {
-    index.labels().iter().all(|label| {
-        matches!(
-            label,
-            IndexLabel::Datetime64(_) | IndexLabel::Timedelta64(_)
-        )
-    })
+    index
+        .label_kinds()
+        .within(fp_index::LabelKinds::DATETIME64.union(fp_index::LabelKinds::TIMEDELTA64))
 }
 
 impl PyRolling {

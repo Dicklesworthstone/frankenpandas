@@ -32798,3 +32798,73 @@ def test_timedelta_index_from_arrays_and_take_like_pandas_lsn8d(case: str) -> No
         return ([str(span) for span in out], out.dtype.kind, out.freqstr, out.name)
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-lsn8d: a rolling by a time window reads a DatetimeIndex's /
+# TimedeltaIndex's instants where they are (its labels were made and scanned
+# to check the axis, its times pushed into a fresh buffer) - over repeated
+# times with each `closed`, NaT refused as pandas refuses it; NEGATIVE: an
+# int index and an object index of timestamps beside text raise as pandas.
+def _lsn8d_roll_minutes(m: Any) -> Any:
+    minutes = np.array([0, 60, 60, 60, 120, 150, 150, 240, 600], dtype="int64")
+    return m.Series(np.arange(9.0), index=m.DatetimeIndex(np.datetime64("2024-01-01", "ns") + minutes.astype("timedelta64[m]")))
+
+
+_LSN8D_ROLL_CASES = {
+    **{f"closed {closed} {window}": (lambda closed, window: lambda m: _lsn8d_roll_minutes(m).rolling(window, closed=closed).sum())(closed, window)
+       for closed in ["right", "left", "both", "neither"] for window in ["1h", "90min"]},
+    "centered": lambda m: _lsn8d_roll_minutes(m).rolling("2h", center=True).mean(),
+    "timedelta index": lambda m: m.Series([1.0, 2.0, 4.0], index=m.TimedeltaIndex(np.array([0, 30, 90], dtype="timedelta64[m]"))).rolling("1h").sum(),
+    "NaT in the index raises": lambda m: m.Series([1.0, 2.0, 3.0], index=m.DatetimeIndex(["2024-01-01", None, "2024-01-03"])).rolling("1D").sum(),
+    "int index raises": lambda m: m.Series([1.0, 2.0]).rolling("1h").sum(),
+    "object index raises": lambda m: m.Series([1.0, 2.0], index=m.Index([m.Timestamp("2024-01-01"), "x"], dtype=object)).rolling("1h").sum(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LSN8D_ROLL_CASES))
+def test_rolling_by_time_reads_instants_like_pandas_lsn8d(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _LSN8D_ROLL_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        return [None if v != v else v for v in out.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-lsn8d: drop_duplicates of a float / int / text / datetime
+# Series takes its index at the kept rows - a row MultiIndex stays one (it
+# became text labels 'a, 1'), a date_range run keeps its freq as pandas' mask
+# getitem keeps it (it was dropped) - and the float dedup keys NaN as one value
+# and -0.0 as 0.0; NEGATIVE: a repeat breaking the run keeps no freq, keep=False
+# drops every repeat, a text index stays text.
+_LSN8D_DEDUP_VALUES = {
+    "float": [1.0, 2.0, 1.0, 3.0],
+    "int": [1, 2, 1, 3],
+    "text": ["a", "b", "a", "c"],
+    "datetime": list(np.array(["2024-01-01", "2024-01-02", "2024-01-01", "2024-01-03"], dtype="datetime64[ns]")),
+}
+_LSN8D_DEDUP_INDEXES = {
+    "multiindex": lambda m: m.MultiIndex.from_tuples([("a", 1), ("a", 2), ("b", 1), ("b", 2)], names=["k", "n"]),
+    "date_range": lambda m: m.date_range("2024-01-01", periods=4, freq="D", name="d"),
+    "text": lambda m: m.Index(["w", "x", "y", "z"]),
+}
+_LSN8D_DEDUP_CASES = {
+    **{f"{dtype} over {index} keep {keep}": (lambda dtype, index, keep: lambda m: m.Series(_LSN8D_DEDUP_VALUES[dtype], index=_LSN8D_DEDUP_INDEXES[index](m)).drop_duplicates(keep=keep))(dtype, index, keep)
+       for dtype in _LSN8D_DEDUP_VALUES for index in _LSN8D_DEDUP_INDEXES for keep in ["first", "last", False]},
+    "float run keeps the freq": lambda m: m.Series([1.0, 2.0, 3.0, 3.0], index=m.date_range("2024-01-01", periods=4, freq="h")).drop_duplicates(),
+    "float NaN and signed zeros": lambda m: m.Series([1.0, np.nan, -0.0, np.nan, 0.0, 1.0], index=m.RangeIndex(6, name="r")).drop_duplicates(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LSN8D_DEDUP_CASES))
+def test_drop_duplicates_takes_its_index_like_pandas_lsn8d(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _LSN8D_DEDUP_CASES[case](m)
+        idx = out.index
+        return ([repr(v) for v in out.tolist()], str(out.dtype), [str(label) for label in idx], type(idx).__name__, list(idx.names), getattr(idx, "freqstr", None))
+
+    assert run(fpd) == run(pd)
