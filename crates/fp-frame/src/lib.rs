@@ -20451,6 +20451,54 @@ impl Series {
                 .collect();
             return self.with_values_preserving_index(out);
         }
+        // A float column missing exactly at its NaNs, every key and value a
+        // number: the same exact typed scan over its data, a gap's NaN equal
+        // to no key and kept - it fell to the Scalar path below (df.replace
+        // of 1M x 10 floats with 5% NaN 161 ms, pandas 47;
+        // br-frankenpandas-e186m).
+        if self.column.dtype() == DType::Float64
+            && self.column.nan_missing_exact()
+            && let Some((data, _)) = self.column.as_f64_slice_with_validity()
+            && let Some(pairs) = replacements
+                .iter()
+                .map(|(key, value)| match (key, value) {
+                    (Scalar::Float64(key), Scalar::Float64(value))
+                        if !key.is_nan() && !value.is_nan() =>
+                    {
+                        Some((*key, *value))
+                    }
+                    _ => None,
+                })
+                .collect::<Option<Vec<(f64, f64)>>>()
+        {
+            let mut lookup: FxHashMap<u64, f64> =
+                FxHashMap::with_capacity_and_hasher(pairs.len(), Default::default());
+            for &(key, value) in &pairs {
+                let key = if key == 0.0 { 0.0 } else { key };
+                lookup
+                    .entry(spread_float_bits(key.to_bits()))
+                    .or_insert(value);
+            }
+            let replaced = |x: f64| -> f64 {
+                if pairs.len() <= 16 {
+                    return pairs
+                        .iter()
+                        .find(|(key, _)| x == *key)
+                        .map_or(x, |(_, v)| *v);
+                }
+                if x.is_nan() {
+                    return x;
+                }
+                let bits = (if x == 0.0 { 0.0 } else { x }).to_bits();
+                lookup.get(&spread_float_bits(bits)).copied().unwrap_or(x)
+            };
+            let out: Vec<f64> = data.iter().map(|&x| replaced(x)).collect();
+            return Series::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::from_f64_values(out),
+            );
+        }
         // Per br-frankenpandas-5110c: O(n + m) hash fast path; see map() above.
         let index = try_build_mapping_index(replacements);
         let mut out = Vec::with_capacity(self.len());
@@ -83003,32 +83051,9 @@ impl DataFrame {
     /// Matches `df.fillna(value)` for scalar `value`.
     pub fn fillna(&self, fill_value: &Scalar) -> Result<Self, FrameError> {
         // Column-parallel (br-frankenpandas-applyall-par): each column's fill is
-        // independent, so spread the columns across par_map_column_positions_min
-        // scope workers. Bit-identical — same Column::fillna per column, reassembled in
-        // column order.
-        let filled = self.par_map_column_positions_min(16_384, |pos| {
-            fill_column(self.column_at(pos).expect("column in bounds"), fill_value)
-        })?;
-        let pairs: Vec<(String, Column)> = self
-            .column_names()
-            .into_iter()
-            .cloned()
-            .zip(filled)
-            .collect();
-        let column_order = pairs
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>();
-        let columns = ColumnStore::from_pairs(pairs);
-        let mut out = Self::new_with_axes(
-            self.index.clone(),
-            self.row_multiindex.clone(),
-            columns,
-            column_order,
-            self.column_multiindex.clone(),
-        )?;
-        out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out.with_labels_of(self))
+        // independent. The filled columns keep this frame's column axis whole
+        // (the names and their lookup were rebuilt; br-frankenpandas-e186m).
+        self.with_columns_mapped(|_, column| fill_column(column, fill_value))
     }
 
     /// Fill the first `limit` missing values of each column with
@@ -84432,56 +84457,23 @@ impl DataFrame {
     /// the last `-n` rows.
     pub fn head(&self, n: i64) -> Result<Self, FrameError> {
         let take = normalize_head_take(n, self.len());
-        // perf (br-frankenpandas-4dhu8): zero-copy contiguous slice per column +
-        // index (typed/affine backing) instead of full materialization to Vec.
-        let n_cols = self.num_columns();
-        let mut pairs = Vec::with_capacity(n_cols);
-        let mut order = Vec::with_capacity(n_cols);
-        for pos in 0..n_cols {
-            let name = self.column_name_at(pos).expect("column name in bounds");
-            let col = self.column_at(pos).expect("column in bounds");
-            order.push(name.clone());
-            pairs.push((name, col.slice(0, take)?));
-        }
-        let columns = ColumnStore::from_pairs(pairs);
-        let row_multiindex = self
-            .row_multiindex
-            .as_ref()
-            .map(|multiindex| {
-                let positions: Vec<usize> = (0..take).collect();
-                Self::project_row_multiindex(multiindex, &positions)
-            })
-            .transpose()?;
-        // Per br-frankenpandas-lhzot: preserve the index name.
-        let mut out = Self::new_with_axes(
-            self.index.slice(0, take).rename_index(self.index.name()),
-            row_multiindex,
-            columns,
-            order,
-            self.column_multiindex.clone(),
-        )?;
-        out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out.with_labels_of(self))
+        self.rows_window(0, take)
     }
 
-    /// Return the last `n` rows.
-    ///
-    /// Matches `df.tail(n)`. If `n` is negative, this returns all rows except
-    /// the first `-n` rows.
-    pub fn tail(&self, n: i64) -> Result<Self, FrameError> {
-        let (start, take) = normalize_tail_window(n, self.len());
-        // perf (br-frankenpandas-4dhu8): zero-copy contiguous slice per column +
-        // index (typed/affine backing) instead of full materialization to Vec.
-        let n_cols = self.num_columns();
-        let mut pairs = Vec::with_capacity(n_cols);
-        let mut order = Vec::with_capacity(n_cols);
-        for pos in 0..n_cols {
-            let name = self.column_name_at(pos).expect("column name in bounds");
-            let col = self.column_at(pos).expect("column in bounds");
-            order.push(name.clone());
-            pairs.push((name, col.slice(start, take)?));
-        }
-        let columns = ColumnStore::from_pairs(pairs);
+    /// Rows `start..start + take` (head / tail): a zero-copy contiguous slice
+    /// of each column and of the index (perf, br-frankenpandas-4dhu8) under
+    /// this frame's column axis kept whole - the names, their lookup and
+    /// the axes were rebuilt a column at a time (a 1000-column head 0.38 ms,
+    /// pandas' 0.007; br-frankenpandas-e186m). Per br-frankenpandas-lhzot
+    /// the index keeps its name.
+    fn rows_window(&self, start: usize, take: usize) -> Result<Self, FrameError> {
+        let columns = (0..self.num_columns())
+            .map(|pos| {
+                self.column_at(pos)
+                    .expect("column in bounds")
+                    .slice(start, take)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let row_multiindex = self
             .row_multiindex
             .as_ref()
@@ -84490,18 +84482,22 @@ impl DataFrame {
                 Self::project_row_multiindex(multiindex, &positions)
             })
             .transpose()?;
-        // Per br-frankenpandas-lhzot: preserve the index name.
-        let mut out = Self::new_with_axes(
+        Ok(self.with_gathered_rows(
             self.index
                 .slice(start, take)
                 .rename_index(self.index.name()),
             row_multiindex,
             columns,
-            order,
-            self.column_multiindex.clone(),
-        )?;
-        out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out.with_labels_of(self))
+        ))
+    }
+
+    /// Return the last `n` rows.
+    ///
+    /// Matches `df.tail(n)`. If `n` is negative, this returns all rows except
+    /// the first `-n` rows.
+    pub fn tail(&self, n: i64) -> Result<Self, FrameError> {
+        let (start, take) = normalize_tail_window(n, self.len());
+        self.rows_window(start, take)
     }
 
     /// Set the DataFrame index from an existing column.
@@ -89143,15 +89139,14 @@ impl DataFrame {
         if !computed.iter().all(Option::is_some) {
             return None;
         }
-        let mut new_columns = BTreeMap::new();
-        for (name, column) in self.column_order.iter().zip(computed) {
-            new_columns.insert(name.clone(), column.expect("all columns checked is_some"));
-        }
-        Some(Self::new_with_axis(
-            self.index.clone(),
-            new_columns,
-            self.column_order.clone(),
-        ))
+        // The columns by position under this frame's axes, a column and a
+        // row MultiIndex kept (a name-keyed rebuild made df.where(cond) of
+        // MultiIndex columns a plain Index; br-frankenpandas-e186m).
+        let columns = computed
+            .into_iter()
+            .map(|column| column.expect("all columns checked is_some"))
+            .collect();
+        Some(Ok(self.with_columns_at_positions(columns)))
     }
 
     /// Keep values where `cond` is True; replace others with `other`.
@@ -89226,15 +89221,14 @@ impl DataFrame {
         if !computed.iter().all(Option::is_some) {
             return None;
         }
-        let mut new_columns = BTreeMap::new();
-        for (name, column) in self.column_order.iter().zip(computed) {
-            new_columns.insert(name.clone(), column.expect("all columns checked is_some"));
-        }
-        Some(Self::new_with_axis(
-            self.index.clone(),
-            new_columns,
-            self.column_order.clone(),
-        ))
+        // The columns by position under this frame's axes, a column and a
+        // row MultiIndex kept (a name-keyed rebuild made df.where(cond) of
+        // MultiIndex columns a plain Index; br-frankenpandas-e186m).
+        let columns = computed
+            .into_iter()
+            .map(|column| column.expect("all columns checked is_some"))
+            .collect();
+        Some(Ok(self.with_columns_at_positions(columns)))
     }
 
     /// Align a `where`/`mask` condition column onto this frame's rows.
@@ -102856,9 +102850,9 @@ impl DataFrame {
         // all-valid float64 one a vectorized pass, a nullable one
         // `nullable_f64_diff`, a float32 one float32). A float64 loop of its
         // own read two mask bits per row (df[['x', 'y']].diff() 4.65 ms a
-        // million rows, two Series diffs 0.54) and made float32 float64.
-        let transformed = self.par_map_column_positions_min(16_384, |pos| {
-            let col = self.column_at(pos).expect("column in bounds");
+        // million rows, two Series diffs 0.54) and made float32 float64. The
+        // columns keep this frame's column axis whole (e186m).
+        self.with_columns_mapped(|pos, col| {
             if col.dtype().is_numeric()
                 || col.dtype().is_bool()
                 || col.dtype().is_datetime()
@@ -102872,27 +102866,7 @@ impl DataFrame {
             } else {
                 Ok(col.clone())
             }
-        })?;
-        let pairs: Vec<(String, Column)> = self
-            .column_names()
-            .into_iter()
-            .cloned()
-            .zip(transformed)
-            .collect();
-        let column_order = pairs
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect::<Vec<_>>();
-        let columns = ColumnStore::from_pairs(pairs);
-        let mut out = Self::new_with_axes(
-            self.index.clone(),
-            self.row_multiindex.clone(),
-            columns,
-            column_order,
-            self.column_multiindex.clone(),
-        )?;
-        out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out.with_labels_of(self))
+        })
     }
 
     /// First-order difference across columns per row.
@@ -107369,28 +107343,15 @@ impl DataFrame {
         // an Int64 column with all-Int64 keys). Bit-identical: a non-Float64 key
         // matches by exact `ScalarKey`, which equals `semantic_eq` for int/str/
         // bool; a Float64 key disables the hash path so the same linear
-        // `semantic_eq` (tolerant) scan runs, first match wins in both.
-        let n_cols = self.num_columns();
-        let mut pairs = Vec::with_capacity(n_cols);
-        let mut column_order = Vec::with_capacity(n_cols);
-        for pos in 0..n_cols {
-            let name = self.column_name_at(pos).expect("column in bounds");
-            let col = self.column_at(pos).expect("column in bounds");
-            let replaced = Series::new(name.clone(), self.index.clone(), col.clone())?
-                .replace(replacements)?;
-            pairs.push((name.clone(), replaced.column().clone()));
-            column_order.push(name.clone());
-        }
-        let columns = ColumnStore::from_pairs(pairs);
-        let mut out = Self::new_with_axes(
-            self.index.clone(),
-            self.row_multiindex.clone(),
-            columns,
-            column_order,
-            self.column_multiindex.clone(),
-        )?;
-        out.allows_duplicate_labels = self.allows_duplicate_labels;
-        Ok(out.with_labels_of(self))
+        // `semantic_eq` (tolerant) scan runs, first match wins in both. The
+        // replaced columns keep this frame's column axis whole, threaded by
+        // column (they were rebuilt with their names on one core; e186m).
+        self.with_columns_mapped(|_, col| {
+            Ok(Series::new("", self.index.clone(), col.clone())?
+                .replace(replacements)?
+                .column()
+                .clone())
+        })
     }
 
     /// Replace values on a per-column basis.

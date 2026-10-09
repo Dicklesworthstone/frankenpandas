@@ -33549,7 +33549,8 @@ def _e186m_axis_show(frame: Any) -> Any:
         [repr(label) for label in columns],
         getattr(columns, "names", None) and list(columns.names),
         [repr(label) for label in frame.index],
-        frame.to_numpy().tolist(),
+        # By repr: a NaN cell equals no other NaN in a list comparison.
+        [[repr(value) for value in row] for row in frame.to_numpy().tolist()],
     )
 
 
@@ -33590,5 +33591,66 @@ def test_series_mask_keys_like_pandas_wm1te(key: str) -> None:
         except Exception as error:  # noqa: BLE001 - the exception is the outcome
             return ("raise", type(error).__name__)
         return ([repr(label) for label in got.index], got.tolist())
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: head / tail / fillna / diff / replace keep the
+# frame's column axis whole (int labels, a RangeIndex, repeated names, the
+# axis name, a column MultiIndex, tz-aware labels), now carried by position
+# rather than rebuilt from the names, and a float column holding NaN replaces
+# its numbers on its typed data. NEGATIVE: the text axis; a NaN key, a NaN or
+# int value, a float32 column and a key no value has answer as pandas.
+_E186M_SAME_SHAPE = {
+    "head": lambda m, df: df.head(2),
+    "tail": lambda m, df: df.tail(3),
+    "fillna": lambda m, df: df.where(df > 5).fillna(-1.0),
+    "diff": lambda m, df: df.diff(),
+    "replace": lambda m, df: df.replace(5.0, 50.0),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", ["text", "int", "range", "repeated", "named", "multi", "zoned"])
+@pytest.mark.parametrize("op", list(_E186M_SAME_SHAPE))
+def test_same_shape_ops_keep_the_column_axis_like_pandas_e186m(kind: str, op: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _e186m_axis_show(_E186M_SAME_SHAPE[op](m, _e186m_axis_frames(m)[kind]))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+_E186M_NAN_REPLACE = {
+    "scalar": lambda s: s.replace(0.5, 9.0),
+    "zero key": lambda s: s.replace(0.0, 7.0),
+    "neg zero key": lambda s: s.replace(-0.0, 7.0),
+    "inf key": lambda s: s.replace(np.inf, 3.0),
+    "nan key": lambda s: s.replace(np.nan, 0.0),
+    "int key": lambda s: s.replace(1, 4.0),
+    "int value": lambda s: s.replace(0.5, 4),
+    "nan value": lambda s: s.replace(0.5, np.nan),
+    "dict": lambda s: s.replace({0.25: 8.0, 0.75: 6.0}),
+    "many keys": lambda s: s.replace({float(k) / 4: float(k) + 100 for k in range(40)}),
+    "list": lambda s: s.replace([0.5, 2.0], [1.5, 2.5]),
+    "missing key": lambda s: s.replace(123.0, 1.0),
+    "float32": lambda s: s.astype("float32").replace(0.5, 9.0),
+    "frame": lambda s: s.to_frame().assign(b=s * 2).replace(1.0, -1.0),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186M_NAN_REPLACE))
+def test_replace_on_nan_holding_floats_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        values = [0.5, np.nan, -0.0, 0.25, np.inf, 1.0, np.nan, 0.75, 2.0, 0.5]
+        try:
+            got = _E186M_NAN_REPLACE[case](m.Series(values, name="s"))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        dtypes = [str(d) for d in got.dtypes] if hasattr(got, "columns") else [str(got.dtype)]
+        return (dtypes, repr(got.to_numpy().tolist()))
 
     assert run(fpd) == run(pd)
