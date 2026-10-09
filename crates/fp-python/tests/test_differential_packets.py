@@ -33985,3 +33985,78 @@ def test_index_take_and_position_dimensions_like_pandas_fk877(case: str) -> None
             return (type(error).__name__, str(error) if isinstance(error, ValueError) else "")
 
     assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-n3ktr: index behaviors across kinds, as pandas'. A
+# TimedeltaIndex's labels print as its values do (whole days short, NaT as
+# NaT - a NaT label printed its sentinel); an object index's missing label
+# compares False (True under !=), ordering included; a CategoricalIndex's
+# argmin / argmax compare the codes and a repeated label's get_loc is a mask
+# or a slice; an IntervalIndex factorizes into an IntervalIndex and builds
+# from intervals and missing values (it dropped them); a bool index's
+# element is numpy's bool. NEGATIVE: a non-interval, non-missing element is
+# pandas' TypeError; an unordered CategoricalIndex's min is pandas'
+# TypeError; a missing key is KeyError.
+_N3KTRB_TD = ["1 days", None, "2h", "1 days"]
+_N3KTRB_CASES = {
+    "td labels with NaT, Series repr": lambda m: repr(m.Series([1, 2, 3, 4], index=m.TimedeltaIndex(_N3KTRB_TD))),
+    "td labels whole days, Series repr": lambda m: repr(m.Series([1, 2], index=m.TimedeltaIndex(["1 days", "2 days"]))),
+    "td labels with NaT, frame repr": lambda m: repr(m.DataFrame({"a": [1, 2]}, index=m.TimedeltaIndex(["1 days", None], name="t"))),
+    "td to_frame repr": lambda m: repr(m.TimedeltaIndex(_N3KTRB_TD, name="t").to_frame()),
+    "td column labels repr": lambda m: repr(m.DataFrame([[1, 2]], columns=m.TimedeltaIndex(["1 days", None]))),
+    "object == self": lambda m: list(m.Index(["b", "a", None, "c"]) == m.Index(["b", "a", None, "c"])),
+    "object != self": lambda m: list(m.Index(["b", "a", None, "c"]) != m.Index(["b", "a", None, "c"])),
+    "object < 'c'": lambda m: list(m.Index(["b", "a", None, "c"]) < "c"),
+    "object >= self": lambda m: list(m.Index(["b", "a", None, "c"]) >= m.Index(["b", "a", None, "c"])),
+    "object == None": lambda m: list(m.Index(["b", None]) == None),  # noqa: E711
+    "object != NaN": lambda m: list(m.Index(["b", None]) != np.nan),
+    "object == list": lambda m: list(m.Index(["b", None, "c"]) == ["b", None, "x"]),
+    "object no missing ==": lambda m: list(m.Index(["b", "a"]) == "a"),
+    "category argmin": lambda m: m.CategoricalIndex(["x", "y", "x", None]).argmin(),
+    "category argmax": lambda m: m.CategoricalIndex(["x", "y", "x", None]).argmax(),
+    "ordered category argmax": lambda m: m.CategoricalIndex(["x", "y", "x"], categories=["y", "x"], ordered=True).argmax(),
+    "category get_loc repeated": lambda m: m.CategoricalIndex(["x", "y", "x"]).get_loc("x"),
+    "category get_loc run": lambda m: m.CategoricalIndex(["x", "x", "y"]).get_loc("x"),
+    "category get_loc once": lambda m: m.CategoricalIndex(["x", "y", "x"]).get_loc("y"),
+    "category get_loc missing (NEGATIVE: KeyError)": lambda m: m.CategoricalIndex(["x", "y"]).get_loc("z"),
+    "category min unordered (NEGATIVE: TypeError)": lambda m: m.CategoricalIndex(["x", "y"]).min(),
+    "interval factorize": lambda m: m.IntervalIndex.from_tuples([(0, 1), (1, 2), (0, 1), None]).factorize(),
+    "interval factorize no sentinel": lambda m: m.IntervalIndex.from_tuples([(0, 1), None, (1, 2)]).factorize(use_na_sentinel=False),
+    "interval factorize sorted": lambda m: m.IntervalIndex.from_tuples([(1, 2), (0, 1), (1, 2)]).factorize(sort=True),
+    "IntervalIndex of a list with NaN": lambda m: m.IntervalIndex([m.Interval(0, 1), np.nan]),
+    "IntervalIndex of a list with None": lambda m: m.IntervalIndex([m.Interval(0, 1, closed="left"), None]),
+    "IntervalIndex of an Index with NaN": lambda m: m.IntervalIndex(m.Index([m.Interval(0, 1), np.nan])),
+    "IntervalIndex of intervals": lambda m: m.IntervalIndex([m.Interval(0, 1), m.Interval(1, 2)]),
+    "IntervalIndex of a number (NEGATIVE: TypeError)": lambda m: m.IntervalIndex([m.Interval(0, 1), 3]),
+    "bool index [0]": lambda m: m.Index([True, False])[0],
+    "bool index max": lambda m: m.Index([True, False]).max(),
+    "float equals copy": lambda m: m.Index([2.5, np.nan, 1.0]).equals(m.Index([2.5, np.nan, 1.0])),
+    "float equals ints": lambda m: m.Index([1.0, 2.0]).equals(m.Index([1, 2])),
+    "float equals other floats": lambda m: m.Index([1.0, 2.0]).equals(m.Index([1.0, 3.0])),
+    "float equals longer (NEGATIVE: Python bool)": lambda m: m.Index([1.0, 2.0]).equals(m.Index([1.0, 2.0, 3.0])),
+    "int equals floats (NEGATIVE: Python bool)": lambda m: m.Index([1, 2]).equals(m.Index([1.0, 2.0])),
+}
+
+
+def _n3ktrb_show(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return tuple(_n3ktrb_show(item) for item in value)
+    if isinstance(value, (pd.Index, fpd.Index)):
+        return (type(value).__name__, str(value.dtype), [repr(x) for x in value.tolist()])
+    if isinstance(value, np.ndarray):
+        return ("ndarray", str(value.dtype), [repr(x) for x in value.tolist()])
+    return (type(value).__name__, repr(value))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_N3KTRB_CASES))
+def test_index_behaviors_across_kinds_like_pandas_n3ktr(case: str) -> None:
+    def run(m: Any) -> Any:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                return _n3ktrb_show(_N3KTRB_CASES[case](m))
+            except Exception as error:  # noqa: BLE001 - the exception is the outcome
+                return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)

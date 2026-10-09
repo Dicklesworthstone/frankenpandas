@@ -885,6 +885,9 @@ fn pandas_aware_datetime_texts(values: &[Option<i64>], zone: &str) -> Vec<String
 /// after them.
 fn pandas_timedelta_text(nanos: i64, long: bool) -> String {
     const SECOND: i64 = 1_000_000_000;
+    if nanos == Timedelta::NAT {
+        return "NaT".to_owned();
+    }
     let days = nanos.div_euclid(86_400 * SECOND);
     let rest = nanos.rem_euclid(86_400 * SECOND);
     let (hours, minutes, seconds) = (
@@ -1635,6 +1638,28 @@ fn pandas_column_label_texts(labels: &[IndexLabel]) -> Vec<String> {
             .collect();
         return pandas_label_texts(&instants, None);
     }
+    // A TimedeltaIndex's header texts likewise: whole days short beside a
+    // NaT, as its values print (they printed each one's '00:00:00';
+    // br-frankenpandas-n3ktr).
+    if labels
+        .iter()
+        .any(|label| matches!(label, IndexLabel::Timedelta64(_)))
+        && all(|label| {
+            matches!(
+                label,
+                IndexLabel::Timedelta64(_) | IndexLabel::Null(NullKind::NaT)
+            )
+        })
+    {
+        let durations: Vec<IndexLabel> = labels
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Null(_) => IndexLabel::Timedelta64(Timedelta::NAT),
+                other => other.clone(),
+            })
+            .collect();
+        return pandas_label_texts(&durations, None);
+    }
     // A NaN among numbers is one of pandas' float labels ('NaN' in the
     // block; it printed 'nan' on its own; br-frankenpandas-qacqs).
     let numeric = |label: &IndexLabel| {
@@ -1738,6 +1763,39 @@ fn pandas_label_texts(labels: &[IndexLabel], zone: Option<&str>) -> Vec<String> 
             Some(zone) => pandas_aware_datetime_texts(&instants, zone),
             None => pandas_datetime_cells(&instants, false),
         };
+    }
+    // A TimedeltaIndex prints as its values do: whole days short ('1 days')
+    // unless one label has a time, NaT as NaT (a NaT label printed its
+    // sentinel, '-106752 days +00:12:43.145224192', and whole days their
+    // times; br-frankenpandas-n3ktr).
+    if labels
+        .iter()
+        .any(|label| matches!(label, IndexLabel::Timedelta64(_)))
+        && all(|label| {
+            matches!(
+                label,
+                IndexLabel::Timedelta64(_) | IndexLabel::Null(NullKind::NaT)
+            )
+        })
+    {
+        const DAY: i64 = 86_400_000_000_000;
+        let durations: Vec<Option<i64>> = labels
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Timedelta64(nanos) if *nanos != Timedelta::NAT => Some(*nanos),
+                _ => None,
+            })
+            .collect();
+        let long = durations.iter().flatten().any(|nanos| nanos % DAY != 0);
+        return durations
+            .iter()
+            .map(|nanos| {
+                nanos.map_or_else(
+                    || "NaT".to_owned(),
+                    |nanos| pandas_timedelta_text(nanos, long),
+                )
+            })
+            .collect();
     }
     labels
         .iter()
@@ -10553,9 +10611,12 @@ fn index_arg_extreme(
 }
 
 fn index_scalar_to_py(py: Python<'_>, index: &Index, label: &IndexLabel) -> PyResult<Py<PyAny>> {
+    // A bool label is numpy's bool as pandas returns it (np.True_; it was
+    // Python's True; br-frankenpandas-n3ktr).
     let numeric = |label: &IndexLabel| match label {
         IndexLabel::Int64(value) => Some(Scalar::Int64(*value)),
         IndexLabel::Float64(value) => Some(Scalar::Float64(value.0)),
+        IndexLabel::Bool(value) => Some(Scalar::Bool(*value)),
         _ => None,
     };
     // A MultiIndex row is the tuple of its levels' values, each numeric one
@@ -13568,11 +13629,73 @@ impl PyIndex {
         op: pyo3::class::basic::CompareOp,
     ) -> PyResult<Bound<'py, PyAny>> {
         let labels = index_ndarray(py, &self.inner)?;
-        let other = match plain_index_ref(other) {
-            Ok(index) => index_ndarray(py, &index.inner)?,
-            Err(_) => other.clone(),
+        let (other, other_missing) = match plain_index_ref(other) {
+            Ok(index) => {
+                let missing: Vec<bool> = index
+                    .inner
+                    .labels()
+                    .iter()
+                    .map(IndexLabel::is_missing)
+                    .collect();
+                (index_ndarray(py, &index.inner)?, Some(missing))
+            }
+            Err(_) => (other.clone(), None),
         };
-        labels.rich_compare(other, op)
+        if labels
+            .getattr("dtype")?
+            .getattr("kind")?
+            .extract::<String>()?
+            != "O"
+        {
+            return labels.rich_compare(other, op);
+        }
+        // An object index compares as pandas' object arrays do: a missing
+        // label (None, NaN, NaT, NA) on either side is False - True under
+        // != - and the rest compare as numpy's; numpy's object compare had
+        // None == None and raised TypeError ordering one
+        // (br-frankenpandas-n3ktr).
+        let len = self.inner.len();
+        let is_array = other_missing.is_some()
+            || (!other.is_instance_of::<pyo3::types::PyString>()
+                && other.hasattr("__len__")?
+                && other.len().ok() == Some(len));
+        let other_missing = match other_missing {
+            Some(missing) => missing,
+            None if is_array => other
+                .try_iter()?
+                .map(|item| py_scalar_is_missing(&item?))
+                .collect::<PyResult<Vec<bool>>>()?,
+            None => vec![py_scalar_is_missing(&other)?; len],
+        };
+        let missing: Vec<bool> = self
+            .inner
+            .labels()
+            .iter()
+            .zip(&other_missing)
+            .map(|(label, &theirs)| label.is_missing() || theirs)
+            .collect();
+        if missing.len() != len || !missing.contains(&true) {
+            return labels.rich_compare(other, op);
+        }
+        let np = py.import("numpy")?;
+        let present = np.call_method1("logical_not", (np.call_method1("asarray", (missing,))?,))?;
+        let out = np.call_method1(
+            "full",
+            (len, matches!(op, pyo3::class::basic::CompareOp::Ne)),
+        )?;
+        let other = if is_array {
+            let object = PyDict::new(py);
+            object.set_item("dtype", "object")?;
+            np.call_method("asarray", (other,), Some(&object))?
+                .get_item(&present)?
+        } else {
+            other
+        };
+        out.set_item(
+            &present,
+            labels.get_item(&present)?.rich_compare(other, op)?,
+        )?;
+        Ok(out)
     }
 
     fn __add__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -13871,9 +13994,25 @@ impl PyIndex {
     }
 
     /// pandas' `Index.equals`: same labels in the same order, names ignored;
-    /// anything that is not an Index is False (a list raised TypeError).
-    fn equals(&self, other: &Bound<'_, PyAny>) -> bool {
-        plain_index_ref(other).is_ok_and(|other| self.inner.equals(&other.inner))
+    /// anything that is not an Index is False (a list raised TypeError). A
+    /// float index beside a numeric one of its length answers numpy's bool,
+    /// as pandas' float comparison reduces to one (np.True_; it was True;
+    /// br-frankenpandas-n3ktr).
+    fn equals(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let Ok(other) = plain_index_ref(other) else {
+            return false.into_py_any(py);
+        };
+        let equal = self.inner.equals(&other.inner);
+        let float = |dtype: &str| dtype.starts_with("float");
+        let numeric =
+            |dtype: &str| float(dtype) || dtype.starts_with("int") || dtype.starts_with("uint");
+        if float(self.inner.dtype())
+            && numeric(other.inner.dtype())
+            && self.inner.len() == other.inner.len()
+        {
+            return numpy_scalar(py, &Scalar::Bool(equal));
+        }
+        equal.into_py_any(py)
     }
 
     #[getter]
@@ -23144,6 +23283,54 @@ pub struct PyCategoricalIndex {
 index_subclass_object!(PyCategoricalIndex);
 
 impl PyCategoricalIndex {
+    /// `op` ("min" / "max") as pandas' Categorical answers it: TypeError
+    /// unless ordered; else the category of the least / greatest code
+    /// present - NaN when none is, or under skipna=False beside a missing row.
+    fn categorical_extreme(
+        &self,
+        py: Python<'_>,
+        op: &str,
+        axis: Option<i64>,
+        skipna: bool,
+    ) -> PyResult<Py<PyAny>> {
+        one_dim_axis(axis)?;
+        if !self.inner.ordered() {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "Categorical is not ordered for operation {op}\nyou can use .as_ordered() to \
+                 change the Categorical to an ordered one\n"
+            )));
+        }
+        let codes = self.inner.codes();
+        if !skipna && codes.iter().any(Option::is_none) {
+            return f64::NAN.into_py_any(py);
+        }
+        let present = codes.into_iter().flatten();
+        let code = if op == "max" {
+            present.max()
+        } else {
+            present.min()
+        };
+        match code.and_then(|code| self.inner.categories().get(code)) {
+            Some(category) => index_scalar_to_py(py, &self.named_index(), category),
+            None => f64::NAN.into_py_any(py),
+        }
+    }
+
+    /// Its codes as an int64 index, a missing row NaN: what pandas' argmin
+    /// / argmax compare.
+    fn codes_index(&self) -> Index {
+        Index::new(
+            self.inner
+                .codes()
+                .into_iter()
+                .map(|code| {
+                    code.and_then(|code| i64::try_from(code).ok())
+                        .map_or(IndexLabel::Null(NullKind::NaN), IndexLabel::Int64)
+                })
+                .collect(),
+        )
+    }
+
     /// Its labels as an Index under its name, which a set op reads (the
     /// conversion dropped it; br-frankenpandas-ff5ik).
     fn named_index(&self) -> Index {
@@ -23660,12 +23847,14 @@ impl PyCategoricalIndex {
         categorical_result(py, &self.inner, out.inner)
     }
 
-    pub fn get_loc(&self, key: &Bound<'_, PyAny>) -> PyResult<usize> {
-        let label = py_to_index_label(key)?;
-        self.inner
-            .to_index()
-            .get_loc(&label)
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!("{key}")))
+    /// pandas' `get_loc` as a plain Index answers it: a label held once its
+    /// position, a repeated one a slice (consecutive) or a boolean mask (it
+    /// was the first position; br-frankenpandas-n3ktr).
+    pub fn get_loc(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        PyIndex {
+            inner: self.named_index(),
+        }
+        .get_loc(py, key)
     }
 
     pub fn get_indexer(&self, target: IndexArg) -> IndexerArray {
@@ -23968,11 +24157,15 @@ impl PyCategoricalIndex {
         categorical_result(py, &self.inner, self.inner.to_index().append(&other_idx))
     }
 
+    /// pandas' argmax: the codes compared - the categories' order, ordered
+    /// or not - a missing row skipped (it compared the values: TypeError
+    /// beside a missing one, the text order for an ordered index;
+    /// br-frankenpandas-n3ktr).
     #[pyo3(signature = (axis=None, skipna=true))]
     fn argmax(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
         index_arg_extreme(
             py,
-            &self.as_py_index().inner,
+            &self.codes_index(),
             "CategoricalIndex",
             true,
             axis,
@@ -23980,11 +24173,12 @@ impl PyCategoricalIndex {
         )
     }
 
+    /// pandas' argmin over the codes, as [`Self::argmax`].
     #[pyo3(signature = (axis=None, skipna=true))]
     fn argmin(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
         index_arg_extreme(
             py,
-            &self.as_py_index().inner,
+            &self.codes_index(),
             "CategoricalIndex",
             false,
             axis,
@@ -24187,14 +24381,19 @@ impl PyCategoricalIndex {
         self.as_py_index().map(py, mapper, na_action)
     }
 
+    /// pandas' max: an unordered index's TypeError, an ordered one's
+    /// greatest category present by the categories' order (it compared the
+    /// values: the text order, TypeError beside a missing one;
+    /// br-frankenpandas-n3ktr).
     #[pyo3(signature = (axis=None, skipna=true))]
     fn max(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
-        self.as_py_index().max(py, axis, skipna)
+        self.categorical_extreme(py, "max", axis, skipna)
     }
 
+    /// pandas' min, as [`Self::max`].
     #[pyo3(signature = (axis=None, skipna=true))]
     fn min(&self, py: Python<'_>, axis: Option<i64>, skipna: bool) -> PyResult<Py<PyAny>> {
-        self.as_py_index().min(py, axis, skipna)
+        self.categorical_extreme(py, "min", axis, skipna)
     }
 
     fn notna(&self) -> BoolArray {
@@ -89488,14 +89687,43 @@ impl PyIntervalIndex {
         if let Some(d) = data {
             if let Ok(list) = d.extract::<Vec<PyInterval>>() {
                 intervals = list;
-            } else if let Ok(seq) = d.cast::<pyo3::types::PySequence>() {
-                let len = seq.len()?;
-                for i in 0..len {
-                    let item = seq.get_item(i)?;
-                    if let Ok(iv) = item.extract::<PyInterval>() {
-                        intervals.push(iv);
+            } else {
+                // Any iterable of intervals (an Index too), a missing value
+                // a missing interval - its closed side the others', the
+                // endpoints then float64 as pandas' - and anything else
+                // pandas' TypeError: a missing value was dropped, and an
+                // Index (not a sequence) gave no intervals at all
+                // (br-frankenpandas-n3ktr).
+                let mut items: Vec<Option<PyInterval>> = Vec::new();
+                for item in d.try_iter()? {
+                    let item = item?;
+                    if let Ok(interval) = item.extract::<PyInterval>() {
+                        items.push(Some(interval));
+                    } else if py_scalar_is_missing(&item)? {
+                        items.push(None);
+                    } else {
+                        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                            "category, object, and string subtypes are not supported for IntervalIndex",
+                        ));
                     }
                 }
+                let closed = items
+                    .iter()
+                    .flatten()
+                    .next()
+                    .map_or("right", |interval| interval.closed.as_str())
+                    .to_owned();
+                let any_missing = items.iter().any(Option::is_none);
+                intervals = items
+                    .into_iter()
+                    .map(|item| match item {
+                        Some(mut interval) => {
+                            interval.int_endpoints &= !any_missing;
+                            interval
+                        }
+                        None => PyInterval::missing(&closed),
+                    })
+                    .collect();
             }
         }
         // Intervals of Timestamps / Timedeltas have no IntervalIndex yet
@@ -90117,6 +90345,47 @@ impl PyIntervalIndex {
             intervals,
             name: self.name.clone(),
         }
+    }
+
+    /// pandas' `factorize(sort=False, use_na_sentinel=True)`: the codes as a
+    /// plain Index gives them, the uniques an IntervalIndex (the base class
+    /// answered an object Index; br-frankenpandas-n3ktr).
+    #[pyo3(signature = (sort=false, use_na_sentinel=true))]
+    fn factorize<'py>(
+        slf: &Bound<'py, Self>,
+        sort: bool,
+        use_na_sentinel: bool,
+    ) -> PyResult<(Bound<'py, PyAny>, Self)> {
+        let pair = slf
+            .py()
+            .get_type::<PyIndex>()
+            .getattr("factorize")?
+            .call1((slf, sort, use_na_sentinel))?;
+        let this = slf.borrow();
+        let closed = this
+            .intervals
+            .iter()
+            .find(|interval| !interval.is_missing())
+            .map_or("right", |interval| interval.closed.as_str())
+            .to_owned();
+        let intervals = pair
+            .get_item(1)?
+            .try_iter()?
+            .map(|item| {
+                let item = item?;
+                Ok(match item.extract::<PyRef<'_, PyInterval>>() {
+                    Ok(interval) => interval.clone(),
+                    Err(_) => PyInterval::missing(&closed),
+                })
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok((
+            pair.get_item(0)?,
+            Self {
+                intervals,
+                name: None,
+            },
+        ))
     }
 
     /// pandas' `unique()`: each interval once, first seen first.
@@ -100434,8 +100703,15 @@ mod tests {
                 },
             )
             .expect("index object"); // ubs:ignore — test fixture
+            // equals answers a Python bool (numpy's for a float index).
+            let equals = |other: &Bound<'_, PyAny>| {
+                idx.equals(py, other)
+                    .expect("equals") // ubs:ignore — test fixture
+                    .extract::<bool>(py)
+                    .expect("a bool") // ubs:ignore — test fixture
+            };
             // pandas' equals ignores names.
-            assert!(idx.equals(other.as_any()));
+            assert!(equals(other.as_any()));
 
             let non_matching = Bound::new(
                 py,
@@ -100448,10 +100724,10 @@ mod tests {
                 },
             )
             .expect("index object"); // ubs:ignore — test fixture
-            assert!(!idx.equals(non_matching.as_any()));
+            assert!(!equals(non_matching.as_any()));
             // NEGATIVE: a list of the same labels is not an Index.
             let listed = PyList::new(py, [10, 20, 30]).expect("list"); // ubs:ignore — test fixture
-            assert!(!idx.equals(listed.as_any()));
+            assert!(!equals(listed.as_any()));
         });
     }
 
