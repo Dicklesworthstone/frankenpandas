@@ -16103,7 +16103,7 @@ impl PyDatetimeIndex {
                 "Index indices must be integers, slices, boolean masks or integer arrays",
             ));
         };
-        let picked = self.inner.nanos_at(&positions);
+        let picked = self.inner.nanos_at_owned(positions);
         let freq = self.inner.freq().filter(|_| run);
         let inner = self.with_nanos(picked).inner.with_freq(freq);
         Ok(Py::new(py, Self { inner })?.into_any())
@@ -17004,7 +17004,10 @@ impl PyDatetimeIndex {
     /// step keep the freq scaled by it, as pandas.
     fn take(&self, indices: Positions) -> PyResult<Self> {
         let positions = take_positions(indices.0, self.inner.len())?;
-        let inner = self.inner.take(&positions).map_err(index_error_to_py)?;
+        let inner = self
+            .inner
+            .take_owned(positions)
+            .map_err(index_error_to_py)?;
         Ok(Self { inner })
     }
 

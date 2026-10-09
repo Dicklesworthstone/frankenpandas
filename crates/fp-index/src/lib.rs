@@ -9494,6 +9494,41 @@ impl DatetimeIndex {
             .collect()
     }
 
+    /// [`Self::nanos_at`] of owned positions: the instants collected into
+    /// their buffer (a usize and an i64 share a layout) - a second
+    /// million-entry buffer was a page-faulted allocation a take
+    /// (idx.take(perm) 0.46x pandas at 1M; br-frankenpandas-lsn8d).
+    #[must_use]
+    pub fn nanos_at_owned(&self, positions: Vec<usize>) -> Vec<i64> {
+        if let Some(range) = self.index.labels.datetime64_affine_range() {
+            return positions.into_iter().map(|p| range.value_at(p)).collect();
+        }
+        if let Some(held) = self.index.labels.datetime64_nanos() {
+            return positions.into_iter().map(|p| held[p]).collect();
+        }
+        let labels = self.index.labels();
+        positions
+            .into_iter()
+            .map(|p| match labels[p] {
+                IndexLabel::Datetime64(n) => n,
+                _ => i64::MIN,
+            })
+            .collect()
+    }
+
+    /// [`Self::take`] of owned positions, its instants gathered into them
+    /// (see [`Self::nanos_at_owned`]).
+    pub fn take_owned(&self, positions: Vec<usize>) -> Result<Self, IndexError> {
+        let length = self.index.len();
+        if let Some(&position) = positions.iter().find(|&&p| p >= length) {
+            return Err(IndexError::OutOfBounds { position, length });
+        }
+        let freq = take_freq(self.freq(), &positions);
+        Ok(self
+            .with_instants(self.nanos_at_owned(positions))
+            .with_freq(freq))
+    }
+
     /// Repeat each label `repeats` times, matching `pd.DatetimeIndex.repeat()`.
     #[must_use]
     pub fn repeat(&self, repeats: usize) -> Self {
@@ -26173,6 +26208,57 @@ mod tests {
         assert_eq!(
             result.labels(),
             &[IndexLabel::Int64(1), IndexLabel::Int64(3)]
+        );
+    }
+
+    #[test]
+    fn datetime_take_owned_gathers_into_its_positions_lsn8d() {
+        // take_owned / nanos_at_owned equal take / nanos_at over a typed
+        // index, a date_range's range (a steady step keeps its freq scaled)
+        // and labels holding NaT (br-frankenpandas-lsn8d).
+        let day = 86_400_000_000_000_i64;
+        let typed = super::DatetimeIndex::new((0..50).map(|k| k * day + 7).collect());
+        let ranged = super::DatetimeIndex::from_index(
+            Index::from_datetime64_affine_range(3 * day, day, 50)
+                .unwrap()
+                .with_freq(Some("D".to_owned())),
+        )
+        .unwrap();
+        let labelled = super::DatetimeIndex::from_index(Index::new(
+            (0..50_i64)
+                .map(|k| {
+                    if k % 9 == 4 {
+                        IndexLabel::Datetime64(i64::MIN)
+                    } else {
+                        IndexLabel::Datetime64(k * day)
+                    }
+                })
+                .collect(),
+        ))
+        .unwrap();
+        for index in [&typed, &ranged, &labelled] {
+            for positions in [vec![49_usize, 0, 7, 7, 31], vec![2, 4, 6, 8], Vec::new()] {
+                assert_eq!(
+                    index.nanos_at_owned(positions.clone()),
+                    index.nanos_at(&positions)
+                );
+                let owned = index.take_owned(positions.clone()).unwrap();
+                let borrowed = index.take(&positions).unwrap();
+                assert_eq!(owned.values(), borrowed.values());
+                assert_eq!(owned.freq(), borrowed.freq());
+            }
+            // NEGATIVE: a position past the end is the same error.
+            assert!(matches!(
+                index.take_owned(vec![1, 50]),
+                Err(super::IndexError::OutOfBounds {
+                    position: 50,
+                    length: 50
+                })
+            ));
+        }
+        assert_eq!(
+            ranged.take_owned(vec![2, 4, 6]).unwrap().freq().as_deref(),
+            Some("2D")
         );
     }
 
