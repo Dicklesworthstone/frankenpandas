@@ -35973,3 +35973,149 @@ def _flatten_e186mra(values: Any) -> list:
     for value in values:
         out.extend(_flatten_e186mra(value) if isinstance(value, list) else [value])
     return out
+
+
+# br-frankenpandas-784vs: reset_index of an index mixing ints and text is an
+# object column holding both, ints as ints (they were stringified) - single
+# index, MultiIndex level, Series. NEGATIVE: an all-int index stays int64,
+# all-text object of str, ints with floats float64.
+def _reset784_frame(m: Any, labels: Any) -> Any:
+    return m.DataFrame({"a": [0, 1, 0, 1], "b": labels, "v": [1.0, 2.0, 3.0, 4.0]})
+
+
+_RESET784_CASES = {
+    "single mixed": lambda m: _reset784_frame(m, ["b0", 1, "b2", 3]).set_index("b").reset_index(),
+    "multi mixed": lambda m: _reset784_frame(m, ["b0", 1, "b2", 3]).set_index(["a", "b"]).reset_index(),
+    "series mixed": lambda m: _reset784_frame(m, [7, "x", 9, "y"]).set_index("b")["v"].reset_index(),
+    "negative ints mixed": lambda m: _reset784_frame(m, [-(10**12), "x", 0, "y"]).set_index("b").reset_index(),
+    "all int (NEGATIVE)": lambda m: _reset784_frame(m, [5, 6, 7, 8]).set_index("b").reset_index(),
+    "all text (NEGATIVE)": lambda m: _reset784_frame(m, ["p", "q", "r", "s"]).set_index("b").reset_index(),
+    "int and float (NEGATIVE)": lambda m: _reset784_frame(m, [1, 2.5, 3, 4]).set_index("b").reset_index(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_RESET784_CASES))
+def test_reset_index_keeps_mixed_labels_784vs(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _RESET784_CASES[case](m)
+        return [(str(name), str(out[name].dtype), [repr(v) for v in out[name].tolist()]) for name in out.columns]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-je5w1: where / mask with other=None passed explicitly keep
+# Python's None in an object column (pandas' omitted other is NaN); a float
+# column's None is NaN and an int column's None makes float64 NaN, as pandas.
+# NEGATIVE: an omitted other is NaN in an object column, np.nan is NaN.
+_WHEREJE_VALUES = {
+    "object": ["b", "a", "c", "a"],
+    "float": [1.5, -2.0, 3.0, 4.5],
+    "int": [1, -2, 3, 5],
+}
+
+
+def _whereje_case(m: Any, kind: str, method: str, other: Any, frame: bool) -> Any:
+    s = m.Series(_WHEREJE_VALUES[kind])
+    cond = m.Series([True, False, False, True])
+    target = s.to_frame("c") if frame else s
+    cond = cond.to_frame("c") if frame else cond
+    if method == "mask":
+        cond = ~cond
+    call = getattr(target, method)
+    out = call(cond) if other == "omitted" else call(cond, other)
+    out = out["c"] if frame else out
+    return str(out.dtype), [repr(v) for v in out.tolist()]
+
+
+_WHEREJE_CASES = {
+    f"{frame and 'frame' or 'series'} {method} {kind} {label}": (lambda m, kind=kind, method=method, other=other, frame=frame: _whereje_case(m, kind, method, other, frame))
+    for frame in (False, True)
+    for method in ("where", "mask")
+    for kind in ("object", "float", "int")
+    for label, other in (("None", None), ("omitted (NEGATIVE)", "omitted"), ("nan (NEGATIVE)", np.nan))
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WHEREJE_CASES))
+def test_where_mask_explicit_none_je5w1(case: str) -> None:
+    assert _WHEREJE_CASES[case](fpd) == _WHEREJE_CASES[case](pd)
+
+
+# br-frankenpandas-lhc48: where / mask of an int64 column stay int64 when
+# the other is a whole number the column can hold, and come back to int64
+# (with pandas' FutureWarning) when an other it cannot hold left every value
+# whole. NEGATIVE: a fraction or NaN in the result keeps float64, a where
+# replacing nothing keeps int64 without a warning, float columns never
+# downcast.
+def _wherelh_frame(m: Any) -> Any:
+    return m.DataFrame({"z": [1, -2, 3, 5]})
+
+
+_WHERELH_CASES = {
+    "df where 2.0": lambda m: _wherelh_frame(m).where(_wherelh_frame(m) > 1, 2.0),
+    "df where df*2.0": lambda m: _wherelh_frame(m).where(_wherelh_frame(m) > 1, _wherelh_frame(m) * 2.0),
+    "s where 2.0": lambda m: _wherelh_frame(m)["z"].where(_wherelh_frame(m)["z"] > 1, 2.0),
+    "s where 1e18": lambda m: _wherelh_frame(m)["z"].where(_wherelh_frame(m)["z"] > 1, 1e18),
+    "s mask s*2.0": lambda m: _wherelh_frame(m)["z"].mask(_wherelh_frame(m)["z"] > 1, _wherelh_frame(m)["z"] * 2.0),
+    "df mask 2.0": lambda m: _wherelh_frame(m).mask(_wherelh_frame(m) > 1, 2.0),
+    "s where fraction only at kept rows": lambda m: _wherelh_frame(m)["z"].where(m.Series([False, False, True, True]), m.Series([2.0, 4.0, 0.5, 0.5])),
+    "s where nan only at kept rows": lambda m: _wherelh_frame(m)["z"].where(m.Series([False, False, True, True]), m.Series([2.0, 4.0, np.nan, np.nan])),
+    "df where frame nan at kept rows": lambda m: _wherelh_frame(m).where(_wherelh_frame(m) < 2, m.DataFrame({"z": [np.nan, np.nan, 6.0, 10.0]})),
+    "df where 2.5 (NEGATIVE)": lambda m: _wherelh_frame(m).where(_wherelh_frame(m) > 1, 2.5),
+    "df mask 0.5 (NEGATIVE)": lambda m: _wherelh_frame(m).mask(_wherelh_frame(m) > 1, 0.5),
+    "s where nan (NEGATIVE)": lambda m: _wherelh_frame(m)["z"].where(_wherelh_frame(m)["z"] > 1, np.nan),
+    "s where 2.5 replacing nothing (NEGATIVE)": lambda m: _wherelh_frame(m)["z"].where(_wherelh_frame(m)["z"] > -5, 2.5),
+    "float column (NEGATIVE)": lambda m: m.Series([1.0, -2.0, 3.0]).where(m.Series([1.0, -2.0, 3.0]) > 1, 2.0),
+    "s clip lower 2.0": lambda m: _wherelh_frame(m)["z"].clip(lower=2.0),
+    "s clip lower 1.5 (NEGATIVE)": lambda m: _wherelh_frame(m)["z"].clip(lower=1.5),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_WHERELH_CASES))
+def test_where_int64_downcast_lhc48(case: str) -> None:
+    def run(m: Any) -> Any:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            out = _WHERELH_CASES[case](m)
+        warned = any("Downcasting behavior in Series and DataFrame methods" in str(w.message) for w in caught)
+        series = out if not hasattr(out, "columns") else out.iloc[:, 0]
+        return str(series.dtype), [repr(v) for v in series.tolist()], warned
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-6w07o: .loc of a list mixing a bool with other labels on
+# an index holding no bool reads the bool as the int it equals (True == 1);
+# a missing Python int past int64 is named as the int. NEGATIVE: a list of
+# only bools is still a mask, and an index holding bool labels keeps them
+# as labels.
+def _loc6w_frame(m: Any, index: Any = None) -> Any:
+    return m.DataFrame({"x": [10, 11, 12, 13]}, index=index)
+
+
+def _loc6w_error(m: Any, key: Any) -> Any:
+    try:
+        _loc6w_frame(m).loc[key]
+    except KeyError as error:
+        return str(error)
+    return "no error"
+
+
+_LOC6W_CASES = {
+    "true beside int": lambda m: _loc6w_frame(m).loc[[True, 2]]["x"].tolist(),
+    "false beside int": lambda m: _loc6w_frame(m).loc[[3, False]]["x"].tolist(),
+    "series true beside int": lambda m: _loc6w_frame(m)["x"].loc[[2, True]].tolist(),
+    "int index true": lambda m: _loc6w_frame(m, [5, 1, 0, 7]).loc[[True, 7]]["x"].tolist(),
+    "missing past int64 message": lambda m: _loc6w_error(m, [1, 2**70]),
+    "only bools mask (NEGATIVE)": lambda m: _loc6w_frame(m).loc[[True, False, True, False]]["x"].tolist(),
+    "bool labels kept (NEGATIVE)": lambda m: _loc6w_frame(m, ["a", True, "b", False]).loc[[True, "a"]]["x"].tolist(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LOC6W_CASES))
+def test_loc_bool_beside_int_labels_6w07o(case: str) -> None:
+    assert _LOC6W_CASES[case](fpd) == _LOC6W_CASES[case](pd)

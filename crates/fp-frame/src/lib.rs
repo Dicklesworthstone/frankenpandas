@@ -2313,7 +2313,7 @@ fn categorical_index_column(
         .map(|label| ranks.get(label).copied().unwrap_or(-1))
         .collect();
     let meta = CategoricalMetadata {
-        categories: DataFrame::index_labels_to_scalars(&categories.categories),
+        categories: index_labels_to_column_scalars(&categories.categories),
         ordered: categories.ordered,
     };
     let positions = Index::new_known_unique_int64_unit_range(0, codes.len());
@@ -5450,20 +5450,6 @@ fn index_label_to_scalar(label: &IndexLabel) -> Scalar {
     }
 }
 
-fn index_label_to_utf8_scalar(label: &IndexLabel) -> Scalar {
-    match label {
-        IndexLabel::Int64(v) => Scalar::Utf8(v.to_string()),
-        IndexLabel::Float64(_) | IndexLabel::Bool(_) => Scalar::Utf8(label.to_string()),
-        IndexLabel::Utf8(v) => Scalar::Utf8(v.clone()),
-        IndexLabel::Timedelta64(ns) => Scalar::Utf8(Timedelta::format(*ns)),
-        IndexLabel::Datetime64(ns) => Scalar::Utf8(format_datetime_ns(*ns)),
-        IndexLabel::Object(object) => Scalar::Utf8(object.to_string()),
-        IndexLabel::Period(_) | IndexLabel::Interval(_) | IndexLabel::Null(_) => {
-            Scalar::Utf8(label.to_string())
-        }
-    }
-}
-
 /// An object (Utf8-backed) column as pandas' `infer_objects` re-reads it:
 /// ints are int64 (float64 beside a missing value), ints and floats
 /// float64, bools bool (object beside a missing value), instants
@@ -5503,20 +5489,11 @@ fn inferred_object_column(column: &Column) -> Result<Option<Column>, FrameError>
     Ok((inferred.dtype() != DType::Utf8).then_some(inferred))
 }
 
-/// Index labels as the values of a column (`reset_index`): typed, except that
-/// a mix of Int64 and Utf8 labels becomes all-Utf8 so the column can hold it.
+/// Index labels as the values of a column (`reset_index`), each label its
+/// own value: a mix of ints and text is an object column holding both, as
+/// pandas' (the ints were stringified; br-frankenpandas-784vs).
 fn index_labels_to_column_scalars(labels: &[IndexLabel]) -> Vec<Scalar> {
-    let has_int = labels
-        .iter()
-        .any(|label| matches!(label, IndexLabel::Int64(_)));
-    let has_utf8 = labels
-        .iter()
-        .any(|label| matches!(label, IndexLabel::Utf8(_)));
-    if has_int && has_utf8 {
-        labels.iter().map(index_label_to_utf8_scalar).collect()
-    } else {
-        labels.iter().map(index_label_to_scalar).collect()
-    }
+    labels.iter().map(index_label_to_scalar).collect()
 }
 
 /// Per br-frankenpandas-41edff: render Float64 the same way pandas to_csv
@@ -79371,20 +79348,6 @@ impl DataFrame {
         Ok(names)
     }
 
-    fn index_labels_to_scalars(labels: &[IndexLabel]) -> Vec<Scalar> {
-        let has_int = labels
-            .iter()
-            .any(|label| matches!(label, IndexLabel::Int64(_)));
-        let has_utf8 = labels
-            .iter()
-            .any(|label| matches!(label, IndexLabel::Utf8(_)));
-        if has_int && has_utf8 {
-            labels.iter().map(index_label_to_utf8_scalar).collect()
-        } else {
-            labels.iter().map(index_label_to_scalar).collect()
-        }
-    }
-
     // The store is the lazy store under lazy-transpose-view, a ColumnStore
     // without.
     #[allow(clippy::useless_conversion)]
@@ -85630,7 +85593,7 @@ impl DataFrame {
                     Some(column) => column,
                     None => {
                         let level_index = row_multiindex.get_level_values(level)?;
-                        Column::from_values(Self::index_labels_to_scalars(level_index.labels()))?
+                        Column::from_values(index_labels_to_column_scalars(level_index.labels()))?
                     }
                 };
                 level_columns.push((column_name.clone(), level_column));
@@ -85678,7 +85641,7 @@ impl DataFrame {
             Some(column) => column,
             None => match self.index.int64_label_values() {
                 Some(view) => Column::from_i64_values_owned(view.as_ref().clone()),
-                None => Column::from_values(Self::index_labels_to_scalars(self.index.labels()))?,
+                None => Column::from_values(index_labels_to_column_scalars(self.index.labels()))?,
             },
         };
         // A narrow index's column keeps its width, a masked index's its
@@ -138903,12 +138866,12 @@ mod tests {
             out.index().labels(),
             &[IndexLabel::from(0_i64), IndexLabel::from(1_i64)]
         );
+        // pandas 2.2.3 keeps the int in the object column (it was
+        // stringified to "2"; br-frankenpandas-784vs).
+        assert_eq!(out.column("index").unwrap().dtype(), DType::Utf8);
         assert_eq!(
             out.column("index").unwrap().values(),
-            &[
-                Scalar::Utf8("row-1".to_owned()),
-                Scalar::Utf8("2".to_owned())
-            ]
+            &[Scalar::Utf8("row-1".to_owned()), Scalar::Int64(2)]
         );
         assert_eq!(
             out.column("v").unwrap().values(),

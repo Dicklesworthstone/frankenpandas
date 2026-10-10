@@ -32332,8 +32332,10 @@ fn normalize_series_other(
     let Some(obj) = other_obj else {
         return Ok(SeriesOrScalar::Scalar(Scalar::Null(NullKind::NaN)));
     };
+    // An explicit None is Python's None - kept by an object column - where
+    // pandas' omitted default is NaN (br-frankenpandas-je5w1).
     if obj.is_none() {
-        return Ok(SeriesOrScalar::Scalar(Scalar::Null(NullKind::NaN)));
+        return Ok(SeriesOrScalar::Scalar(Scalar::Null(NullKind::Null)));
     }
     if obj.is_callable() {
         let py_s = Py::new(
@@ -32500,6 +32502,158 @@ fn keep_object_frame(source: &DataFrame, result: DataFrame) -> DataFrame {
         }
     }
     out
+}
+
+/// `value` as the int64 it equals: a whole number within int64, else None.
+#[allow(clippy::cast_possible_truncation)] // whole and within int64, checked
+fn whole_int64(value: f64) -> Option<i64> {
+    (value.fract() == 0.0
+        && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&value))
+    .then_some(value as i64)
+}
+
+/// pandas' `np_can_hold_element` of an int64 column for every value of
+/// `column`: ints, and floats that are whole numbers within int64 - a NaN, a
+/// fraction or anything else cannot be held.
+fn int64_holds_column(column: &Column) -> bool {
+    if column.as_i64_slice().is_some() {
+        return true;
+    }
+    if let Some(floats) = column.as_f64_slice() {
+        return floats.iter().all(|&value| whole_int64(value).is_some());
+    }
+    column.values().iter().all(int64_holds)
+}
+
+/// [`int64_holds_column`] of one value.
+fn int64_holds(value: &Scalar) -> bool {
+    match value {
+        Scalar::Int64(_) => true,
+        Scalar::Float64(value) => whole_int64(*value).is_some(),
+        _ => false,
+    }
+}
+
+/// pandas 2.2's where / mask downcast (`Block._maybe_downcast(caller=
+/// "where")`): an int64 column whose result came back float64 is int64 again
+/// when every value is present and a whole number within int64 - fp kept
+/// float64 (br-frankenpandas-lhc48). Narrow and nullable ints are left as
+/// they are. None when nothing downcasts.
+fn where_int64_downcast(source: &Column, result: &Column) -> Option<Column> {
+    if source.dtype() != DType::Int64
+        || source.width().is_some()
+        || result.dtype() != DType::Float64
+    {
+        return None;
+    }
+    let ints: Option<Vec<i64>> = match result.as_f64_slice() {
+        Some(floats) => floats.iter().map(|&value| whole_int64(value)).collect(),
+        None => result
+            .values()
+            .iter()
+            .map(|cell| match cell {
+                Scalar::Float64(value) => whole_int64(*value),
+                Scalar::Int64(value) => Some(*value),
+                _ => None,
+            })
+            .collect(),
+    };
+    ints.map(Column::from_i64_values)
+}
+
+/// Whether a where (`mask` false) or mask (`mask` true) over `cond` replaces
+/// some row: a where's false or missing condition, a mask's true one.
+fn where_replaces(cond: &Column, mask: bool) -> bool {
+    match cond.as_bool_slice() {
+        Some(flags) => flags.contains(&mask),
+        None => cond.values().iter().any(|cell| match cell {
+            Scalar::Bool(flag) => *flag == mask,
+            _ => !mask,
+        }),
+    }
+}
+
+/// pandas 2.2's FutureWarning for a where / mask / clip downcast: raised when
+/// the column could not hold `other` (pandas coerced it to float64 first),
+/// some row was replaced and the result came back to int64.
+fn warn_where_downcast(py: Python<'_>) -> PyResult<()> {
+    PyErr::warn(
+        py,
+        &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+        c"Downcasting behavior in Series and DataFrame methods 'where', 'mask', and 'clip' is deprecated. In a future version this will not infer object dtypes or cast all-round floats to integers. Instead call result.infer_objects(copy=False) for object inference, or cast round floats explicitly. To opt-in to the future behavior, set `pd.set_option('future.no_silent_downcasting', True)`",
+        1,
+    )
+}
+
+/// A Series where / mask `result` over `source` with pandas' int64 downcast
+/// ([`where_int64_downcast`]) and its warning; `cond` is the rows kept.
+fn series_where_downcast(
+    py: Python<'_>,
+    source: &Series,
+    result: Series,
+    cond: &Series,
+    other: &SeriesOrScalar,
+) -> PyResult<Series> {
+    let Some(column) = where_int64_downcast(source.column(), result.column()) else {
+        return Ok(result);
+    };
+    let holdable = match other {
+        SeriesOrScalar::Scalar(value) => int64_holds(value),
+        SeriesOrScalar::Series(other) => int64_holds_column(other.column()),
+    };
+    if !holdable && where_replaces(cond.column(), false) {
+        warn_where_downcast(py)?;
+    }
+    Series::new(result.name(), result.index().clone(), column).map_err(frame_error_to_py)
+}
+
+/// [`series_where_downcast`] for each int64 column of a frame's where
+/// (`mask` false) or mask (`mask` true) `result`: a cond frame's column says
+/// whether a row was replaced (one it lacks: every row for a where, none for
+/// a mask); a cond Series is taken as replacing some row.
+fn df_where_downcast(
+    py: Python<'_>,
+    source: &DataFrame,
+    result: DataFrame,
+    cond: &DfCond,
+    other: &DfOther,
+    mask: bool,
+) -> PyResult<DataFrame> {
+    let mut out = result;
+    let mut warn = false;
+    for name in source.column_names() {
+        let (Some(before), Some(after)) = (source.column(name), out.column(name)) else {
+            continue;
+        };
+        let Some(column) = where_int64_downcast(before, after) else {
+            continue;
+        };
+        let holdable = match other {
+            DfOther::Scalar(value) => int64_holds(value),
+            DfOther::Series(other) => int64_holds_column(other.column()),
+            DfOther::DataFrame(other) => {
+                other.len() == source.len()
+                    && other.index() == source.index()
+                    && other.column(name).is_some_and(int64_holds_column)
+            }
+        };
+        let replaced = match cond {
+            DfCond::DataFrame(cond) => cond
+                .column(name)
+                .map_or(!mask && !source.is_empty(), |flags| {
+                    where_replaces(flags, mask)
+                }),
+            DfCond::Series(_) => true,
+        };
+        warn |= !holdable && replaced;
+        out = out
+            .with_column(name.clone(), column)
+            .map_err(frame_error_to_py)?;
+    }
+    if warn {
+        warn_where_downcast(py)?;
+    }
+    Ok(out)
 }
 
 impl PySeries {
@@ -38905,12 +39059,12 @@ impl PySeries {
     // mutable one only to write in place: `s.where(s)` (cond, or other,
     // the Series itself) raised RuntimeError 'Already mutably borrowed'
     // (br-frankenpandas-vzoct).
-    #[pyo3(signature = (cond, other=None, inplace=false, axis=None, level=None))]
+    #[pyo3(signature = (cond, other=Passed(None), inplace=false, axis=None, level=None))]
     fn r#where(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         cond: &Bound<'_, PyAny>,
-        other: Option<&Bound<'_, PyAny>>,
+        other: Passed<'_>,
         inplace: Option<bool>,
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
@@ -38925,8 +39079,9 @@ impl PySeries {
         let res_inner = {
             let this = slf.borrow();
             let cond_series = normalize_series_cond(py, &this.inner, cond)?;
-            let other_val = normalize_series_other(py, &this.inner, other)?;
+            let other_val = normalize_series_other(py, &this.inner, other.0.as_ref())?;
             let result = execute_series_where(&this.inner, &cond_series, &other_val)?;
+            let result = series_where_downcast(py, &this.inner, result, &cond_series, &other_val)?;
             if inplace.unwrap_or(false) {
                 warn_inplace_upcast(py, &this.inner, &result, &other_val)?;
             }
@@ -38940,12 +39095,12 @@ impl PySeries {
         }
     }
 
-    #[pyo3(signature = (cond, other=None, inplace=false, axis=None, level=None))]
+    #[pyo3(signature = (cond, other=Passed(None), inplace=false, axis=None, level=None))]
     fn mask(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         cond: &Bound<'_, PyAny>,
-        other: Option<&Bound<'_, PyAny>>,
+        other: Passed<'_>,
         inplace: Option<bool>,
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
@@ -38961,8 +39116,10 @@ impl PySeries {
             let this = slf.borrow();
             let cond_series = normalize_series_cond(py, &this.inner, cond)?;
             let not_cond_series = cond_series.not().map_err(frame_error_to_py)?;
-            let other_val = normalize_series_other(py, &this.inner, other)?;
+            let other_val = normalize_series_other(py, &this.inner, other.0.as_ref())?;
             let result = execute_series_where(&this.inner, &not_cond_series, &other_val)?;
+            let result =
+                series_where_downcast(py, &this.inner, result, &not_cond_series, &other_val)?;
             if inplace.unwrap_or(false) {
                 warn_inplace_upcast(py, &this.inner, &result, &other_val)?;
             }
@@ -45883,8 +46040,9 @@ fn normalize_df_other(
     let Some(obj) = other_obj else {
         return Ok(DfOther::Scalar(Scalar::Null(NullKind::NaN)));
     };
+    // An explicit None is Python's None (br-frankenpandas-je5w1).
     if obj.is_none() {
-        return Ok(DfOther::Scalar(Scalar::Null(NullKind::NaN)));
+        return Ok(DfOther::Scalar(Scalar::Null(NullKind::Null)));
     }
     if obj.is_callable() {
         let py_df = Py::new(
@@ -55712,12 +55870,12 @@ impl PyDataFrame {
         self.dot(py, other)
     }
 
-    #[pyo3(signature = (cond, other=None, inplace=false, axis=None, level=None))]
+    #[pyo3(signature = (cond, other=Passed(None), inplace=false, axis=None, level=None))]
     fn r#where(
         &mut self,
         py: Python<'_>,
         cond: &Bound<'_, PyAny>,
-        other: Option<&Bound<'_, PyAny>>,
+        other: Passed<'_>,
         inplace: Option<bool>,
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
@@ -55725,11 +55883,13 @@ impl PyDataFrame {
         unsupported_params("DataFrame.where", &[("level", level.is_none())])?;
         let ax = parse_axis_param_for_type(axis, "DataFrame")?;
         let cond_norm = normalize_df_cond(py, &self.inner, cond)?;
-        let other_norm = normalize_df_other(py, &self.inner, other)?;
+        let other_norm = normalize_df_other(py, &self.inner, other.0.as_ref())?;
         let res_inner = keep_object_frame(
             &self.inner,
             execute_df_where(&self.inner, &cond_norm, &other_norm, ax)?,
         );
+        let res_inner =
+            df_where_downcast(py, &self.inner, res_inner, &cond_norm, &other_norm, false)?;
         if inplace.unwrap_or(false) {
             self.inner = res_inner;
             Ok(None)
@@ -55738,12 +55898,12 @@ impl PyDataFrame {
         }
     }
 
-    #[pyo3(signature = (cond, other=None, inplace=false, axis=None, level=None))]
+    #[pyo3(signature = (cond, other=Passed(None), inplace=false, axis=None, level=None))]
     fn mask(
         &mut self,
         py: Python<'_>,
         cond: &Bound<'_, PyAny>,
-        other: Option<&Bound<'_, PyAny>>,
+        other: Passed<'_>,
         inplace: Option<bool>,
         axis: Option<&Bound<'_, PyAny>>,
         level: Option<&Bound<'_, PyAny>>,
@@ -55751,11 +55911,13 @@ impl PyDataFrame {
         unsupported_params("DataFrame.mask", &[("level", level.is_none())])?;
         let ax = parse_axis_param_for_type(axis, "DataFrame")?;
         let cond_norm = normalize_df_cond(py, &self.inner, cond)?;
-        let other_norm = normalize_df_other(py, &self.inner, other)?;
+        let other_norm = normalize_df_other(py, &self.inner, other.0.as_ref())?;
         let res_inner = keep_object_frame(
             &self.inner,
             execute_df_mask(&self.inner, &cond_norm, &other_norm, ax)?,
         );
+        let res_inner =
+            df_where_downcast(py, &self.inner, res_inner, &cond_norm, &other_norm, true)?;
         if inplace.unwrap_or(false) {
             self.inner = res_inner;
             Ok(None)
@@ -59324,10 +59486,10 @@ fn loc_missing_labels_error(
             wanted.iter().map(|label| present.contains(label)).collect()
         }
     };
-    let mut missing: Vec<&IndexLabel> = Vec::new();
-    for (label, &here) in wanted.iter().zip(&found) {
-        if !here && !missing.contains(&label) {
-            missing.push(label);
+    let mut missing: Vec<(usize, &IndexLabel)> = Vec::new();
+    for (at, (label, &here)) in wanted.iter().zip(&found).enumerate() {
+        if !here && !missing.iter().any(|(_, seen)| *seen == label) {
+            missing.push((at, label));
         }
     }
     if missing.is_empty() {
@@ -59349,9 +59511,24 @@ fn loc_missing_labels_error(
             .call((values,), Some(&kwargs))?;
         format!("None of [{}] are in the [index]", keyed.repr()?)
     } else {
+        // A Python int key is named as given: one past int64 became a float
+        // label and was named as the float (br-frankenpandas-6w07o).
+        let items = key
+            .cast::<PyList>()
+            .ok()
+            .filter(|items| items.len() == wanted.len());
         let missing = missing
             .into_iter()
-            .map(|label| index_label_to_py(py, label))
+            .map(|(at, label)| {
+                match items
+                    .as_ref()
+                    .and_then(|items| items.get_item(at).ok())
+                    .filter(|item| item.is_exact_instance_of::<pyo3::types::PyInt>())
+                {
+                    Some(item) => Ok(item.unbind()),
+                    None => index_label_to_py(py, label),
+                }
+            })
             .collect::<PyResult<Vec<_>>>()?;
         format!("{} not in index", PyList::new(py, missing)?.repr()?)
     };
@@ -59493,11 +59670,20 @@ fn loc_key(labels: &[IndexLabel], label: IndexLabel) -> PyResult<LocKey> {
 }
 
 /// A list key's labels on `labels`: date text on a DatetimeIndex is its
-/// instant (pandas converts the list with `to_datetime`).
+/// instant (pandas converts the list with `to_datetime`); a bool beside other
+/// labels, on labels holding no bool, is the int it equals - Python's
+/// True == 1, which pandas' index engines follow (it missed as a bool label;
+/// br-frankenpandas-6w07o). A list of only bools is left as it is.
 fn loc_list_labels(labels: &[IndexLabel], wanted: Vec<IndexLabel>) -> Vec<IndexLabel> {
+    let is_bool = |label: &IndexLabel| matches!(label, IndexLabel::Bool(_));
+    let bools_as_ints =
+        wanted.iter().any(is_bool) && !wanted.iter().all(is_bool) && !labels.iter().any(is_bool);
     wanted
-        .iter()
-        .map(|label| fp_frame::datetime_list_label(labels, label))
+        .into_iter()
+        .map(|label| match label {
+            IndexLabel::Bool(flag) if bools_as_ints => IndexLabel::Int64(i64::from(flag)),
+            label => fp_frame::datetime_list_label(labels, &label),
+        })
         .collect()
 }
 
