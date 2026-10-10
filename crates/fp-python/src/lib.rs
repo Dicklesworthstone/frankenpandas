@@ -9134,6 +9134,20 @@ fn typed_index_of(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
             data,
         )?)));
     }
+    // A float64 array: its labels read off the buffer - each went out to a
+    // Python float through tolist and was read back (Index(floats) of a
+    // million 282 ms, pandas a view; br-frankenpandas-e186m). All NaN, the
+    // labels cannot tell the dtype: it is declared, pandas' float64.
+    if dtype_name == "float64" {
+        let labels = float_index_labels_of(ndarray_elements::<f64>(data.py(), data)?);
+        let all_missing = labels.iter().all(IndexLabel::is_missing);
+        let index = Index::new(labels);
+        return Ok(Some(if all_missing {
+            index.with_declared_dtype(Some(fp_index::DeclaredDtype::Float64))
+        } else {
+            index
+        }));
+    }
     // A narrower numpy array (int8 ... uint64, float32) is an index of its
     // values under that width, as pandas' (it read the values one by one
     // and came back int64 / float64; br-frankenpandas-vqjvd). A uint64 value
@@ -9144,12 +9158,7 @@ fn typed_index_of(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
     };
     let index = if width.is_float() {
         let floats = ndarray_elements::<f32>(data.py(), data)?;
-        Index::new(
-            floats
-                .into_iter()
-                .map(|value| IndexLabel::Float64(OrderedF64(f64::from(value))))
-                .collect(),
-        )
+        Index::new(float_index_labels_of(floats.into_iter().map(f64::from)))
     } else {
         let column = narrow_ndarray_column(data.py(), data, width)?;
         match column.as_i64_slice() {
@@ -9160,6 +9169,70 @@ fn typed_index_of(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
     Ok(Some(index.with_declared_dtype(Some(
         fp_index::DeclaredDtype::Width(width),
     ))))
+}
+
+/// The index of a one-dimensional numpy object array whose first present
+/// item is a number or a bool: an object index of its items as they are, as
+/// pandas' (2.x) keeps them - it infers only instants and durations from an
+/// object array. They became an int64 / float64 / bool index, ints beside
+/// a NaN floats (br-frankenpandas-n3ktr). None for any other data, which
+/// the label paths read as before.
+fn object_ndarray_index(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
+    if !data.get_type().name().is_ok_and(|name| name == "ndarray")
+        || data.getattr("ndim")?.extract::<usize>()? != 1
+        || data
+            .getattr("dtype")?
+            .getattr("kind")?
+            .extract::<String>()?
+            != "O"
+    {
+        return Ok(None);
+    }
+    let mut items = data.try_iter()?;
+    let numbers = loop {
+        let Some(item) = items.next() else {
+            break false;
+        };
+        let label = py_to_index_label(&item?)?;
+        if !label.is_missing() {
+            break matches!(
+                label,
+                IndexLabel::Int64(_) | IndexLabel::Float64(_) | IndexLabel::Bool(_)
+            );
+        }
+    };
+    if !numbers {
+        return Ok(None);
+    }
+    let labels = data
+        .try_iter()?
+        .map(|item| py_to_index_label(&item?))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(Some(Index::new(labels).with_declared_dtype(Some(
+        fp_index::DeclaredDtype::Object,
+    ))))
+}
+
+/// `values` each mapped by `apply`: generic, so each operator's loop the
+/// caller picks is its own and vectorized (a function pointer per value was
+/// not).
+fn each_i64<T>(values: &[i64], apply: impl Fn(i64) -> T) -> Vec<T> {
+    values.iter().map(|&value| apply(value)).collect()
+}
+
+/// The labels of float `values` as a Python float's are: NaN the missing
+/// label (as [`py_to_index_label`] reads it), any other value itself.
+fn float_index_labels_of(values: impl IntoIterator<Item = f64>) -> Vec<IndexLabel> {
+    values
+        .into_iter()
+        .map(|value| {
+            if value.is_nan() {
+                IndexLabel::Null(NullKind::NaN)
+            } else {
+                IndexLabel::Float64(OrderedF64(value))
+            }
+        })
+        .collect()
 }
 
 /// The nanoseconds of a one-dimensional timedelta64 numpy array of any unit,
@@ -10582,10 +10655,10 @@ fn index_extreme(
     // br-frankenpandas-e186m).
     if index.masked().is_none()
         && let Some(values) = index.cached_int64_label_values().flatten()
-        && let Some(&best) = if largest {
-            values.iter().max()
+        && let Some(best) = if largest {
+            fp_columnar::max_i64(&values)
         } else {
-            values.iter().min()
+            fp_columnar::min_i64(&values)
         }
     {
         return index_scalar_to_py(py, index, &IndexLabel::Int64(best));
@@ -11331,7 +11404,13 @@ fn float_labelled(index: Index) -> Index {
     // Typed ints hold no float and no missing label, instants no int, float
     // or null label: their million labels were made only to find none
     // (br-frankenpandas-lnb7i, lsn8d).
-    if index.has_int64_backing() || index.label_kinds().within(fp_index::LabelKinds::DATETIME64) {
+    // A declared dtype's labels are of it already: the rebuild dropped it
+    // (Index(Index([1, None], dtype='Int64')) and a float32 array holding a
+    // NaN came back float64; br-frankenpandas-05cm6, vqjvd).
+    if index.declared_dtype().is_some()
+        || index.has_int64_backing()
+        || index.label_kinds().within(fp_index::LabelKinds::DATETIME64)
+    {
         return index;
     }
     let labels = index.labels();
@@ -11377,6 +11456,8 @@ fn index_arg_index(index: &Bound<'_, PyAny>) -> PyResult<Index> {
         } else if let Some(typed) = typed_index_of(index)? {
             // A range or an int64 array, typed without a label each.
             typed
+        } else if let Some(objects) = object_ndarray_index(index)? {
+            objects
         } else {
             Index::new(extract_index_labels(Some(index), 0)?)
         },
@@ -11511,6 +11592,9 @@ fn index_from_axis_value(value: &Bound<'_, PyAny>) -> PyResult<Index> {
     }
     if let Some(typed) = typed_index_of(value)? {
         return Ok(typed);
+    }
+    if let Some(objects) = object_ndarray_index(value)? {
+        return Ok(objects);
     }
     // A tz-aware DatetimeIndex or datetime Series keeps its zone (it was
     // taken as naive UTC labels).
@@ -12980,18 +13064,20 @@ impl<'py> IntoPyObject<'py> for BoolArray {
     type Output = Bound<'py, PyAny>;
     type Error = PyErr;
 
-    /// numpy over a bytearray of the flags, copied so the array owns its
-    /// data as numpy.array's did: a Python list of a bool per row made
-    /// numpy.array of 200k flags cost ~4.5 ms (Index.duplicated was 0.18x
-    /// pandas, its hashing a tenth of that; br-frankenpandas-bss5q.3).
+    /// A numpy bool array that owns its data, as numpy.array's does, the
+    /// flags written once through its bytes: a Python list of a bool per row
+    /// made numpy.array of 200k flags cost ~4.5 ms (Index.duplicated was
+    /// 0.18x pandas, its hashing a tenth of that; br-frankenpandas-bss5q.3),
+    /// and a bytearray, numpy's view of it and that view's copy were three
+    /// copies (e186m).
     fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let marks: Vec<u8> = self.0.into_iter().map(u8::from).collect();
-        py.import("numpy")?
-            .call_method1(
-                "frombuffer",
-                (pyo3::types::PyByteArray::new(py, &marks), "bool"),
-            )?
-            .call_method0("copy")
+        let array = py
+            .import("numpy")?
+            .call_method1("empty", (marks.len(), "bool"))?;
+        pyo3::buffer::PyBuffer::<u8>::get(&array.call_method1("view", ("uint8",))?)?
+            .copy_from_slice(py, &marks)?;
+        Ok(array)
     }
 }
 
@@ -13234,6 +13320,30 @@ impl PyIndex {
             || other.extract::<PyRef<'_, PyDataFrame>>().is_ok()
         {
             return Ok(py.NotImplemented());
+        }
+        // A plain int64 index and a Python int: numpy's wrapping int64
+        // + - * over the ints as they are held - they went out to a numpy
+        // array and came back in (idx + 1 of a million 0.74 ms, pandas
+        // 0.26; br-frankenpandas-e186m).
+        if self.inner.declared_dtype().is_none()
+            && other.is_instance_of::<pyo3::types::PyInt>()
+            && !other.is_instance_of::<pyo3::types::PyBool>()
+            && self.inner.has_int64_backing()
+            && let Ok(number) = other.extract::<i64>()
+            && let Some(values) = self.inner.int64_label_values()
+        {
+            // A loop per operator (see [`each_i64`]).
+            let out = match op {
+                "__add__" | "__radd__" => Some(each_i64(&values, |v| v.wrapping_add(number))),
+                "__sub__" => Some(each_i64(&values, |v| v.wrapping_sub(number))),
+                "__rsub__" => Some(each_i64(&values, |v| number.wrapping_sub(v))),
+                "__mul__" | "__rmul__" => Some(each_i64(&values, |v| v.wrapping_mul(number))),
+                _ => None,
+            };
+            if let Some(out) = out {
+                let inner = Index::from_i64_values(out).rename_index(self.inner.name().cloned());
+                return Ok(Py::new(py, Self { inner })?.into_any());
+            }
         }
         let labels = index_ndarray(py, &self.inner)?;
         let (other, name) = match plain_index_ref(other) {
@@ -13504,6 +13614,9 @@ impl PyIndex {
             && let Some(multi) = data.map(tuple_labels_multiindex).transpose()?.flatten()
         {
             return Ok(Py::new(py, PyMultiIndex { inner: multi })?.into_any());
+        }
+        if let Some(index) = data.map(object_ndarray_index).transpose()?.flatten() {
+            return row_index_to_py(py, &index.set_names(name));
         }
         let index = float_labelled(Self::new(data, name)?.inner);
         row_index_to_py(py, &index)
@@ -13801,6 +13914,30 @@ impl PyIndex {
         other: &Bound<'py, PyAny>,
         op: pyo3::class::basic::CompareOp,
     ) -> PyResult<Bound<'py, PyAny>> {
+        // A plain int64 index against a Python int compares the ints as
+        // they are held (they went out to a numpy array first: idx == 5 of
+        // a million 0.66 ms, pandas 0.36; br-frankenpandas-e186m).
+        if self.inner.declared_dtype().is_none()
+            && self.inner.has_int64_backing()
+            && other.is_instance_of::<pyo3::types::PyInt>()
+            && !other.is_instance_of::<pyo3::types::PyBool>()
+            && let Ok(number) = other.extract::<i64>()
+            && let Some(values) = self.inner.int64_label_values()
+        {
+            // Eight lanes a step where the CPU has AVX2: an int64 compare has
+            // no earlier instruction.
+            use pyo3::class::basic::CompareOp;
+            let op = match op {
+                CompareOp::Lt => fp_columnar::ComparisonOp::Lt,
+                CompareOp::Le => fp_columnar::ComparisonOp::Le,
+                CompareOp::Eq => fp_columnar::ComparisonOp::Eq,
+                CompareOp::Ne => fp_columnar::ComparisonOp::Ne,
+                CompareOp::Gt => fp_columnar::ComparisonOp::Gt,
+                CompareOp::Ge => fp_columnar::ComparisonOp::Ge,
+            };
+            return BoolArray::from(fp_columnar::compare_i64_scalar(&values, number, op))
+                .into_pyobject(py);
+        }
         let labels = index_ndarray(py, &self.inner)?;
         let (other, other_missing) = match plain_index_ref(other) {
             Ok(index) => {
@@ -40538,6 +40675,17 @@ fn index_values_column(index: &Index) -> PyResult<Column> {
 }
 
 fn index_ndarray<'py>(py: Python<'py>, index: &Index) -> PyResult<Bound<'py, PyAny>> {
+    // An object index's array is an object array of its labels, each the
+    // Python object it is (ints / floats / bools under dtype=object came
+    // back an int64 / float64 / bool array; br-frankenpandas-n3ktr).
+    if index.declared_dtype() == Some(fp_index::DeclaredDtype::Object) {
+        let items = index
+            .labels()
+            .iter()
+            .map(|label| index_label_to_py(py, label))
+            .collect::<PyResult<Vec<_>>>()?;
+        return py_objects_ndarray(py, items);
+    }
     // A narrow index's array is of its width (int32 ... float32), as
     // pandas' (it was int64 / float64; br-frankenpandas-vqjvd).
     if let Some(width) = index
@@ -40570,6 +40718,15 @@ fn index_ndarray<'py>(py: Python<'py>, index: &Index) -> PyResult<Bound<'py, PyA
             pyo3::buffer::PyBuffer::<f64>::get(&array)?.copy_from_slice(py, &values)?;
             return Ok(array);
         }
+    }
+    // A float64 index of no label but NaN - or none - is float64 NaNs, as
+    // pandas' (object arrays; br-frankenpandas-e186m).
+    if index.declared_dtype() == Some(fp_index::DeclaredDtype::Float64)
+        && index.labels().iter().all(IndexLabel::is_missing)
+    {
+        return py
+            .import("numpy")?
+            .call_method1("full", (index.len(), f64::NAN));
     }
     labels_ndarray(py, index.labels())
 }

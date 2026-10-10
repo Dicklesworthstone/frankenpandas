@@ -34604,3 +34604,233 @@ def test_uint64_index_past_int64_is_refused_vqjvd() -> None:
         fpd.Index(np.array([2**63 + 5, 1], dtype="uint64"))
     held = np.array([2**63 - 1, 1], dtype="uint64")
     assert (str(fpd.Index(held).dtype), fpd.Index(held).tolist()) == (str(pd.Index(held).dtype), pd.Index(held).tolist())
+
+
+# br-frankenpandas-e186m: a plain int64 Index against a Python int - + - *
+# either way round and the six comparisons - works on the ints as held, with
+# numpy's wrapping int64 answers (an Index named as the left / a bool
+# ndarray), a RangeIndex's comparisons too. NEGATIVE: a bool, a float, an
+# int past int64, a numpy int, // and %, an int32 index, an object index
+# take the paths they took.
+_E186MARITH_VALUES = [3, -1, 7, 0, 2**62, -(2**62), 3]
+_E186MARITH_CASES = {
+    "+ 1": lambda i: i + 1,
+    "1 +": lambda i: 1 + i,
+    "- 4": lambda i: i - 4,
+    "4 -": lambda i: 4 - i,
+    "* 3": lambda i: i * 3,
+    "3 *": lambda i: 3 * i,
+    "+ wraps": lambda i: i + (2**63 - 1),
+    "* wraps": lambda i: i * -4,
+    "== 3": lambda i: i == 3,
+    "!= 3": lambda i: i != 3,
+    "< 3": lambda i: i < 3,
+    "<= 3": lambda i: i <= 3,
+    "> 0": lambda i: i > 0,
+    ">= -1": lambda i: i >= -1,
+    "3 == (reflected)": lambda i: 3 == i,
+    "3 > (reflected)": lambda i: 3 > i,
+    "+ True (NEGATIVE)": lambda i: i + True,
+    "== True (NEGATIVE)": lambda i: i == True,  # noqa: E712
+    "+ 1.5 (NEGATIVE)": lambda i: i + 1.5,
+    "< 2.5 (NEGATIVE)": lambda i: i < 2.5,
+    "+ 2**63 (NEGATIVE)": lambda i: i + 2**63,
+    "== 2**63 (NEGATIVE)": lambda i: i == 2**63,
+    "// 2 (NEGATIVE)": lambda i: i // 2,
+    "% 3 (NEGATIVE)": lambda i: i % 3,
+    "+ np.int64 (NEGATIVE)": lambda i: i + np.int64(2),
+}
+_E186MARITH_KINDS = {
+    "array": lambda m: m.Index(np.array(_E186MARITH_VALUES, dtype="int64"), name="k"),
+    "list": lambda m: m.Index(_E186MARITH_VALUES),
+    "int32 (NEGATIVE)": lambda m: m.Index(np.array([3, -1, 7, 0, 3], dtype="int32"), name="k"),
+    "object (NEGATIVE)": lambda m: m.Index([3, "a", 7], dtype=object),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", list(_E186MARITH_KINDS))
+@pytest.mark.parametrize("case", list(_E186MARITH_CASES))
+def test_int64_index_number_arithmetic_like_pandas_e186m(case: str, kind: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _E186MARITH_CASES[case](_E186MARITH_KINDS[kind](m))
+        except (OverflowError, TypeError, ValueError) as error:
+            return ("raise", type(error).__name__)
+        return (type(out).__name__, str(out.dtype), getattr(out, "name", None), repr(out.tolist()))
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case", ["== 3", "!= 3", "< 3", "<= 3", "> 0", ">= -1", "3 == (reflected)", "3 > (reflected)", "== True (NEGATIVE)", "< 2.5 (NEGATIVE)"]
+)
+def test_range_index_compares_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MARITH_CASES[case](m.RangeIndex(2, 9, 2, name="r"))
+        return (type(out).__name__, str(out.dtype), repr(out.tolist()))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: an Index of a float64 array reads its labels off
+# the buffer (each went out to a Python float through tolist), NaN the
+# missing label; all NaN or empty it is float64 and its values float64 (they
+# were object). Also an index of a declared dtype keeps it when wrapped
+# again or holding a NaN (Index(Index([1, None], dtype='Int64')) and a
+# float32 array with a NaN came back float64; 05cm6, vqjvd). NEGATIVE:
+# floats in a list beside None and an int64 array take the paths they
+# took; an object array of floats is not read as float64 (it keeps its
+# objects, n3ktr).
+_E186MFLOAT_DATA = {
+    "float64": lambda m: np.array([1.5, np.nan, -0.0, np.inf, 2.0, -7.25]),
+    "float64 whole numbers": lambda m: np.array([3.0, 1.0, 2.0]),
+    "float64 all NaN": lambda m: np.array([np.nan, np.nan]),
+    "float64 empty": lambda m: np.array([], dtype="float64"),
+    "float64 strided": lambda m: np.arange(10, dtype="float64")[::3],
+    "float32 with NaN": lambda m: np.array([1.5, np.nan, 2.0], dtype="float32"),
+    "Int64 index again": lambda m: m.Index(m.Index([1, None, 3], dtype="Int64")),
+    "float32 index again": lambda m: m.Index(m.Index(np.array([1.5, np.nan], dtype="float32"))),
+    "list beside None (NEGATIVE)": lambda m: [1.5, None, 2.0],
+    "int64 array (NEGATIVE)": lambda m: np.array([3, 1, 2]),
+    "object array (NEGATIVE)": lambda m: np.array([1.5, None, 2.0], dtype=object),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("data", list(_E186MFLOAT_DATA))
+def test_float_index_of_an_array_like_pandas_e186m(data: str) -> None:
+    def run(m: Any) -> Any:
+        index = m.Index(_E186MFLOAT_DATA[data](m), name="x")
+        series = m.Series(range(len(index)), index=_E186MFLOAT_DATA[data](m))
+        return (
+            type(index).__name__,
+            str(index.dtype),
+            repr(index.tolist()),
+            [bool(x) for x in index.isna()],
+            str(index.values.dtype),
+            repr(index.sort_values().tolist()),
+            str(series.index.dtype),
+            repr(series.sort_index().tolist()),
+        )
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-n3ktr: an Index of a numpy object array of numbers or
+# bools keeps them as objects (pandas 2.x infers only instants and
+# durations from an object array) - built, as a Series' / frame's index=
+# and set as .index - and an object index's values / to_numpy are an
+# object array of its labels as they are. They were an int64 / float64 /
+# bool index, ints beside a NaN floats, and dtype=object's values typed.
+# NEGATIVE: a list of numbers is inferred as before; an object array of
+# strings or of None takes the path it took, one of datetimes is inferred a
+# DatetimeIndex as before.
+_N3KTROBJ_DATA = {
+    "floats beside None": [1.5, None, 2.0],
+    "ints": [3, 1, 2],
+    "ints beside NaN": [3, np.nan, 1],
+    "bools": [True, False, True],
+    "NaN first": [np.nan, 2.5, 1],
+    "numbers beside text": [1, "a", 2.5],
+    "strings (NEGATIVE)": ["b", "a", "c"],
+    "all None (NEGATIVE)": [None, None],
+}
+_N3KTROBJ_BUILDS = {
+    "Index(object array)": lambda m, d: m.Index(np.array(d, dtype=object), name="x"),
+    "Index(object array, dtype=object)": lambda m, d: m.Index(np.array(d, dtype=object), dtype=object),
+    "Index(list, dtype=object)": lambda m, d: m.Index(d, dtype=object),
+    "Series(index=object array)": lambda m, d: m.Series(range(len(d)), index=np.array(d, dtype=object)).index,
+    "s.index = object array": lambda m, d: _n3ktrobj_set_index(m.Series(range(len(d))), np.array(d, dtype=object)),
+    "Index(list) (NEGATIVE)": lambda m, d: m.Index(d),
+}
+
+
+def _n3ktrobj_set_index(series: Any, labels: Any) -> Any:
+    series.index = labels
+    return series.index
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("build", list(_N3KTROBJ_BUILDS))
+@pytest.mark.parametrize("data", list(_N3KTROBJ_DATA))
+def test_object_array_index_keeps_objects_like_pandas_n3ktr(data: str, build: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            index = _N3KTROBJ_BUILDS[build](m, _N3KTROBJ_DATA[data])
+        except (TypeError, ValueError) as error:
+            return ("raise", type(error).__name__)
+        return (
+            type(index).__name__,
+            str(index.dtype),
+            [repr(x) for x in index.tolist()],
+            [bool(x) for x in index.isna()],
+            str(index.values.dtype),
+            [repr(x) for x in index.to_numpy().tolist()],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "build", ["Index(object array)", "Series(index=object array)", "s.index = object array", "Index(list) (NEGATIVE)"]
+)
+def test_object_array_of_datetimes_is_inferred_like_pandas_n3ktr(build: str) -> None:
+    stamps = [datetime.datetime(2020, 1, 1), datetime.datetime(2021, 6, 1), datetime.datetime(2019, 3, 1)]
+
+    def run(m: Any) -> Any:
+        index = _N3KTROBJ_BUILDS[build](m, stamps)
+        return (type(index).__name__, str(index.dtype), [str(x) for x in index.tolist()], str(index.values.dtype))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: an int64 Series' / Index's min, max, argmin,
+# argmax, idxmin and idxmax run on lane kernels (AVX2 where the CPU has it)
+# - the extreme in a late block, repeated later (the first position wins),
+# both int64 ends, ints past 2**53 a double cannot tell apart - with
+# pandas' answers; instants beside NaT too. NEGATIVE: a float Series with
+# NaN, a nullable Int64 Series with NA and an all-equal Series take their
+# own paths.
+def _e186mext_ints() -> list:
+    values = [(k * 37) % 101 - 50 for k in range(1000)]
+    values[613] = 2**60 + 1
+    values[871] = 2**60 + 1
+    values[40] = 2**60
+    values[77] = -(2**63)
+    values[950] = -(2**63)
+    return values
+
+
+_E186MEXT_DATA = {
+    "ints across blocks": lambda m: m.Series(_e186mext_ints(), index=[f"r{k}" for k in range(1000)]),
+    "ints past 2**53": lambda m: m.Series([2**60, 2**60 + 1, 2**60 - 1]),
+    "one int": lambda m: m.Series([7]),
+    "instants beside NaT": lambda m: m.Series(np.array(["2021-01-01", "NaT", "2020-05-01", "2022-02-02"], dtype="datetime64[ns]")),
+    "floats with NaN (NEGATIVE)": lambda m: m.Series([1.5, np.nan, -2.0, 9.0, 9.0]),
+    "nullable Int64 with NA (NEGATIVE)": lambda m: m.Series([3, None, -1, 3], dtype="Int64"),
+    "all equal (NEGATIVE)": lambda m: m.Series([4] * 40),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", ["min", "max", "argmin", "argmax", "idxmin", "idxmax"])
+@pytest.mark.parametrize("data", list(_E186MEXT_DATA))
+def test_series_extremes_like_pandas_e186m(data: str, op: str) -> None:
+    def run(m: Any) -> Any:
+        out = getattr(_E186MEXT_DATA[data](m), op)()
+        return (type(out).__name__, repr(out))
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", ["min", "max", "argmin", "argmax"])
+def test_int64_index_extremes_like_pandas_e186m(op: str) -> None:
+    def run(m: Any) -> Any:
+        out = getattr(m.Index(np.array(_e186mext_ints(), dtype="int64")), op)()
+        return (type(out).__name__, repr(out))
+
+    assert run(fpd) == run(pd)
