@@ -32,7 +32,7 @@
 #![forbid(unsafe_code)]
 
 use std::simd::{
-    Mask, Simd,
+    Mask, Select, Simd,
     cmp::{SimdPartialEq, SimdPartialOrd},
 };
 
@@ -371,7 +371,10 @@ pub fn div_f64_into(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
 /// br-frankenpandas-3tk83). IEEE division is correctly rounded lane by lane,
 /// so the quotients are the baseline loop's bits. The output is built with
 /// its capacity, not over a zeroed buffer: zeroing a recycled 8 MB block is
-/// a memset the size of the divide's own stores.
+/// a memset the size of the divide's own stores. Collected, not extended a
+/// 4-lane chunk at a time: each extend kept the Vec's length in memory and
+/// reloaded it and the divisor every chunk (x / 3 a million rows 0.35 ms,
+/// pandas 0.30; br-frankenpandas-rc0923-epic-zero-certified-losses-bss5q.3).
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`], so the `+avx2`
 /// codegen is this crate's; the CALLER MUST GUARD with
@@ -379,22 +382,11 @@ pub fn div_f64_into(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
 #[inline(never)]
 #[must_use]
 pub fn div_by_number_f64(a: &[f64], s: f64, number_first: bool) -> Vec<f64> {
-    const LANES: usize = 4;
-    let mut out = Vec::with_capacity(a.len());
-    let sv = Simd::<f64, LANES>::splat(s);
-    let (chunks, rest) = a.as_chunks::<LANES>();
     if number_first {
-        for chunk in chunks {
-            out.extend_from_slice(&(sv / Simd::<f64, LANES>::from_array(*chunk)).to_array());
-        }
-        out.extend(rest.iter().map(|&x| s / x));
+        a.iter().map(|&x| s / x).collect()
     } else {
-        for chunk in chunks {
-            out.extend_from_slice(&(Simd::<f64, LANES>::from_array(*chunk) / sv).to_array());
-        }
-        out.extend(rest.iter().map(|&x| x / s));
+        a.iter().map(|&x| x / s).collect()
     }
-    out
 }
 
 /// `k as f64` four lanes at a time without AVX-512's conversion: the
@@ -538,6 +530,20 @@ compare_float_int_kernel!(ne_f64_i64_collect, !=);
 pub fn mul_i64_collect(a: &[i64], b: &[i64]) -> Vec<i64> {
     assert_eq!(a.len(), b.len(), "mul_i64_collect: a/b length mismatch");
     a.iter().zip(b).map(|(&x, &y)| x.wrapping_mul(y)).collect()
+}
+
+/// `a[i] * s` (wrapping, numpy's int64 product) for every value, four lanes
+/// at a time - the [`mul_i64_collect`] of one factor: the baseline's two-lane
+/// emulation of the int64 multiply made a column times a number 0.24 ms a
+/// million rows, pandas 0.20 (br-frankenpandas-e186m). Wrapping
+/// multiplication is exact, so the products are the baseline loop's.
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn mul_i64_by_number(a: &[i64], s: i64) -> Vec<i64> {
+    a.iter().map(|&x| x.wrapping_mul(s)).collect()
 }
 
 /// 2^52 + 2^51: a double in [2^52, 2^53) steps by 1, so an int below 2^51
@@ -1201,6 +1207,287 @@ macro_rules! compare_scalar_kernel {
             }
         }
     };
+}
+
+/// numpy's float64 `add.reduce` of int64 `values` - `a.sum(dtype=float64)`,
+/// the total pandas' int64 mean divides: the values cast to float64 8192 at
+/// a time (numpy's cast buffer), each buffer summed pairwise ([`pairwise_sum`],
+/// fp-types' `numpy_pairwise_sum`), the buffers' sums added onto 0.0 in
+/// order. The same additions in the same order, so the same bits; the
+/// casts four lanes at a time while every value of a buffer is below 2^51
+/// in magnitude ([`small_int_as_float`], exact), the conversion's own
+/// rounding otherwise. Series.mean of a million ints was 0.52 ms, pandas
+/// 0.41 (br-frankenpandas-e186m).
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+#[allow(clippy::cast_precision_loss)] // numpy's cast of each int
+pub fn numpy_cast_sum_i64(values: &[i64]) -> f64 {
+    const CAST_BUFFER: usize = 8192;
+    let mut buffer = [0.0_f64; CAST_BUFFER];
+    let mut total = 0.0;
+    for chunk in values.chunks(CAST_BUFFER) {
+        let cast = &mut buffer[..chunk.len()];
+        let small = chunk.iter().fold(true, |small, &value| {
+            small & (value.unsigned_abs() < 1 << 51)
+        });
+        if small {
+            for (slot, &value) in cast.iter_mut().zip(chunk) {
+                *slot = small_int_as_float(value);
+            }
+        } else {
+            for (slot, &value) in cast.iter_mut().zip(chunk) {
+                *slot = value as f64;
+            }
+        }
+        total += pairwise_sum(cast);
+    }
+    total
+}
+
+/// numpy's float64 variance of int64 `values` with `ddof` - pandas' nanvar
+/// of an int64 column: the values cast to float64 whole, their pairwise sum
+/// over the count the mean, the pairwise sum of each `(mean - value)^2` over
+/// `count - ddof` (fp-types' `PandasReductions::var`, bit for bit: the same
+/// additions in the same order), the casts four lanes at a time while every
+/// value is below 2^51 in magnitude ([`small_int_as_float`], exact).
+/// Series.std of a million ints 0.6 ms, pandas 0.43 (br-frankenpandas-e186m).
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")` and pass more values
+/// than `ddof`.
+#[inline(never)]
+#[must_use]
+#[allow(clippy::cast_precision_loss)] // numpy's casts and counts
+pub fn numpy_var_i64(values: &[i64], ddof: usize) -> f64 {
+    let small = values.iter().fold(true, |small, &value| {
+        small & (value.unsigned_abs() < 1 << 51)
+    });
+    if small {
+        variance_of(values, ddof, small_int_as_float)
+    } else {
+        variance_of(values, ddof, |value| value as f64)
+    }
+}
+
+/// [`numpy_var_i64`] with each value cast by `cast`: generic, so the cast is
+/// inlined into each pairwise loop (a function pointer a value was not).
+#[inline(always)]
+#[allow(clippy::cast_precision_loss)] // numpy's counts
+fn variance_of(values: &[i64], ddof: usize, cast: impl Fn(i64) -> f64 + Copy) -> f64 {
+    let mean = pairwise_sum_of(values, cast) / values.len() as f64;
+    let squares = pairwise_sum_of(values, |value| {
+        let deviation = mean - cast(value);
+        deviation * deviation
+    });
+    squares / (values.len() - ddof) as f64
+}
+
+/// [`pairwise_sum`] of `term(value)` over `values`, each term made where it
+/// is added (fp-types' `numpy_pairwise_sum_of`).
+#[inline(always)]
+fn pairwise_sum_of(values: &[i64], term: impl Fn(i64) -> f64 + Copy) -> f64 {
+    let n = values.len();
+    if n > 128 {
+        let mut half = n / 2;
+        half -= half % 8;
+        return pairwise_sum_of(&values[..half], term) + pairwise_sum_of(&values[half..], term);
+    }
+    if n < 8 {
+        return values.iter().fold(0.0, |sum, &value| sum + term(value));
+    }
+    let mut sums: [f64; 8] = std::array::from_fn(|lane| term(values[lane]));
+    let whole = n - n % 8;
+    for block in values[8..whole].as_chunks::<8>().0 {
+        for (sum, &value) in sums.iter_mut().zip(block) {
+            *sum += term(value);
+        }
+    }
+    let folded =
+        ((sums[0] + sums[1]) + (sums[2] + sums[3])) + ((sums[4] + sums[5]) + (sums[6] + sums[7]));
+    values[whole..]
+        .iter()
+        .fold(folded, |sum, &value| sum + term(value))
+}
+
+/// numpy's pairwise sum of `values` (fp-types' `numpy_pairwise_sum`, which
+/// pandas' sums are bit for bit): below 8 values a running sum from 0; up
+/// to 128, eight running sums seeded with the first eight values and
+/// stepped over the 8-value blocks, folded as
+/// `((r0 + r1) + (r2 + r3)) + ((r4 + r5) + (r6 + r7))`, then the remainder
+/// in order; beyond that the two halves (the first a multiple of 8 long)
+/// summed apart.
+fn pairwise_sum(values: &[f64]) -> f64 {
+    const BLOCK: usize = 128;
+    let n = values.len();
+    if n > BLOCK {
+        let mut half = n / 2;
+        half -= half % 8;
+        return pairwise_sum(&values[..half]) + pairwise_sum(&values[half..]);
+    }
+    if n < 8 {
+        return values.iter().fold(0.0, |sum, &value| sum + value);
+    }
+    let mut sums: [f64; 8] = std::array::from_fn(|lane| values[lane]);
+    let whole = n - n % 8;
+    for block in values[8..whole].as_chunks::<8>().0 {
+        for (sum, &value) in sums.iter_mut().zip(block) {
+            *sum += value;
+        }
+    }
+    let folded =
+        ((sums[0] + sums[1]) + (sums[2] + sums[3])) + ((sums[4] + sums[5]) + (sums[6] + sums[7]));
+    values[whole..]
+        .iter()
+        .fold(folded, |sum, &value| sum + value)
+}
+
+/// The least / greatest of `values`, `None` when there is none, sixteen
+/// lanes at a time: an int64 compare has no instruction before SSE4.2 and
+/// the baseline emulates it in several (Series.min / max of a million ints
+/// 0.17 ms, pandas 0.09; br-frankenpandas-e186m). An integer min / max is
+/// exact in any order, so the lanes answer as the serial fold does.
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn min_i64(values: &[i64]) -> Option<i64> {
+    fold_i64_lanes(values, i64::MAX, i64::min)
+}
+
+/// The greatest of `values`; see [`min_i64`].
+///
+/// ⚠️ The CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn max_i64(values: &[i64]) -> Option<i64> {
+    fold_i64_lanes(values, i64::MIN, i64::max)
+}
+
+/// The first position of the least / greatest of `values` (numpy's argmin
+/// / argmax, ties to the first; a float buffer holding no NaN, -0.0 equal
+/// to 0.0), `None` when empty: one pass of sixteen lanes - four 4-lane
+/// vectors - each keeping its extreme and the 16-value block it was first
+/// seen in (a strict compare keeps a lane's first), one compare's mask
+/// selecting both; then the least position among the lanes holding the
+/// overall extreme, every block position preceding the tail's. Written in
+/// `std::simd`: the auto-vectorized loop scalarized its selects with any
+/// change to it. A position carried through a scalar compare made
+/// Series.argmax of a million ints 0.47 ms, pandas 0.10
+/// (br-frankenpandas-e186m).
+macro_rules! arg_extreme_kernel {
+    ($name:ident, $elem:ty, $seed:expr, $simd_beats:ident, $beats:tt) => {
+        #[doc = concat!(
+            "The first position of the ", stringify!($beats), "-most `", stringify!($elem),
+            "` of `values`; see `arg_extreme_kernel`."
+        )]
+        ///
+        /// ⚠️ The CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`
+        /// (and pass a float buffer without NaN).
+        #[inline(never)]
+        #[must_use]
+        #[allow(
+            clippy::cast_possible_wrap,
+            clippy::cast_sign_loss,
+            clippy::cast_possible_truncation
+        )] // block numbers of a slice
+        pub fn $name(values: &[$elem]) -> Option<usize> {
+            if values.is_empty() {
+                return None;
+            }
+            let (chunks, tail) = values.as_chunks::<16>();
+            // A lane that never beats its seed holds the seed from block 0 on.
+            let mut best = [Simd::<$elem, 4>::splat($seed); 4];
+            let mut seen = [Simd::<i64, 4>::splat(0); 4];
+            for (block, chunk) in chunks.iter().enumerate() {
+                let block = Simd::<i64, 4>::splat(block as i64);
+                for ((kept, first), quad) in best
+                    .iter_mut()
+                    .zip(seen.iter_mut())
+                    .zip(chunk.as_chunks::<4>().0)
+                {
+                    let value = Simd::<$elem, 4>::from_array(*quad);
+                    let better = value.$simd_beats(*kept);
+                    *kept = better.select(value, *kept);
+                    *first = better.select(block, *first);
+                }
+            }
+            let best: [$elem; 16] = std::array::from_fn(|lane| best[lane / 4][lane % 4]);
+            let seen: [i64; 16] = std::array::from_fn(|lane| seen[lane / 4][lane % 4]);
+            let pick = |a: $elem, b: $elem| if b $beats a { b } else { a };
+            let lane_best = best.iter().copied().reduce(pick);
+            let tail_best = tail.iter().copied().reduce(pick);
+            let extreme = match (chunks.is_empty(), lane_best, tail_best) {
+                (false, Some(lanes), Some(rest)) if rest $beats lanes => rest,
+                (false, Some(lanes), _) => lanes,
+                (_, _, rest) => rest?,
+            };
+            if !chunks.is_empty()
+                && let Some(position) = (0..16)
+                    .filter(|&lane| best[lane] == extreme)
+                    .map(|lane| seen[lane] as usize * 16 + lane)
+                    .min()
+            {
+                return Some(position);
+            }
+            tail.iter()
+                .position(|&value| value == extreme)
+                .map(|offset| chunks.len() * 16 + offset)
+        }
+    };
+}
+
+arg_extreme_kernel!(argmin_i64, i64, i64::MAX, simd_lt, <);
+arg_extreme_kernel!(argmax_i64, i64, i64::MIN, simd_gt, >);
+arg_extreme_kernel!(argmin_f64, f64, f64::INFINITY, simd_lt, <);
+arg_extreme_kernel!(argmax_f64, f64, f64::NEG_INFINITY, simd_gt, >);
+
+/// The wrapping sum of `values` (numpy's int64 sum), four lanes a vector -
+/// the baseline adds two (Series.sum of a million ints 0.12 ms, pandas
+/// 0.09; br-frankenpandas-e186m). Wrapping addition is associative, so any
+/// order gives the serial fold's sum.
+///
+/// ⚠️ The CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn sum_i64(values: &[i64]) -> i64 {
+    let (chunks, tail) = values.as_chunks::<16>();
+    let mut lanes = [0_i64; 16];
+    for chunk in chunks {
+        for (lane, &value) in lanes.iter_mut().zip(chunk) {
+            *lane = lane.wrapping_add(value);
+        }
+    }
+    lanes
+        .into_iter()
+        .chain(tail.iter().copied())
+        .fold(0, i64::wrapping_add)
+}
+
+/// `values` folded by `pick` in sixteen independent lanes from `seed`, then
+/// the lanes and the tail; `None` when empty. Inlined into each kernel, so
+/// it is codegenned here with the kernel's `+avx2`.
+#[inline(always)]
+fn fold_i64_lanes(values: &[i64], seed: i64, pick: impl Fn(i64, i64) -> i64 + Copy) -> Option<i64> {
+    if values.is_empty() {
+        return None;
+    }
+    let (chunks, tail) = values.as_chunks::<16>();
+    let mut lanes = [seed; 16];
+    for chunk in chunks {
+        for (lane, &value) in lanes.iter_mut().zip(chunk) {
+            *lane = pick(*lane, value);
+        }
+    }
+    Some(
+        lanes
+            .into_iter()
+            .chain(tail.iter().copied())
+            .fold(seed, pick),
+    )
 }
 
 compare_scalar_kernel!(gt_f64_scalar_into, f64, simd_gt, >);
@@ -2560,5 +2847,108 @@ mod div_f64_into_uza04 {
         a[n - 2] = 0.0;
         b[n - 2] = 0.0;
         assert_bit_identical(&a, &b);
+    }
+}
+
+#[cfg(test)]
+mod int_extremes_e186m {
+    use super::*;
+
+    /// The serial answers the lane kernels must give: the first position
+    /// of the least / greatest, ties to the first.
+    fn serial(values: &[i64]) -> (Option<i64>, Option<i64>, Option<usize>, Option<usize>) {
+        let least = values.iter().copied().min();
+        let greatest = values.iter().copied().max();
+        let first = |target: Option<i64>| target.and_then(|t| values.iter().position(|&v| v == t));
+        (least, greatest, first(least), first(greatest))
+    }
+
+    #[test]
+    fn lanes_answer_as_the_serial_fold_at_every_length() {
+        // Repeated extremes (the first one wins), both int64 ends, ints past
+        // 2^53 a double cannot tell apart, every tail length.
+        let mut values: Vec<i64> = (0..70_i64).map(|k| (k * 7919) % 53 - 26).collect();
+        values[9] = 2_i64.pow(60) + 1;
+        values[40] = 2_i64.pow(60) + 1;
+        values[41] = 2_i64.pow(60);
+        values[33] = i64::MIN;
+        values[65] = i64::MIN;
+        for len in 0..=values.len() {
+            let part = &values[..len];
+            assert_eq!(
+                (
+                    min_i64(part),
+                    max_i64(part),
+                    argmin_i64(part),
+                    argmax_i64(part)
+                ),
+                serial(part),
+                "len {len}"
+            );
+            // The sum wraps as numpy's int64 sum (2^60 + 1 twice and the
+            // least int64 twice overflow).
+            let wrapped = part.iter().fold(0_i64, |sum, &v| sum.wrapping_add(v));
+            assert_eq!(sum_i64(part), wrapped, "sum, len {len}");
+        }
+    }
+
+    /// The first position of the least / greatest float as numpy's argmin /
+    /// argmax reads one (no NaN): a strict compare, ties to the first.
+    fn serial_f64(values: &[f64]) -> (Option<usize>, Option<usize>) {
+        let first = |better: fn(f64, f64) -> bool| {
+            let mut best: Option<usize> = None;
+            for (at, &value) in values.iter().enumerate() {
+                if best.is_none_or(|b| better(value, values[b])) {
+                    best = Some(at);
+                }
+            }
+            best
+        };
+        (first(|a, b| a < b), first(|a, b| a > b))
+    }
+
+    #[test]
+    fn float_lanes_answer_as_the_serial_scan_e186m() {
+        // -0.0 before 0.0 (equal: the first wins), both infinities, repeats
+        // across blocks, every tail length; an all -inf run (NEGATIVE: a lane
+        // that never beats its seed still answers its first position).
+        let mut values: Vec<f64> = (0..70_u32)
+            .map(|k| f64::from((k * 37) % 53) / 4.0 - 6.0)
+            .collect();
+        values[12] = -0.0;
+        values[50] = 0.0;
+        values[20] = f64::INFINITY;
+        values[66] = f64::INFINITY;
+        values[30] = f64::NEG_INFINITY;
+        values[31] = f64::NEG_INFINITY;
+        for len in 0..=values.len() {
+            let part = &values[..len];
+            assert_eq!(
+                (argmin_f64(part), argmax_f64(part)),
+                serial_f64(part),
+                "len {len}"
+            );
+        }
+        let lows = [f64::NEG_INFINITY; 40];
+        assert_eq!((argmin_f64(&lows), argmax_f64(&lows)), (Some(0), Some(0)));
+        let zeros: Vec<f64> = (0..40)
+            .map(|k| if k % 3 == 0 { 0.0 } else { -0.0 })
+            .collect();
+        assert_eq!((argmin_f64(&zeros), argmax_f64(&zeros)), (Some(0), Some(0)));
+    }
+
+    #[test]
+    fn empty_has_no_extreme_and_a_lone_value_is_both() {
+        assert_eq!(
+            (min_i64(&[]), max_i64(&[]), argmin_i64(&[]), argmax_i64(&[])),
+            (None, None, None, None)
+        );
+        assert_eq!(
+            (min_i64(&[i64::MAX]), argmax_i64(&[i64::MAX])),
+            (Some(i64::MAX), Some(0))
+        );
+        // NEGATIVE: a later equal value is not the position (ties to the first).
+        let ties = [5_i64; 40];
+        assert_eq!((argmin_i64(&ties), argmax_i64(&ties)), (Some(0), Some(0)));
     }
 }

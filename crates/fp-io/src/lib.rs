@@ -97,7 +97,7 @@
 
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     io::Cursor,
     path::Path,
     sync::{Arc, Mutex, OnceLock},
@@ -10487,7 +10487,7 @@ pub fn write_jsonl_string_with_precision(
 const READ_JSONL_MAX_ROWS: usize = 100_000_000;
 
 pub fn read_jsonl_str(input: &str) -> Result<DataFrame, IoError> {
-    let mut all_rows: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
+    let mut table = JsonlColumns::default();
 
     for line in input.lines() {
         let trimmed = line.trim();
@@ -10496,68 +10496,233 @@ pub fn read_jsonl_str(input: &str) -> Result<DataFrame, IoError> {
         }
         // Per br-frankenpandas-9l8gd: reject hostile inputs that would
         // exhaust memory before the column-build allocation step.
-        if all_rows.len() >= READ_JSONL_MAX_ROWS {
+        if table.rows >= READ_JSONL_MAX_ROWS {
             return Err(IoError::JsonFormat(format!(
                 "JSONL input exceeds maximum of {READ_JSONL_MAX_ROWS} rows"
             )));
         }
-        // Move the parsed object out of the per-line `Value` instead of cloning
-        // it — avoids a deep copy (every key String + value) of each row's Map.
-        match parse_json_value_allowing_pandas_nan(trimmed)? {
-            serde_json::Value::Object(map) => all_rows.push(map),
-            _ => {
-                return Err(IoError::JsonFormat(
-                    "JSONL: each line must be a JSON object".into(),
-                ));
+        // Each value straight into its column ([`JsonlRow`]); a line that
+        // does not parse so - pandas' bare NaN tokens, or anything that is no
+        // JSON object - takes the per-line `Value` path, its errors and all.
+        table.entries.clear();
+        let mut parser = serde_json::Deserializer::from_str(trimmed);
+        let parsed = serde::de::DeserializeSeed::deserialize(JsonlRow(&mut table), &mut parser)
+            .and_then(|()| parser.end());
+        if parsed.is_err() {
+            table.entries.clear();
+            table.row_order.clear();
+            match parse_json_value_allowing_pandas_nan(trimmed)? {
+                serde_json::Value::Object(map) => {
+                    for (position, (key, value)) in map.iter().enumerate() {
+                        let column = table.column_of(key, position);
+                        table.entries.push((column, json_value_to_scalar(value)));
+                    }
+                }
+                _ => {
+                    return Err(IoError::JsonFormat(
+                        "JSONL: each line must be a JSON object".into(),
+                    ));
+                }
             }
         }
+        table.finish_row();
     }
 
-    if all_rows.is_empty() {
+    if table.rows == 0 {
         return DataFrame::new(Index::new(Vec::new()), BTreeMap::new()).map_err(IoError::Frame);
     }
 
-    // Collect column names as the UNION of all keys across all rows.
-    // This matches pandas behavior: missing keys in a row become null.
-    let mut col_name_set = std::collections::BTreeSet::new();
-    let mut col_names_ordered: Vec<String> = Vec::new();
-    for row in &all_rows {
-        for key in row.keys() {
-            // Only clone a key the first time it is seen (uniform JSONL — every
-            // line sharing the same keys — clones each key exactly once total,
-            // not once per row).
-            if !col_name_set.contains(key.as_str()) {
-                col_name_set.insert(key.clone());
-                col_names_ordered.push(key.clone());
-            }
-        }
-    }
-    let col_names = col_names_ordered;
-    let mut columns: Vec<Vec<Scalar>> = col_names
-        .iter()
-        .map(|_| Vec::with_capacity(all_rows.len()))
-        .collect();
-
-    for row in &all_rows {
-        for (col_idx, name) in col_names.iter().enumerate() {
-            let val = row.get(name).unwrap_or(&serde_json::Value::Null);
-            columns[col_idx].push(json_value_to_scalar(val));
-        }
-    }
-
+    // The columns are the UNION of all keys across all rows, first seen first
+    // (pandas: a key missing from a row is null there).
+    let rows = table.rows;
     let mut out_columns = BTreeMap::new();
     let mut column_order = Vec::new();
-    for (name, values) in col_names.into_iter().zip(columns) {
+    for (name, values) in table.names.into_iter().zip(table.columns) {
         out_columns.insert(name.clone(), column_from_json_values(values)?);
         column_order.push(name);
     }
 
-    let index = Index::default_range(all_rows.len());
+    let index = Index::default_range(rows);
     Ok(DataFrame::new_with_column_order(
         index,
         out_columns,
         column_order,
     )?)
+}
+
+/// The columns of a JSON-lines read built as its lines parse: each line's
+/// values written straight into their columns - a column per key, first
+/// seen first - where every line was a map of key Strings and Values, made
+/// and dropped, then each column read back out of every map by name
+/// (read_json(lines=True) of 200k rows 318 ms, pandas 204;
+/// br-frankenpandas-e186m). A duplicate key's last value stands, as the
+/// map's did.
+#[derive(Default)]
+struct JsonlColumns {
+    names: Vec<String>,
+    index: HashMap<String, usize>,
+    columns: Vec<Vec<Scalar>>,
+    rows: usize,
+    /// The current line's (column, value) pairs, set into the columns once
+    /// the line has parsed.
+    entries: Vec<(usize, Scalar)>,
+    /// The previous line's columns in key order - a line's `k`th key is
+    /// almost always the previous line's - and the current line's.
+    last_order: Vec<usize>,
+    row_order: Vec<usize>,
+}
+
+impl JsonlColumns {
+    /// The column of `key`, the `position`th key of its line: the previous
+    /// line's column at that position when it is that key, else the one
+    /// named so, else a new column, missing (NaN) in every earlier row.
+    fn column_of(&mut self, key: &str, position: usize) -> usize {
+        let column = match self.last_order.get(position) {
+            Some(&guess) if self.names[guess] == key => guess,
+            _ => match self.index.get(key) {
+                Some(&known) => known,
+                None => {
+                    let column = self.names.len();
+                    self.names.push(key.to_owned());
+                    self.index.insert(key.to_owned(), column);
+                    self.columns
+                        .push(vec![Scalar::Null(NullKind::NaN); self.rows]);
+                    column
+                }
+            },
+        };
+        self.row_order.push(column);
+        column
+    }
+
+    /// The parsed line into the columns: NaN in each column it has no key
+    /// for - pandas' missing key, where a JSON null is None in a text column
+    /// (both were None) - its values (the last of a repeated key) in the rest.
+    fn finish_row(&mut self) {
+        for column in &mut self.columns {
+            column.push(Scalar::Null(NullKind::NaN));
+        }
+        for (column, value) in self.entries.drain(..) {
+            self.columns[column][self.rows] = value;
+        }
+        self.rows += 1;
+        std::mem::swap(&mut self.last_order, &mut self.row_order);
+        self.row_order.clear();
+    }
+}
+
+/// One JSON-lines line, a JSON object, into [`JsonlColumns`]' entries.
+struct JsonlRow<'a>(&'a mut JsonlColumns);
+
+impl<'de> serde::de::DeserializeSeed<'de> for JsonlRow<'_> {
+    type Value = ();
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        deserializer.deserialize_map(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for JsonlRow<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON object")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let mut position = 0;
+        while let Some(column) = map.next_key_seed(JsonlKey(&mut *self.0, position))? {
+            let value = map.next_value_seed(JsonlValue)?;
+            self.0.entries.push((column, value));
+            position += 1;
+        }
+        Ok(())
+    }
+}
+
+/// One JSON-lines key, the `.1`th of its line, as its column in
+/// [`JsonlColumns`] - read as the parser holds it, no String made.
+struct JsonlKey<'a>(&'a mut JsonlColumns, usize);
+
+impl<'de> serde::de::DeserializeSeed<'de> for JsonlKey<'_> {
+    type Value = usize;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<usize, D::Error> {
+        deserializer.deserialize_str(self)
+    }
+}
+
+impl serde::de::Visitor<'_> for JsonlKey<'_> {
+    type Value = usize;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON object key")
+    }
+
+    fn visit_str<E>(self, key: &str) -> Result<usize, E> {
+        Ok(self.0.column_of(key, self.1))
+    }
+}
+
+/// One JSON-lines value as [`json_value_to_scalar`] reads it, made where it
+/// is parsed: a nested object or array its JSON text.
+struct JsonlValue;
+
+impl<'de> serde::de::DeserializeSeed<'de> for JsonlValue {
+    type Value = Scalar;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Scalar, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for JsonlValue {
+    type Value = Scalar;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Scalar, E> {
+        Ok(Scalar::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Scalar, E> {
+        Ok(Scalar::Int64(value))
+    }
+
+    #[allow(clippy::cast_precision_loss)] // serde_json's Number::as_f64 of it
+    fn visit_u64<E>(self, value: u64) -> Result<Scalar, E> {
+        Ok(i64::try_from(value).map_or(Scalar::Float64(value as f64), Scalar::Int64))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Scalar, E> {
+        Ok(Scalar::Float64(value))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Scalar, E> {
+        Ok(Scalar::Utf8(value.to_owned()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Scalar, E> {
+        Ok(Scalar::Utf8(value))
+    }
+
+    fn visit_unit<E>(self) -> Result<Scalar, E> {
+        Ok(Scalar::Null(NullKind::Null))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Scalar, A::Error> {
+        let value: serde_json::Value =
+            serde::Deserialize::deserialize(serde::de::value::MapAccessDeserializer::new(map))?;
+        Ok(json_value_to_scalar(&value))
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, seq: A) -> Result<Scalar, A::Error> {
+        let value: serde_json::Value =
+            serde::Deserialize::deserialize(serde::de::value::SeqAccessDeserializer::new(seq))?;
+        Ok(json_value_to_scalar(&value))
+    }
 }
 
 /// Write a DataFrame to a JSONL file.
@@ -29689,7 +29854,9 @@ mod tests {
             ],
         };
 
-        let chunks = read_sql_chunks_with_options(
+        // Stub-backend test, compiled without `sql-sqlite`: the read_sql_* imports
+        // above are SQLite-gated, so call the function by path (issue #39).
+        let chunks = super::read_sql_chunks_with_options(
             &conn,
             "SELECT id, name FROM paged_source WHERE keep = ? ORDER BY id;",
             &SqlReadOptions {

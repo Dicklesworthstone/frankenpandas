@@ -4865,6 +4865,11 @@ _OBJECT_LABEL_CASES = {
     "dt.timetz of a zoned column": lambda m: [str(v.tzinfo) for v in _stamps(m).dt.tz_localize("UTC").dt.timetz.dropna()],
     "dt.date all NaT": lambda m: m.Series(m.to_datetime([None, None])).dt.date,
     "dt.time empty": lambda m: m.Series(m.to_datetime([])).dt.time,
+    # vk7y9: the date / time are built from the wall nanos - before 1970
+    # (negative nanos) too, and a column from a numpy array (NaT at a gap).
+    "dt.date before 1970": lambda m: m.Series(m.to_datetime(["1969-12-31 23:59:59.999999999", "1900-03-01", None])).dt.date,
+    "dt.time before 1970": lambda m: m.Series(m.to_datetime(["1969-12-31 23:59:59.999999999", "1900-03-01 01:02:03", None])).dt.time,
+    "dt.date of an array column": lambda m: m.Series(np.array(["2020-01-05T03:04", "NaT", "1960-02-29T23:00"], dtype="datetime64[ns]")).dt.date,
     "groupby dt.date": lambda m: _stamped_frame(m).groupby(_stamped_frame(m)["ts"].dt.date)["v"].sum(),
     "groupby a date column": lambda m: _stamped_frame(m).assign(day=lambda f: f["ts"].dt.date).groupby("day")["v"].sum(),
     "groupby dates and text": lambda m: _stamped_frame(m).assign(day=lambda f: f["ts"].dt.date).groupby(["k", "day"])["v"].sum(),
@@ -12833,8 +12838,7 @@ def test_from_records_index_field_like_pandas(case: str) -> None:
 
 # br-frankenpandas-05cm6: value_counts(dropna=False) of a nullable Series
 # labelled the missing value None; pandas' label is pd.NA itself (printed
-# <NA>). [ns] the index dtype: pandas' is the masked Int64, fp's object - fp
-# has no masked Index dtype yet (05cm6 stays open for it).
+# <NA>), under the masked index dtype (test_masked_indexes_keep_their_dtype_*).
 _NA_LABEL_CASES = {
     "Int64 value_counts": lambda m: repr(m.Series([1, None, 1], dtype="Int64").value_counts(dropna=False)),
     "Int64 value_counts NA label is pd.NA": lambda m: m.Series([1, None], dtype="Int64").value_counts(dropna=False).index[-1] is m.NA,
@@ -25879,8 +25883,8 @@ _4OHJC_OPS = {
     "round": lambda s: s.round(1),
     "interp": lambda s: s.interpolate(),
 }
-_4OHJC_EMPTY_RESIDUE = {("cumsum", "datetime64[ns]"), ("cumprod", "datetime64[ns]"), ("gb mean", "object"), ("gb mean", "string"), ("diff", "bool"), ("diff", "object"), ("diff", "string"), ("pct", "bool"), ("pct", "object"), ("pct", "string"), ("abs", "datetime64[ns]"), ("pow2", "Int64"), ("pow2", "string"), ("pow2", "datetime64[ns]"), ("pow2", "timedelta64[ns]"),("add1", "datetime64[ns]"), ("div2", "string"), ("div2", "datetime64[ns]"), ("div2", "timedelta64[ns]"), ("eq1", "datetime64[ns]"), ("eq1", "timedelta64[ns]"), ("roll sum", "object"), ("roll sum", "string"), ("exp mean", "object"), ("exp mean", "string"), ("interp", "Int64")}
-_4OHJC_ONE_ROW_RESIDUE = {("cumprod", "object"), ("diff", "object"), ("diff", "string"), ("pct", "bool"), ("pct", "object"), ("pct", "string"), ("abs", "datetime64[ns]")}
+_4OHJC_EMPTY_RESIDUE = {("cumsum", "datetime64[ns]"), ("cumprod", "datetime64[ns]"), ("gb mean", "object"), ("gb mean", "string"), ("diff", "bool"), ("diff", "string"), ("pct", "object"), ("pct", "string"), ("pow2", "Int64"), ("pow2", "string"), ("pow2", "datetime64[ns]"), ("pow2", "timedelta64[ns]"),("add1", "datetime64[ns]"), ("div2", "string"), ("div2", "datetime64[ns]"), ("div2", "timedelta64[ns]"), ("eq1", "datetime64[ns]"), ("eq1", "timedelta64[ns]"), ("roll sum", "object"), ("roll sum", "string"), ("exp mean", "object"), ("exp mean", "string"), ("interp", "Int64")}
+_4OHJC_ONE_ROW_RESIDUE = {("cumprod", "object"), ("diff", "string"), ("pct", "object"), ("pct", "string")}
 
 
 def _4ohjc_cells(residue: set[tuple[str, str]], bead: str) -> list[Any]:
@@ -28367,6 +28371,895 @@ def test_categorical_codes_like_pandas_5oup5(case: Any) -> None:
     assert _5oup5_shown(run(fpd)) == _5oup5_shown(run(pd))
 
 
+# br-frankenpandas-89sri: a categorical's value_counts tallies its codes - every
+# option, on 300 categories each counted a different number of times (no tie,
+# whose order is kbnmj's), one unused and a missing value's count beside them;
+# NEGATIVE: the same values not categorical keep a plain index.
+def _89sri_values(kind: str) -> Any:
+    k = np.repeat(np.arange(300), np.arange(1, 301))[np.random.default_rng(89).permutation(45150)]
+    values = [f"t{v}" for v in k] if kind == "text" else list(k)
+    return values + [None] * 400
+
+
+def _89sri_shown(obj: Any) -> Any:
+    index = obj.index
+    categories = getattr(index, "categories", None)
+    return [
+        str(obj.dtype),
+        obj.name,
+        [repr(v) for v in obj.tolist()],
+        type(index).__name__,
+        [repr(v) for v in index.tolist()],
+        None if categories is None else [repr(v) for v in categories.tolist()],
+        getattr(index, "ordered", None),
+    ]
+
+
+_89SRI_CASES = [
+    (kind, op)
+    for kind in ("text", "int", "plain")
+    for op in (
+        "counts",
+        "normalize",
+        "unsorted",
+        "ascending",
+        "dropna_false",
+        "dropna_false_normalize",
+        "unused",
+        "gb_size",
+        "gb_size_unsorted",
+        "gb_size_dropna_false",
+    )
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _89SRI_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_categorical_value_counts_like_pandas_89sri(case: Any) -> None:
+    kind, op = case
+
+    def run(m: Any) -> Any:
+        s = m.Series(_89sri_values("int" if kind == "plain" else kind), name="k")
+        if kind != "plain":
+            s = s.astype("category")
+        if op == "unused":
+            if kind == "plain":
+                return s.value_counts()
+            # 999.0: the int values beside None make float64 categories, and
+            # an int added to them stays an int in fp (br-frankenpandas-yrjrc).
+            return s.cat.add_categories(["unused"] if kind == "text" else [999.0]).value_counts()
+        if op.startswith("gb_size"):
+            frame = m.DataFrame({"k": s, "v": np.arange(len(s))})
+            sort = op != "gb_size_unsorted"
+            dropna = op != "gb_size_dropna_false"
+            return frame.groupby("k", observed=True, sort=sort, dropna=dropna).size()
+        return {
+            "counts": lambda: s.value_counts(),
+            "normalize": lambda: s.value_counts(normalize=True),
+            "unsorted": lambda: s.value_counts(sort=False),
+            "ascending": lambda: s.value_counts(ascending=True),
+            "dropna_false": lambda: s.value_counts(dropna=False),
+            "dropna_false_normalize": lambda: s.value_counts(dropna=False, normalize=True),
+        }[op]()
+
+    assert _89sri_shown(run(fpd)) == _89sri_shown(run(pd))
+
+
+# br-frankenpandas-knu1r: df.dropna over an all-valid int, a NaN-free float, a
+# NaN float, a text column holding None and a datetime holding NaT (the
+# missing rows across 64-row words and the last row) - how, subset, thresh;
+# NEGATIVE: a subset of only missing-free columns drops nothing, and the
+# text / NaT columns' missing rows drop though every numeric one is whole.
+def _knu1r_frame(m: Any) -> Any:
+    k = np.arange(200)
+    nan = np.where(np.isin(k % 67, [0, 5, 63, 64]) | (k == 199), np.nan, k * 0.5)
+    stamps = np.datetime64("2020-01-01", "ns") + k.astype("timedelta64[h]")
+    stamps = np.where(k % 41 == 3, np.datetime64("NaT"), stamps)
+    return m.DataFrame(
+        {
+            "i": k,
+            "clean": k * 0.25,
+            "nan": nan,
+            "text": [None if v % 53 == 7 else f"t{v}" for v in k],
+            "when": stamps,
+        }
+    )
+
+
+_KNU1R_CASES = {
+    "any": lambda df: df.dropna(),
+    "all": lambda df: df.dropna(how="all"),
+    "subset nan": lambda df: df.dropna(subset=["nan"]),
+    "subset clean i": lambda df: df.dropna(subset=["i", "clean"]),
+    "subset text when": lambda df: df.dropna(subset=["text", "when"]),
+    "subset all nan text": lambda df: df.dropna(subset=["nan", "text"], how="all"),
+    "numeric only": lambda df: df[["i", "clean", "nan"]].dropna(),
+    "floats all": lambda df: df[["clean", "nan"]].dropna(how="all"),
+    "thresh 5": lambda df: df.dropna(thresh=5),
+    "text only missing": lambda df: df[["i", "clean", "text"]].dropna(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_KNU1R_CASES))
+def test_frame_dropna_like_pandas_knu1r(case: str) -> None:
+    def shown(df: Any) -> Any:
+        return [
+            [str(d) for d in df.dtypes],
+            df.index.tolist(),
+            [[repr(v) for v in df[c].tolist()] for c in df.columns],
+        ]
+
+    assert shown(_KNU1R_CASES[case](_knu1r_frame(fpd))) == shown(_KNU1R_CASES[case](_knu1r_frame(pd)))
+
+
+# br-frankenpandas-knu1r: a text (object) column == / != a string compares
+# each row to it - a missing value (None, NaN) unequal - over text holding
+# None, NaN, ints, empty and non-ASCII strings, all missing, and a
+# categorical; NEGATIVE: pandas' `string` dtype answers its nullable boolean
+# (<NA> where missing), and a non-string operand takes the general path.
+_KNU1R_TEXT = {
+    "none": ["beta", None, "alpha", "beta", "", "Beta"],
+    "nan": ["beta", np.nan, "alpha", "beta", "", "beta "],
+    "mixed": ["beta", 3, None, "beta", 2.5, "3"],
+    "unicode": ["béta", "beta", None, "ß", "béta", "z"],
+    "all missing": [None, None, None],
+}
+_KNU1R_EQ_CASES = [
+    (kind, op, operand)
+    for kind in [*_KNU1R_TEXT, "categorical", "string dtype"]
+    for op in ("==", "!=")
+    for operand in ("beta", "béta", "", "3")
+] + [("none", "==", 3), ("mixed", "==", 3), ("mixed", "!=", 2.5)]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _KNU1R_EQ_CASES, ids=lambda case: f"{case[0]}{case[1]}{case[2]!r}")
+def test_text_equality_like_pandas_knu1r(case: Any) -> None:
+    kind, op, operand = case
+
+    def run(m: Any) -> Any:
+        if kind == "categorical":
+            s = m.Series(_KNU1R_TEXT["none"]).astype("category")
+        elif kind == "string dtype":
+            s = m.Series(_KNU1R_TEXT["none"], dtype="string")
+        else:
+            s = m.Series(_KNU1R_TEXT[kind])
+        out = s == operand if op == "==" else s != operand
+        return [str(out.dtype), [repr(v) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-knu1r: isin over text holding missing values (the general
+# membership path, its flags a typed bool column) - string needles, None /
+# NaN needles, a number among them, none matching; NEGATIVE: an absent needle
+# matches no row, and pandas' `string` dtype keeps its own result.
+_KNU1R_ISIN_CASES = [
+    (kind, needles)
+    for kind in ("none", "nan", "mixed", "all missing", "string dtype")
+    for needles in (("beta", "alpha"), ("beta", None), (np.nan,), (3, "3"), ("absent",), ())
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _KNU1R_ISIN_CASES, ids=lambda case: f"{case[0]}-{case[1]!r}")
+def test_text_isin_like_pandas_knu1r(case: Any) -> None:
+    kind, needles = case
+
+    def run(m: Any) -> Any:
+        if kind == "string dtype":
+            s = m.Series(_KNU1R_TEXT["none"], dtype="string")
+        else:
+            s = m.Series(_KNU1R_TEXT[kind])
+        out = s.isin(list(needles))
+        return [str(out.dtype), [repr(v) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-knu1r: rolling aggregations of a float column holding NaN
+# (each window's present values off the typed buffer) - scattered NaN, a NaN
+# run longer than the window, NaN at the ends; windows 3 and 20, min_periods
+# 1, centered; NEGATIVE: an all-NaN window (min_periods unmet) is NaN.
+def _knu1r_rolling_values() -> Any:
+    k = np.arange(120, dtype=float)
+    values = np.sin(k * 0.7) * 10 + k / 7
+    values[[0, 5, 6, 40, 77, 119]] = np.nan
+    values[50:75] = np.nan
+    return values
+
+
+_KNU1R_ROLLING_CASES = [
+    (op, window, extra)
+    for op in ("median", "quantile", "skew", "kurt", "var", "std", "sem", "sum", "mean", "min", "max", "count")
+    for window in (3, 20)
+    for extra in ("", "min_periods=1", "center")
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _KNU1R_ROLLING_CASES, ids=lambda case: f"{case[0]}-{case[1]}-{case[2]}")
+def test_rolling_over_nan_like_pandas_knu1r(case: Any) -> None:
+    op, window, extra = case
+    keywords = {"": {}, "min_periods=1": {"min_periods": 1}, "center": {"center": True}}[extra]
+
+    def run(m: Any) -> Any:
+        rolling = m.Series(_knu1r_rolling_values(), name="v").rolling(window, **keywords)
+        out = rolling.quantile(0.3) if op == "quantile" else getattr(rolling, op)()
+        return [str(out.dtype), [None if v != v else round(float(v), 9) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-knu1r: rolling skew / kurt of constant stretches a NaN
+# interrupts - the window of equal present values is constant (skew 0, kurt
+# -3), as pandas' run of equal values skips the NaN; NEGATIVE: a window too
+# short for kurt (fewer than 4 values) is NaN.
+_KNU1R_MOMENT_CASES = [
+    (op, window, min_periods)
+    for op in ("skew", "kurt")
+    for window in (3, 4, 5)
+    for min_periods in (None, 1, 3)
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _KNU1R_MOMENT_CASES, ids=lambda case: f"{case[0]}-{case[1]}-{case[2]}")
+def test_rolling_moments_of_constant_stretches_like_pandas_knu1r(case: Any) -> None:
+    op, window, min_periods = case
+    values = [4.0, 4.0, np.nan, 4.0, 4.0, 4.0, 4.0, 5.0, 5.0, np.nan, np.nan, 5.0, 5.0, 1.0, np.nan, 1.0, 1.0, 1.0]
+
+    def run(m: Any) -> Any:
+        out = getattr(m.Series(values).rolling(window, min_periods=min_periods), op)()
+        return [None if v != v else round(float(v), 9) for v in out.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.14: s[text] is a
+# label read before any other key kind is tried - a text index's label,
+# date text on a DatetimeIndex, a category label, a row-wise apply reading
+# its row; NEGATIVE: a missing label is pandas' KeyError and an int key
+# keeps its own reading.
+_FVSAO14_GETITEM = {
+    "text label": lambda m: m.Series([1.5, 2.5, 3.5], index=["a", "b", "c"])["b"],
+    "duplicated label": lambda m: m.Series([1, 2, 3], index=["a", "b", "a"])["a"].tolist(),
+    "date text": lambda m: m.Series([1, 2, 3], index=m.date_range("2021-01-01", periods=3))["2021-01-02"],
+    "category label": lambda m: m.Series([1, 2], index=m.CategoricalIndex(["x", "y"]))["y"],
+    "row apply": lambda m: m.DataFrame({"a": [1.0, 2.0], "b": [3.0, np.nan]}).apply(lambda r: r["a"] + r["b"], axis=1).tolist(),
+    "missing label": lambda m: m.Series([1, 2], index=["a", "b"])["z"],
+    "int key on text index": lambda m: m.Series([1, 2], index=["a", "b"]).iloc[1],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FVSAO14_GETITEM))
+def test_series_text_key_like_pandas_fvsao14(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return repr(_FVSAO14_GETITEM[case](m))
+        except Exception as error:  # noqa: BLE001
+            return type(error).__name__
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-lsn8d: s.iloc[positions] normalizes them in their own
+# buffer and gathers an int64 index's labels back into it - a RangeIndex,
+# a stepped one, an int64 index, a text index, a daily range holding its
+# freq; positions as an int64 / int32 array or a list, negative, repeated,
+# consecutive; NEGATIVE: a position out of bounds is pandas' IndexError.
+def _lsn8d_iloc_index(m: Any, kind: str) -> Any:
+    if kind == "range":
+        return m.RangeIndex(40)
+    if kind == "stepped":
+        return m.RangeIndex(100, -20, -3)
+    if kind == "int":
+        return m.Index((np.arange(40) * 37) % 41 - 20)
+    if kind == "text":
+        return m.Index([f"r{k}" for k in range(40)])
+    return m.date_range("2021-01-01", periods=40, freq="D", name="when")
+
+
+_LSN8D_ILOC_POSITIONS = {
+    "shuffled": lambda: np.random.default_rng(7).permutation(40),
+    "int32 negative": lambda: (np.arange(40, dtype="int32") * 7) % 80 - 40,
+    "list repeated": lambda: [-1, 0, 5, 5, -40],
+    "consecutive": lambda: np.array([3, 4, 5]),
+    "out of bounds": lambda: np.array([0, 40]),
+}
+_LSN8D_ILOC_CASES = [
+    (kind, how) for kind in ("range", "stepped", "int", "text", "dated") for how in _LSN8D_ILOC_POSITIONS
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _LSN8D_ILOC_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_series_iloc_positions_like_pandas_lsn8d(case: Any) -> None:
+    kind, how = case
+
+    def run(m: Any) -> Any:
+        s = m.Series(np.arange(40) * 0.5, index=_lsn8d_iloc_index(m, kind), name="v")
+        try:
+            out = s.iloc[_LSN8D_ILOC_POSITIONS[how]()]
+        except Exception as error:  # noqa: BLE001
+            return type(error).__name__
+        return [repr(out.index), out.name, out.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-7zs0a / br-frankenpandas-yrjrc: a categorical's
+# categories as pandas' CategoricalDtype makes them - a category equal to
+# another by pandas' equality (1 / 1.0 / True, 'a' / 'a') or a missing one is
+# pandas' ValueError from Categorical, from_codes, CategoricalDtype and the
+# category editors; an int / float mix is float64 (constructors and editors);
+# NEGATIVE: unique categories of mixed kinds stay object, an int-only
+# addition stays int64, a text addition object.
+def _7zs0a_series(m: Any) -> Any:
+    return m.Series([3, 1, 3]).astype("category")
+
+
+_7ZS0A_CATEGORIES = {
+    "ctor 1 / 1.0": lambda m: m.Categorical([1, 1.0], categories=[1, 1.0]),
+    "ctor 1 / True": lambda m: m.Categorical([1], categories=[1, True]),
+    "ctor a / a": lambda m: m.Categorical(["a"], categories=["a", "a"]),
+    "ctor nan": lambda m: m.Categorical([1.0], categories=[np.nan, 1.0]),
+    "ctor floats": lambda m: m.Categorical([1.0, 2.0], categories=[1.0, 2.0]),
+    "ctor text and int": lambda m: m.Categorical(["a", 1], categories=["a", 1]),
+    "ctor int / float mix": lambda m: m.Categorical([1, 2.5], categories=[1, 2.5]),
+    "values 1 / 1.0 / 2.5": lambda m: m.Categorical([1, 1.0, 2.5]),
+    "values int / float": lambda m: m.Categorical([3, 2.5, 1]),
+    "from_codes 1 / 1.0": lambda m: m.Categorical.from_codes([0, 1, 0], categories=[1, 1.0]),
+    "dtype 1 / 1.0": lambda m: m.CategoricalDtype([1, 1.0]),
+    "dtype int / float": lambda m: m.CategoricalDtype([1, 2.5]),
+    "set dup": lambda m: _7zs0a_series(m).cat.set_categories([1, 1.0, 3]),
+    "set int / float": lambda m: _7zs0a_series(m).cat.set_categories([1, 2.5, 3]),
+    "add float": lambda m: _7zs0a_series(m).cat.add_categories([2.5]),
+    "float add int": lambda m: m.Series([1.5, 3.0]).astype("category").cat.add_categories([7]),
+    "add int": lambda m: _7zs0a_series(m).cat.add_categories([7]),
+    "add text": lambda m: _7zs0a_series(m).cat.add_categories(["x"]),
+    "add True": lambda m: _7zs0a_series(m).cat.add_categories([True]),
+    "rename int / float": lambda m: _7zs0a_series(m).cat.rename_categories([10, 2.5]),
+    "rename dup": lambda m: _7zs0a_series(m).cat.rename_categories([10, 10.0]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_7ZS0A_CATEGORIES))
+def test_categories_validate_and_infer_like_pandas_7zs0a(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _7ZS0A_CATEGORIES[case](m)
+        except Exception as error:  # noqa: BLE001
+            return type(error).__name__
+        holder = out.cat if hasattr(out, "cat") else out
+        categories = holder.categories
+        codes = list(holder.codes) if hasattr(holder, "codes") else None
+        return [repr(list(categories)), str(categories.dtype), codes]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-7zs0a / br-frankenpandas-yrjrc over a CategoricalIndex:
+# repeated categories by pandas' equality are its ValueError from the
+# constructor and the editors; an int / float mix makes categories and labels
+# floats; NEGATIVE: an int addition stays int64, a text one object, text with
+# an int object.
+def _7zs0a_index(m: Any) -> Any:
+    return m.CategoricalIndex([3, 1, 3], categories=[1, 3])
+
+
+_7ZS0A_INDEX = {
+    "ctor 1 / 1.0": lambda m: m.CategoricalIndex(["a"], categories=[1, 1.0]),
+    "ctor 1 / True": lambda m: m.CategoricalIndex([1], categories=[1, True]),
+    "ctor int / float": lambda m: m.CategoricalIndex([1, 3], categories=[1, 2.5, 3]),
+    "ctor int label, float categories": lambda m: m.CategoricalIndex([1], categories=[1.0]),
+    "values int / float": lambda m: m.CategoricalIndex([1, 2.5, 1]),
+    "values 1 / 1.0": lambda m: m.CategoricalIndex([1, 1.0, 2.5]),
+    "add float": lambda m: _7zs0a_index(m).add_categories([2.5]),
+    "float add int": lambda m: m.CategoricalIndex([1.5, 3.0]).add_categories([7]),
+    "add True": lambda m: _7zs0a_index(m).add_categories([True]),
+    "add int": lambda m: _7zs0a_index(m).add_categories([7]),
+    "add text": lambda m: _7zs0a_index(m).add_categories(["x"]),
+    "set dup": lambda m: _7zs0a_index(m).set_categories([1, 1.0]),
+    "set int / float": lambda m: _7zs0a_index(m).set_categories([1, 2.5, 3]),
+    "rename int / float": lambda m: _7zs0a_index(m).rename_categories([10, 2.5]),
+    "rename dup": lambda m: _7zs0a_index(m).rename_categories([10, 10.0]),
+    "ctor text and int": lambda m: m.CategoricalIndex(["a", 1], categories=["a", 1]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_7ZS0A_INDEX))
+def test_categorical_index_categories_like_pandas_7zs0a(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _7ZS0A_INDEX[case](m)
+        except Exception as error:  # noqa: BLE001
+            return type(error).__name__
+        return [repr(list(out)), repr(list(out.categories)), str(out.categories.dtype), list(out.codes)]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-1r2sj: categories compare by pandas' equality (1 == 1.0)
+# through the editors - set / remove / reorder_categories after an int / float
+# mix made the categories floats keep the values (they went missing), on a
+# Series and a CategoricalIndex - and mixed ints and floats are told apart as
+# the floats they become (2**53 and 2**53 + 1 one category beside 0.5);
+# what is left of an unordered categorical's categories after a removal is
+# sorted (pandas' Index.difference; fp kept their order); NEGATIVE: a value
+# set_categories drops is missing, an ordered categorical or a removal of
+# nothing keeps the categories' order.
+def _1r2sj_series(m: Any) -> Any:
+    return m.Series([3, 1, 3]).astype("category").cat.add_categories([2.5])
+
+
+_1R2SJ_CASES = {
+    "set back to ints": lambda m: _1r2sj_series(m).cat.set_categories([1, 3]),
+    "set drops one": lambda m: _1r2sj_series(m).cat.set_categories([3]),
+    "remove int": lambda m: _1r2sj_series(m).cat.remove_categories([1]),
+    "reorder by ints": lambda m: _1r2sj_series(m).cat.reorder_categories([2.5, 3, 1]),
+    "index set back to ints": lambda m: m.CategoricalIndex([3, 1, 3])
+    .add_categories([2.5])
+    .set_categories([1, 3]),
+    "index remove int": lambda m: m.CategoricalIndex([3, 1, 3]).add_categories([2.5]).remove_categories([1]),
+    "values 2**53": lambda m: m.Categorical([2**53, 2**53 + 1, 0.5]),
+    "remove sorts the rest": lambda m: m.Series(["b", "a", "c"])
+    .astype(m.CategoricalDtype(["c", "b", "a"]))
+    .cat.remove_categories(["b"]),
+    "index remove sorts the rest": lambda m: m.CategoricalIndex(["b", "a", "c"], categories=["c", "b", "a"])
+    .remove_categories(["b"]),
+    "ordered remove keeps order": lambda m: m.Series(["b", "a", "c"])
+    .astype(m.CategoricalDtype(["c", "b", "a"], ordered=True))
+    .cat.remove_categories(["b"]),
+    "remove nothing keeps order": lambda m: m.Series([3, 1, 2])
+    .astype(m.CategoricalDtype([3, 1, 2]))
+    .cat.remove_categories([]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_1R2SJ_CASES))
+def test_category_editors_compare_numbers_like_pandas_1r2sj(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _1R2SJ_CASES[case](m)
+        except Exception as error:  # noqa: BLE001
+            return type(error).__name__
+        holder = out.cat if hasattr(out, "cat") else out
+        values = [None if v != v else v for v in list(out)]
+        return [repr(values), repr(list(holder.categories)), str(holder.categories.dtype), list(holder.codes)]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-7undg: repeat / combine_first / ffill / bfill keep the
+# nullable extension dtypes (Int64, Float64, boolean, string) with their
+# <NA>, and Int64 combined with float64 is Float64 (pandas' common dtype);
+# NEGATIVE: numpy int64 / float64 Series as before.
+_7UNDG_SOURCES = {
+    "Int64": lambda m: m.Series([1, None, 3], dtype="Int64"),
+    "Float64": lambda m: m.Series([1.5, None, 3.0], dtype="Float64"),
+    "boolean": lambda m: m.Series([True, None, False], dtype="boolean"),
+    "string": lambda m: m.Series(["a", None, "c"], dtype="string"),
+    "int64": lambda m: m.Series([1, 2, 3]),
+    "float64": lambda m: m.Series([1.5, None, 3.0]),
+}
+_7UNDG_OPS = {
+    "repeat": lambda s, m: s.repeat(2),
+    "combine_first": lambda s, m: s.combine_first(s.iloc[::-1].reset_index(drop=True)),
+    "ffill": lambda s, m: s.ffill(),
+    "bfill": lambda s, m: s.bfill(),
+}
+_7UNDG_CASES = [(src, op) for src in _7UNDG_SOURCES for op in _7UNDG_OPS] + [
+    ("Int64", "combine_first float64"),
+]
+
+
+def _7undg_cell(v: Any) -> Any:
+    if v is None or type(v).__name__ == "NAType":
+        return "NA"
+    if isinstance(v, float) and v != v:
+        return "nan"
+    return (type(v).__name__, v)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _7UNDG_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_extension_dtypes_kept_like_pandas_7undg(case: Any) -> None:
+    src, op = case
+
+    def run(m: Any) -> Any:
+        s = _7UNDG_SOURCES[src](m)
+        if op == "combine_first float64":
+            out = s.combine_first(m.Series([9.5, 2.5, 7.5]))
+        else:
+            out = _7UNDG_OPS[op](s, m)
+        return [str(out.dtype), [_7undg_cell(v) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-7v4wf: an object column of numbers keeps its values - mode
+# (its ints were stringified), interpolate (pandas 2.2 leaves an object column
+# as it is, with a FutureWarning; fp interpolated it), clip (pandas' where
+# keeps the cells and the bounds as given; fp made floats); NEGATIVE: text
+# object columns and numeric columns as before.
+_7V4WF_OBJECT_OPS = {
+    "mode ints": lambda m: m.Series([1, 1, 2], dtype=object).mode(),
+    "mode floats": lambda m: m.Series([1.5, 1.5, 2], dtype=object).mode(),
+    "mode text": lambda m: m.Series(["a", "a", "b"], dtype=object).mode(),
+    "mode int64": lambda m: m.Series([1, 1, 2]).mode(),
+    "interpolate ints": lambda m: m.Series([1, None, 2, 3], dtype=object).interpolate(),
+    "interpolate text": lambda m: m.Series(["a", None, "b"], dtype=object).interpolate(),
+    "interpolate float64": lambda m: m.Series([1.0, None, 3.0]).interpolate(),
+    "clip ints": lambda m: m.Series([3, 1, 2], dtype=object).clip(1, 2),
+    "clip lower float bound": lambda m: m.Series([1, None, 0], dtype=object).clip(0.5, None),
+    "clip upper only": lambda m: m.Series([3, 1.5, 2], dtype=object).clip(upper=2),
+    "clip int64": lambda m: m.Series([3, 1, 2]).clip(1, 2),
+    "where": lambda m: m.Series([1, None, 2], dtype=object).where(m.Series([True, False, True]), 0),
+    "mask": lambda m: m.Series([1, None, 2], dtype=object).mask(m.Series([False, True, False]), 9),
+    "drop_duplicates": lambda m: m.Series([1, 1, 2.5], dtype=object).drop_duplicates(),
+    "combine_first": lambda m: m.Series([1, None], dtype=object).combine_first(m.Series([5, 6], dtype=object)),
+    "update": lambda m: (lambda s: (s.update(m.Series([9], index=[1], dtype=object)), s)[1])(
+        m.Series([3, 1, 2], dtype=object)
+    ),
+    "repeat": lambda m: m.Series([3, 1], dtype=object).repeat(2),
+    "cumsum": lambda m: m.Series([3, 1, 2], dtype=object).cumsum(),
+    "unique": lambda m: m.Series([3, 1, 3], dtype=object).unique(),
+    "groupby first": lambda m: m.DataFrame({"k": [1, 1, 2], "v": m.Series([3, 1, 2], dtype=object)})
+    .groupby("k")["v"]
+    .first(),
+    "groupby last": lambda m: m.DataFrame({"k": [1, 1, 2], "v": m.Series([3, 1, 2], dtype=object)})
+    .groupby("k")["v"]
+    .last(),
+    "frame where": lambda m: m.DataFrame({"v": m.Series([1, None], dtype=object), "f": [1.5, 2.5]})
+    .where(m.DataFrame({"v": [True, False], "f": [True, False]}), 0)["v"],
+    "frame mask": lambda m: m.DataFrame({"v": m.Series([1, 2], dtype=object)})
+    .mask(m.DataFrame({"v": [False, True]}), 7)["v"],
+    "concat": lambda m: m.concat([m.Series([3, 1], dtype=object), m.Series([2.5], dtype=object)], ignore_index=True),
+    "concat object and int64": lambda m: m.concat([m.Series([3], dtype=object), m.Series([4])], ignore_index=True),
+    "concat int64": lambda m: m.concat([m.Series([3]), m.Series([4])], ignore_index=True),
+    "where text": lambda m: m.Series(["a", None], dtype=object).where(m.Series([True, False]), "z"),
+    "where int64": lambda m: m.Series([1, 2]).where(m.Series([True, False]), 0),
+}
+
+
+def _7v4wf_cell(v: Any) -> Any:
+    if v is None or (isinstance(v, float) and v != v):
+        return "missing"
+    return (type(v).__name__, v)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_7V4WF_OBJECT_OPS))
+def test_object_column_ops_keep_values_like_pandas_7v4wf(case: str) -> None:
+    def run(m: Any) -> Any:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            try:
+                out = _7V4WF_OBJECT_OPS[case](m)
+            except Exception as error:  # noqa: BLE001
+                return type(error).__name__
+        future = sorted({w.category.__name__ for w in caught if "object dtype is deprecated" in str(w.message)})
+        return [future, str(out.dtype), [_7v4wf_cell(v) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.24: fillna / ffill /
+# bfill of an object column keep the fill and the values as they are (a fill
+# was made text, and a column of numbers stringified), then downcast as pandas
+# 2.2 does with its FutureWarning; NEGATIVE: text stays object with no warning,
+# text beside numbers stays object.
+_FVSAO24_FILLS = {
+    "ints fillna 0": lambda m: m.Series([1, None, 2], dtype=object).fillna(0),
+    "ints ffill": lambda m: m.Series([1, None, 2], dtype=object).ffill(),
+    "ints bfill": lambda m: m.Series([1, None, 2], dtype=object).bfill(),
+    "leading None ffill": lambda m: m.Series([None, 1, 2], dtype=object).ffill(),
+    "floats fillna": lambda m: m.Series([1.5, None], dtype=object).fillna(0.5),
+    "bools fillna": lambda m: m.Series([True, None], dtype=object).fillna(False),
+    "int and float fillna": lambda m: m.Series([1, None, 2.5], dtype=object).fillna(0),
+    "nothing missing fillna": lambda m: m.Series([1, 2], dtype=object).fillna(0),
+    "limit fillna": lambda m: m.Series([1, None, None], dtype=object).fillna(0, limit=1),
+    "text fillna": lambda m: m.Series(["a", None], dtype=object).fillna("z"),
+    "text and int fillna": lambda m: m.Series(["a", None, 1], dtype=object).fillna(0),
+    "frame fillna": lambda m: m.DataFrame(
+        {"a": m.Series([1, None], dtype=object), "b": m.Series(["x", None], dtype=object)}
+    ).fillna(0),
+    "frame ffill": lambda m: m.DataFrame({"a": m.Series([1, None], dtype=object)}).ffill(),
+    "frame bfill": lambda m: m.DataFrame({"a": m.Series([None, 2.5], dtype=object)}).bfill(),
+}
+
+
+def _fvsao24_cell(v: Any) -> Any:
+    if v is None or (isinstance(v, float) and v != v):
+        return "missing"
+    return (type(v).__name__, v)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FVSAO24_FILLS))
+def test_object_fills_like_pandas_fvsao24(case: str) -> None:
+    def run(m: Any) -> Any:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            out = _FVSAO24_FILLS[case](m)
+        downcast = sorted(
+            {w.category.__name__ for w in caught if "Downcasting object dtype" in str(w.message)}
+        )
+        if hasattr(out, "columns"):
+            return [
+                downcast,
+                [(str(out[c].dtype), [_fvsao24_cell(v) for v in out[c].tolist()]) for c in out.columns],
+            ]
+        return [downcast, str(out.dtype), [_fvsao24_cell(v) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-knu1r: grouped shift / diff / pct_change by periods other
+# than 1 (each group's ring stepped by a cursor) - by an int key (the
+# key-offset kernels) and a text key (the group-id kernels), over floats
+# holding NaN, all-valid floats and ints, forward and backward;
+# NEGATIVE: a group's first |periods| rows are NaN and a NaN source stays
+# NaN.
+def _knu1r_ring_frame(m: Any, key: str, values: str) -> Any:
+    k = np.arange(120)
+    floats = (k * 7 % 13) / 4.0 - 1.0
+    if values == "nan floats":
+        floats[[0, 3, 4, 5, 33, 34, 60, 89, 118]] = np.nan
+    data = (k * 7 % 13) - 6 if values == "ints" else floats
+    keys = (k * 5) % 4 if key == "int" else [f"g{(v * 5) % 4}" for v in k]
+    return m.DataFrame({"k": keys, "v": data})
+
+
+_KNU1R_RING_OPS = {
+    "shift(2)": lambda g: g.shift(2),
+    "shift(-2)": lambda g: g.shift(-2),
+    "shift(3)": lambda g: g.shift(3),
+    "diff(2)": lambda g: g.diff(2),
+    "diff(-3)": lambda g: g.diff(-3),
+    "pct_change(2)": lambda g: g.pct_change(2, fill_method=None),
+}
+_KNU1R_RING_CASES = [
+    (op, key, values)
+    for op in _KNU1R_RING_OPS
+    for key in ("int", "text")
+    for values in ("nan floats", "floats", "ints")
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _KNU1R_RING_CASES, ids=lambda case: "-".join(case))
+def test_grouped_ring_periods_like_pandas_knu1r(case: Any) -> None:
+    op, key, values = case
+
+    def run(m: Any) -> Any:
+        out = _KNU1R_RING_OPS[op](_knu1r_ring_frame(m, key, values).groupby("k")["v"])
+        return [str(out.dtype), [None if v != v else round(float(v), 9) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-knu1r: unique of a float column builds its distinct
+# floats directly - first-seen order, every missing value one NaN where the
+# first is seen, -0.0 and 0.0 one value (the first seen kept), from numpy
+# NaN, by where, by a reindex adding a label, all NaN, empty, float32,
+# infinities; NEGATIVE: a nullable Float64's unique stays its FloatingArray
+# with <NA>, an int64 column's an int64 array.
+_KNU1R_UNIQUE = {
+    "numpy nan": lambda m: m.Series(np.array([1.5, np.nan, 2.5, 1.5, np.nan, 3.0, 2.5])),
+    "nan first": lambda m: m.Series(np.array([np.nan, 0.25, 0.25, np.nan])),
+    "signed zeros": lambda m: m.Series(np.array([-0.0, 0.0, np.nan, 0.0, -0.0])),
+    "zero first": lambda m: m.Series(np.array([0.0, np.nan, -0.0])),
+    "where": lambda m: m.Series([0.2, 0.7, 0.9, 0.1, 0.7]).where(m.Series([0.2, 0.7, 0.9, 0.1, 0.7]) > 0.5),
+    "reindex": lambda m: m.Series([1.0, 2.0, 1.0], index=[0, 1, 2]).reindex([2, 7, 0, 9]),
+    "all nan": lambda m: m.Series(np.array([np.nan, np.nan])),
+    "empty": lambda m: m.Series(np.array([], dtype="float64")),
+    "float32": lambda m: m.Series(np.array([0.1, np.nan, 0.1, 2.5], dtype="float32")),
+    "infinities": lambda m: m.Series(np.array([np.inf, -np.inf, np.nan, np.inf, 1.0])),
+    "no missing": lambda m: m.Series(np.array([3.5, 1.25, 3.5, -2.0, 1.25])),
+    "nullable Float64": lambda m: m.Series([1.5, None, 1.5, 2.0], dtype="Float64"),
+    "int64": lambda m: m.Series(np.array([3, 1, 3, 2])),
+}
+
+
+def _knu1r_unique_cell(v: Any) -> Any:
+    if type(v).__name__ == "NAType":
+        return "<NA>"
+    if isinstance(v, (float, np.floating)):
+        return "nan" if v != v else (float(v), bool(np.signbit(v)))
+    return int(v)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_KNU1R_UNIQUE))
+def test_float_unique_like_pandas_knu1r(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _KNU1R_UNIQUE[case](m).unique()
+        return [type(out).__name__, str(out.dtype), [_knu1r_unique_cell(v) for v in list(out)]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-knu1r: grouped cumsum / cumprod / cummax / cummin of a
+# float column holding NaN (a group's first value, runs of them) by an int
+# key (the key-offset kernel) and a text key (the group-id kernel);
+# NEGATIVE: a NaN row stays NaN and does not reset its group's running value.
+def _knu1r_cum_frame(m: Any, key: str) -> Any:
+    k = np.arange(90)
+    values = (k * 7 % 13) / 4.0 - 1.0
+    values[[0, 3, 4, 5, 33, 34, 60, 89]] = np.nan
+    keys = (k * 5) % 4 if key == "int" else [f"g{(v * 5) % 4}" for v in k]
+    return m.DataFrame({"k": keys, "v": values})
+
+
+_KNU1R_CUM_CASES = [
+    (op, key)
+    for op in ("cumsum", "cumprod", "cummax", "cummin", "median")
+    for key in ("int", "text")
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _KNU1R_CUM_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_grouped_cum_over_nan_like_pandas_knu1r(case: Any) -> None:
+    op, key = case
+
+    def run(m: Any) -> Any:
+        out = getattr(_knu1r_cum_frame(m, key).groupby("k")["v"], op)()
+        return [str(out.dtype), [None if v != v else round(float(v), 9) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-knu1r: tolist / iteration of a float64 column holding
+# missing values gives Python floats with nan in their place - built from
+# numpy, by where, by a reindex adding a label, float32, with infinities and
+# -0.0; NEGATIVE: a nullable Float64 keeps <NA> and a datetime NaT.
+_KNU1R_TOLIST = {
+    "numpy nan": lambda m: m.Series(np.array([1.5, np.nan, -0.0, np.inf, np.nan, -np.inf])),
+    "where": lambda m: m.Series([0.2, 0.7, 0.9, 0.1]).where(m.Series([0.2, 0.7, 0.9, 0.1]) > 0.5),
+    "reindex": lambda m: m.Series([1.0, 2.0, 3.0], index=[0, 1, 2]).reindex([2, 7, 0]),
+    "float32": lambda m: m.Series(np.array([0.1, np.nan, 2.5], dtype="float32")),
+    "nullable Float64": lambda m: m.Series([1.5, None, 2.0], dtype="Float64"),
+    "datetime NaT": lambda m: m.Series(np.array(["2021-01-01", "NaT"], dtype="datetime64[ns]")),
+}
+_KNU1R_TOLIST_CASES = [(kind, how) for kind in _KNU1R_TOLIST for how in ("tolist", "iter")]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _KNU1R_TOLIST_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_float_tolist_like_pandas_knu1r(case: Any) -> None:
+    kind, how = case
+
+    def run(m: Any) -> Any:
+        s = _KNU1R_TOLIST[kind](m)
+        values = s.tolist() if how == "tolist" else list(s)
+        return [(type(v).__name__, repr(v)) for v in values]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-knu1r: rolling count - a float column holding NaN and an
+# infinity (counted), text holding None, ints - windows wider than the
+# column (every window short: a float64 of NaN, it was object), centered,
+# min_periods; NEGATIVE: a NaN is never counted, an infinity always is.
+_KNU1R_COUNT_VALUES = {
+    "floats": [1.0, np.nan, np.inf, 4.0, np.nan, np.nan, 7.0, -np.inf, 9.0],
+    "text": ["a", None, "b", "c", None, "d", "e", None, "f"],
+    "ints": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+}
+_KNU1R_COUNT_CASES = [
+    (kind, window, extra)
+    for kind in _KNU1R_COUNT_VALUES
+    for window in (2, 4, 20)
+    for extra in ("", "min_periods=1", "center")
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _KNU1R_COUNT_CASES, ids=lambda case: f"{case[0]}-{case[1]}-{case[2]}")
+def test_rolling_count_like_pandas_knu1r(case: Any) -> None:
+    kind, window, extra = case
+    keywords = {"": {}, "min_periods=1": {"min_periods": 1}, "center": {"center": True}}[extra]
+
+    def run(m: Any) -> Any:
+        out = m.Series(_KNU1R_COUNT_VALUES[kind]).rolling(window, **keywords).count()
+        return [str(out.dtype), [None if v != v else float(v) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-vk7y9: value_counts of a datetime / timedelta column holding
+# NaT (day stamps, each counted a different number of times) - the default
+# options tally the nanos; normalize, ascending, unsorted and dropna=False
+# beside them; NEGATIVE: a zoned column (the general path) and dropna=False
+# (NaT's row kept) answer as pandas too.
+def _vk7y9vc_series(m: Any, kind: str) -> Any:
+    k = np.repeat(np.arange(9), np.arange(1, 10))[np.random.default_rng(7).permutation(45)]
+    stamps = np.datetime64("2021-03-01", "ns") + k.astype("timedelta64[D]")
+    stamps = np.concatenate([stamps, np.array(["NaT"] * 4, dtype="datetime64[ns]")])
+    s = m.Series(stamps, name="when")
+    if kind == "timedelta":
+        return s - m.Timestamp("2021-01-01")
+    if kind == "aware":
+        return s.dt.tz_localize("UTC")
+    return s
+
+
+_VK7Y9VC_CASES = [
+    (kind, options)
+    for kind in ("datetime", "timedelta", "aware")
+    for options in ("default", "normalize", "ascending", "unsorted", "dropna=False")
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _VK7Y9VC_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_temporal_value_counts_like_pandas_vk7y9(case: Any) -> None:
+    kind, options = case
+    keywords = {
+        "default": {},
+        "normalize": {"normalize": True},
+        "ascending": {"ascending": True},
+        "unsorted": {"sort": False},
+        "dropna=False": {"dropna": False},
+    }[options]
+
+    def run(m: Any) -> Any:
+        out = _vk7y9vc_series(m, kind).value_counts(**keywords)
+        return [
+            str(out.dtype),
+            out.name,
+            out.tolist(),
+            [str(v) for v in out.index],
+            str(out.index.dtype),
+            out.index.name,
+        ]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-vk7y9: mode of datetimes / durations holding NaT - with
+# dropna=False NaT is a value of its own, sorted first among tied modes as
+# pandas sorts them; NEGATIVE: dropna=True leaves it out.
+_VK7Y9MODE_VALUES = {
+    "ties": ["2021-03-01", "NaT", "2021-03-02"],
+    "NaT most": ["2021-03-01", "NaT", "NaT", "2021-03-02"],
+    "tie with NaT": ["2021-03-02", "NaT", "NaT", "2021-03-02", "2021-03-01"],
+    "all NaT": ["NaT", "NaT"],
+    "no NaT": ["2021-03-02", "2021-03-01", "2021-03-02"],
+}
+_VK7Y9MODE_CASES = [
+    (values, kind, dropna)
+    for values in _VK7Y9MODE_VALUES
+    for kind in ("datetime", "timedelta", "aware")
+    for dropna in (False, True)
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _VK7Y9MODE_CASES, ids=lambda case: f"{case[0]}-{case[1]}-dropna={case[2]}")
+def test_temporal_mode_like_pandas_vk7y9(case: Any) -> None:
+    values, kind, dropna = case
+
+    def run(m: Any) -> Any:
+        s = m.Series(np.array(_VK7Y9MODE_VALUES[values], dtype="datetime64[ns]"), name="w")
+        if kind == "timedelta":
+            s = s - m.Timestamp("2021-01-01")
+        elif kind == "aware":
+            s = s.dt.tz_localize("UTC")
+        out = s.mode(dropna=dropna)
+        return [str(out.dtype), out.name, [str(v) for v in out]]
+
+    assert run(fpd) == run(pd)
+
+
 # br-frankenpandas-vriq2: a category key's groups are a CategoricalIndex - its
 # categories and ordered flag - for size() and the dropna=False reductions
 # too, as for its other reductions (they were a plain Index); a missing key's
@@ -29523,3 +30416,5560 @@ def test_groupby_selections_share_group_ids_vug8g(case: str) -> None:
         ]
 
     assert run(fpd) == run(pd)
+
+
+_1F4YB_COLUMNS = {
+    "b": ("bool", [True, False]),
+    "i": ("int64", [3, -1]),
+    "u": ("uint8", [2, 7]),
+    "f": ("float64", [0.5, float("nan")]),
+    "g": ("float32", [1.5, -2.0]),
+    "o": ("object", ["x", 1]),
+    "d": ("datetime64[ns]", ["2020-01-01", "2021-06-30"]),
+    "z": ("datetime64[ns, UTC]", ["2020-01-01", "2021-06-30"]),
+    "t": ("timedelta64[ns]", ["1D", "2h"]),
+}
+_1F4YB_FRAMES = ["b", "i", "u", "g", "bi", "if", "gi", "oi", "o", "d", "z", "t", "df", "dz", ""]
+_1F4YB_OPS = [
+    ("sum", {}),
+    ("sum", {"min_count": 1}),
+    ("prod", {}),
+    ("min", {}),
+    ("max", {}),
+    ("mean", {}),
+    ("median", {}),
+    ("std", {}),
+    ("var", {"ddof": 0}),
+    ("sem", {}),
+    ("skew", {}),
+    ("kurt", {}),
+    ("mean", {"skipna": False}),
+    ("sum", {"numeric_only": True}),
+    ("max", {"numeric_only": True}),
+]
+
+
+def _1f4yb_frame(m: Any, columns: str, rows: bool) -> Any:
+    index = m.Index([10, 20] if rows else [], dtype="int64")
+    return m.DataFrame(
+        {
+            name: m.Series(_1F4YB_COLUMNS[name][1] if rows else [], dtype=_1F4YB_COLUMNS[name][0], index=index)
+            for name in columns
+        },
+        index=index,
+    )
+
+
+def _1f4yb_answers(m: Any, frame: Any, axis: int, ops: list) -> list:
+    answers = []
+    for op, kwargs in ops:
+        try:
+            result = getattr(frame, op)(axis=axis, **kwargs)
+        except Exception as error:  # noqa: BLE001
+            answers.append((op, kwargs, type(error).__name__, str(error)))
+            continue
+        answers.append(
+            (op, kwargs, str(result.dtype), [str(v) for v in result.index], [str(v) for v in result.tolist()])
+        )
+    return answers
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("axis", [0, 1])
+@pytest.mark.parametrize("columns", _1F4YB_FRAMES)
+def test_rowless_frame_reductions_like_pandas_1f4yb(columns: str, axis: int) -> None:
+    # A frame without rows reduces as pandas' blocks reduce an empty array
+    # (br-frankenpandas-1f4yb): a number's sum its identity (int64, uint64
+    # unsigned, float32 a float32's), NaN with a min_count, every other op
+    # NaN float64 (a float32's skew / kurt float32); an object column's
+    # identity or NaN, object; a date's min / mean NaT of its dtype, its std
+    # a NaT duration, its sum pandas' TypeError; the columns' common dtype
+    # over the columns, and over the rows that dtype emptied. An int's min
+    # was int64, a float's std object, a bool beside an int's sum object,
+    # mean(skipna=False) dropped the columns. NEGATIVE: the same frames with
+    # rows (dates and durations aside, br-frankenpandas-4ckef).
+    assert _1f4yb_answers(fpd, _1f4yb_frame(fpd, columns, False), axis, _1F4YB_OPS) == _1f4yb_answers(
+        pd, _1f4yb_frame(pd, columns, False), axis, _1F4YB_OPS
+    )
+
+
+_1F4YB_ROWS_CASES = {
+    "int min": ("i", 0, [("min", {}), ("max", {})]),
+    "int + float std": ("if", 0, [("std", {}), ("var", {"ddof": 0}), ("sem", {})]),
+    "bool + int sum over rows": ("bi", 1, [("sum", {})]),
+    "object beside int count": ("oi", 0, [("count", {})]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_1F4YB_ROWS_CASES))
+def test_frame_reductions_with_rows_unchanged_1f4yb(case: str) -> None:
+    # NEGATIVE of br-frankenpandas-1f4yb: frames with rows keep their own
+    # answers - an int's min int64, a bool beside an int object over rows.
+    columns, axis, ops = _1F4YB_ROWS_CASES[case]
+    assert _1f4yb_answers(fpd, _1f4yb_frame(fpd, columns, True), axis, ops) == _1f4yb_answers(
+        pd, _1f4yb_frame(pd, columns, True), axis, ops
+    )
+
+
+_4CKEF_REFUSED = [("sum", {}), ("prod", {}), ("var", {}), ("sem", {}), ("skew", {}), ("kurt", {})]
+_4CKEF_CASES = {
+    "dates": ("d", _4CKEF_REFUSED),
+    "zoned dates": ("z", _4CKEF_REFUSED),
+    "durations": ("t", _4CKEF_REFUSED),
+    "dates beside an int": ("di", [("sum", {}), ("var", {})]),
+    # NEGATIVE: what pandas reduces keeps answering, and numeric_only drops
+    # the dates and durations.
+    "dates answered (NEGATIVE)": ("d", [("min", {}), ("max", {}), ("count", {})]),
+    "durations answered (NEGATIVE)": ("t", [("sum", {}), ("std", {}), ("min", {})]),
+    "numeric_only (NEGATIVE)": ("dti", [("sum", {"numeric_only": True}), ("var", {"numeric_only": True})]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_4CKEF_CASES))
+def test_temporal_frame_reductions_refuse_like_pandas_4ckef(case: str) -> None:
+    # A frame's reductions over its columns refuse a date's sum / prod /
+    # var / sem / skew / kurt and a duration's prod / var / sem / skew /
+    # kurt with pandas' TypeError naming the array and dtype
+    # (br-frankenpandas-4ckef; a date's sum answered, a duration's skew
+    # too, others raised 'could not convert' or a ValueError).
+    columns, ops = _4CKEF_CASES[case]
+    assert _1f4yb_answers(fpd, _1f4yb_frame(fpd, columns, True), 0, ops) == _1f4yb_answers(
+        pd, _1f4yb_frame(pd, columns, True), 0, ops
+    )
+
+
+_BSS5Q3_FRAME_VALUES_CASES = {
+    "floats": lambda m: m.DataFrame({"a": [0.5, -1.25, 3.0], "b": [2.0, 0.0, -0.0]}),
+    "floats with NaN": lambda m: m.DataFrame({"a": [0.5, float("nan"), 3.0], "b": [float("nan"), 1.0, 2.0]}),
+    "ints": lambda m: m.DataFrame({"a": [1, -2, 3], "b": [4, 5, 2**62]}),
+    "int beside float": lambda m: m.DataFrame({"i": [1, -2, 3], "f": [0.5, float("nan"), 2.0]}),
+    "bools": lambda m: m.DataFrame({"p": [True, False, True], "q": [False, False, True]}),
+    "dates": lambda m: m.DataFrame(
+        {"d": m.to_datetime(["2020-01-01", None, "2021-06-30"]), "e": m.to_datetime(["2000-01-01"] * 3)}
+    ),
+    "durations": lambda m: m.DataFrame({"t": m.to_timedelta(["1D", "2h", None])}),
+    "float32": lambda m: m.DataFrame(
+        {"g": m.Series([1.5, -2.0, 0.25], dtype="float32"), "h": m.Series([1.0, 2.0, 3.0], dtype="float32")}
+    ),
+    "text": lambda m: m.DataFrame({"s": ["x", "y"], "t": ["z", None]}),
+    "text beside a number": lambda m: m.DataFrame({"s": ["x", "y"], "n": [1.5, 2.0]}),
+    # NEGATIVE: one column (both layouts at once) and no rows were laid out
+    # as pandas' already.
+    "one column (NEGATIVE)": lambda m: m.DataFrame({"a": [1.0, 2.0]}),
+    "no rows (NEGATIVE)": lambda m: m.DataFrame({"a": m.Series([], dtype="float64"), "b": m.Series([], dtype="float64")}),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BSS5Q3_FRAME_VALUES_CASES))
+def test_frame_values_layout_like_pandas_bss5q3(case: str) -> None:
+    # df.values is pandas' block transposed - F-ordered - each column copied
+    # once into its row of a numpy.empty block (a zeroed bytearray took
+    # every cell interleaved: 0.46x pandas; br-frankenpandas-bss5q.3): its
+    # dtype, layout and values as pandas', to_numpy() the same, an object
+    # frame's too. NEGATIVE: one column and no rows, laid out as before.
+    def run(m: Any) -> Any:
+        frame = _BSS5Q3_FRAME_VALUES_CASES[case](m)
+        answers = []
+        for array in (frame.values, frame.to_numpy()):
+            answers.append(
+                (
+                    str(array.dtype),
+                    array.shape,
+                    bool(array.flags["F_CONTIGUOUS"]),
+                    bool(array.flags["C_CONTIGUOUS"]),
+                    [[str(v) for v in row] for row in array.tolist()],
+                )
+            )
+        return answers
+
+    assert run(fpd) == run(pd)
+
+
+_V0P5K_NS = np.array(["2020-01-01", "NaT", "2021-06-30T12:30"], dtype="datetime64[ns]")
+_V0P5K_TD = np.array([1, -2, 86_400_000_000_000], dtype="timedelta64[ns]")
+_V0P5K_CASES = {
+    "Series(index=dates)": lambda m: m.Series([1, 2, 3], index=_V0P5K_NS).index,
+    "DataFrame(index=dates)": lambda m: m.DataFrame({"a": [1, 2, 3]}, index=_V0P5K_NS).index,
+    "Index(dates)": lambda m: m.Index(_V0P5K_NS),
+    "DatetimeIndex(dates)": lambda m: m.DatetimeIndex(_V0P5K_NS),
+    "DatetimeIndex(date_range values)": lambda m: m.DatetimeIndex(pd.date_range("2024-02-27", periods=4).values),
+    "DatetimeIndex(tuple of text)": lambda m: m.DatetimeIndex(("2020-01-01", "2020-03-01")),
+    "DatetimeIndex(array of text)": lambda m: m.DatetimeIndex(np.array(["2020-01-01", "2020-03-01"])),
+    "Index(durations)": lambda m: m.Index(_V0P5K_TD),
+    "Series(index=durations)": lambda m: m.Series([1, 2, 3], index=_V0P5K_TD).index,
+    # NEGATIVE: number arrays stay numeric indexes.
+    "Series(index=ints) (NEGATIVE)": lambda m: m.Series([1, 2], index=np.array([5, 7])).index,
+    "Index(floats) (NEGATIVE)": lambda m: m.Index(np.array([0.5, 2.0])),
+}
+# A second-resolution array keeps its unit in pandas, fp holds nanoseconds
+# (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.16): its labels.
+_V0P5K_UNIT_CASES = {
+    "Series(index=dates[s])": lambda m: m.Series([1, 2], index=_V0P5K_NS[[0, 2]].astype("datetime64[s]")).index,
+    "Index(dates[ms])": lambda m: m.Index(_V0P5K_NS.astype("datetime64[ms]")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_V0P5K_CASES) + list(_V0P5K_UNIT_CASES))
+def test_datetime_arrays_index_as_dates_v0p5k(case: str) -> None:
+    # A numpy datetime64 / timedelta64 array as an index is dates /
+    # durations (br-frankenpandas-v0p5k): Series(index=dates) was a float64
+    # index of the nanoseconds, Index(dates) int64, DatetimeIndex(dates)
+    # raised TypeError. NEGATIVE: int and float arrays stay numeric.
+    def run(m: Any) -> Any:
+        if case in _V0P5K_CASES:
+            index = _V0P5K_CASES[case](m)
+            return type(index).__name__, str(index.dtype), [str(v) for v in index]
+        index = _V0P5K_UNIT_CASES[case](m)
+        return type(index).__name__, [str(v) for v in index]
+
+    assert run(fpd) == run(pd)
+
+
+_U3A2C_BIG = 2**53
+_U3A2C_CASES = {
+    "ints above 2**53": (
+        lambda m: m.DataFrame({"a": [_U3A2C_BIG, 5, -_U3A2C_BIG], "b": [1, _U3A2C_BIG + 2, 0]}),
+        lambda m: m.DataFrame({"a": [_U3A2C_BIG + 1, 5, -_U3A2C_BIG - 1], "b": [1, _U3A2C_BIG + 3, 0]}),
+    ),
+    "floats with NaN": (
+        lambda m: m.DataFrame({"a": [0.5, float("nan"), 2.0], "b": [float("nan"), float("nan"), -1.0]}),
+        lambda m: m.DataFrame({"a": [0.5, 1.0, float("nan")], "b": [float("nan"), 0.0, -2.0]}),
+    ),
+    "masked Int64": (
+        lambda m: m.DataFrame({"a": m.array([1, None, 3], dtype="Int64")}),
+        lambda m: m.DataFrame({"a": m.array([1, 2, None], dtype="Int64")}),
+    ),
+    "text beside ints": (
+        lambda m: m.DataFrame({"a": ["x", "y", "z"]}),
+        lambda m: m.DataFrame({"a": [1, 2, 3]}),
+    ),
+    # NEGATIVE: an int beside a float compares through the float, as numpy;
+    # categoricals of the same categories keep their compare.
+    "int beside float (NEGATIVE)": (
+        lambda m: m.DataFrame({"a": [_U3A2C_BIG + 1, 5, 7]}),
+        lambda m: m.DataFrame({"a": [float(_U3A2C_BIG), 5.0, 6.5]}),
+    ),
+    "categoricals (NEGATIVE)": (
+        lambda m: m.DataFrame({"a": m.Categorical(["x", "y", "x"], categories=["x", "y"])}),
+        lambda m: m.DataFrame({"a": m.Categorical(["x", "x", "y"], categories=["x", "y"])}),
+    ),
+}
+_U3A2C_OPERATORS = ["__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__", "eq", "ne", "lt", "le", "gt", "ge"]
+# An unordered categorical has no order (pandas' TypeError; it answered by
+# its values); its equality is the NEGATIVE above. Ordered categoricals'
+# order is br-frankenpandas-x6p40.
+_U3A2C_CASE_OPERATORS = {
+    "categoricals (NEGATIVE)": ["__eq__", "__ne__", "eq", "ne"],
+    "unordered categoricals ordered": ["__lt__", "__le__", "__gt__", "__ge__", "lt", "le", "gt", "ge"],
+}
+_U3A2C_CASES["unordered categoricals ordered"] = _U3A2C_CASES["categoricals (NEGATIVE)"]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_U3A2C_CASES))
+def test_frame_comparisons_like_pandas_u3a2c(case: str) -> None:
+    # Two frames compare each pair of columns as two Series do
+    # (br-frankenpandas-u3a2c): an int64 pair exactly (2**53 equalled
+    # 2**53 + 1 through f64), a missing value False (True under !=), a masked
+    # pair pandas' boolean (it was object), text ordered against numbers
+    # pandas' TypeError (it compared the printed text) - under every
+    # operator and its flex method, the flex methods also on frames aligned
+    # in another row order. NEGATIVE: an int beside a float through the
+    # float; categoricals of the same categories as before.
+    def run(m: Any) -> Any:
+        left_of, right_of = _U3A2C_CASES[case]
+        answers = []
+        for shuffled in (False, True):
+            left, right = left_of(m), right_of(m)
+            if shuffled:
+                right = right.iloc[[2, 0, 1]]
+            for name in _U3A2C_CASE_OPERATORS.get(case, _U3A2C_OPERATORS):
+                if shuffled and name.startswith("__"):
+                    continue
+                try:
+                    result = getattr(left, name)(right)
+                except Exception as error:  # noqa: BLE001
+                    answers.append((shuffled, name, type(error).__name__))
+                    continue
+                answers.append(
+                    (
+                        shuffled,
+                        name,
+                        [str(dtype) for dtype in result.dtypes],
+                        [str(v) for v in result.index],
+                        [[str(v) for v in row] for row in result.values.tolist()],
+                    )
+                )
+        return answers
+
+    assert run(fpd) == run(pd)
+
+
+def _bss5q3_dup_frame(m: Any) -> Any:
+    rng = np.random.default_rng(41)
+    return m.DataFrame(
+        {
+            "k": rng.integers(-3, 4, 60),
+            "k2": rng.integers(0, 3, 60),
+            "k3": rng.integers(10, 13, 60),
+            "w": rng.integers(0, 2**40, 60) * rng.integers(0, 2, 60),
+            "a": rng.random(60),
+        }
+    )
+
+
+_BSS5Q3_DUP_CASES = {
+    "two ints": lambda m: _bss5q3_dup_frame(m).duplicated(["k", "k2"]),
+    "two ints keep=last": lambda m: _bss5q3_dup_frame(m).duplicated(["k", "k2"], keep="last"),
+    "two ints keep=False": lambda m: _bss5q3_dup_frame(m).duplicated(["k", "k2"], keep=False),
+    "three ints": lambda m: _bss5q3_dup_frame(m).duplicated(["k", "k2", "k3"]),
+    "drop_duplicates": lambda m: _bss5q3_dup_frame(m).drop_duplicates(["k3", "k"])["a"],
+    "drop_duplicates keep=last": lambda m: _bss5q3_dup_frame(m).drop_duplicates(["k", "k2"], keep="last")["a"],
+    # NEGATIVE: a column of wide range keeps the digest path.
+    "wide column (NEGATIVE)": lambda m: _bss5q3_dup_frame(m).duplicated(["k", "w"]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BSS5Q3_DUP_CASES))
+def test_duplicated_over_int_columns_like_pandas_bss5q3(case: str) -> None:
+    # Several int columns of bounded range deduplicate through one combined
+    # int key per row (the digest + bucket path took 0.42x pandas;
+    # br-frankenpandas-bss5q.3): the same rows flagged and kept as pandas
+    # under each keep. NEGATIVE: a wide column, through the digest path.
+    def run(m: Any) -> Any:
+        result = _BSS5Q3_DUP_CASES[case](m)
+        return str(result.dtype), list(result.index), [str(v) for v in result.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
+def _bss5q3_minutes(m: Any, holes: bool) -> Any:
+    rng = np.random.default_rng(43)
+    stamps = pd.date_range("2024-01-01", periods=1000, freq="min")
+    keep = [k for k in range(1000) if not 300 <= k < 480 or k == 330]
+    values = rng.normal(size=1000)[keep]
+    if holes:
+        values[::7] = np.nan
+    values[5] = -0.0
+    values[6] = 0.0
+    return m.Series(values, index=m.to_datetime(stamps[keep].values))
+
+
+_BSS5Q3_RESAMPLE_CASES = {
+    **{
+        f"{op} {freq}": (lambda m, op=op, freq=freq: getattr(_bss5q3_minutes(m, False).resample(freq), op)())
+        for op in ["max", "min"]
+        for freq in ["h", "15min", "D"]
+    },
+    **{
+        f"count {freq} with NaN": (lambda m, freq=freq: _bss5q3_minutes(m, True).resample(freq).count())
+        for freq in ["h", "15min", "D"]
+    },
+    # NEGATIVE: an int column's count keeps its path.
+    "int count (NEGATIVE)": lambda m: m.Series(np.arange(1000), index=m.to_datetime(
+        pd.date_range("2024-01-01", periods=1000, freq="min").values
+    )).resample("h").count(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BSS5Q3_RESAMPLE_CASES))
+def test_resample_extremes_and_counts_like_pandas_bss5q3(case: str) -> None:
+    # resample max / min / count over daily and sub-daily bins in one pass
+    # over the stamps (a per-bin Scalar gather took max 0.23x and count
+    # 0.15x pandas; br-frankenpandas-bss5q.3): each bin's answer, a gap's
+    # empty bins NaN / 0, -0.0 beside 0.0 the first, as pandas. NEGATIVE:
+    # an int column's count.
+    def run(m: Any) -> Any:
+        result = _BSS5Q3_RESAMPLE_CASES[case](m)
+        return (
+            str(result.dtype),
+            [str(v) for v in result.index],
+            [repr(v) if v == v else "nan" for v in result.tolist()],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+def _bss5q2_frame(m: Any, holes: bool) -> Any:
+    rng = np.random.default_rng(47)
+    frame = m.DataFrame({name: rng.normal(size=500) * 1e3 for name in ["a", "b", "c"]})
+    if holes:
+        frame = m.DataFrame(
+            {
+                "a": np.where(np.arange(500) % 9 == 0, np.nan, rng.normal(size=500)),
+                "b": np.full(500, np.nan),
+                "c": rng.normal(size=500),
+            }
+        )
+    return frame
+
+
+_BSS5Q2_CASES = {
+    "T.sum(axis=1)": lambda m: _bss5q2_frame(m, False).T.sum(axis=1),
+    "T.mean(axis=1)": lambda m: _bss5q2_frame(m, False).T.mean(axis=1),
+    "T.sum(axis=1) with NaN": lambda m: _bss5q2_frame(m, True).T.sum(axis=1),
+    "T.mean(axis=1) with NaN": lambda m: _bss5q2_frame(m, True).T.mean(axis=1),
+    "T.sum(axis=1, min_count=400)": lambda m: _bss5q2_frame(m, True).T.sum(axis=1, min_count=400),
+    "int columns T.T": lambda m: m.DataFrame({0: [1.5, 2.0], 1: [3.0, -1.0]}).T.sum(axis=1),
+    # NEGATIVE: ints keep the column path (skipna=False too, whose wide rows'
+    # last bits are br-frankenpandas-gqjc5).
+    "ints T.sum(axis=1) (NEGATIVE)": lambda m: m.DataFrame({"a": np.arange(50), "b": np.arange(50) * 3}).T.sum(axis=1),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BSS5Q2_CASES))
+def test_transposed_row_reductions_like_pandas_bss5q2(case: str) -> None:
+    # A lazily transposed float frame's row sums / means are its source
+    # columns' (pandas answers df.T.sum(axis=1) with df.sum()'s bits; each
+    # row was a column of the materialized view: 0.36x pandas;
+    # br-frankenpandas-rc0923-epic-zero-certified-losses-bss5q.2): bits,
+    # labels (int column labels stay ints), min_count. NEGATIVE: an int frame
+    # through the column path.
+    def run(m: Any) -> Any:
+        result = _BSS5Q2_CASES[case](m)
+        return (
+            str(result.dtype),
+            [repr(v) for v in result.index],
+            [v.hex() if isinstance(v, float) and v == v else repr(v) for v in result.tolist()],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+def _xm57b_frame(m: Any) -> Any:
+    nan = float("nan")
+    return m.DataFrame(
+        {
+            "a": [1.0, nan, 3.0, 4.0],
+            "b": [2.0, 3.0, nan, 5.0],
+            "c": [0.5, 1.0, 1.5, 2.5],
+            "t": ["x", "y", "z", "w"],
+        }
+    )
+
+
+_XM57B_CASES = {
+    **{
+        f"{op}": (lambda m, op=op: getattr(_xm57b_frame(m)[["a", "b", "c"]], op)(axis=1, skipna=False))
+        for op in ["sum", "prod", "mean"]
+    },
+    **{
+        f"{op} numeric_only": (
+            lambda m, op=op: getattr(_xm57b_frame(m), op)(axis=1, skipna=False, numeric_only=True)
+        )
+        for op in ["sum", "prod", "mean"]
+    },
+    "sum of a transposed frame": lambda m: _xm57b_frame(m)[["a", "b", "c"]].T.sum(axis=1, skipna=False),
+    "sum min_count=2": lambda m: _xm57b_frame(m)[["a", "b", "c"]].sum(axis=1, skipna=False, min_count=2),
+    # NEGATIVE: median already took skipna; a frame without NaN and an int
+    # frame answer the same for either skipna.
+    "median (NEGATIVE)": lambda m: _xm57b_frame(m)[["a", "b", "c"]].median(axis=1, skipna=False),
+    "no NaN (NEGATIVE)": lambda m: _xm57b_frame(m)[["c"]].assign(d=[1.0, 2.0, 3.0, 4.0]).sum(axis=1, skipna=False),
+    "ints (NEGATIVE)": lambda m: m.DataFrame({"i": [1, 2], "j": [3, 4]}).mean(axis=1, skipna=False),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_XM57B_CASES))
+def test_row_reductions_skipna_false_like_pandas_xm57b(case: str) -> None:
+    # sum / prod / mean over rows with skipna=False: a row holding a missing
+    # value is NaN, as pandas (it was skipped as under skipna=True: [3.0,
+    # 3.0] for pandas' [3.0, nan]; br-frankenpandas-xm57b). NEGATIVE: median
+    # (already right), a frame without NaN, an int frame.
+    def run(m: Any) -> Any:
+        result = _XM57B_CASES[case](m)
+        return str(result.dtype), list(result.index), [repr(v) if v == v else "nan" for v in result.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
+def _eb0hv_frames(m: Any) -> dict:
+    nan = float("nan")
+    index = [10, 20]
+    return {
+        "all-NaN float": m.DataFrame({"f": [nan, nan]}, index=index),
+        "all-NaN float beside an int": m.DataFrame({"f": [nan, nan], "i": [1, 2]}, index=index),
+        "float32": m.DataFrame({"g": m.Series([1.5, -2.0], dtype="float32", index=index)}, index=index),
+        "float32 beside float64": m.DataFrame(
+            {"g": m.Series([1.5, -2.0], dtype="float32", index=index), "f": [0.5, 1.0]}, index=index
+        ),
+        "dates": m.DataFrame({"d": m.to_datetime(["2020-01-01", "2021-06-30"])}),
+        "all-NaT dates": m.DataFrame({"d": m.to_datetime([None, None])}),
+        "all-NaT durations": m.DataFrame({"t": m.to_timedelta([None, None])}),
+        "dates beside an int": m.DataFrame({"d": m.to_datetime(["2020-01-01", "2021-06-30"]), "i": [1, 2]}),
+        # NEGATIVE: plain float and int frames keep their path.
+        "floats (NEGATIVE)": m.DataFrame({"f": [0.5, 2.0, -1.0], "h": [1.0, nan, 3.0]}),
+        "ints (NEGATIVE)": m.DataFrame({"i": [1, 2, 4], "j": [5, -1, 0]}),
+    }
+
+
+_EB0HV_OPS = ["sum", "prod", "min", "max", "mean", "median", "std", "var", "sem", "skew", "kurt"]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("frame", list(_eb0hv_frames(pd)))
+def test_column_reductions_keep_dtypes_like_pandas_eb0hv(frame: str) -> None:
+    # A frame's reductions over its columns answer each column as its own
+    # Series does, in the columns' common dtype, as pandas reduces each
+    # block (br-frankenpandas-eb0hv): a float32 frame float32 (its std
+    # rounded there; it was float64), a date's mean / median / std (they
+    # raised), an all-NaN column's std float64 and an all-NaT date's min
+    # datetime64 (they were object). NEGATIVE: plain float and int frames.
+    def run(m: Any) -> Any:
+        answers = []
+        for op in _EB0HV_OPS:
+            try:
+                result = getattr(_eb0hv_frames(m)[frame], op)()
+            except Exception as error:  # noqa: BLE001
+                answers.append((op, type(error).__name__))
+                continue
+            answers.append((op, str(result.dtype), list(result.index), [str(v) for v in result.tolist()]))
+        return answers
+
+    assert run(fpd) == run(pd)
+
+
+_KSD1F_CASES = {
+    "DataFrame()": lambda m: m.DataFrame(),
+    "DataFrame({})": lambda m: m.DataFrame({}),
+    "DataFrame([])": lambda m: m.DataFrame([]),
+    "DataFrame(index=[1, 2])": lambda m: m.DataFrame(index=[1, 2]),
+    "columns=[]": lambda m: m.DataFrame(columns=[]),
+    "every column dropped": lambda m: m.DataFrame({"a": ["x"]}).drop(columns=["a"]),
+    # NEGATIVE: named-empty and dropped-to-nothing column axes stay object.
+    "columns=[] axis (NEGATIVE)": lambda m: m.DataFrame(columns=[]),
+    "every column dropped axis (NEGATIVE)": lambda m: m.DataFrame({"a": ["x"]}).drop(columns=["a"]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_KSD1F_CASES))
+def test_columnless_frame_axis_like_pandas_ksd1f(case: str) -> None:
+    # A frame built without columns, none named, has pandas' empty
+    # RangeIndex columns (it was an object Index, so its reductions'
+    # index was object; br-frankenpandas-ksd1f): the column axis and the
+    # sum / count / nunique answers' dtypes and index dtypes. NEGATIVE:
+    # columns=[] and a frame whose columns were all dropped stay object.
+    def run(m: Any) -> Any:
+        frame = _KSD1F_CASES[case](m)
+        answers = [(type(frame.columns).__name__, str(frame.columns.dtype), list(frame.columns))]
+        if case.endswith("(NEGATIVE)"):
+            return answers
+        for op in ["sum", "count", "nunique", "mean"]:
+            result = getattr(frame, op)()
+            answers.append((op, str(result.dtype), str(result.index.dtype), len(result)))
+        return answers
+
+    assert run(fpd) == run(pd)
+
+
+def _x6p40_pair(m: Any, left: tuple, right: tuple, frame: bool) -> tuple:
+    def build(values: list, categories: list, ordered: bool) -> Any:
+        column = m.Categorical(values, categories=categories, ordered=ordered)
+        return m.DataFrame({"a": column}) if frame else m.Series(column)
+
+    return build(*left), build(*right)
+
+
+_X6P40_PAIRS = {
+    "ordered, categories y before x": ((["x", "y", "x"], ["y", "x"], True), (["y", "y", "x"], ["y", "x"], True)),
+    "ordered with a NaN": ((["x", None, "y"], ["y", "x"], True), (["y", "y", None], ["y", "x"], True)),
+    "unordered, categories differ": ((["a", "b"], ["a", "b"], False), (["b", "b"], ["b"], False)),
+    "unordered, categories permuted": ((["x", "y"], ["x", "y"], False), (["y", "y"], ["y", "x"], False)),
+    "ordered beside unordered": ((["x", "y"], ["x", "y"], True), (["x", "y"], ["x", "y"], False)),
+    "ordered, categories in another order": ((["x", "y"], ["x", "y"], True), (["x", "y"], ["y", "x"], True)),
+    # NEGATIVE: equal unordered categories compare by value, a NaN False
+    # (True under !=), as before.
+    "unordered, same categories (NEGATIVE)": ((["x", None, "y"], ["x", "y"], False), (["x", None, "x"], ["x", "y"], False)),
+}
+_X6P40_OPERATORS = ["__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__"]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("frame", [False, True])
+@pytest.mark.parametrize("pair", list(_X6P40_PAIRS))
+def test_categorical_comparisons_like_pandas_x6p40(pair: str, frame: bool) -> None:
+    # Two categoricals compare as pandas' Categorical does
+    # (br-frankenpandas-x6p40): ordered ones by their categories' order (a
+    # frame ordered them by their values' text), equality only over
+    # matching categories - any order when unordered, the same order when
+    # ordered - else pandas' TypeError (they compared), an ordering of an
+    # unordered one refused; a NaN False, True under !=. Frame and Series.
+    # NEGATIVE: equal unordered categories under == / !=.
+    operators = _X6P40_OPERATORS[:2] if pair.endswith("(NEGATIVE)") else _X6P40_OPERATORS
+
+    def run(m: Any) -> Any:
+        left, right = _x6p40_pair(m, *_X6P40_PAIRS[pair], frame)
+        answers = []
+        for name in operators:
+            try:
+                result = getattr(left, name)(right)
+            except Exception as error:  # noqa: BLE001
+                answers.append((name, type(error).__name__, str(error)))
+                continue
+            result = result["a"] if frame else result
+            answers.append((name, str(result.dtype), result.tolist()))
+        return answers
+
+    assert run(fpd) == run(pd)
+
+
+_D468V_CASES = {
+    "ordered, right index reversed": (True, [2, 1, 0]),
+    "ordered, right index shifted": (True, [1, 2, 3]),
+    # NEGATIVE: unordered categoricals refuse an ordering after alignment too.
+    "unordered, right index reversed (NEGATIVE)": (False, [2, 1, 0]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_D468V_CASES))
+def test_aligned_categorical_frames_compare_like_pandas_d468v(case: str) -> None:
+    # Frames whose indexes differ align before comparing, and their ordered
+    # categoricals keep their categories' order through it (the alignment
+    # dropped it, so an ordering refused them as unordered;
+    # br-frankenpandas-d468v): lt / le / gt / ge / eq / ne, the result or
+    # the exception vs pandas. NEGATIVE: unordered ones still refuse.
+    ordered, right_index = _D468V_CASES[case]
+
+    def run(m: Any) -> Any:
+        dtype = m.CategoricalDtype(["y", "x"], ordered=ordered)
+        left = m.DataFrame({"a": m.Series(["x", "y", "x"], dtype=dtype)})
+        right = m.DataFrame({"a": m.Series(["y", "y", "x"], dtype=dtype, index=right_index)})
+        answers = []
+        for name in ["lt", "le", "gt", "ge", "eq", "ne"]:
+            try:
+                result = getattr(left, name)(right)
+            except Exception as error:  # noqa: BLE001
+                answers.append((name, type(error).__name__, str(error)))
+                continue
+            answers.append((name, list(result.index), str(result["a"].dtype), result["a"].tolist()))
+        return answers
+
+    assert run(fpd) == run(pd)
+
+
+_2UMLL_SERIES = {
+    "floats": [4.0, 1.0, 3.0, 2.0, 5.0, 2.0, 7.5, -1.0],
+    "floats with NaN": [1.0, np.nan, 3.0, 2.0, np.nan, np.nan, np.nan, 5.0, 4.0],
+    "floats with inf": [1.0, np.inf, 3.0, -np.inf, 2.0, 0.5],
+    # NEGATIVE: a negative zero keeps the per-window fold.
+    "negative zero (NEGATIVE)": [0.0, -0.0, 1.0, -0.0, 0.0, -2.0],
+}
+_2UMLL_WINDOWS = {
+    "rolling(3)": lambda s: s.rolling(3),
+    "rolling(3, min_periods=1)": lambda s: s.rolling(3, min_periods=1),
+    "rolling(3, min_periods=0)": lambda s: s.rolling(3, min_periods=0),
+    "rolling(3, center=True, min_periods=1)": lambda s: s.rolling(3, center=True, min_periods=1),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("window", list(_2UMLL_WINDOWS))
+@pytest.mark.parametrize("values", list(_2UMLL_SERIES))
+def test_rolling_extremum_like_pandas_2umll(values: str, window: str) -> None:
+    # A float column's rolling max / min, all valid or holding NaN, run the
+    # deque over its data into a typed output (br-frankenpandas-2umll: a
+    # Scalar per row in and out, 0.35x pandas at 1M): the values as float.hex,
+    # missing as None, dtype vs pandas. NEGATIVE: a negative zero.
+    def run(m: Any) -> Any:
+        s = m.Series(_2UMLL_SERIES[values])
+        answers = []
+        for op in ["max", "min"]:
+            out = getattr(_2UMLL_WINDOWS[window](s), op)()
+            answers.append((op, str(out.dtype), [None if x != x else float(x).hex() for x in out.tolist()]))
+        return answers
+
+    assert run(fpd) == run(pd)
+
+
+def _8ycr8_series(m: Any, holed: bool) -> Any:
+    rng = np.random.default_rng(83)
+    values = rng.random(4 * 48)
+    if holed:
+        values[rng.random(4 * 48) < 0.2] = np.nan
+        values[6:8] = np.nan  # an all-NaN hour
+    stamps = np.datetime64("2020-01-30T00:00", "ns") + np.arange(4 * 48) * np.timedelta64(30, "m")
+    return m.Series(values, index=m.to_datetime(stamps))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("freq", ["h", "15min", "D", "ME"])
+@pytest.mark.parametrize("holed", [True, False], ids=["NaN held", "NaN-free (NEGATIVE)"])
+def test_nan_holding_resample_like_pandas_8ycr8(freq: str, holed: bool) -> None:
+    # A float column holding NaN reduces per bin skipping each NaN, as
+    # pandas' group reductions (br-frankenpandas-8ycr8: it went through the
+    # per-Scalar path, 0.29x-0.37x pandas at 1M): an all-NaN bin sums to 0.0,
+    # is NaN under the rest; the bits are pandas' (Kahan / Welford over the
+    # present values in row order). NEGATIVE: a NaN-free column as before.
+    def run(m: Any) -> Any:
+        r = _8ycr8_series(m, holed).resample(freq)
+        answers = []
+        for op in ["max", "min", "sum", "mean", "std", "var", "sem", "count"]:
+            out = getattr(r, op)()
+            values = [None if x != x else float(x).hex() for x in out.tolist()]
+            answers.append((op, str(out.dtype), [str(label) for label in out.index], values))
+        return answers
+
+    assert run(fpd) == run(pd)
+
+
+_FXK1A_CASES = {
+    # NEGATIVE (the change is speed): keys sharing an index, lists and a
+    # missing key count as before.
+    "keys on one index (NEGATIVE)": lambda m: m.crosstab(m.Series([1, 2, 1]), m.Series([3, 3, 4])),
+    "lists (NEGATIVE)": lambda m: m.crosstab([1, 2, 1], [3, 3, 4]),
+    "missing key (NEGATIVE)": lambda m: m.crosstab(m.Series([1.0, None, 1.0]), m.Series([3, 3, 4])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FXK1A_CASES))
+def test_crosstab_counts_like_pandas_fxk1a(case: str) -> None:
+    # crosstab counts over pandas' df['__dummy__'] = 0 on the keys' frame
+    # (br-frankenpandas-fxk1a: a list of n Python zeros was converted one by
+    # one): the counts, labels and the axes' dtypes vs pandas.
+    def run(m: Any) -> Any:
+        out = _FXK1A_CASES[case](m)
+        axes = (repr(list(out.index)), str(out.index.dtype), repr(list(out.columns)), str(out.columns.dtype))
+        return (out.shape, out.values.tolist(), axes, [str(d) for d in out.dtypes])
+
+    assert run(fpd) == run(pd)
+
+
+def _vk7y9_dates(m: Any) -> Any:
+    stamps = ["2020-01-05", "NaT", "2019-12-31T06:30", "2020-03-01", "NaT", "2021-07-04"]
+    return m.Series(np.array(stamps, dtype="datetime64[ns]"))
+
+
+_VK7Y9_SHIFT_CASES = {
+    "dates holding NaT, shift(2)": lambda m: _vk7y9_dates(m).shift(2),
+    "dates holding NaT, shift(-1)": lambda m: _vk7y9_dates(m).shift(-1),
+    "dates, shift past the length": lambda m: _vk7y9_dates(m).shift(9),
+    "dates, a Timestamp fill": lambda m: _vk7y9_dates(m).shift(1, fill_value=m.Timestamp("2000-01-01")),
+    "dates, a NaN fill": lambda m: _vk7y9_dates(m).shift(1, fill_value=np.nan),
+    "dates, a None fill": lambda m: _vk7y9_dates(m).shift(-2, fill_value=None),
+    "aware dates holding NaT": lambda m: _vk7y9_dates(m).dt.tz_localize("UTC").shift(1),
+    # The fill a Timestamp of the column's zone or another: an instant read
+    # in the column's zone (fp dropped the zone and read it as naive UTC).
+    "aware dates, a fill in their zone": lambda m: _vk7y9_dates(m).dt.tz_localize("Asia/Tokyo").shift(2, fill_value=m.Timestamp("2000-01-01", tz="Asia/Tokyo")),
+    "aware dates, a fill in another zone": lambda m: _vk7y9_dates(m).dt.tz_localize("UTC").shift(-1, fill_value=m.Timestamp("2000-01-01", tz="Asia/Tokyo")),
+    "durations holding NaT": lambda m: (_vk7y9_dates(m) - m.Timestamp("2020-01-01")).shift(2),
+    "durations, a Timedelta fill": lambda m: (_vk7y9_dates(m) - m.Timestamp("2020-01-01")).shift(-1, fill_value=m.Timedelta("1h")),
+    # NEGATIVE: dates without NaT shift as before.
+    "dates without NaT (NEGATIVE)": lambda m: m.Series(np.array(["2020-01-01", "2020-02-01", "2020-03-01"], dtype="datetime64[ns]")).shift(1),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_SHIFT_CASES))
+def test_temporal_shift_like_pandas_vk7y9(case: str) -> None:
+    # A datetime / timedelta column - holding NaT or not - shifts its nanos
+    # and its mask (br-frankenpandas-vk7y9: a Scalar per row, d.shift() 0.01x
+    # pandas at 1M): dtype, missing rows and values vs pandas.
+    def run(m: Any) -> Any:
+        out = _VK7Y9_SHIFT_CASES[case](m)
+        return (str(out.dtype), out.isna().tolist(), out.astype(str).tolist(), list(out.index))
+
+    assert run(fpd) == run(pd)
+
+
+_VK7Y9_STAMPS = np.array(
+    ["2020-01-05", "NaT", "2019-12-31T06:30", "2020-03-01", "NaT", "2021-07-04", "1969-12-31T23:59:59.5"],
+    dtype="datetime64[ns]",
+)
+_VK7Y9_LONG = np.datetime64("2020-01-01", "ns") + np.arange(150).astype("timedelta64[h]")
+_VK7Y9_LONG[[3, 64, 65, 149]] = np.datetime64("NaT")
+
+
+def _vk7y9_unit(m: Any, array: Any) -> Any:
+    # pandas keeps a unit other than ns, fp has ns only (fvsao.16): pandas
+    # reads the array in ns here, so its values and ops are compared.
+    return m.Series(array if m is fpd else array.astype(f"{array.dtype.kind}8[ns]"))
+
+
+_VK7Y9_BUILD_CASES = {
+    "dates holding NaT": lambda m: m.Series(_VK7Y9_STAMPS),
+    "dates, no NaT": lambda m: m.Series(_VK7Y9_STAMPS[[0, 2, 3]]),
+    "dates, all NaT": lambda m: m.Series(_VK7Y9_STAMPS[[1, 4]]),
+    "dates, empty": lambda m: m.Series(_VK7Y9_STAMPS[:0]),
+    "dates across words, a strided view": lambda m: m.Series(_VK7Y9_LONG[::-1][::2]),
+    # NEGATIVE: an array not in ns, or not in native order, read as its
+    # raw int64 is off by its unit / byte-swapped.
+    "dates in seconds (NEGATIVE)": lambda m: _vk7y9_unit(m, _VK7Y9_STAMPS[[0, 1, 2]].astype("datetime64[s]")),
+    "dates in days (NEGATIVE)": lambda m: _vk7y9_unit(m, _VK7Y9_STAMPS.astype("datetime64[D]")),
+    "big-endian dates (NEGATIVE)": lambda m: m.Series(_VK7Y9_STAMPS.astype(">M8[ns]")),
+    "durations holding NaT": lambda m: m.Series(_VK7Y9_STAMPS - np.datetime64("2020-01-01", "ns")),
+    "durations in minutes": lambda m: _vk7y9_unit(m, (_VK7Y9_STAMPS - np.datetime64("2020-01-01", "ns")).astype("timedelta64[m]")),
+    "a DatetimeIndex holding NaT": lambda m: m.Series(m.DatetimeIndex(_VK7Y9_STAMPS)),
+    "an aware DatetimeIndex holding NaT": lambda m: m.Series(m.DatetimeIndex(_VK7Y9_STAMPS).tz_localize("Asia/Tokyo")),
+    "a TimedeltaIndex holding NaT": lambda m: m.Series(m.TimedeltaIndex(_VK7Y9_STAMPS - np.datetime64("2020-01-01", "ns"))),
+    "a frame's column holding NaT": lambda m: m.DataFrame({"d": _VK7Y9_LONG, "k": np.arange(150)})["d"],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_BUILD_CASES))
+def test_temporal_array_builds_typed_like_pandas_vk7y9(case: str) -> None:
+    # A datetime64 / timedelta64 array - any unit, byte order, stride, NaT
+    # or not - builds a column of its nanoseconds and mask (it built a
+    # Scalar per row: Series(dates) 35 ms a million rows, pandas 0.03;
+    # br-frankenpandas-vk7y9), and the everyday ops read it: dtype, missing
+    # rows, values, fillna / dropna / sort_values / shift / min / max /
+    # a comparison vs pandas.
+    def run(m: Any) -> Any:
+        s = _VK7Y9_BUILD_CASES[case](m)
+        if str(s.dtype).startswith("timedelta"):
+            fill = m.Timedelta("1h")
+        else:
+            fill = m.Timestamp("2000-01-01", tz=s.dt.tz)
+        shown = lambda out: (str(out.dtype), out.isna().tolist(), out.astype(str).tolist(), list(out.index))
+        return (
+            shown(s),
+            shown(s.fillna(fill)),
+            shown(s.dropna()),
+            shown(s.sort_values()),
+            shown(s.shift(1)),
+            str(s.min()),
+            str(s.max()),
+            (s > fill).tolist(),
+        )
+
+    assert run(fpd) == run(pd)
+
+
+_VK7Y9_FIELD_SERIES = {
+    "dates holding NaT": lambda m: m.Series(_VK7Y9_STAMPS),
+    "dates across words holding NaT": lambda m: m.Series(_VK7Y9_LONG),
+    "aware dates holding NaT": lambda m: m.Series(_VK7Y9_STAMPS).dt.tz_localize("Asia/Tokyo"),
+    # NEGATIVE: without NaT the fields stay integers.
+    "dates, no NaT (NEGATIVE)": lambda m: m.Series(_VK7Y9_STAMPS[[0, 2, 3, 6]]),
+}
+_VK7Y9_FIELDS = ["year", "month", "day", "quarter", "dayofyear", "hour", "minute", "second",
+                 "microsecond", "nanosecond", "dayofweek", "days_in_month"]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_FIELD_SERIES))
+def test_datetime_fields_with_nat_like_pandas_vk7y9(case: str) -> None:
+    # The integer dt fields of dates holding NaT read the nanos (a NaT sent
+    # the column through a Timestamp and a Scalar a row: dt.year 0.26x pandas
+    # at 1M; br-frankenpandas-vk7y9): dtype, missing rows, values vs pandas.
+    def run(m: Any) -> Any:
+        s = _VK7Y9_FIELD_SERIES[case](m)
+        out = []
+        for field in _VK7Y9_FIELDS:
+            got = getattr(s.dt, field)
+            out.append((field, str(got.dtype), got.isna().tolist(), got.astype(str).tolist()))
+        return out
+
+    assert run(fpd) == run(pd)
+
+
+_VK7Y9_ZONED = np.array(
+    ["2024-03-10T06:59:59", "2024-03-10T07:00:00", "NaT", "2024-11-03T05:30", "2024-12-30T00:30",
+     "2024-12-31T19:00", "2023-01-01T04:59", "2024-02-29T18:31"],
+    dtype="datetime64[ns]",
+)
+_VK7Y9_ZONED_FIELDS = ["year", "month", "day", "hour", "minute", "dayofweek", "dayofyear", "quarter",
+                       "days_in_month", "is_month_start", "is_month_end", "is_year_start", "is_leap_year"]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("zone", ["UTC", "America/New_York", "Asia/Kolkata", "Australia/Lord_Howe"])
+@pytest.mark.parametrize("nat", [True, False])
+def test_zoned_datetime_fields_like_pandas_vk7y9(zone: str, nat: bool) -> None:
+    # The dt fields of a tz-aware column read its wall clock from the nanos
+    # (a zone sent the column through a chrono Timestamp and a Scalar a
+    # row; br-frankenpandas-vk7y9): UTC instants across a DST change, a
+    # +05:30 and a half-hour-DST zone, with NaT and without (NEGATIVE: the
+    # UTC instant's fields differ from the wall clock's in each zone but UTC).
+    def run(m: Any) -> Any:
+        stamps = _VK7Y9_ZONED if nat else _VK7Y9_ZONED[[0, 1, 3, 4, 5, 6, 7]]
+        s = m.Series(stamps).dt.tz_localize("UTC").dt.tz_convert(zone)
+        out = [(f, str(getattr(s.dt, f).dtype), getattr(s.dt, f).astype(str).tolist()) for f in _VK7Y9_ZONED_FIELDS]
+        iso = s.dt.isocalendar()
+        # Column by column: a frame's astype(str) spells NA 'None' (abewp).
+        out.append(("isocalendar", [(str(iso[c].dtype), iso[c].astype(str).tolist()) for c in iso.columns]))
+        return out
+
+    assert run(fpd) == run(pd)
+
+
+_VK7Y9_SCALAR_OPS = {
+    "dates > Timestamp": lambda m, s, t: s > t,
+    "dates == Timestamp": lambda m, s, t: s == t,
+    "dates != Timestamp": lambda m, s, t: s != t,
+    "dates <= Timestamp": lambda m, s, t: s <= t,
+    "dates - Timestamp": lambda m, s, t: s - t,
+    "Timestamp - dates": lambda m, s, t: t - s,
+    "durations > Timedelta": lambda m, s, t: (s - t) > m.Timedelta("-3D"),
+    "durations + Timedelta": lambda m, s, t: (s - t) + m.Timedelta("90min"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_SCALAR_OPS))
+@pytest.mark.parametrize("zone", [None, "UTC"])
+def test_temporal_scalar_ops_like_pandas_vk7y9(case: str, zone: Any) -> None:
+    # A Timestamp / Timedelta operand is broadcast typed (it was a Scalar a
+    # row: d > ts 0.08x pandas at 1M; br-frankenpandas-vk7y9): dtype, missing
+    # rows, values vs pandas, NaT rows included, naive and aware.
+    def run(m: Any) -> Any:
+        s = m.Series(_VK7Y9_STAMPS)
+        # Nanosecond precision: pandas keeps a coarser Timestamp's unit
+        # (fvsao.16).
+        t = m.Timestamp("2020-02-01T00:00:00.000000001")
+        if zone is not None:
+            s = s.dt.tz_localize(zone)
+            t = t.tz_localize(zone)
+        out = _VK7Y9_SCALAR_OPS[case](m, s, t)
+        return (str(out.dtype), out.isna().tolist(), out.astype(str).tolist())
+
+    assert run(fpd) == run(pd)
+
+
+_VK7Y9_TIES = np.array(
+    ["2020-03-01", "NaT", "2020-01-01", "2020-03-01", "NaT", "2020-01-01", "1999-01-01"],
+    dtype="datetime64[ns]",
+)
+_VK7Y9_SORT_SERIES = {
+    "dates holding NaT and ties": lambda m: m.Series(_VK7Y9_TIES, index=list("abcdefg")),
+    "dates across words holding NaT": lambda m: m.Series(_VK7Y9_LONG[::-1]),
+    "aware dates holding NaT": lambda m: m.Series(_VK7Y9_TIES).dt.tz_localize("Asia/Tokyo"),
+    "durations holding NaT and ties": lambda m: m.Series(_VK7Y9_TIES - np.datetime64("2020-01-01", "ns")),
+    "dates, no NaT": lambda m: m.Series(_VK7Y9_TIES[[0, 2, 3, 5, 6]]),
+    "dates, all NaT": lambda m: m.Series(_VK7Y9_TIES[[1, 4]]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_SORT_SERIES))
+@pytest.mark.parametrize("ascending", [True, False])
+@pytest.mark.parametrize("na_position", ["last", "first"])
+def test_temporal_sort_values_like_pandas_vk7y9(case: str, ascending: bool, na_position: str) -> None:
+    # A datetime / timedelta column sorts its present nanos typed, NaT rows
+    # at na_position (the comparator sort over its Scalars: 0.32x pandas at
+    # 1M; br-frankenpandas-vk7y9): values, index order (ties keep their
+    # order - a small array, where numpy's sort is stable too), dtype.
+    def run(m: Any) -> Any:
+        out = _VK7Y9_SORT_SERIES[case](m).sort_values(ascending=ascending, na_position=na_position)
+        return (str(out.dtype), out.astype(str).tolist(), list(out.index))
+
+    assert run(fpd) == run(pd)
+
+
+_VK7Y9_GB_VALUES = {
+    "dates holding NaT": lambda m: m.Series(_VK7Y9_TIES),
+    "aware dates holding NaT": lambda m: m.Series(_VK7Y9_TIES).dt.tz_localize("Asia/Tokyo"),
+    "durations holding NaT": lambda m: m.Series(_VK7Y9_TIES - np.datetime64("2020-01-01", "ns")),
+    # NEGATIVE: without NaT every row counts and folds.
+    "dates, no NaT (NEGATIVE)": lambda m: m.Series(_VK7Y9_TIES[[0, 2, 3, 5, 6, 0, 2]]),
+}
+_VK7Y9_GB_KEYS = {
+    # Key 3 holds only the NaT rows: its count 0, its max / min NaT.
+    "int keys": [1, 3, 2, 1, 3, 2, 1],
+    "text keys": ["b", "z", "a", "b", "z", "a", "b"],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("values", list(_VK7Y9_GB_VALUES))
+@pytest.mark.parametrize("keys", list(_VK7Y9_GB_KEYS))
+@pytest.mark.parametrize("how", ["count", "max", "min", "first", "last"])
+def test_groupby_temporal_reductions_like_pandas_vk7y9(values: str, keys: str, how: str) -> None:
+    # groupby count / max / min of a datetime / timedelta column fold its
+    # nanos per group, a NaT skipped (build_groups and a Scalar a row: gb
+    # d.count 0.06x, d.max 0.11x pandas at 1M; br-frankenpandas-vk7y9):
+    # dtype, missing groups, values, index vs pandas.
+    def run(m: Any) -> Any:
+        frame = m.DataFrame({"k": _VK7Y9_GB_KEYS[keys], "d": _VK7Y9_GB_VALUES[values](m)})
+        out = getattr(frame.groupby("k")["d"], how)()
+        return (str(out.dtype), out.isna().tolist(), out.astype(str).tolist(), list(out.index))
+
+    assert run(fpd) == run(pd)
+
+
+_VK7Y9_DIFF_SERIES = {
+    "dates holding NaT": lambda m: m.Series(_VK7Y9_STAMPS),
+    "dates across words holding NaT": lambda m: m.Series(_VK7Y9_LONG),
+    "aware dates holding NaT": lambda m: m.Series(_VK7Y9_STAMPS).dt.tz_localize("Asia/Tokyo"),
+    "durations holding NaT": lambda m: m.Series(_VK7Y9_STAMPS - np.datetime64("2020-01-01", "ns")),
+    "dates, all NaT": lambda m: m.Series(_VK7Y9_STAMPS[[1, 4]]),
+    # NEGATIVE: without NaT every partner in range answers.
+    "dates, no NaT (NEGATIVE)": lambda m: m.Series(_VK7Y9_STAMPS[[0, 2, 3, 6]]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_DIFF_SERIES))
+@pytest.mark.parametrize("periods", [1, 2, -1, 0, 70, -200])
+def test_temporal_diff_like_pandas_vk7y9(case: str, periods: int) -> None:
+    # diff of a datetime / timedelta column subtracts its nanos into
+    # durations, NaT where a side is missing or out of range (a Scalar a
+    # row: d.diff() 0.20x pandas at 1M; br-frankenpandas-vk7y9).
+    def run(m: Any) -> Any:
+        out = _VK7Y9_DIFF_SERIES[case](m).diff(periods)
+        return (str(out.dtype), out.isna().tolist(), out.astype(str).tolist())
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_DIFF_SERIES))
+@pytest.mark.parametrize("how", ["floor", "ceil", "round"])
+@pytest.mark.parametrize("freq", ["h", "D", "15min", "ms"])
+def test_temporal_snap_like_pandas_vk7y9(case: str, how: str, freq: str) -> None:
+    # dt.floor / ceil / round of a datetime / timedelta column snap its
+    # nanos, NaT staying NaT (a NaT sent it through a Scalar a row:
+    # dt.floor('h') 0.14x pandas at 1M; br-frankenpandas-vk7y9).
+    def run(m: Any) -> Any:
+        out = getattr(_VK7Y9_DIFF_SERIES[case](m).dt, how)(freq)
+        return (str(out.dtype), out.isna().tolist(), out.astype(str).tolist())
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_SORT_SERIES))
+@pytest.mark.parametrize("method", ["average", "min", "max", "first", "dense"])
+@pytest.mark.parametrize("na_option", ["keep", "top", "bottom"])
+@pytest.mark.parametrize("ascending", [True, False])
+@pytest.mark.parametrize("pct", [False, True])
+def test_temporal_rank_like_pandas_vk7y9(case: str, method: str, na_option: str, ascending: bool, pct: bool) -> None:
+    # rank of a datetime / timedelta column keys its nanos typed (a Scalar
+    # sort and a binary search a row: d.rank() 0.13x pandas at 1M;
+    # br-frankenpandas-vk7y9): ranks as float.hex, missing rows, dtype.
+    def run(m: Any) -> Any:
+        out = _VK7Y9_SORT_SERIES[case](m).rank(method=method, na_option=na_option, ascending=ascending, pct=pct)
+        return (str(out.dtype), [float.hex(v) if v == v else "nan" for v in out.tolist()])
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9_SORT_SERIES))
+def test_temporal_argsort_like_pandas_vk7y9(case: str) -> None:
+    # argsort of a datetime / timedelta column sorts its present nanos typed,
+    # a NaT row -1 (a Scalar compare a pair: d.argsort() 0.35x pandas at 1M;
+    # br-frankenpandas-vk7y9): positions, index, dtype.
+    def run(m: Any) -> Any:
+        out = _VK7Y9_SORT_SERIES[case](m).argsort()
+        return (str(out.dtype), out.tolist(), list(out.index))
+
+    assert run(fpd) == run(pd)
+
+
+def _vk7y9p3_dates(m: Any) -> Any:
+    return m.Series(np.array(["2020-01-05T03:00", "NaT", "NaT", "2019-12-31T06:30", "2021-07-04", "NaT", "1969-12-31T23:59:59.5"], dtype="datetime64[ns]"))
+
+
+def _vk7y9p3_spans(m: Any) -> Any:
+    return _vk7y9p3_dates(m) - m.Timestamp("2020-01-01")
+
+
+def _vk7y9p5_outcome(make: Any) -> Any:
+    # The values, or the class of what pandas raises.
+    try:
+        return make()
+    except Exception as err:  # noqa: BLE001 - the class is the answer
+        return type(err).__name__
+
+
+_VK7Y9P4_CASES = {
+    "mean": lambda m: _vk7y9p3_dates(m).mean(),
+    "mean, an aware column": lambda m: _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo").mean(),
+    "mean of durations": lambda m: _vk7y9p3_spans(m).mean(),
+    "quantile": lambda m: _vk7y9p3_dates(m).quantile(0.3),
+    "quantile lower": lambda m: _vk7y9p3_dates(m).quantile(0.3, interpolation="lower"),
+    "quantile higher": lambda m: _vk7y9p3_dates(m).quantile(0.7, interpolation="higher"),
+    "quantile nearest": lambda m: _vk7y9p3_dates(m).quantile(0.5, interpolation="nearest"),
+    "quantile midpoint": lambda m: _vk7y9p3_dates(m).quantile(0.5, interpolation="midpoint"),
+    "quantile list": lambda m: list(_vk7y9p3_dates(m).quantile([0.1, 0.9])),
+    "quantile of durations": lambda m: _vk7y9p3_spans(m).quantile(0.25),
+    "median": lambda m: _vk7y9p3_dates(m).median(),
+    "median of an odd count": lambda m: _vk7y9p3_dates(m).iloc[:5].median(),
+    "median of durations": lambda m: _vk7y9p3_spans(m).median(),
+    "mean of one present": lambda m: m.Series(np.array(["NaT", "2020-02-29T12:00"], dtype="datetime64[ns]")).mean(),
+    "quantile all NaT": lambda m: m.Series(np.array(["NaT", "NaT"], dtype="datetime64[ns]")).quantile(0.5),
+    "mean all NaT": lambda m: m.Series(np.array(["NaT", "NaT"], dtype="datetime64[ns]")).mean(),
+    "idxmax": lambda m: _vk7y9p3_dates(m).idxmax(),
+    "idxmin": lambda m: _vk7y9p3_dates(m).idxmin(),
+    "durations idxmax": lambda m: _vk7y9p3_spans(m).idxmax(),
+    "idxmax of a tie": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m)], ignore_index=True).idxmax(),
+    "max": lambda m: _vk7y9p3_dates(m).max(),
+    "min": lambda m: _vk7y9p3_dates(m).min(),
+    "durations max": lambda m: _vk7y9p3_spans(m).max(),
+    "durations min": lambda m: _vk7y9p3_spans(m).min(),
+    "aware min": lambda m: _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo").min(),
+    "min all NaT": lambda m: m.Series(np.array(["NaT", "NaT"], dtype="datetime64[ns]")).min(),
+    "durations max all NaT": lambda m: m.Series(np.array(["NaT", "NaT"], dtype="timedelta64[ns]")).max(),
+    "mode": lambda m: (lambda out: [str(v) for v in out] + [str(out.dtype), str(list(out.index))])(
+        m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[[4, 0]]]).mode()
+    ),
+    "mode, every value once": lambda m: [str(v) for v in _vk7y9p3_dates(m).mode()],
+    "durations mode": lambda m: [str(v) for v in m.concat([_vk7y9p3_spans(m), _vk7y9p3_spans(m).iloc[[3]]]).mode()],
+    "aware mode": lambda m: (lambda out: [str(v) for v in out] + [str(out.dtype)])(
+        m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[[6]]]).dt.tz_localize("Asia/Tokyo").mode()
+    ),
+    "mode all NaT": lambda m: (lambda out: [str(len(out)), str(out.dtype)])(
+        m.Series(np.array(["NaT", "NaT"], dtype="datetime64[ns]")).mode()
+    ),
+    # NEGATIVE: dropna=False counts NaT, the mode here (three of them).
+    "mode dropna=False": lambda m: [str(v) for v in _vk7y9p3_dates(m).mode(dropna=False)],
+    "count": lambda m: [_vk7y9p3_dates(m).count(), _vk7y9p3_spans(m).count()],
+    "nunique": lambda m: [
+        _vk7y9p3_dates(m).nunique(),
+        _vk7y9p3_dates(m).nunique(dropna=False),
+        m.concat([_vk7y9p3_spans(m), _vk7y9p3_spans(m)]).nunique(),
+        m.concat([_vk7y9p3_spans(m), _vk7y9p3_spans(m)]).nunique(dropna=False),
+        _vk7y9p3_dates(m).dropna().nunique(dropna=False),
+    ],
+    "d > ts": lambda m: list(_vk7y9p3_dates(m) > m.Timestamp("2020-01-01")),
+    "d < ts (NaT False)": lambda m: list(_vk7y9p3_dates(m) < m.Timestamp("2020-01-01")),
+    "d <= ts": lambda m: list(_vk7y9p3_dates(m) <= m.Timestamp("2019-12-31T06:30")),
+    "d >= datetime": lambda m: list(_vk7y9p3_dates(m) >= datetime.datetime(2019, 12, 31, 6, 30)),
+    "d == ts": lambda m: list(_vk7y9p3_dates(m) == m.Timestamp("2021-07-04")),
+    "d != ts (NaT True)": lambda m: list(_vk7y9p3_dates(m) != m.Timestamp("2021-07-04")),
+    "aware > aware ts of another zone": lambda m: list(
+        _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo") > m.Timestamp("2020-01-04T20:00", tz="UTC")
+    ),
+    "durations < Timedelta": lambda m: list(_vk7y9p3_spans(m) < m.Timedelta("4D")),
+    "durations <= timedelta": lambda m: list(_vk7y9p3_spans(m) <= datetime.timedelta(days=-1)),
+    # NEGATIVE: an operand of another zone-awareness or kind stays pandas'
+    # invalid comparison (== all False, ordering TypeError).
+    "aware > naive ts": lambda m: _vk7y9p5_outcome(
+        lambda: list(_vk7y9p3_dates(m).dt.tz_localize("UTC") > m.Timestamp("2020-01-01"))
+    ),
+    "aware == naive ts": lambda m: list(_vk7y9p3_dates(m).dt.tz_localize("UTC") == m.Timestamp("2020-01-05T03:00")),
+    "durations > ts": lambda m: _vk7y9p5_outcome(lambda: list(_vk7y9p3_spans(m) > m.Timestamp("2020-01-01"))),
+    "d + 1 day": lambda m: [str(v) for v in _vk7y9p3_dates(m) + m.Timedelta("1D")],
+    "d - ts": lambda m: (lambda out: [str(v) for v in out] + [str(out.dtype)])(_vk7y9p3_dates(m) - m.Timestamp("2020-01-01")),
+    "aware - 90 minutes": lambda m: (lambda out: [str(v) for v in out] + [str(out.dtype)])(
+        _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo") - m.Timedelta("90min")
+    ),
+    "durations + durations": lambda m: [str(v) for v in _vk7y9p3_spans(m) + _vk7y9p3_spans(m).iloc[::-1].reset_index(drop=True)],
+    # NEGATIVE: a present pair past the int64 range raises; NaT beside the
+    # extreme operand does not.
+    "overflow raises": lambda m: _vk7y9p5_outcome(
+        lambda: [str(v) for v in m.Series(np.array(["2262-04-11", "NaT"], dtype="datetime64[ns]")) + m.Timedelta("2D")]
+    ),
+    "NaT beside the extreme": lambda m: [
+        str(v) for v in m.Series(np.array(["NaT", "2262-04-09"], dtype="datetime64[ns]")) + m.Timedelta("1D")
+    ],
+    "set_index": lambda m: (lambda out: [str(v) for v in out.index] + [str(out.index.dtype), str(out.index.name)])(
+        m.DataFrame({"t": _vk7y9p3_dates(m), "v": np.arange(7)}).set_index("t")
+    ),
+    "set_index, aware": lambda m: [str(v) for v in m.DataFrame({"t": _vk7y9p3_dates(m).dt.tz_localize("UTC"), "v": np.arange(7)}).set_index("t").index],
+    "unique": lambda m: (lambda out: [str(v) for v in out] + [str(out.dtype), type(out).__name__])(
+        m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[::-1]]).unique()
+    ),
+    "durations unique": lambda m: [str(v) for v in m.concat([_vk7y9p3_spans(m), _vk7y9p3_spans(m)]).unique()],
+    "aware unique": lambda m: (lambda out: [str(v) for v in out] + [str(out.dtype)])(
+        m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m)]).dt.tz_localize("Asia/Tokyo").unique()
+    ),
+    # NEGATIVE: no NaT reads the buffer as it is.
+    "unique, no NaT": lambda m: [str(v) for v in _vk7y9p3_dates(m).dropna().unique()],
+    "mean, no NaT": lambda m: _vk7y9p3_dates(m).dropna().mean(),
+    "durations min, no NaT": lambda m: _vk7y9p3_spans(m).dropna().min(),
+    "quantile, no NaT": lambda m: _vk7y9p3_dates(m).dropna().quantile(0.3),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9P4_CASES))
+def test_temporal_reductions_like_pandas_vk7y9(case: str) -> None:
+    # A datetime / duration column's mean and quantile read its nanos, NaT
+    # left out (a quantile built a Scalar a row, a mean built per-row
+    # presence bits: 0.33x / 0.39x pandas at 1M; br-frankenpandas-vk7y9):
+    # each result, NaT included, vs pandas.
+    def run(m: Any) -> Any:
+        out = _VK7Y9P4_CASES[case](m)
+        return [str(v) for v in out] if isinstance(out, list) else str(out)
+
+    assert run(fpd) == run(pd)
+
+
+_VK7Y9P3_CASES = {
+    "dates astype int64": lambda m: _vk7y9p3_dates(m).astype("int64"),
+    "durations astype int64": lambda m: _vk7y9p3_spans(m).astype("int64"),
+    "aware dates astype int64": lambda m: _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo").astype("int64"),
+    "tz_localize UTC": lambda m: _vk7y9p3_dates(m).dt.tz_localize("UTC"),
+    "tz_localize +05:30": lambda m: _vk7y9p3_dates(m).dt.tz_localize("+05:30"),
+    "tz_localize None of UTC": lambda m: _vk7y9p3_dates(m).dt.tz_localize("UTC").dt.tz_localize(None),
+    "tz_localize None of Lord_Howe": lambda m: _vk7y9p3_dates(m).dt.tz_localize("UTC").dt.tz_convert("Australia/Lord_Howe").dt.tz_localize(None),
+    "ffill": lambda m: _vk7y9p3_dates(m).ffill(),
+    "ffill limit 1": lambda m: _vk7y9p3_dates(m).ffill(limit=1),
+    "bfill": lambda m: _vk7y9p3_dates(m).bfill(),
+    "bfill limit 1": lambda m: _vk7y9p3_dates(m).bfill(limit=1),
+    "aware ffill": lambda m: _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo").ffill(),
+    "durations bfill": lambda m: _vk7y9p3_spans(m).bfill(),
+    "between both": lambda m: _vk7y9p3_dates(m).between(m.Timestamp("2019-12-31T06:30"), m.Timestamp("2021-07-04")),
+    "between neither": lambda m: _vk7y9p3_dates(m).between(m.Timestamp("2019-12-31T06:30"), m.Timestamp("2021-07-04"), inclusive="neither"),
+    "between left": lambda m: _vk7y9p3_dates(m).between(m.Timestamp("2019-12-31T06:30"), m.Timestamp("2021-07-04"), inclusive="left"),
+    "durations between right": lambda m: _vk7y9p3_spans(m).between(m.Timedelta("-1D"), m.Timedelta("4h"), inclusive="right"),
+    "clip both": lambda m: _vk7y9p3_dates(m).clip(m.Timestamp("2000-01-01"), m.Timestamp("2020-06-01")),
+    "clip lower": lambda m: _vk7y9p3_dates(m).clip(lower=m.Timestamp("2020-01-01")),
+    "durations clip upper": lambda m: _vk7y9p3_spans(m).clip(upper=m.Timedelta("1D")),
+    "where": lambda m: _vk7y9p3_dates(m).where(_vk7y9p3_dates(m) > m.Timestamp("2020-01-01")),
+    "where, a Timestamp fill": lambda m: _vk7y9p3_dates(m).where(_vk7y9p3_dates(m) > m.Timestamp("2020-01-01"), m.Timestamp("2000-01-01")),
+    "aware where": lambda m: _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo").where(_vk7y9p3_dates(m) > m.Timestamp("2020-01-01")),
+    "durations where, a Timedelta fill": lambda m: _vk7y9p3_spans(m).where(_vk7y9p3_spans(m) > m.Timedelta(0), m.Timedelta("1h")),
+    "total_seconds": lambda m: _vk7y9p3_spans(m).dt.total_seconds(),
+    "days": lambda m: _vk7y9p3_spans(m).dt.days,
+    "seconds": lambda m: _vk7y9p3_spans(m).dt.seconds,
+    "microseconds": lambda m: _vk7y9p3_spans(m).dt.microseconds,
+    "nanoseconds": lambda m: _vk7y9p3_spans(m).dt.nanoseconds,
+    # The calendar flags of a column holding NaT read its nanos, NaT False.
+    "is_month_start": lambda m: (_vk7y9p3_dates(m) + m.Timedelta("27D")).dt.is_month_start,
+    "is_month_end": lambda m: _vk7y9p3_dates(m).dt.is_month_end,
+    "is_quarter_start": lambda m: (_vk7y9p3_dates(m) + m.Timedelta("27D")).dt.is_quarter_start,
+    "is_quarter_end": lambda m: _vk7y9p3_dates(m).dt.is_quarter_end,
+    "is_year_start": lambda m: (_vk7y9p3_dates(m) + m.Timedelta("1D")).dt.is_year_start,
+    "is_year_end": lambda m: _vk7y9p3_dates(m).dt.is_year_end,
+    "is_leap_year": lambda m: _vk7y9p3_dates(m).dt.is_leap_year,
+    "aware is_month_end": lambda m: _vk7y9p3_dates(m).dt.tz_localize("Asia/Tokyo").dt.is_month_end,
+    # Duplicate flags of a column holding NaT read its nanos, NaT one value.
+    "duplicated": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[::2]]).duplicated(),
+    "duplicated keep last": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[::2]]).duplicated(keep="last"),
+    "duplicated keep False": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[::2]]).duplicated(keep=False),
+    "drop_duplicates": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[::2]]).drop_duplicates(),
+    "drop_duplicates keep last": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[::2]]).drop_duplicates(keep="last"),
+    "drop_duplicates keep False": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m).iloc[::2]]).drop_duplicates(keep=False),
+    "aware drop_duplicates": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m)]).dt.tz_localize("Asia/Tokyo").drop_duplicates(),
+    "durations drop_duplicates": lambda m: m.concat([_vk7y9p3_spans(m), _vk7y9p3_spans(m).iloc[1::3]]).drop_duplicates(),
+    "durations duplicated keep False": lambda m: m.concat([_vk7y9p3_spans(m), _vk7y9p3_spans(m).iloc[1::3]]).duplicated(keep=False),
+    "aware duplicated": lambda m: m.concat([_vk7y9p3_dates(m), _vk7y9p3_dates(m)]).dt.tz_localize("UTC").duplicated(),
+    # Membership of a column holding NaT reads its nanos (NaT never a match).
+    "isin": lambda m: _vk7y9p3_dates(m).isin([m.Timestamp("2020-01-05T03:00"), m.Timestamp("2021-07-04")]),
+    "isin with a NaT needle": lambda m: _vk7y9p3_dates(m).isin([m.NaT, m.Timestamp("2021-07-04")]),
+    "durations isin": lambda m: _vk7y9p3_spans(m).isin([m.Timedelta("4D 03:00:00"), m.Timedelta("-1D")]),
+    "aware isin": lambda m: _vk7y9p3_dates(m).dt.tz_localize("UTC").isin([m.Timestamp("2021-07-04", tz="UTC")]),
+    # NEGATIVE: no needle present is all False.
+    "isin of no match": lambda m: _vk7y9p3_dates(m).isin([m.Timestamp("1999-01-01")]),
+    # NEGATIVE: without NaT the fields stay int64 and nothing is filled.
+    "days, no NaT (NEGATIVE)": lambda m: _vk7y9p3_spans(m).dropna().dt.days,
+    "ffill, no NaT (NEGATIVE)": lambda m: _vk7y9p3_dates(m).dropna().ffill(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VK7Y9P3_CASES))
+def test_temporal_ops_part3_like_pandas_vk7y9(case: str) -> None:
+    # astype int64 (a NaT is numpy's i64::MIN, present), tz_localize to a
+    # fixed offset and to None, ffill / bfill, between, clip and the
+    # duration fields of columns holding NaT read the nanos (each a Scalar
+    # a row: 0.01x - 0.48x pandas at 1M; br-frankenpandas-vk7y9): dtype,
+    # missing rows, values vs pandas.
+    def run(m: Any) -> Any:
+        out = _VK7Y9P3_CASES[case](m)
+        return (str(out.dtype), out.isna().tolist(), out.astype(str).tolist(), list(out.index))
+
+    assert run(fpd) == run(pd)
+
+
+_LSN8D_STAMPS = np.array(
+    ["2020-01-03", "2020-01-05T06:00", "2020-01-05T18:00", "2020-01-08", "2020-02-01", "2020-02-02T12:00"],
+    dtype="datetime64[ns]",
+)
+_LSN8D_INDEXES = {
+    "ascending": lambda m: m.DatetimeIndex(_LSN8D_STAMPS),
+    "descending": lambda m: m.DatetimeIndex(_LSN8D_STAMPS[::-1]),
+    "unsorted": lambda m: m.DatetimeIndex(_LSN8D_STAMPS[[2, 0, 5, 1, 4, 3]]),
+    "holding NaT": lambda m: m.DatetimeIndex(np.concatenate([_LSN8D_STAMPS[:3], np.array(["NaT"], dtype="datetime64[ns]"), _LSN8D_STAMPS[3:5]])),
+    "with duplicates": lambda m: m.DatetimeIndex(_LSN8D_STAMPS[[0, 1, 1, 3, 4, 5]]),
+    "aware": lambda m: m.DatetimeIndex(_LSN8D_STAMPS).tz_localize("UTC"),
+}
+_LSN8D_KEYS = {
+    "Timestamp bounds": lambda m, z: slice(m.Timestamp("2020-01-05", tz=z), m.Timestamp("2020-02-01", tz=z)),
+    "bounds between labels": lambda m, z: slice(m.Timestamp("2020-01-04", tz=z), m.Timestamp("2020-01-09", tz=z)),
+    "bounds outside": lambda m, z: slice(m.Timestamp("2019-01-01", tz=z), m.Timestamp("2030-01-01", tz=z)),
+    "open start": lambda m, z: slice(None, m.Timestamp("2020-01-08", tz=z)),
+    "date text": lambda m, z: slice("2020-01-05", "2020-01-08"),
+    "month text": lambda m, z: slice("2020-01", "2020-01"),
+    "a label": lambda m, z: m.Timestamp("2020-01-08", tz=z),
+    "a label between": lambda m, z: m.Timestamp("2020-01-04", tz=z),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("index", list(_LSN8D_INDEXES))
+@pytest.mark.parametrize("key", list(_LSN8D_KEYS))
+@pytest.mark.parametrize("frame", [False, True])
+def test_datetime_index_loc_like_pandas_lsn8d(index: str, key: str, frame: bool) -> None:
+    # .loc of a datetime-indexed Series / frame - a slice by instants or date
+    # text, or one label - reads the index's cached kinds and order (each
+    # lookup scanned every label: s.loc[ts] 4.9 ms, s.loc[ts:ts] 4.7 ms a
+    # million rows, pandas 0.007 / 0.03; br-frankenpandas-lsn8d): rows and
+    # values vs pandas, or the same exception kind.
+    def run(m: Any) -> Any:
+        idx = _LSN8D_INDEXES[index](m)
+        zone = "UTC" if index == "aware" else None
+        obj = m.Series(np.arange(len(idx), dtype="float64"), index=idx, name="v")
+        if frame:
+            obj = obj.to_frame()
+        try:
+            out = obj.loc[_LSN8D_KEYS[key](m, zone)]
+        except Exception as error:  # noqa: BLE001
+            return ("raises", type(error).__name__)
+        if not hasattr(out, "index"):
+            return ("scalar", float(out))
+        values = out.to_numpy().ravel().tolist()
+        return ([str(label) for label in out.index], values)
+
+    assert run(fpd) == run(pd)
+
+
+_LSN8D2_NAT = np.concatenate([_LSN8D_STAMPS[:3], np.array(["NaT"], dtype="datetime64[ns]"), _LSN8D_STAMPS[3:5]])
+_LSN8D2_INDEXES = {
+    "ascending": lambda m: m.DatetimeIndex(_LSN8D_STAMPS),
+    "descending": lambda m: m.DatetimeIndex(_LSN8D_STAMPS[::-1]),
+    "unsorted": lambda m: m.DatetimeIndex(_LSN8D_STAMPS[[2, 0, 5, 1, 4, 3]]),
+    "holding NaT": lambda m: m.DatetimeIndex(_LSN8D2_NAT),
+    "with duplicates": lambda m: m.DatetimeIndex(_LSN8D_STAMPS[[0, 1, 1, 3, 4, 5]]),
+    "aware": lambda m: m.DatetimeIndex(_LSN8D_STAMPS).tz_localize("UTC"),
+    "named": lambda m: m.DatetimeIndex(_LSN8D_STAMPS, name="when"),
+    "every other": lambda m: m.DatetimeIndex(_LSN8D_STAMPS)[::2],
+    "empty": lambda m: m.DatetimeIndex(np.array([], dtype="datetime64[ns]")),
+    "Index(array)": lambda m: m.Index(_LSN8D2_NAT),
+    "a Series' index": lambda m: m.Series(np.arange(6.0), index=_LSN8D_STAMPS[[2, 0, 5, 1, 4, 3]]).index,
+    "a date_range": lambda m: m.date_range("2020-01-01", periods=6, freq="D", name="day"),
+}
+
+
+def _lsn8d2_index(out: Any) -> Any:
+    return (type(out).__name__, str(out.dtype), out.name, [str(label) for label in out], getattr(out, "freqstr", None))
+
+
+def _lsn8d2_frame(out: Any) -> Any:
+    return ([str(dtype) for dtype in out.dtypes], out.astype(str).values.tolist(), [str(label) for label in out.index])
+
+
+_LSN8D2_OPS = {
+    "asi8": lambda m, i: (type(i.asi8).__name__, str(i.asi8.dtype), i.asi8.tolist()),
+    "values": lambda m, i: (str(i.values.dtype), i.values.astype("int64").tolist()),
+    "iterate": lambda m, i: [str(label) for label in i],
+    "i[2]": lambda m, i: str(i[2]),
+    "i[-1]": lambda m, i: str(i[-1]),
+    "i[::2]": lambda m, i: _lsn8d2_index(i[::2]),
+    "i[1:4]": lambda m, i: _lsn8d2_index(i[1:4]),
+    "i[::-2]": lambda m, i: _lsn8d2_index(i[::-2]),
+    "i[4:1:-1]": lambda m, i: _lsn8d2_index(i[4:1:-1]),
+    "i[10:20]": lambda m, i: _lsn8d2_index(i[10:20]),
+    "i[positions array]": lambda m, i: _lsn8d2_index(i[np.array([2, -1, 0])]),
+    "i[positions list]": lambda m, i: _lsn8d2_index(i[[1, 0, -2]]),
+    "i[a mask]": lambda m, i: _lsn8d2_index(i[np.array([False, True, True, True, False, False])]),
+    "take": lambda m, i: _lsn8d2_index(i.take([4, 0, 2])),
+    "sort_values": lambda m, i: _lsn8d2_index(i.sort_values()),
+    "sort_values, an indexer": lambda m, i: (lambda out: (_lsn8d2_index(out[0]), list(out[1])))(i.sort_values(return_indexer=True)),
+    "sort_values descending": lambda m, i: _lsn8d2_index(i.sort_values(ascending=False)),
+    "argsort": lambda m, i: list(i.argsort()),
+    "unique": lambda m, i: _lsn8d2_index(i.unique()),
+    "monotonic": lambda m, i: (i.is_monotonic_increasing, i.is_monotonic_decreasing),
+    "inferred_type / dtype": lambda m, i: (i.inferred_type, str(i.dtype)),
+    "is_unique / hasnans": lambda m, i: (i.is_unique, i.hasnans),
+    "tz_localize UTC": lambda m, i: _lsn8d2_index(i.tz_localize("UTC")),
+    "tz_localize Tokyo": lambda m, i: _lsn8d2_index(i.tz_localize("Asia/Tokyo")),
+    "tz_localize UTC, then None": lambda m, i: _lsn8d2_index(i.tz_localize("UTC").tz_localize(None)),
+    "shift freq": lambda m, i: _lsn8d2_index(i.shift(1, freq="D")),
+    "union": lambda m, i: _lsn8d2_index(i.union(i[:3])),
+    "intersection": lambda m, i: _lsn8d2_index(i.intersection(i[2:])),
+    "difference": lambda m, i: _lsn8d2_index(i.difference(i[:2])),
+    "min / max": lambda m, i: (str(i.min()), str(i.max())),
+    "year": lambda m, i: [str(year) for year in i.year],
+    "equals a copy": lambda m, i: i.equals(i.copy()),
+    # NEGATIVE: an index moved by an hour, or put in a zone, is another.
+    "equals a shifted (NEGATIVE)": lambda m, i: i.equals(i.shift(1, freq="h")),
+    "equals itself in UTC (NEGATIVE)": lambda m, i: i.equals(i.tz_localize("UTC")),
+    "Series reset_index": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").reset_index()),
+    "frame reset_index": lambda m, i: _lsn8d2_frame(m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i).reset_index()),
+    "sort_index": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").sort_index().to_frame()),
+    "Series shift freq": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").shift(1, freq="D").to_frame()),
+    "Series shift -2 hours": lambda m, i: _lsn8d2_index(m.Series(np.arange(len(i), dtype="float64"), index=i).shift(-2, freq="h").index),
+    "sort_index descending": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").sort_index(ascending=False).to_frame()),
+    # NEGATIVE: NaT is placed where asked, which the instants alone cannot say.
+    "sort_index, NaT first": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").sort_index(na_position="first").to_frame()),
+    "groupby its hour": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").groupby(i.hour).sum().to_frame()),
+    "groupby an Index of ints": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").groupby(m.Index(np.arange(len(i)) % 2)).sum().to_frame()),
+    "groupby a list": lambda m, i: _lsn8d2_frame(m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").groupby([k % 3 for k in range(len(i))]).sum().to_frame()),
+    "between_time 05:00-13:00": lambda m, i: (lambda out: (_lsn8d2_frame(out.to_frame()), _lsn8d2_index(out.index)))(
+        m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").between_time("05:00", "13:00")
+    ),
+    # Past midnight it wraps: the times after 17:00 or before 01:00.
+    "between_time 17:00-01:00": lambda m, i: (lambda out: (_lsn8d2_frame(out.to_frame()), _lsn8d2_index(out.index)))(
+        m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").between_time("17:00", "01:00")
+    ),
+    # NEGATIVE: open ends leave 06:00 and 18:00 out.
+    "between_time open": lambda m, i: _lsn8d2_frame(
+        m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").between_time("06:00", "18:00", inclusive="neither").to_frame()
+    ),
+    "at_time midnight": lambda m, i: (lambda out: (_lsn8d2_frame(out.to_frame()), _lsn8d2_index(out.index)))(
+        m.Series(np.arange(len(i), dtype="float64"), index=i, name="v").at_time("00:00")
+    ),
+    "frame between_time": lambda m, i: _lsn8d2_frame(
+        m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i).between_time("05:00", "19:00")
+    ),
+    # NEGATIVE: a position past either end is pandas' IndexError.
+    "i[positions out of bounds]": lambda m, i: _lsn8d2_index(i[np.array([0, 99])]),
+    "take out of bounds": lambda m, i: _lsn8d2_index(i.take([-99])),
+    "frame loc by its index's every other": lambda m, i: _lsn8d2_frame(
+        m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i).loc[i[::2]]
+    ),
+    # NEGATIVE: a key missing from the index is pandas' KeyError.
+    "frame loc by a missing key": lambda m, i: _lsn8d2_frame(
+        m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i).loc[m.DatetimeIndex(["1999-01-01"]).append(i[:1])]
+    ),
+    "frame join a subset": lambda m, i: _lsn8d2_frame(
+        m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i).join(
+            m.DataFrame({"w": np.arange(len(i[::2]), dtype="float64")}, index=i[::2])
+        )
+    ),
+    "frame join reversed, inner": lambda m, i: _lsn8d2_frame(
+        m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i).join(
+            m.DataFrame({"w": np.arange(len(i), dtype="float64")}, index=i[::-1]), how="inner"
+        )
+    ),
+    "frame join reversed, outer": lambda m, i: _lsn8d2_frame(
+        m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i).join(
+            m.DataFrame({"w": np.arange(len(i), dtype="float64")}, index=i[::-1]), how="outer"
+        )
+    ),
+    "frame join its tail": lambda m, i: (lambda out: (_lsn8d2_frame(out), _lsn8d2_index(out.index)))(
+        m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i).join(
+            m.DataFrame({"w": np.arange(len(i[1:]), dtype="float64")}, index=i[1:]), how="outer"
+        )
+    ),
+    # NEGATIVE: every other row is another freq - none kept.
+    "frame join every other, its index": lambda m, i: _lsn8d2_index(
+        m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i)
+        .join(m.DataFrame({"w": np.arange(len(i[::2]), dtype="float64")}, index=i[::2]), how="inner")
+        .index
+    ),
+    "merge on both indexes": lambda m, i: (lambda out: (_lsn8d2_frame(out), _lsn8d2_index(out.index)))(
+        m.merge(
+            m.DataFrame({"v": np.arange(len(i), dtype="float64")}, index=i),
+            m.DataFrame({"w": np.arange(len(i[1:]), dtype="float64")}, index=i[1:]),
+            left_index=True,
+            right_index=True,
+        )
+    ),
+    # Each field under the index's name (the named indexes failed: it was
+    # dropped), int32 - float64 beside NaT.
+    "calendar fields": lambda m, i: [
+        (field, getattr(i, field).name, str(getattr(i, field).dtype), [str(v) for v in getattr(i, field)])
+        for field in (
+            "year", "month", "day", "hour", "minute", "second", "microsecond", "nanosecond", "dayofweek",
+            "day_of_week", "weekday", "quarter", "dayofyear", "day_of_year", "days_in_month", "daysinmonth",
+        )
+    ],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("index", list(_LSN8D2_INDEXES))
+@pytest.mark.parametrize("op", list(_LSN8D2_OPS))
+def test_typed_datetime_index_like_pandas_lsn8d(index: str, op: str) -> None:
+    # A DatetimeIndex built from an array holds its instants, as do the
+    # indexes taken, sliced, sorted, localized or reset from one (it was a
+    # 32 B label a row: DatetimeIndex(stamps) 7.2 ms a million, pandas 0.01,
+    # asi8 38 ms; br-frankenpandas-lsn8d): each op vs pandas, or the same
+    # exception kind.
+    def run(m: Any) -> Any:
+        try:
+            return _LSN8D2_OPS[op](m, _LSN8D2_INDEXES[index](m))
+        except Exception as error:  # noqa: BLE001
+            return ("raises", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+_P448Q6_CASES = {
+    "days, freq M": (["2020-01-01", None, "2021-03-04"], "M"),
+    "days, freq Q": (["2020-05-17", "2020-12-31"], "Q"),
+    "days, freq Y": (["2020-05-17", "2019-01-01"], "Y"),
+    "days, freq W": (["2020-05-17", "2020-05-18"], "W"),
+    "minutes, freq h": (["2020-05-17T13:45", "2020-05-17T00:59"], "h"),
+    "a year, freq D (coarser)": (["2020"], "D"),
+    "Timestamps, freq M": ([pd.Timestamp("2020-01-05"), pd.Timestamp("2021-02-28T23:00")], "M"),
+    "datetimes, freq D": ([datetime.datetime(2020, 1, 5, 3), datetime.datetime(2020, 1, 6)], "D"),
+    "dates, freq M": ([datetime.date(2020, 1, 5), datetime.date(2020, 3, 1)], "M"),
+    "an aware datetime, freq D": ([datetime.datetime(2020, 1, 5, 23, 30, tzinfo=datetime.timezone(datetime.timedelta(hours=-5)))], "D"),
+    # NEGATIVE: strings at the freq's own resolution are as they were.
+    "months, freq M": (["2020-01", "2021-03"], "M"),
+    "quarters, freq Q": (["2020Q1", "2021Q4"], "Q"),
+    # NEGATIVE: an instant without a freq is pandas' refusal.
+    "a Timestamp, no freq": ([pd.Timestamp("2020-01-05")], None),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_P448Q6_CASES))
+def test_period_index_takes_the_given_freq_448q6(case: str) -> None:
+    # PeriodIndex(data, freq=) puts each string, Timestamp, datetime or date
+    # in the period of the given freq holding its start (day strings with
+    # 'M' built a daily index; a Timestamp was refused;
+    # br-frankenpandas-448q6): freqstr, labels and ordinals vs pandas.
+    data, freq = _P448Q6_CASES[case]
+
+    def run(m: Any) -> Any:
+        values = [m.Timestamp(str(v)) if isinstance(v, pd.Timestamp) else v for v in data]
+        try:
+            out = m.PeriodIndex(values, freq=freq)
+        except Exception as error:  # noqa: BLE001
+            return ("raises", type(error).__name__)
+        return (out.freqstr, [str(p) for p in out], [int(v) for v in out.asi8])
+
+    assert run(fpd) == run(pd)
+
+
+def _abewp_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "i": m.array([1, None, 3], dtype="Int64"),
+            "u": m.array([4, None, 6], dtype="UInt32"),
+            "b": m.array([True, None, False], dtype="boolean"),
+            "f": m.array([1.5, None, 2.0], dtype="Float64"),
+            "s": m.array(["x", None, "z"], dtype="string"),
+            "plain": [7, 8, 9],
+        }
+    )
+
+
+_ABEWP_CASES = {
+    "astype(str)": lambda m: _abewp_frame(m).astype(str),
+    "astype(str), a dict": lambda m: _abewp_frame(m).astype({"i": str, "b": str}),
+    "astype('string')": lambda m: _abewp_frame(m).astype("string"),
+    # NEGATIVE: an object column's None and a float column's NaN keep their text.
+    "object None / float NaN": lambda m: m.DataFrame({"o": ["a", None], "x": [1.5, float("nan")]}).astype(str),
+    # NEGATIVE: masked columns without NA are their values' text.
+    "no NA": lambda m: _abewp_frame(m).iloc[[0, 2]].astype(str),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_ABEWP_CASES))
+def test_frame_astype_str_spells_na_like_pandas_abewp(case: str) -> None:
+    # DataFrame.astype(str) of a masked / string column spells its NA '<NA>'
+    # as pandas (it wrote 'None'; br-frankenpandas-abewp): values, missing
+    # cells and dtypes vs pandas.
+    def run(m: Any) -> Any:
+        out = _ABEWP_CASES[case](m)
+        return (
+            [str(dtype) for dtype in out.dtypes],
+            [[str(cell) for cell in row] for row in out.values.tolist()],
+            [list(out[column].isna()) for column in out.columns],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+_LSN8D3_ROWS = {
+    "sorted dates": lambda m: m.DatetimeIndex(_LSN8D_STAMPS),
+    "unsorted dates": lambda m: m.DatetimeIndex(_LSN8D_STAMPS[[2, 0, 5, 1, 4, 3]]),
+    "a date_range": lambda m: m.date_range("2020-01-01", periods=6, freq="D", name="day"),
+    "a RangeIndex": lambda m: m.RangeIndex(6),
+    "text": lambda m: m.Index(["f", "b", "e", "a", "d", "c"]),
+    # NEGATIVE: equal indexes repeating a label pair every copy, and unequal
+    # ones match labels - neither is a row-for-row pairing.
+    "dates repeating one (NEGATIVE)": lambda m: m.DatetimeIndex(_LSN8D_STAMPS[[0, 1, 1, 3, 4, 5]]),
+    "unequal dates (NEGATIVE)": lambda m: m.DatetimeIndex(_LSN8D_STAMPS),
+}
+_LSN8D3_JOINS = {
+    "join": lambda left, right: left.join(right),
+    "join, sort": lambda left, right: left.join(right, sort=True),
+    "join inner": lambda left, right: left.join(right, how="inner"),
+    "join outer": lambda left, right: left.join(right, how="outer"),
+    "join right": lambda left, right: left.join(right, how="right"),
+    "join, a shared column": lambda left, right: left.join(right.rename(columns={"b": "a"}), lsuffix="_l", rsuffix="_r"),
+    "merge on the indexes, indicator": lambda left, right: left.merge(right, left_index=True, right_index=True, indicator=True),
+    "merge on the indexes, 1:1": lambda left, right: left.merge(right, left_index=True, right_index=True, validate="1:1"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("rows", list(_LSN8D3_ROWS))
+@pytest.mark.parametrize("join", list(_LSN8D3_JOINS))
+def test_join_on_equal_indexes_like_pandas_lsn8d(rows: str, join: str) -> None:
+    # Two frames on equal unique indexes pair row for row, the index kept
+    # (each side's labels became a key column, were merged and set back:
+    # df.join 66 ms a million on equal date indexes, pandas 3.3;
+    # br-frankenpandas-lsn8d): rows, values, columns, index and its freq vs
+    # pandas, or the same exception kind.
+    def run(m: Any) -> Any:
+        left_rows = _LSN8D3_ROWS[rows](m)
+        right_rows = _LSN8D3_ROWS[rows](m)
+        if rows.startswith("unequal"):
+            right_rows = right_rows[::-1]
+        left = m.DataFrame({"a": np.arange(6.0)}, index=left_rows)
+        right = m.DataFrame({"b": np.arange(6.0) * 10}, index=right_rows)
+        try:
+            out = _LSN8D3_JOINS[join](left, right)
+        except Exception as error:  # noqa: BLE001
+            return ("raises", type(error).__name__)
+        return (
+            [str(column) for column in out.columns],
+            out.astype(str).values.tolist(),
+            (type(out.index).__name__, out.index.name, [str(label) for label in out.index]),
+            getattr(out.index, "freqstr", None),
+        )
+
+    assert run(fpd) == run(pd)
+
+
+_WVPFB_STAMPS = np.array(
+    ["2020-01-03", "2020-01-05", "2020-01-04", "2020-01-08", "2020-01-01", "NaT"], dtype="datetime64[ns]"
+)
+
+
+def _wvpfb_like(m: Any, index: Any, positions: list[int], name: str) -> Any:
+    out = m.DatetimeIndex(_WVPFB_STAMPS[positions], name=name)
+    return out if index.tz is None else out.tz_localize(index.tz)
+
+
+_WVPFB_SHAPES = {
+    "sorted": lambda m: m.DatetimeIndex(_WVPFB_STAMPS[[4, 0, 2, 1, 3]], name="x"),
+    "unsorted": lambda m: m.DatetimeIndex(_WVPFB_STAMPS[[1, 0, 3, 4, 2]], name="x"),
+    "repeating": lambda m: m.DatetimeIndex(_WVPFB_STAMPS[[0, 0, 1, 3, 1]], name="x"),
+    "holding NaT": lambda m: m.DatetimeIndex(_WVPFB_STAMPS[[1, 5, 0, 3]], name="x"),
+    "empty": lambda m: m.DatetimeIndex(np.array([], dtype="datetime64[ns]"), name="x"),
+    "a date_range": lambda m: m.date_range("2020-01-01", periods=6, freq="D", name="x"),
+    "aware": lambda m: m.DatetimeIndex(_WVPFB_STAMPS[[1, 0, 3]], name="x").tz_localize("UTC"),
+}
+_WVPFB_OTHERS = {
+    "a slice": lambda m, i: i[1:3],
+    "another name, unsorted": lambda m, i: _wvpfb_like(m, i, [3, 0], "y"),
+    "holding NaT": lambda m, i: _wvpfb_like(m, i, [5, 2], "x"),
+    "repeating": lambda m, i: _wvpfb_like(m, i, [0, 0, 2], "x"),
+    "itself": lambda m, i: i,
+    "a copy": lambda m, i: i.copy(),
+    "empty": lambda m, i: i[:0],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("shape", list(_WVPFB_SHAPES))
+@pytest.mark.parametrize("other", list(_WVPFB_OTHERS))
+@pytest.mark.parametrize("op", ["union", "intersection", "difference", "symmetric_difference"])
+@pytest.mark.parametrize("sort", ["default", False, True])
+def test_datetime_index_set_ops_like_pandas_wvpfb(shape: str, other: str, op: str, sort: Any) -> None:
+    # A DatetimeIndex's union / intersection / difference / symmetric_difference
+    # as pandas: the sort keyword, NaT last, repeats kept by count, the shared
+    # name, the freq of a range or a run, the class (intersection, difference
+    # and symmetric_difference took no sort, NaT sorted first, union kept each
+    # instant once, symmetric_difference was a plain Index;
+    # br-frankenpandas-wvpfb): instants, order, name, freq vs pandas.
+    def run(m: Any) -> Any:
+        try:
+            left = _WVPFB_SHAPES[shape](m)
+            right = _WVPFB_OTHERS[other](m, left)
+            method = getattr(left, op)
+            out = method(right) if sort == "default" else method(right, sort=sort)
+        except Exception as error:  # noqa: BLE001
+            return ("raises", type(error).__name__)
+        return (type(out).__name__, str(out.dtype), out.name, [str(v) for v in out], out.freqstr)
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", ["DatetimeIndex", "TimedeltaIndex"])
+@pytest.mark.parametrize("values", [["2", None, "1", "3"], ["2", "1", "3"], [None, None]])
+def test_datetimelike_argsort_puts_nat_last_wvpfb(kind: str, values: list[Any]) -> None:
+    # argsort of instants or durations: NaT last, as pandas (it came first,
+    # the order of its i64::MIN; br-frankenpandas-wvpfb). NEGATIVE: none
+    # missing is the plain order.
+    def run(m: Any) -> Any:
+        if kind == "DatetimeIndex":
+            index = m.DatetimeIndex([None if v is None else f"2020-01-0{v}" for v in values])
+        else:
+            index = m.TimedeltaIndex([None if v is None else f"{v}D" for v in values])
+        return [int(position) for position in index.argsort()]
+
+    assert run(fpd) == run(pd)
+
+
+_FF5IK_INDEXES = {
+    "ints": lambda m, name, n: m.Index([1, 2, 3][-n:], name=name),
+    "text": lambda m, name, n: m.Index(["a", "b", "c"][-n:], name=name),
+    "RangeIndex": lambda m, name, n: m.RangeIndex(4 - n, 4, name=name),
+    "TimedeltaIndex": lambda m, name, n: m.TimedeltaIndex(["1D", "2D", "3D"][-n:], name=name),
+    "PeriodIndex": lambda m, name, n: m.period_range(["2020-01", "2020-02", "2020-03"][-n], periods=n, freq="M", name=name),
+    "DatetimeIndex": lambda m, name, n: m.DatetimeIndex(["2020-01-01", "2020-01-02", "2020-01-03"][-n:], name=name),
+    "CategoricalIndex": lambda m, name, n: m.CategoricalIndex(["a", "b", "c"][-n:], name=name),
+}
+_FF5IK_OTHERS = {
+    "named otherwise": lambda m, kind, i: _FF5IK_INDEXES[kind](m, "y", 2),
+    # NEGATIVE: one name between the two stays.
+    "the same name": lambda m, kind, i: _FF5IK_INDEXES[kind](m, "x", 2),
+    "unnamed": lambda m, kind, i: _FF5IK_INDEXES[kind](m, None, 2),
+    # A list is the Index of it under this one's name (pandas).
+    "a list": lambda m, kind, i: list(_FF5IK_INDEXES[kind](m, None, 2)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", list(_FF5IK_INDEXES))
+@pytest.mark.parametrize("other", list(_FF5IK_OTHERS))
+@pytest.mark.parametrize("op", ["union", "intersection", "difference", "symmetric_difference"])
+def test_set_op_names_like_pandas_ff5ik(kind: str, other: str, op: str) -> None:
+    # A set op's result name, pandas' get_op_result_name: the shared name,
+    # else none - for a difference too (it kept this index's name,
+    # br-frankenpandas-6r1lq); a list operand is an Index under this one's
+    # name, so the result keeps it (union / intersection /
+    # symmetric_difference dropped it; br-frankenpandas-ff5ik): name and
+    # labels vs pandas, or the same exception kind.
+    def run(m: Any) -> Any:
+        left = _FF5IK_INDEXES[kind](m, "x", 3)
+        try:
+            out = getattr(left, op)(_FF5IK_OTHERS[other](m, kind, left))
+        except Exception as error:  # noqa: BLE001
+            return ("raises", type(error).__name__)
+        return (out.name, sorted(str(v) for v in out))
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("dtype", ["int64", "int32", "float64", "bool", "object", "datetime64[ns]", "timedelta64[ns]"])
+def test_empty_index_inferred_type_lsn8d(dtype: str) -> None:
+    # An empty index of a dtype infers that dtype's kind, as pandas (an
+    # empty DatetimeIndex / int64 / float64 Index said "empty";
+    # br-frankenpandas-lsn8d). NEGATIVE: an object one is "empty".
+    def run(m: Any) -> Any:
+        index = m.Index(np.array([], dtype=dtype))
+        return (index.inferred_type, str(index.dtype))
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    ("freq", "values"),
+    [
+        ("M", ["2020-01", None, "2021-03"]),
+        ("D", ["2020-01-01", None, "2021-03-04"]),
+        ("Y", ["2020", None, "2021"]),
+        ("Q", ["2020Q1", None, "2021Q3"]),
+    ],
+)
+def test_period_index_asi8_is_an_int64_array_lsn8d(freq: str, values: list[Any]) -> None:
+    # PeriodIndex.asi8 is a numpy int64 array of its ordinals, NaT as
+    # i64::MIN, as pandas (it was a list; br-frankenpandas-lsn8d).
+    def run(m: Any) -> Any:
+        asi8 = m.PeriodIndex(values, freq=freq).asi8
+        return (type(asi8).__name__, str(asi8.dtype), asi8.tolist())
+
+    assert run(fpd) == run(pd)
+
+
+def _geqye_dates(m: Any) -> Any:
+    return m.Series(np.array(["2020-01-05", "NaT", "2020-03-01"], dtype="datetime64[ns]"))
+
+
+_GEQYE_CASES = {
+    "dates, an int": lambda m: _geqye_dates(m).shift(1, fill_value=0),
+    "dates, a bool": lambda m: _geqye_dates(m).shift(1, fill_value=True),
+    "dates, a numpy int": lambda m: _geqye_dates(m).shift(1, fill_value=np.int64(3)),
+    "dates, a float": lambda m: _geqye_dates(m).shift(1, fill_value=1.5),
+    "dates, a date": lambda m: _geqye_dates(m).shift(1, fill_value=datetime.date(2000, 1, 1)),
+    "dates, a Timedelta": lambda m: _geqye_dates(m).shift(1, fill_value=m.Timedelta("1h")),
+    "dates, a date string": lambda m: _geqye_dates(m).shift(1, fill_value="2000-01-01"),
+    "dates, text": lambda m: _geqye_dates(m).shift(1, fill_value="abc"),
+    "dates, an aware Timestamp": lambda m: _geqye_dates(m).shift(1, fill_value=m.Timestamp("2000-01-01", tz="UTC")),
+    "dates, an aware string": lambda m: _geqye_dates(m).shift(1, fill_value="2000-01-01T00:00+05:00"),
+    "aware dates, a naive Timestamp": lambda m: _geqye_dates(m).dt.tz_localize("UTC").shift(1, fill_value=m.Timestamp("2000-01-01")),
+    "aware dates, a naive string": lambda m: _geqye_dates(m).dt.tz_localize("Asia/Tokyo").shift(1, fill_value="2000-01-01"),
+    "aware dates, an aware string": lambda m: _geqye_dates(m).dt.tz_localize("UTC").shift(-1, fill_value="2000-01-01T00:00+05:00"),
+    "durations, an int": lambda m: (_geqye_dates(m) - m.Timestamp("2020-01-01")).shift(1, fill_value=5),
+    "durations, a Timestamp": lambda m: (_geqye_dates(m) - m.Timestamp("2020-01-01")).shift(1, fill_value=m.Timestamp("2000-01-01")),
+    "durations, a duration string": lambda m: (_geqye_dates(m) - m.Timestamp("2020-01-01")).shift(1, fill_value="1h"),
+    "durations, text": lambda m: (_geqye_dates(m) - m.Timestamp("2020-01-01")).shift(1, fill_value="abc"),
+    "durations, a timedelta": lambda m: (_geqye_dates(m) - m.Timestamp("2020-01-01")).shift(1, fill_value=datetime.timedelta(hours=2)),
+    "a frame, dates and ints, a Timestamp": lambda m: m.DataFrame({"a": _geqye_dates(m), "b": [1, 2, 3]}).shift(1, fill_value=m.Timestamp("2000-01-01")),
+    "a frame, dates and ints, an int": lambda m: m.DataFrame({"a": _geqye_dates(m), "b": [1, 2, 3]}).shift(1, fill_value=0),
+    "a frame, dates and text, a date string": lambda m: m.DataFrame({"a": _geqye_dates(m), "b": ["x", "y", "z"]}).shift(1, fill_value="2000-01-01"),
+    # NEGATIVE: a fill of the column's kind, a missing fill, or no row
+    # moved is no error.
+    "dates, a Timestamp (NEGATIVE)": lambda m: _geqye_dates(m).shift(1, fill_value=m.Timestamp("2000-01-01")),
+    "dates, a datetime (NEGATIVE)": lambda m: _geqye_dates(m).shift(-1, fill_value=datetime.datetime(2000, 1, 1, 6)),
+    "dates, a numpy datetime64 (NEGATIVE)": lambda m: _geqye_dates(m).shift(1, fill_value=np.datetime64("2000-01-01T00:00:00.000000000")),
+    "dates, None (NEGATIVE)": lambda m: _geqye_dates(m).shift(1, fill_value=None),
+    "dates, NaN (NEGATIVE)": lambda m: _geqye_dates(m).shift(1, fill_value=np.nan),
+    "dates, no row moved (NEGATIVE)": lambda m: _geqye_dates(m).shift(0, fill_value=0),
+    "ints, a string (NEGATIVE)": lambda m: m.Series([1, 2, 3]).shift(1, fill_value="x"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GEQYE_CASES))
+def test_temporal_shift_fill_like_pandas_geqye(case: str) -> None:
+    # shift(fill_value=) of a datetime / timedelta column reads the fill as
+    # pandas: a wrong kind is its TypeError, a string parses, an aware
+    # string's awareness must match (fp put any fill in an object column;
+    # br-frankenpandas-geqye): exception and message, or dtypes and values.
+    def run(m: Any) -> Any:
+        try:
+            out = _GEQYE_CASES[case](m)
+        except Exception as error:  # noqa: BLE001
+            return ("raises", type(error).__name__, str(error))
+        if hasattr(out, "columns"):
+            return [(c, str(out[c].dtype), out[c].astype(str).tolist()) for c in out.columns]
+        return (str(out.dtype), out.astype(str).tolist())
+
+    assert run(fpd) == run(pd)
+
+
+_UFWPF_VALUES = {
+    "aware Timestamp in UTC": lambda m: m.Timestamp("2020-02-01T00:00:00.000000001").tz_localize("UTC"),
+    "aware Timestamp in a named zone": lambda m: m.Timestamp("2020-02-01T09:30:00.000000001").tz_localize("Asia/Tokyo"),
+    "datetime with timezone.utc": lambda m: datetime.datetime(2020, 2, 1, 9, 30, tzinfo=datetime.timezone.utc),
+    "NaT": lambda m: m.NaT,
+    # NEGATIVE: a naive instant stays naive.
+    "naive Timestamp (NEGATIVE)": lambda m: m.Timestamp("2020-02-01T00:00:00.000000001"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("value", list(_UFWPF_VALUES))
+@pytest.mark.parametrize("how", ["assign", "setitem", "constructor"])
+def test_frame_column_of_an_aware_timestamp_like_pandas_ufwpf(value: str, how: str) -> None:
+    # A Timestamp / datetime assigned as a whole column keeps its zone,
+    # pandas' datetime64[ns, tz] (the broadcast Scalar holds UTC nanos only,
+    # so the column came back naive; br-frankenpandas-ufwpf): dtype, values.
+    def run(m: Any) -> Any:
+        v = _UFWPF_VALUES[value](m)
+        if how == "assign":
+            out = m.DataFrame({"a": [1, 2, 3]}).assign(z=v)["z"]
+        elif how == "setitem":
+            frame = m.DataFrame({"a": [1, 2, 3]})
+            frame["z"] = v
+            out = frame["z"]
+        else:
+            out = m.DataFrame({"a": [1, 2, 3], "z": v})["z"]
+        # pandas keeps a datetime's microsecond unit, fp has ns only
+        # (fvsao.16): the zone is compared, not the unit.
+        return (str(out.dtype).replace("[us,", "[ns,"), out.astype(str).tolist())
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_frame_column_assigned_a_timestamp_like_pandas_vk7y9() -> None:
+    # A naive Timestamp assigned as a column broadcasts typed
+    # (br-frankenpandas-vk7y9); an aware one keeps its zone in pandas, fp's
+    # is naive (ufwpf). Values and dtype vs pandas.
+    def run(m: Any) -> Any:
+        t = m.Timestamp("2020-02-01T00:00:00.000000001")
+        out = m.DataFrame({"d": _VK7Y9_STAMPS}).assign(z=t)["z"]
+        return (str(out.dtype), out.isna().tolist(), out.astype(str).tolist())
+
+    assert run(fpd) == run(pd)
+
+
+_FQGW7_SERIES = {
+    "floats holding NaN": [np.nan, 3.0, np.nan, 1.0, 5.0, np.nan, 2.0],
+    "an all-NaN start": [np.nan, np.nan, 2.0, 1.0],
+    "floats with inf": [1.0, np.inf, 0.5, -np.inf, 2.0],
+    "ints": [4, 9, 2, 7, 1],
+    # NEGATIVE: a column without NaN folds as before.
+    "no NaN (NEGATIVE)": [2.0, 1.0, 3.0, 0.5],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("min_periods", [1, 0, 3])
+@pytest.mark.parametrize("values", list(_FQGW7_SERIES))
+def test_expanding_extremum_like_pandas_fqgw7(values: str, min_periods: int) -> None:
+    # expanding max / min of a float column fold its data in row order, a
+    # NaN skipped (br-frankenpandas-fqgw7: a Scalar per row, 0.48x pandas at
+    # 1M holding NaN): values as float.hex, NaN as None, dtype vs pandas.
+    def run(m: Any) -> Any:
+        s = m.Series(np.array(_FQGW7_SERIES[values]))
+        answers = []
+        for op in ["max", "min"]:
+            out = getattr(s.expanding(min_periods=min_periods), op)()
+            answers.append((op, str(out.dtype), [None if x != x else float(x).hex() for x in out.tolist()]))
+        return answers
+
+    assert run(fpd) == run(pd)
+
+
+_PFXCK_CASES = {
+    "mean, int key": ("k", "b", "mean"),
+    "sum, int key": ("k", "b", "sum"),
+    "mean, text key": ("t", "b", "mean"),
+    "sum, text key": ("t", "b", "sum"),
+    # NEGATIVE: an all-valid column transforms as before.
+    "mean, all valid (NEGATIVE)": ("k", "a", "mean"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_PFXCK_CASES))
+def test_groupby_transform_with_nan_like_pandas_pfxck(case: str) -> None:
+    # groupby transform('mean' / 'sum') of a float column holding NaN in the
+    # dense pass, a NaN skipped (br-frankenpandas-pfxck: the generic path,
+    # 0.11x pandas at 1M): an all-NaN group sums to 0.0 and averages NaN,
+    # broadcast to every row; values as float.hex, index, dtype vs pandas.
+    key, column, func = _PFXCK_CASES[case]
+
+    def run(m: Any) -> Any:
+        frame = m.DataFrame(
+            {
+                "k": np.array([3, 1, 3, 2, 1, 3, 2, 1]),
+                "t": np.array(["x", "y", "x", "z", "y", "x", "z", "y"]),
+                "b": np.array([np.nan, 1.5, 2.25, np.nan, np.nan, 4.0, np.nan, 0.1]),
+                "a": np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]),
+            }
+        )
+        out = frame.groupby(key)[column].transform(func)
+        return ([None if x != x else float(x).hex() for x in out.tolist()], list(out.index), str(out.dtype))
+
+    assert run(fpd) == run(pd)
+
+
+_SMODN_VALUES = {
+    "floats holding NaN": [3.0, np.nan, 1.0, np.nan, 2.0, 0.5],
+    "ties and NaN": [2.0, 1.0, np.nan, 2.0, 1.0, np.nan, 2.0],
+    "signed zeros and NaN": [0.0, -0.0, np.nan, -1.0, 0.0],
+    "all NaN": [np.nan, np.nan, np.nan],
+    # NEGATIVE: a column without NaN sorts as before, an int column's ties
+    # in their positions' order. (Float ties are not compared: numpy's default
+    # quicksort - a vectorized sort here - orders them, and -0.0 before 0.0,
+    # its own way; fp keeps the stable order.)
+    "no NaN (NEGATIVE)": [3.0, 1.0, 2.0, 1.0],
+    "int ties (NEGATIVE)": [5, 3, 5, 3, 1, 5],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("values", list(_SMODN_VALUES))
+def test_argsort_with_nan_like_pandas_smodn(values: str) -> None:
+    # argsort of a float column holding NaN pair-sorts its present values
+    # (br-frankenpandas-smodn: a Scalar compare, 0.10x pandas at 1M): a missing
+    # row -1, each present row the next position of the sorted present values;
+    # values, index and dtype vs pandas.
+    def run(m: Any) -> Any:
+        s = m.Series(np.array(_SMODN_VALUES[values]), index=[10 + i for i in range(len(_SMODN_VALUES[values]))], name="v")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            out = s.argsort()
+        return (out.tolist(), list(out.index), str(out.dtype), out.name)
+
+    assert run(fpd) == run(pd)
+
+
+def _5eklr_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "k": np.array([3, 1, 3, 2, 1, 3, 2, 1]),
+            "t": np.array(["x", "y", "x", "z", "y", "x", "z", "y"]),
+            "b": np.array([np.nan, 1.5, 2.5, np.nan, np.nan, 4.0, np.nan, 0.5]),
+            "a": np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]),
+            "i": np.array([1, 2, 3, 4, 5, 6, 7, 8]),
+        }
+    )
+
+
+_5EKLR_CASES = {
+    "Series first, NaN column": lambda m: _5eklr_frame(m).groupby("k")["b"].first(),
+    "Series last, NaN column": lambda m: _5eklr_frame(m).groupby("k")["b"].last(),
+    "Series first, text key": lambda m: _5eklr_frame(m).groupby("t")["b"].first(),
+    "frame first": lambda m: _5eklr_frame(m).groupby("k").first(),
+    "frame last": lambda m: _5eklr_frame(m).groupby("k").last(),
+    "frame last, two keys": lambda m: _5eklr_frame(m)[["k", "i", "b"]].assign(i=lambda f: f["i"] % 2).groupby(["k", "i"]).last(),
+    # NEGATIVE: an all-valid column answers its first / last row's value, as before.
+    "Series first, all valid (NEGATIVE)": lambda m: _5eklr_frame(m).groupby("k")["a"].first(),
+    "Series last, all valid (NEGATIVE)": lambda m: _5eklr_frame(m).groupby("k")["a"].last(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_5EKLR_CASES))
+def test_groupby_first_last_with_nan_like_pandas_5eklr(case: str) -> None:
+    # groupby first / last of a float column holding NaN take each group's
+    # first / last present value in one pass, NaN for a group with none
+    # (br-frankenpandas-5eklr: a per-group Scalar find, 0.31x-0.45x pandas at
+    # 1M): values (floats as float.hex, NaN as None), labels and dtypes.
+    def run(m: Any) -> Any:
+        out = _5EKLR_CASES[case](m)
+        frame = out.to_frame() if hasattr(out, "to_frame") and not hasattr(out, "columns") else out
+        cells = {
+            str(name): [None if x != x else (float(x).hex() if isinstance(x, float) else x) for x in frame[name].tolist()]
+            for name in frame.columns
+        }
+        return (repr(list(frame.index)), [str(d) for d in frame.dtypes], cells)
+
+    assert run(fpd) == run(pd)
+
+
+def _px927_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "a": np.array([0.5, 1.5, -2.0, 3.25]),
+            "b": np.array([1.0, np.nan, np.nan, 4.0]),
+            "c": np.array([np.nan, 2.0, 3.0, np.nan]),
+            "k": np.array([1, 2, 3, 4]),
+            "t": np.array([True, False, True, True]),
+        }
+    )
+
+
+_PX927_CASES = {
+    "two floats, one holding NaN": lambda m: _px927_frame(m)[["a", "b"]].values,
+    "floats holding NaN to_numpy": lambda m: _px927_frame(m)[["b", "c"]].to_numpy(),
+    "NaN-holding float beside an int": lambda m: _px927_frame(m)[["b", "k"]].values,
+    "one NaN-holding column": lambda m: _px927_frame(m)[["c"]].values,
+    # NEGATIVE: all-valid floats, ints and bools copy as before.
+    "all-valid float (NEGATIVE)": lambda m: _px927_frame(m)[["a"]].values,
+    "ints (NEGATIVE)": lambda m: _px927_frame(m)[["k", "k"]].values,
+    "bools (NEGATIVE)": lambda m: _px927_frame(m)[["t"]].values,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_PX927_CASES))
+def test_frame_values_with_nan_like_pandas_px927(case: str) -> None:
+    # A float column holding NaN as its missing values copies its data into
+    # the frame's array, as an all-valid one (br-frankenpandas-px927: a Scalar
+    # per cell, 0.20x pandas at 1M): shape, dtype, F-contiguity and the
+    # values (floats as float.hex, NaN as None) vs pandas.
+    def run(m: Any) -> Any:
+        array = _PX927_CASES[case](m)
+        cells = [[None if x != x else (float(x).hex() if isinstance(x, float) else x) for x in row] for row in array.tolist()]
+        return (array.shape, str(array.dtype), bool(array.flags.f_contiguous), cells)
+
+    assert run(fpd) == run(pd)
+
+
+_IOV9I_CASES = {
+    "int keys on different indexes": lambda m: m.crosstab(m.Series([1, 2, 1], index=[0, 1, 2]), m.Series([3, 3, 4], index=[1, 2, 3])),
+    "text keys on shifted indexes": lambda m: m.crosstab(m.Series(["a", "b", "a", "b"]), m.Series(["x", "y", "x"], index=[2, 3, 4])),
+    "keys of different lengths": lambda m: m.crosstab(m.Series([1, 2, 1, 2]), m.Series([5, 6], index=[1, 3])),
+    # NEGATIVE: keys on one index and lists count as before.
+    "keys on one index (NEGATIVE)": lambda m: m.crosstab(m.Series([1, 2, 1], index=[5, 6, 7]), m.Series([3, 3, 4], index=[5, 6, 7])),
+    "lists (NEGATIVE)": lambda m: m.crosstab([1, 2, 1], [3, 3, 4]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_IOV9I_CASES))
+def test_crosstab_keys_on_shared_labels_like_pandas_iov9i(case: str) -> None:
+    # Key Series on different indexes count over the labels they share, as
+    # pandas' crosstab (its frame on the indexes' intersection): int keys stay
+    # int64 labels (the union widened them to floats; br-frankenpandas-iov9i).
+    def run(m: Any) -> Any:
+        out = _IOV9I_CASES[case](m)
+        axes = (repr(list(out.index)), str(out.index.dtype), repr(list(out.columns)), str(out.columns.dtype))
+        return (out.shape, out.values.tolist(), axes, [str(d) for d in out.dtypes])
+
+    assert run(fpd) == run(pd)
+
+
+def _x6p40_plain_operands(m: Any, case: str) -> tuple:
+    kind, side, dtype_name, operand = _X6P40_PLAIN_CASES[case]
+    dtype = m.CategoricalDtype(["y", "x"], ordered=dtype_name == "ordered")
+    categorical = m.Series(["x", "y", None], dtype=dtype)
+    plain = m.Series(["y", "y", "x"])
+    if kind == "frame":
+        categorical, plain = m.DataFrame({"a": categorical}), m.DataFrame({"a": plain})
+    other = plain if operand == "plain" else operand
+    return (other, categorical) if side == "right" else (categorical, other)
+
+
+_X6P40_PLAIN_CASES = {
+    f"{kind} {dtype_name} {side} vs {operand!r}": (kind, side, dtype_name, operand)
+    for kind in ("series", "frame")
+    for dtype_name in ("ordered", "unordered")
+    for side, operand in (("left", "plain"), ("right", "plain"), ("left", "y"), ("left", "z"), ("left", 1), ("left", None))
+}
+_X6P40_PLAIN_NEGATIVE = [case for case in _X6P40_PLAIN_CASES if case.startswith(("series ordered left", "frame ordered left"))]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case, operators",
+    [(case, ["__lt__", "__ge__", "__gt__", "__le__"]) for case in _X6P40_PLAIN_CASES]
+    # NEGATIVE: == / != against plain values, a category and other scalars
+    # compare values, as before.
+    + [(case, ["__eq__", "__ne__"]) for case in _X6P40_PLAIN_NEGATIVE],
+)
+def test_categorical_against_plain_values_like_pandas_x6p40(case: str, operators: list) -> None:
+    # A categorical against plain values compares as pandas' Categorical
+    # (br-frankenpandas-x6p40): a scalar among the categories by its
+    # position (a frame compared the text), any other scalar pandas'
+    # "Invalid comparison" for an ordering, an ordered one against a plain
+    # Series / frame pandas' TypeError naming the operator as the
+    # categorical sees it (they compared), an unordered one refused any
+    # ordering: the result or the exception vs pandas.
+    def run(m: Any) -> Any:
+        answers = []
+        for name in operators:
+            left, right = _x6p40_plain_operands(m, case)
+            try:
+                result = getattr(left, name)(right)
+            except Exception as error:  # noqa: BLE001
+                answers.append((name, type(error).__name__, str(error)))
+                continue
+            result = result["a"] if hasattr(result, "columns") else result
+            answers.append((name, str(result.dtype), result.tolist()))
+        return answers
+
+    assert run(fpd) == run(pd)
+
+
+# Everyday Series operations over awkward inputs, pandas live vs fp
+# (br-frankenpandas-anux4).
+_ANUX4_INPUTS = {
+    "floats with NaN": lambda m: m.Series([1.5, np.nan, -2.0, 0.0, np.nan, 3.25]),
+    "all NaN": lambda m: m.Series([np.nan, np.nan, np.nan]),
+    "empty float": lambda m: m.Series([], dtype="float64"),
+    "big ints": lambda m: m.Series([2**53 + 1, 2**53, -(2**53) - 3, 7]),
+    "float32": lambda m: m.Series([1.5, -2.25, 0.1, 3.0], dtype="float32"),
+    "dates with NaT": lambda m: m.Series(m.to_datetime(["2020-01-05", None, "2019-12-31", "2020-03-01"])),
+    "text with None": lambda m: m.Series(["b", None, "a", "c", "a"]),
+    "bools": lambda m: m.Series([True, False, True, True]),
+}
+_ANUX4_OPS = {
+    "sum": lambda s: s.sum(),
+    "mean": lambda s: s.mean(),
+    "min": lambda s: s.min(),
+    "max": lambda s: s.max(),
+    "median": lambda s: s.median(),
+    "std": lambda s: s.std(),
+    "count": lambda s: s.count(),
+    "nunique": lambda s: s.nunique(),
+    "cumsum": lambda s: s.cumsum(),
+    "cummax": lambda s: s.cummax(),
+    "diff": lambda s: s.diff(),
+    "shift": lambda s: s.shift(1),
+    "rank": lambda s: s.rank(),
+    "rank pct": lambda s: s.rank(pct=True),
+    "sort_values": lambda s: s.sort_values(),
+    "sort desc na_first": lambda s: s.sort_values(ascending=False, na_position="first"),
+    "argsort": lambda s: s.argsort(),
+    "unique": lambda s: s.unique(),
+    "value_counts": lambda s: s.value_counts(),
+    "value_counts dropna": lambda s: s.value_counts(dropna=False),
+    "duplicated": lambda s: s.duplicated(),
+    "isna": lambda s: s.isna(),
+    "fillna": lambda s: s.fillna(s.iloc[0] if len(s) else 0),
+    "dropna": lambda s: s.dropna(),
+    "ffill": lambda s: s.ffill(),
+    "abs": lambda s: s.abs(),
+    "neg": lambda s: -s,
+    "add self": lambda s: s + s,
+    "mul 2": lambda s: s * 2,
+    "eq shift": lambda s: s == s.shift(1),
+    "lt first": lambda s: s < s.iloc[0] if len(s) else s,
+    "clip": lambda s: s.clip(lower=s.min()),
+    "round": lambda s: s.round(1),
+    "astype str": lambda s: s.astype(str),
+    "astype object": lambda s: s.astype(object),
+    "idxmax": lambda s: s.idxmax(),
+    "nlargest": lambda s: s.nlargest(2),
+    "quantile": lambda s: s.quantile(0.3),
+    "describe": lambda s: s.describe(),
+    "pct_change": lambda s: s.pct_change(),
+    "rolling sum": lambda s: s.rolling(2).sum(),
+    "expanding max": lambda s: s.expanding().max(),
+    "where": lambda s: s.where(s.notna(), s.iloc[0] if len(s) else 0),
+    "isin first": lambda s: s.isin(list(s.iloc[:1])),
+    "map dict": lambda s: s.map({s.iloc[0]: "x"} if len(s) else {}),
+    "replace": lambda s: s.replace(s.iloc[0], s.iloc[-1]) if len(s) else s,
+    "between": lambda s: s.between(s.iloc[0], s.iloc[-1]) if len(s) else s,
+    "to_list": lambda s: s.tolist(),
+    "groupby self count": lambda s: s.groupby(s).count(),
+}
+# The object columns pandas reduces with Python's own comparisons and
+# subtraction: dates, mixed numbers, bools beside numbers.
+_ANUX4_OBJECT_INPUTS = {
+    "object dates": lambda m: m.Series(
+        [datetime.date(2020, 1, 2), datetime.date(2019, 1, 1), datetime.date(2021, 5, 5)], dtype=object
+    ),
+    "object numbers with NaN": lambda m: m.Series([1, 2.5, np.nan, 4], dtype=object),
+    "object bool and numbers": lambda m: m.Series([True, 1, 2.5], dtype=object),
+    "object text and int": lambda m: m.Series(["b", 1, "a"], dtype=object),
+    # NEGATIVE: text without a missing value keeps its min / max / arg /
+    # cum answers (its diff is pandas' TypeError now; it was NaN).
+    "object text (NEGATIVE)": lambda m: m.Series(["b", "a", "c"]),
+}
+_ANUX4_OBJECT_OPS = {
+    "min": lambda s: s.min(),
+    "max skipna=False": lambda s: s.max(skipna=False),
+    "idxmin": lambda s: s.idxmin(),
+    "argmax": lambda s: s.argmax(),
+    "cummax": lambda s: s.cummax(),
+    "cummin skipna=False": lambda s: s.cummin(skipna=False),
+    "diff": lambda s: s.diff(),
+    "diff -1": lambda s: s.diff(-1),
+}
+
+
+def _anux4_view(value: Any, top: bool = True) -> Any:
+    """A result as its kind, dtype, labels and values (NaN as 'nan'); a
+    scalar answer's numpy type too, a cell's value only."""
+    if hasattr(value, "index") and hasattr(value, "dtype") and hasattr(value, "tolist"):
+        return (
+            "series",
+            str(value.dtype),
+            [repr(label) for label in value.index.tolist()],
+            [_anux4_view(cell, False) for cell in value.tolist()],
+        )
+    if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
+        listed = value.tolist()
+        if isinstance(listed, list):
+            return ("array", str(getattr(value, "dtype", "")), [_anux4_view(cell, False) for cell in listed])
+        return (type(value).__name__, _anux4_view(listed, False)) if top else _anux4_view(listed, False)
+    if isinstance(value, float):
+        return "nan" if value != value else repr(value)
+    if isinstance(value, list):
+        return [_anux4_view(cell, False) for cell in value]
+    if type(value).__name__ in ("NaTType", "Timestamp", "Timedelta", "NAType"):
+        return str(value)
+    return repr(value)
+
+
+def _anux4_answer(m: Any, build: Any, op: Any) -> Any:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            return _anux4_view(op(build(m)))
+        except Exception as error:  # noqa: BLE001
+            return ("raises", type(error).__name__)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", list(_ANUX4_OPS))
+@pytest.mark.parametrize("data", list(_ANUX4_INPUTS))
+def test_edge_inputs_like_pandas_anux4(data: str, op: str) -> None:
+    # Each everyday Series op over each awkward input answers as pandas -
+    # values, dtype, labels, or the exception and its message
+    # (br-frankenpandas-anux4): int64 diff wraps in int64 (2**53 + 1 less
+    # 2**53 was 0.0), an all-NaN nlargest its NaN rows (empty), float32
+    # astype(str) float32's digits, all-missing rank / expanding max /
+    # replace float64 (object), text holding None refuses min / max /
+    # cummax / diff / idxmax as pandas (it answered), bool pct_change's
+    # ZeroDivisionError, a date's abs TypeError, quantile / describe of big
+    # ints and float32 in numpy's arithmetic. NEGATIVE: the 373 cases that
+    # already matched are parametrizations here too and stay equal.
+    build, call = _ANUX4_INPUTS[data], _ANUX4_OPS[op]
+    assert _anux4_answer(fpd, build, call) == _anux4_answer(pd, build, call)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", list(_ANUX4_OBJECT_OPS))
+@pytest.mark.parametrize("data", list(_ANUX4_OBJECT_INPUTS))
+def test_object_reductions_like_pandas_anux4(data: str, op: str) -> None:
+    # An object column's min / max / argmax / idxmin / cummin / cummax /
+    # diff run Python's own comparisons and subtraction as pandas' numpy
+    # object kernels do (br-frankenpandas-anux4): dates keep their cells and
+    # subtract to durations, mixed numbers stay object, text beside an int
+    # is the TypeError (they read as float64, NaN, or the first row).
+    # NEGATIVE: text with nothing missing keeps its comparisons' answers.
+    build, call = _ANUX4_OBJECT_INPUTS[data], _ANUX4_OBJECT_OPS[op]
+    assert _anux4_answer(fpd, build, call) == _anux4_answer(pd, build, call)
+
+
+def _xmwso_series(m: Any, shift_minutes: int = 0) -> Any:
+    stamps = pd.date_range("2020-01-01", periods=600, freq="min") + pd.Timedelta(minutes=shift_minutes)
+    rows = np.arange(600)
+    values = np.where(rows % 7 == 3, np.nan, (rows * 37 % 101).astype(float))
+    return m.Series(values, index=m.to_datetime(stamps.values))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_resampler_reuse_like_pandas_xmwso() -> None:
+    # One resampler answers each reduction - and again after the others -
+    # as pandas, its rows' bins kept by the first (br-frankenpandas-xmwso);
+    # a frame's columns, and a column picked off its resampler, too.
+    # NEGATIVE: a resampler of another freq, and one over another series'
+    # stamps, made after it, answer their own bins.
+    def run(m: Any) -> Any:
+        s = _xmwso_series(m)
+        r = s.resample("h")
+        answers = [getattr(r, op)() for op in ("max", "count", "min", "sum", "mean", "max", "std")]
+        answers.append(s.resample("15min").max())
+        answers.append(_xmwso_series(m, 30).resample("h").max())
+        rf = m.DataFrame({"a": s, "b": s * 2}).resample("h")
+        answers += [rf.mean()["b"], rf.max()["a"], rf["b"].count()]
+        return [
+            (str(x.dtype), [str(label) for label in x.index], ["nan" if v != v else v for v in x.tolist()])
+            for x in answers
+        ]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-lsn8d: DatetimeIndex.take of an int64 array reads its
+# positions in place, each wrapped (negative from the end), checked and
+# gathered in one pass - over a typed index, a date_range (a steady step keeps
+# the freq, scaled), a zone and a name, NaT, an empty take; pandas reads the
+# positions as given for the freq, so a negative one keeps none (fp scaled the
+# freq by the wrapped positions' step); NEGATIVE: a position past either end
+# is numpy's IndexError (not NaT), and the arrays read the other way (a
+# strided view, byte-swapped, int32, a list) agree.
+def _lsn8d_take_stamps(m: Any) -> Any:
+    days = np.array([0, 3, 4, 9, 11, 30, 31, 45], dtype="int64") * 86_400_000_000_000
+    return m.DatetimeIndex(np.datetime64("2021-03-01", "ns") + days.astype("timedelta64[ns]"), name="t")
+
+
+_LSN8D_TAKE_CASES = {
+    "permutation": lambda m: _lsn8d_take_stamps(m).take(np.array([7, 0, 3, 3, 5], dtype="int64")),
+    "negative": lambda m: _lsn8d_take_stamps(m).take(np.array([-1, -8, 2], dtype="int64")),
+    "steady step keeps the freq": lambda m: m.date_range("2024-01-01", periods=9, freq="h").take(np.array([1, 4, 7], dtype="int64")),
+    "descending steady step": lambda m: m.date_range("2024-01-01", periods=9, freq="D").take(np.array([8, 6, 4], dtype="int64")),
+    "negative steady step keeps no freq": lambda m: m.date_range("2024-01-01", periods=9, freq="D").take(np.array([-1, -3, -5], dtype="int64")),
+    "one negative keeps no freq": lambda m: m.date_range("2024-01-01", periods=9, freq="D").take(np.array([-1], dtype="int64")),
+    "negative end keeps no freq": lambda m: m.date_range("2024-01-01", periods=9, freq="D").take([0, -8]),
+    "zone and name": lambda m: m.date_range("2024-01-01", periods=4, tz="US/Eastern", name="z").take(np.array([3, 1], dtype="int64")),
+    "NaT kept": lambda m: m.DatetimeIndex(["2024-01-01", None, "2024-01-03"]).take(np.array([1, 2, 1], dtype="int64")),
+    "empty": lambda m: m.date_range("2024-01-01", periods=3, freq="D").take(np.array([], dtype="int64")),
+    "past the end raises": lambda m: _lsn8d_take_stamps(m).take(np.array([1, 8], dtype="int64")),
+    "past the start raises": lambda m: _lsn8d_take_stamps(m).take(np.array([-9, 1], dtype="int64")),
+    "strided view": lambda m: _lsn8d_take_stamps(m).take(np.arange(8, dtype="int64")[::-3]),
+    "byte-swapped": lambda m: _lsn8d_take_stamps(m).take(np.array([6, -2], dtype=">i8")),
+    "int32": lambda m: _lsn8d_take_stamps(m).take(np.array([6, -2], dtype="int32")),
+    "list": lambda m: _lsn8d_take_stamps(m).take([6, -2]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LSN8D_TAKE_CASES))
+def test_datetime_index_take_in_place_like_pandas_lsn8d(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _LSN8D_TAKE_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__, str(error))
+        return ([str(stamp) for stamp in out], out.freqstr, out.name, str(out.tz))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-lsn8d: TimedeltaIndex of a timedelta64 array of any unit
+# reads its durations through an int64 view (each was read a numpy scalar at a
+# time), NaT included (a byte-swapped array is left out: pandas 2.2.3 reads
+# its bytes as native and shows nonsense durations); its take of an int64 array is
+# read in place, the freq that of the positions as given (a negative one keeps
+# none - fp scaled it by the wrapped positions' step); NEGATIVE: an int array
+# with a unit, a list of strings and an empty array build as before, and a
+# position past the end is numpy's IndexError. The dtype is compared by kind:
+# pandas 2.2 keeps a non-nanosecond unit, fp holds nanoseconds only
+# (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.16).
+def _lsn8d_td_spans(unit: str) -> Any:
+    return np.array([0, 90, -3, 7200, 86_400], dtype="int64").astype(f"timedelta64[{unit}]")
+
+
+_LSN8D_TD_CASES = {
+    **{f"from timedelta64[{unit}]": (lambda unit: lambda m: m.TimedeltaIndex(_lsn8d_td_spans(unit), name="d"))(unit)
+       for unit in ["ns", "us", "ms", "s", "m", "h", "D"]},
+    "from timedelta64 with NaT": lambda m: m.TimedeltaIndex(np.array([1, "NaT", 3], dtype="timedelta64[s]")),
+    "from a strided view": lambda m: m.TimedeltaIndex(_lsn8d_td_spans("ms")[::-2]),
+    "from timedelta64 with a freq": lambda m: m.TimedeltaIndex(np.arange(4).astype("timedelta64[h]"), freq="h"),
+    "from timedelta64 not following its freq": lambda m: m.TimedeltaIndex(_lsn8d_td_spans("s"), freq="h"),
+    "from ints with a unit": lambda m: m.TimedeltaIndex(np.array([1, 2, 3]), unit="s"),
+    "from strings": lambda m: m.TimedeltaIndex(["1 days", "2h"]),
+    "from an empty array": lambda m: m.TimedeltaIndex(np.array([], dtype="timedelta64[ns]")),
+    "take": lambda m: m.timedelta_range("1D", periods=9, freq="h", name="t").take(np.array([8, 0, -1, 3], dtype="int64")),
+    "take steady step": lambda m: m.timedelta_range("1D", periods=9, freq="h").take(np.array([1, 4, 7], dtype="int64")),
+    "take negative steady step keeps no freq": lambda m: m.timedelta_range("1D", periods=9, freq="h").take(np.array([-1, -3], dtype="int64")),
+    "take a list with a negative": lambda m: m.timedelta_range("1D", periods=9, freq="h").take([-1]),
+    "take past the end raises": lambda m: m.timedelta_range("1D", periods=9, freq="h").take(np.array([9], dtype="int64")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LSN8D_TD_CASES))
+def test_timedelta_index_from_arrays_and_take_like_pandas_lsn8d(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _LSN8D_TD_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        return ([str(span) for span in out], out.dtype.kind, out.freqstr, out.name)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-lsn8d: a rolling by a time window reads a DatetimeIndex's /
+# TimedeltaIndex's instants where they are (its labels were made and scanned
+# to check the axis, its times pushed into a fresh buffer) - over repeated
+# times with each `closed`, NaT refused as pandas refuses it; NEGATIVE: an
+# int index and an object index of timestamps beside text raise as pandas.
+def _lsn8d_roll_minutes(m: Any) -> Any:
+    minutes = np.array([0, 60, 60, 60, 120, 150, 150, 240, 600], dtype="int64")
+    return m.Series(np.arange(9.0), index=m.DatetimeIndex(np.datetime64("2024-01-01", "ns") + minutes.astype("timedelta64[m]")))
+
+
+_LSN8D_ROLL_CASES = {
+    **{f"closed {closed} {window}": (lambda closed, window: lambda m: _lsn8d_roll_minutes(m).rolling(window, closed=closed).sum())(closed, window)
+       for closed in ["right", "left", "both", "neither"] for window in ["1h", "90min"]},
+    "centered": lambda m: _lsn8d_roll_minutes(m).rolling("2h", center=True).mean(),
+    "timedelta index": lambda m: m.Series([1.0, 2.0, 4.0], index=m.TimedeltaIndex(np.array([0, 30, 90], dtype="timedelta64[m]"))).rolling("1h").sum(),
+    "NaT in the index raises": lambda m: m.Series([1.0, 2.0, 3.0], index=m.DatetimeIndex(["2024-01-01", None, "2024-01-03"])).rolling("1D").sum(),
+    "int index raises": lambda m: m.Series([1.0, 2.0]).rolling("1h").sum(),
+    "object index raises": lambda m: m.Series([1.0, 2.0], index=m.Index([m.Timestamp("2024-01-01"), "x"], dtype=object)).rolling("1h").sum(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LSN8D_ROLL_CASES))
+def test_rolling_by_time_reads_instants_like_pandas_lsn8d(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _LSN8D_ROLL_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        return [None if v != v else v for v in out.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-lsn8d: drop_duplicates of a float / int / text / datetime
+# Series takes its index at the kept rows - a row MultiIndex stays one (it
+# became text labels 'a, 1'), a date_range run keeps its freq as pandas' mask
+# getitem keeps it (it was dropped) - and the float dedup keys NaN as one value
+# and -0.0 as 0.0; NEGATIVE: a repeat breaking the run keeps no freq, keep=False
+# drops every repeat, a text index stays text.
+_LSN8D_DEDUP_VALUES = {
+    "float": [1.0, 2.0, 1.0, 3.0],
+    "int": [1, 2, 1, 3],
+    "text": ["a", "b", "a", "c"],
+    "datetime": list(np.array(["2024-01-01", "2024-01-02", "2024-01-01", "2024-01-03"], dtype="datetime64[ns]")),
+}
+_LSN8D_DEDUP_INDEXES = {
+    "multiindex": lambda m: m.MultiIndex.from_tuples([("a", 1), ("a", 2), ("b", 1), ("b", 2)], names=["k", "n"]),
+    "date_range": lambda m: m.date_range("2024-01-01", periods=4, freq="D", name="d"),
+    "text": lambda m: m.Index(["w", "x", "y", "z"]),
+}
+_LSN8D_DEDUP_CASES = {
+    **{f"{dtype} over {index} keep {keep}": (lambda dtype, index, keep: lambda m: m.Series(_LSN8D_DEDUP_VALUES[dtype], index=_LSN8D_DEDUP_INDEXES[index](m)).drop_duplicates(keep=keep))(dtype, index, keep)
+       for dtype in _LSN8D_DEDUP_VALUES for index in _LSN8D_DEDUP_INDEXES for keep in ["first", "last", False]},
+    "float run keeps the freq": lambda m: m.Series([1.0, 2.0, 3.0, 3.0], index=m.date_range("2024-01-01", periods=4, freq="h")).drop_duplicates(),
+    "float NaN and signed zeros": lambda m: m.Series([1.0, np.nan, -0.0, np.nan, 0.0, 1.0], index=m.RangeIndex(6, name="r")).drop_duplicates(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LSN8D_DEDUP_CASES))
+def test_drop_duplicates_takes_its_index_like_pandas_lsn8d(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _LSN8D_DEDUP_CASES[case](m)
+        idx = out.index
+        return ([repr(v) for v in out.tolist()], str(out.dtype), [str(label) for label in idx], type(idx).__name__, list(idx.names), getattr(idx, "freqstr", None))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.59: a str method
+# over a 'string' column is typed by the method, as pandas types it, even
+# where no row says - every row missing, or none: a count (len, count, find,
+# rfind) Int64, a test (contains, startswith, is*, match, fullmatch) boolean,
+# text (upper, strip, replace, slice, get, pad, zfill, repeat, ...) string
+# (each was object); cat with others over a string column is string with
+# <NA> (it was object holding NaN), an na_rep row joined; a regex replace
+# Python runs is string too; a count over an object column of nothing but
+# None keeps those None cells, object (they were NaN floats). NEGATIVE: an
+# object column's other methods stay as they were, contains(na=False)
+# answers False, and a present row still decides.
+_FVSAO59_KIND_METHODS = {
+    "len": lambda s: s.str.len(), "count": lambda s: s.str.count("a"), "find": lambda s: s.str.find("a"),
+    "rfind": lambda s: s.str.rfind("a"), "upper": lambda s: s.str.upper(), "strip": lambda s: s.str.strip(),
+    "replace": lambda s: s.str.replace("a", "b"), "regex replace": lambda s: s.str.replace("(a)", r"\1\1", regex=True),
+    "slice": lambda s: s.str.slice(0, 1), "get": lambda s: s.str.get(0), "zfill": lambda s: s.str.zfill(3),
+    "pad": lambda s: s.str.pad(3), "repeat": lambda s: s.str.repeat(2), "title": lambda s: s.str.title(),
+    "contains": lambda s: s.str.contains("a"), "contains na=False": lambda s: s.str.contains("a", na=False),
+    "startswith": lambda s: s.str.startswith("a"), "isdigit": lambda s: s.str.isdigit(),
+    "isupper": lambda s: s.str.isupper(), "match": lambda s: s.str.match("a"), "fullmatch": lambda s: s.str.fullmatch("a"),
+    "cat others": lambda s: s.str.cat(s, sep="-"), "cat others na_rep": lambda s: s.str.cat(s, sep="-", na_rep="?"),
+}
+_FVSAO59_KIND_SOURCES = {
+    "all missing": lambda m: m.Series([None, None], dtype="string"),
+    "empty": lambda m: m.Series([], dtype="string"),
+    "some text": lambda m: m.Series(["ab", None, "Ca"], dtype="string"),
+    "object all missing": lambda m: m.Series([None, None], dtype=object),
+}
+_FVSAO59_KIND_CASES = [(source, method) for source in _FVSAO59_KIND_SOURCES for method in _FVSAO59_KIND_METHODS]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _FVSAO59_KIND_CASES, ids=lambda case: f"{case[0]}-{case[1]}")
+def test_string_methods_typed_by_the_method_like_pandas_fvsao59(case: Any) -> None:
+    source, method = case
+
+    def run(m: Any) -> Any:
+        try:
+            out = _FVSAO59_KIND_METHODS[method](_FVSAO59_KIND_SOURCES[source](m))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        # repr, not the value: <NA> has no truth value to compare by.
+        return [str(out.dtype), [(type(v).__name__, repr(v)) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-rc0923-epic-full-surface-conformance-j0lg5.7: between with
+# bounds the values do not compare with raises pandas' TypeError (it was
+# ValueError) - text, an object mix and datetimes against numbers;
+# NEGATIVE: comparable bounds answer.
+_J0LG57_BETWEEN_CASES = {
+    "text against numbers": lambda m: m.Series(["a", None, "c"]).between(0, 2),
+    "mixed against numbers": lambda m: m.Series([1, "a", 2.5, None], dtype=object).between(0, 2),
+    "datetimes against numbers": lambda m: m.Series(m.to_datetime(["2024-01-01", "2024-01-02"])).between(0, 2),
+    "timedeltas against numbers": lambda m: m.Series(m.to_timedelta(["1D", "2D"])).between(0, 2),
+    "text against text": lambda m: m.Series(["a", None, "c"]).between("a", "b"),
+    "numbers against numbers": lambda m: m.Series([1.5, None, 3.0]).between(1, 2),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_J0LG57_BETWEEN_CASES))
+def test_between_incomparable_bounds_raise_like_pandas_j0lg5_7(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _J0LG57_BETWEEN_CASES[case](m).tolist()
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-7v4wf: an object column's modes that do not compare - text
+# beside numbers - keep their first-seen order, as numpy's sort leaves them
+# (they were sorted numbers first); NEGATIVE: numbers alone, text alone and
+# a float column's modes are sorted.
+_7V4WF_MODE_ORDER = {
+    "text beside numbers": lambda m: m.Series([1, "a", 2.5, None], dtype=object).mode(),
+    "repeats": lambda m: m.Series(["b", 2, "b", 2, 1.5], dtype=object).mode(),
+    "numbers": lambda m: m.Series([3, 1.5, 2], dtype=object).mode(),
+    "text": lambda m: m.Series(["b", "a"], dtype=object).mode(),
+    "floats": lambda m: m.Series([3.0, 1.5, 2.0]).mode(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_7V4WF_MODE_ORDER))
+def test_object_mode_order_like_pandas_7v4wf(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _7V4WF_MODE_ORDER[case](m)
+        return [str(out.dtype), [(type(v).__name__, repr(v)) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-7v4wf: sorting an object column of text beside numbers is
+# pandas' TypeError (Python's < cannot order them; fp sorted numbers first) -
+# sort_values either way, argsort; an object column's ints and floats sort by
+# value (every int came before every float); NEGATIVE: text alone and a key
+# mapping the cells to numbers sort.
+_7V4WF_SORT_MIXED = {
+    "sort_values": lambda m: m.Series([1, "a", 2.5, None], dtype=object).sort_values(),
+    "sort_values descending": lambda m: m.Series([1, "a", 2.5], dtype=object).sort_values(ascending=False),
+    "argsort": lambda m: m.Series([1, "a", 2.5], dtype=object).argsort(),
+    "text": lambda m: m.Series(["b", None, "a"], dtype=object).sort_values(),
+    "numbers": lambda m: m.Series([3, 1.5, None, 2], dtype=object).sort_values(),
+    "key to numbers": lambda m: m.Series([1, "a", 2.5], dtype=object).sort_values(key=lambda s: s.map(lambda v: len(str(v)))),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_7V4WF_SORT_MIXED))
+def test_object_sort_of_mixed_cells_like_pandas_7v4wf(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _7V4WF_SORT_MIXED[case](m)
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        return [list(out.index), [(type(v).__name__, repr(v)) for v in out.tolist()]]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-1qj7z (the scalar): pd.Interval of Timestamps or of
+# Timedeltas holds them exactly (it raised 'must be real number, not
+# Timestamp') - repr / str, left / right / length / mid and their types, a
+# nanosecond endpoint, contains, overlaps, equality, hashing, order, pickle,
+# a zone; NEGATIVE: a Timestamp beside a number and a Timestamp beside a
+# Timedelta are Python's TypeError, reversed endpoints pandas' ValueError, a
+# number tested against Timestamps raises. An Index / IntervalIndex of them
+# is refused with NotImplementedError until the core interval holds them; a
+# Series holds the Interval objects themselves (object, where pandas has
+# interval[datetime64[ns], right]), exact.
+def _1qj7z_days(m: Any, closed: str = "right") -> Any:
+    return m.Interval(m.Timestamp("2024-01-01"), m.Timestamp("2024-02-01"), closed=closed)
+
+
+def _1qj7z_spans(m: Any) -> Any:
+    return m.Interval(m.Timedelta("1D"), m.Timedelta("2D 3h"))
+
+
+_1QJ7Z_SCALAR_CASES = {
+    "repr": lambda m: repr(_1qj7z_days(m)),
+    "str": lambda m: str(_1qj7z_days(m)),
+    "closed both repr": lambda m: repr(_1qj7z_days(m, "both")),
+    "endpoint types": lambda m: [type(_1qj7z_days(m).left).__name__, type(_1qj7z_days(m).right).__name__, type(_1qj7z_days(m).length).__name__],
+    "nanosecond endpoint": lambda m: str(m.Interval(m.Timestamp("2024-01-01"), m.Timestamp("2024-01-01 00:00:00.000000001")).right),
+    "length": lambda m: str(_1qj7z_days(m).length),
+    "mid": lambda m: str(_1qj7z_days(m).mid),
+    "contains": lambda m: [m.Timestamp(t) in _1qj7z_days(m) for t in ["2024-01-01", "2024-01-15", "2024-02-01", "2024-03-01"]],
+    "contains closed left": lambda m: [m.Timestamp(t) in _1qj7z_days(m, "left") for t in ["2024-01-01", "2024-02-01"]],
+    "overlaps": lambda m: [_1qj7z_days(m).overlaps(m.Interval(m.Timestamp(a), m.Timestamp(b))) for a, b in [("2024-01-20", "2024-03-01"), ("2024-02-01", "2024-03-01"), ("2023-01-01", "2023-06-01")]],
+    "equality": lambda m: [_1qj7z_days(m) == _1qj7z_days(m), _1qj7z_days(m) == _1qj7z_days(m, "left")],
+    "hash": lambda m: len({_1qj7z_days(m), _1qj7z_days(m), _1qj7z_days(m, "both")}),
+    "order": lambda m: [_1qj7z_days(m) < m.Interval(m.Timestamp("2024-01-02"), m.Timestamp("2024-01-03")), _1qj7z_days(m) > _1qj7z_days(m, "left")],
+    "pickle": lambda m: repr(pickle.loads(pickle.dumps(_1qj7z_days(m)))),
+    "zone": lambda m: repr(m.Interval(m.Timestamp("2024-01-01", tz="UTC"), m.Timestamp("2024-01-02", tz="UTC"))),
+    "zone left": lambda m: str(m.Interval(m.Timestamp("2024-01-01", tz="UTC"), m.Timestamp("2024-01-02", tz="UTC")).left),
+    "timedelta repr": lambda m: repr(_1qj7z_spans(m)),
+    "timedelta str": lambda m: str(_1qj7z_spans(m)),
+    "timedelta length": lambda m: str(_1qj7z_spans(m).length),
+    "timedelta mid": lambda m: str(_1qj7z_spans(m).mid),
+    "timedelta contains": lambda m: [m.Timedelta(t) in _1qj7z_spans(m) for t in ["1D", "1D 1h", "2D 3h", "3D"]],
+    "timestamp beside a number": lambda m: m.Interval(m.Timestamp("2024-01-01"), 5),
+    "timestamp beside a timedelta": lambda m: m.Interval(m.Timestamp("2024-01-01"), m.Timedelta("1D")),
+    "reversed": lambda m: m.Interval(m.Timestamp("2024-02-01"), m.Timestamp("2024-01-01")),
+    "number in timestamps": lambda m: 5 in _1qj7z_days(m),
+    "numeric still": lambda m: [repr(m.Interval(0, 3)), str(m.Interval(0.5, 1.5)), 1 in m.Interval(0, 3)],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_1QJ7Z_SCALAR_CASES))
+def test_interval_of_timestamps_and_timedeltas_like_pandas_1qj7z(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _1QJ7Z_SCALAR_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_index_of_timestamp_intervals_refused_until_held_1qj7z() -> None:
+    # Not parity: pandas builds interval[datetime64[ns]]. An Index says it
+    # cannot yet rather than rounding the nanoseconds into float intervals;
+    # a Series keeps the exact Interval objects, as object cells.
+    with pytest.raises(NotImplementedError, match="1qj7z"):
+        fpd.IntervalIndex([_1qj7z_days(fpd)])
+    with pytest.raises(NotImplementedError, match="1qj7z"):
+        fpd.Index([_1qj7z_days(fpd)])
+    held = fpd.Series([_1qj7z_days(fpd)])
+    assert str(held.dtype) == "object"
+    assert held.iloc[0] == _1qj7z_days(fpd)
+    assert str(held.iloc[0].right) == "2024-02-01 00:00:00"
+
+
+def _e186m_frames(m: Any) -> dict[str, Any]:
+    zoned = m.date_range("2024-01-01", periods=4, freq="D", tz="US/Eastern")
+    named = m.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
+    named.columns.name = "cols"
+    return {
+        "transposed tz rows": m.DataFrame({"a": [1.0, 2, 3, 4], "b": [5.0, 6, 7, 8]}, index=zoned).T,
+        "naive datetime columns": m.DataFrame({"a": [1.0, 2], "b": [3.0, 4]}, index=m.to_datetime(["2024-01-01", "2024-01-02"])).T,
+        "range columns": m.DataFrame(np.arange(12.0).reshape(4, 3)),
+        "named columns": named,
+        "repeated columns": m.DataFrame([[1, 2, 3], [4, 5, 6]], columns=["a", "b", "a"]),
+    }
+
+
+_E186M_ROW_OPS = {
+    "iloc[:1]": lambda d: d.iloc[:1],
+    "iloc[1:]": lambda d: d.iloc[1:],
+    "iloc[5:]": lambda d: d.iloc[5:],
+    "head(1)": lambda d: d.head(1),
+    "tail(1)": lambda d: d.tail(1),
+    "iloc[[1, 0]]": lambda d: d.iloc[[1, 0]],
+    "astype(float32)": lambda d: d.astype("float32"),
+    "shift(1)": lambda d: d.shift(1),
+    "+ 1": lambda d: d + 1,
+    "isna": lambda d: d.isna(),
+    "notna": lambda d: d.notna(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("frame", ["transposed tz rows", "naive datetime columns", "range columns", "named columns", "repeated columns"])
+@pytest.mark.parametrize("op", list(_E186M_ROW_OPS))
+def test_row_slices_and_casts_keep_the_columns_index_e186m(frame: str, op: str) -> None:
+    # A row slice, take, cast, shift or arithmetic keeps the columns Index
+    # whole - its labels, type, name and zone (a tz-aware one came back naive
+    # UTC from a row slice); NEGATIVE: a naive one stays naive.
+    def run(m: Any) -> Any:
+        try:
+            out = _E186M_ROW_OPS[op](_e186m_frames(m)[frame])
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        columns = out.columns
+        return (
+            type(columns).__name__,
+            [repr(label) for label in columns],
+            columns.name,
+            str(getattr(columns, "tz", None)),
+            out.shape,
+            [str(dtype) for dtype in out.dtypes],
+            repr(out.to_numpy().tolist()),
+        )
+
+    assert run(fpd) == run(pd)
+
+
+_E186M_GRID = np.arange(7 * 37, dtype="float64").reshape(7, 37) * 1.5 - 40.0
+
+_E186M_MATRICES = {
+    "C float64": lambda: _E186M_GRID.copy(),
+    "Fortran float64": lambda: np.asfortranarray(_E186M_GRID),
+    "C int64": lambda: _E186M_GRID.astype("int64"),
+    "Fortran int64": lambda: np.asfortranarray(_E186M_GRID.astype("int64")),
+    "C bool": lambda: _E186M_GRID > 0,
+    "Fortran bool": lambda: np.asfortranarray(_E186M_GRID > 0),
+    "strided columns": lambda: _E186M_GRID[:, ::3],
+    "strided rows": lambda: _E186M_GRID[::2],
+    "reversed": lambda: _E186M_GRID[::-1, ::-1],
+    "transposed view": lambda: _E186M_GRID.T,
+    "one row": lambda: _E186M_GRID[:1].copy(),
+    "one column": lambda: _E186M_GRID[:, :1].copy(),
+    "no rows": lambda: np.empty((0, 4)),
+    "no columns": lambda: np.empty((3, 0)),
+    "big-endian": lambda: _E186M_GRID.astype(">f8"),
+    "with NaN": lambda: np.where(_E186M_GRID > 10, np.nan, _E186M_GRID),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("matrix", list(_E186M_MATRICES))
+def test_frame_of_a_2d_array_in_any_layout_e186m(matrix: str) -> None:
+    # DataFrame(ndarray) reads a C-ordered buffer a block of columns at a
+    # time, a Fortran-ordered one a column at a time, any other through a
+    # gather: every layout holds pandas' values and dtypes. NEGATIVE: views
+    # whose strides fit neither order (a step, a reversal) take the gather.
+    def run(m: Any) -> Any:
+        frame = m.DataFrame(_E186M_MATRICES[matrix]())
+        # Not parity: pandas keeps a big-endian array's '>f8'; fp holds its
+        # values as native float64 (the values are compared as they are).
+        return (
+            frame.shape,
+            [str(np.dtype(str(dtype)).newbyteorder("=")) for dtype in frame.dtypes],
+            repr(frame.to_numpy().tolist()),
+            repr(frame.iloc[:, -1:].to_numpy().tolist()) if frame.shape[1] else None,
+        )
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-5s8nr: a TimedeltaIndex holds its durations as they are -
+# slices are views of the same buffer, a scalar reads one duration, takes and
+# reads gather in place - and answers as pandas for each; NEGATIVE: NaT, a
+# name, a freq scaled by a slice's step, a negative step, an empty slice and
+# a DatetimeIndex's slices as before.
+def _5s8nr_spans(m: Any) -> Any:
+    return m.TimedeltaIndex(np.array([50, "NaT", 10, 40, 30, 20, 60], dtype="timedelta64[s]"), name="d")
+
+
+def _5s8nr_hours(m: Any) -> Any:
+    return m.timedelta_range("1D", periods=9, freq="h", name="t")
+
+
+_5S8NR_CASES = {
+    **{f"spans[{key}]": (lambda key: lambda m: eval(f"_5s8nr_spans(m)[{key}]"))(key)
+       for key in ["1:4", "::2", "::-1", "5:1:-2", "3:3", "-2:", "0", "-1", "1"]},
+    **{f"hours[{key}]": (lambda key: lambda m: eval(f"_5s8nr_hours(m)[{key}]"))(key)
+       for key in ["2:7", "::3", "1::2", "::-2", "8:9"]},
+    "slice of a slice": lambda m: _5s8nr_hours(m)[1:8][::2],
+    "take of a slice": lambda m: _5s8nr_hours(m)[::2].take(np.array([-1, 0], dtype="int64")),
+    "sort_values": lambda m: _5s8nr_spans(m).sort_values(),
+    "argsort": lambda m: list(_5s8nr_spans(m).argsort()),
+    "unique": lambda m: _5s8nr_spans(m).unique(),
+    "isin": lambda m: list(_5s8nr_spans(m).isin([m.Timedelta(10, "s"), m.Timedelta(60, "s")])),
+    "isin NaT": lambda m: list(_5s8nr_spans(m).isin([m.NaT, m.Timedelta(50, "s")])),
+    "isin None": lambda m: list(_5s8nr_spans(m).isin([None])),
+    "isin ints match nothing": lambda m: list(_5s8nr_spans(m).isin([10_000_000_000, 10])),
+    "isin text matches nothing": lambda m: list(_5s8nr_spans(m).isin(["10s"])),
+    "isin timedelta64": lambda m: list(_5s8nr_spans(m).isin(np.array([20, 40], dtype="timedelta64[s]"))),
+    "get_loc": lambda m: _5s8nr_hours(m).get_loc(m.Timedelta("1 days 03:00:00")),
+    "union": lambda m: _5s8nr_spans(m)[::2].union(_5s8nr_spans(m)[1::2]),
+    "intersection": lambda m: _5s8nr_spans(m).intersection(_5s8nr_spans(m)[2:5]),
+    "difference": lambda m: _5s8nr_spans(m).difference(_5s8nr_spans(m)[2:5]),
+    "symmetric_difference": lambda m: _5s8nr_spans(m)[:4].symmetric_difference(_5s8nr_spans(m)[2:]),
+    "union with ints": lambda m: _5s8nr_spans(m)[:2].union(m.Index([1, 2])),
+    "union sort=False": lambda m: _5s8nr_spans(m)[::2].union(_5s8nr_spans(m)[1::2], sort=False),
+    "intersection sort=True": lambda m: _5s8nr_spans(m).intersection(_5s8nr_spans(m)[1:6], sort=True),
+    "symmetric_difference result_name": lambda m: _5s8nr_spans(m)[:4].symmetric_difference(_5s8nr_spans(m)[2:], result_name="r"),
+    "isin text not parsing": lambda m: list(_5s8nr_spans(m).isin(["10s", "nope"])),
+    "isin text beside a Timedelta": lambda m: list(_5s8nr_spans(m).isin([m.Timedelta(10, unit="s"), "20s"])),
+    "Timedelta positional unit": lambda m: [repr(m.Timedelta(10, "s")), repr(m.Timedelta(1.5, "h")), repr(m.Timedelta(3, "D")), repr(m.Timedelta(10, None))],
+    "Timedelta text and a unit raises": lambda m: m.Timedelta("10s", "s"),
+    "Timedelta three positionals raise": lambda m: m.Timedelta(10, "s", 3),
+    "Timedelta unit twice raises": lambda m: m.Timedelta(10, "s", unit="ms"),
+    "equals": lambda m: _5s8nr_hours(m)[::2].equals(m.timedelta_range("1D", periods=5, freq="2h")),
+    "series loc": lambda m: list(m.Series(np.arange(9.0), index=_5s8nr_hours(m)).loc[m.Timedelta("1 days 02:00:00"):m.Timedelta("1 days 05:00:00")]),
+    "asi8": lambda m: (type(_5s8nr_hours(m).asi8).__name__, str(_5s8nr_hours(m).asi8.dtype), [int(nanos) for nanos in _5s8nr_hours(m)[::3].asi8]),
+    "total_seconds": lambda m: _5s8nr_spans(m)[2:].total_seconds(),
+    "datetime slices as before": lambda m: m.date_range("2024-01-01", periods=6, freq="D")[::-2],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_5S8NR_CASES))
+def test_timedelta_index_slices_and_reads_like_pandas_5s8nr(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _5S8NR_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        if hasattr(out, "freqstr") or hasattr(out, "dtype") and hasattr(out, "name") and not np.isscalar(out):
+            return (type(out).__name__, [str(span) for span in out], out.dtype.kind, getattr(out, "freqstr", None), out.name)
+        return repr(out) if not isinstance(out, list) else repr(out)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: DataFrame(2-D ndarray) without index= builds the
+# default range as one (its labels were made a row at a time, and the frame's
+# transpose could not be the lazy view); its index and transpose answer as
+# pandas', NEGATIVE: an explicit index of each kind as before.
+_E186M_GRID_INDEX = np.arange(12.0).reshape(4, 3)
+
+_E186M_INDEX_CASES = {
+    "default": lambda m: m.DataFrame(_E186M_GRID_INDEX),
+    "default with columns": lambda m: m.DataFrame(_E186M_GRID_INDEX, columns=["a", "b", "c"]),
+    "index list": lambda m: m.DataFrame(_E186M_GRID_INDEX, index=[10, 20, 30, 40]),
+    "index range": lambda m: m.DataFrame(_E186M_GRID_INDEX, index=range(4)),
+    "index text": lambda m: m.DataFrame(_E186M_GRID_INDEX, index=["w", "x", "y", "z"]),
+    "index wrong length": lambda m: m.DataFrame(_E186M_GRID_INDEX, index=[1, 2]),
+    "no rows": lambda m: m.DataFrame(np.empty((0, 3))),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186M_INDEX_CASES))
+@pytest.mark.parametrize("view", ["frame", "T", "T.T"])
+def test_frame_of_an_ndarray_index_and_transpose_e186m(case: str, view: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            frame = _E186M_INDEX_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        out = {"frame": frame, "T": frame.T, "T.T": frame.T.T}[view]
+        return (
+            type(out.index).__name__,
+            [repr(label) for label in out.index],
+            type(out.columns).__name__,
+            [repr(label) for label in out.columns],
+            repr(out.to_numpy().tolist()),
+        )
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a RangeIndex position is the range's value there,
+# computed (every label was made to read one: s.index[5] 9 ms a million rows);
+# NEGATIVE: a bool and a position past either end raise as pandas.
+_E186M_RANGES = {
+    "default": lambda m: m.Series(np.arange(6.0)).index,
+    "start step": lambda m: m.RangeIndex(2, 20, 3),
+    "negative step": lambda m: m.RangeIndex(10, -5, -4),
+    "empty": lambda m: m.RangeIndex(0),
+    "plain ints": lambda m: m.Index([5, 6, 7, 8, 9, 10]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("rng", list(_E186M_RANGES))
+@pytest.mark.parametrize("key", ["0", "3", "-1", "-4", "5", "6", "-7", "True", "np.int64(2)", "np.int64(-2)"])
+def test_range_index_position_like_pandas_e186m(rng: str, key: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            value = _E186M_RANGES[rng](m)[eval(key)]
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        return (type(value).__name__, value)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-n3ktr: a typed index's methods answer with pandas' class
+# and values - astype(object) the label objects, to_numpy / values / isna /
+# notna numpy arrays, [[i, j]] and a mask taking positions, where / insert /
+# factorize / set operations / append / delete / repeat of the index's class
+# (a tz-aware one in its zone), reindex's indexer an int64 array, isin of
+# NaT, a tz-aware map; NEGATIVE: the int, float, object, range and bool
+# indexes, which agreed, still agree.
+def _n3ktr_indexes(m: Any) -> dict[str, Any]:
+    return {
+        "range": m.RangeIndex(1, 11, 2, name="r"),
+        "range down": m.RangeIndex(10, 0, -3, name="q"),
+        "int": m.Index([5, 3, 9, 3, 1], name="i"),
+        "float": m.Index([2.5, np.nan, 1.0, 2.5], name="f"),
+        "object": m.Index(["b", "a", "c", "a"], name="o"),
+        "datetime": m.DatetimeIndex(["2024-03-01", None, "2024-01-15", "2024-01-15"], name="d"),
+        "datetime tz": m.date_range("2024-01-01", periods=4, freq="D", tz="US/Eastern", name="z"),
+        "timedelta": m.TimedeltaIndex(["1 days", None, "2h", "1 days"], name="t"),
+        "period": m.period_range("2024-01", periods=4, freq="M", name="p"),
+        "category": m.CategoricalIndex(["x", "y", "x", None], name="c"),
+    }
+
+
+_N3KTR_OPS = {
+    "astype(object)": lambda i: i.astype(object),
+    "to_numpy": lambda i: i.to_numpy(),
+    "values": lambda i: i.values,
+    "isna": lambda i: i.isna(),
+    "notna": lambda i: i.notna(),
+    "[[2, 0]]": lambda i: i[[2, 0]],
+    "[mask]": lambda i: i[np.arange(len(i)) % 2 == 0],
+    "where": lambda i: i.where(np.arange(len(i)) % 2 == 0),
+    "insert": lambda i: i.insert(1, i[0]),
+    "factorize": lambda i: i.factorize(),
+    "factorize sort": lambda i: i.factorize(sort=True),
+    "union": lambda i: i.union(i[:2]),
+    "intersection": lambda i: i.intersection(i[1:]),
+    "difference": lambda i: i.difference(i[:1]),
+    "append": lambda i: i.append(i),
+    "delete": lambda i: i.delete(0),
+    "repeat": lambda i: i.repeat(2),
+    "reindex": lambda i: i.drop_duplicates().reindex(i.drop_duplicates()[:2]),
+    "reindex(self)": lambda i: i.drop_duplicates().reindex(i.drop_duplicates()),
+    "isin": lambda i: i.isin(i[:2]),
+    "map(str)": lambda i: i.map(str),
+    "min": lambda i: i.min(),
+    "max": lambda i: i.max(),
+}
+
+
+def _n3ktr_show(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return tuple(_n3ktr_show(part) for part in value)
+    if hasattr(value, "dtype") and hasattr(value, "__len__") and not isinstance(value, str):
+        return (type(value).__name__, str(value.dtype), [repr(item) for item in list(value)], getattr(value, "name", None))
+    return (type(value).__name__, repr(value))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", ["range", "range down", "int", "float", "object", "datetime", "datetime tz", "timedelta", "period", "category"])
+@pytest.mark.parametrize("op", list(_N3KTR_OPS))
+def test_index_methods_keep_class_and_values_like_pandas_n3ktr(kind: str, op: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _n3ktr_show(_N3KTR_OPS[op](_n3ktr_indexes(m)[kind]))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("target", ["categorical", "list", "list with a stranger", "Index"])
+def test_categorical_index_reindex_follows_its_target_n3ktr(target: str) -> None:
+    # A categorical target is the new index as it is, a CategoricalIndex;
+    # NEGATIVE: a list or another Index gives a plain Index, as pandas.
+    def run(m: Any) -> Any:
+        source = m.CategoricalIndex(["x", "y", "x", None], name="c").drop_duplicates()
+        targets = {
+            "categorical": source[:2],
+            "list": ["x", "y"],
+            "list with a stranger": ["x", "z"],
+            "Index": m.Index(["y"]),
+        }
+        return _n3ktr_show(source.reindex(targets[target]))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-76kq0: Series operations keep pandas' dtype across kinds -
+# a tz-aware Series' zone through drop_duplicates / cummax / cummin /
+# replace / combine_first / groupby shift and ffill / DataFrame where,
+# replace, cummax and clip with Timestamp bounds; a categorical's categories
+# through shift / where / mask / ffill / bfill / mode / replace /
+# combine_first / groupby first, last, shift and ffill, its idxmin / idxmax
+# by code and pandas' refusals of cumsum / diff / any / interpolate / abs; a
+# period Series' comparisons, min / max / median / idxmin / idxmax /
+# cummax / clip and NaT gaps; a masked or string isin's missing rows; a
+# string between's boolean; text clip; describe's numpy counts. NEGATIVE:
+# the int and float Series, which agreed, still agree.
+def _76kq0_series(m: Any) -> dict[str, Any]:
+    index = ["a", "b", "c", "d", "e"]
+    return {
+        "int": m.Series([3, 1, 4, 1, 5], index=index, name="s"),
+        "float": m.Series([2.5, np.nan, -1.0, 2.5, 0.0], index=index, name="s"),
+        "datetime": m.Series(m.to_datetime(["2024-03-01", None, "2024-01-15", "2024-01-15", "2024-02-29"]), index=index, name="s"),
+        "timedelta": m.Series(m.to_timedelta(["1 days", None, "2h", "1 days", "3s"]), index=index, name="s"),
+        "datetime tz": m.Series(m.to_datetime(["2024-01-03", "2024-01-01", None, "2024-01-03", "2024-01-02"]).tz_localize("US/Eastern"), index=index, name="s"),
+        "category": m.Series(m.Categorical(["x", "y", None, "x", "y"], categories=["y", "x", "w"]), index=index, name="s"),
+        "ordered category": m.Series(m.Categorical(["x", "y", None, "w", "y"], categories=["y", "x", "w"], ordered=True), index=index, name="s"),
+        "period": m.Series(m.PeriodIndex(["2024-03", "2024-01", None, "2024-03", "2024-02"], freq="M"), index=index, name="s"),
+        "Int64": m.Series([3, None, 4, 1, 5], index=index, name="s", dtype="Int64"),
+        "Float64": m.Series([2.5, None, -1.0, 2.5, 0.0], index=index, name="s", dtype="Float64"),
+        "string": m.Series(["b", None, "a", "b", "c"], index=index, name="s", dtype="string"),
+        "object": m.Series(["b", None, "a", "b", "c"], index=index, name="s"),
+    }
+
+
+_76KQ0_OPS = {
+    "drop_duplicates": lambda m, s: s.drop_duplicates(),
+    "cummax": lambda m, s: s.cummax(),
+    "cummin": lambda m, s: s.cummin(),
+    "replace": lambda m, s: s.replace(s.iloc[0], s.iloc[4]),
+    "shift": lambda m, s: s.shift(1),
+    "where": lambda m, s: s.where([True, False, True, False, True]),
+    "mask": lambda m, s: s.mask([True, False, True, False, True]),
+    "ffill": lambda m, s: s.ffill(),
+    "bfill": lambda m, s: s.bfill(),
+    "mode": lambda m, s: s.mode(),
+    "combine_first": lambda m, s: s.combine_first(s.iloc[::-1]),
+    "reindex": lambda m, s: s.reindex(["e", "a", "z"]),
+    "groupby first": lambda m, s: s.groupby([1, 1, 2, 2, 2]).first(),
+    "groupby last": lambda m, s: s.groupby([1, 1, 2, 2, 2]).last(),
+    "groupby shift": lambda m, s: s.groupby([1, 1, 2, 2, 2]).shift(1),
+    "groupby ffill": lambda m, s: s.groupby([1, 1, 2, 2, 2]).ffill(),
+    "idxmin": lambda m, s: s.idxmin(),
+    "idxmax": lambda m, s: s.idxmax(),
+    "min": lambda m, s: s.min(),
+    "max": lambda m, s: s.max(),
+    "median": lambda m, s: s.median(),
+    "eq self": lambda m, s: s.eq(s.copy()),
+    "== reversed": lambda m, s: s.reset_index(drop=True) == s.iloc[::-1].reset_index(drop=True),
+    "< reversed": lambda m, s: s.reset_index(drop=True) < s.iloc[::-1].reset_index(drop=True),
+    "clip": lambda m, s: s.clip(s.iloc[4], s.iloc[0]),
+    "between": lambda m, s: s.between(s.iloc[4], s.iloc[0]),
+    "isin": lambda m, s: s.isin(s.iloc[:2]),
+    "cumsum": lambda m, s: s.cumsum(),
+    "diff": lambda m, s: s.diff(),
+    "any": lambda m, s: s.any(),
+    "interpolate": lambda m, s: s.interpolate(),
+    "abs": lambda m, s: s.abs(),
+    "round": lambda m, s: s.round(),
+    "apply(repr)": lambda m, s: s.apply(repr),
+    "describe": lambda m, s: s.describe(),
+    "df where": lambda m, s: s.to_frame().where(s.to_frame().notna() & False),
+    "df cummax": lambda m, s: s.to_frame().cummax(),
+    "df replace": lambda m, s: s.to_frame().replace(s.iloc[0], s.iloc[4]),
+    "df shift": lambda m, s: s.to_frame().shift(1),
+    "df ffill": lambda m, s: s.to_frame().ffill(),
+    "df clip": lambda m, s: s.to_frame().clip(s.iloc[4], s.iloc[0]),
+}
+
+
+def _76kq0_dtype(value: Any) -> str:
+    dtype = value.dtype
+    if str(dtype) == "category":
+        return f"category{list(dtype.categories)}{dtype.ordered}"
+    return str(dtype)
+
+
+def _76kq0_show(value: Any) -> Any:
+    if isinstance(value, (pd.DataFrame, fpd.DataFrame)):
+        return ("DataFrame", [_76kq0_dtype(value[c]) for c in value.columns], [repr(x) for x in value.index], [[repr(x) for x in row] for row in value.to_numpy().tolist()])
+    if isinstance(value, (pd.Series, fpd.Series)):
+        return ("Series", _76kq0_dtype(value), value.name, [repr(x) for x in value.index], [repr(x) for x in value.tolist()])
+    return (type(value).__name__, repr(value))
+
+
+_76KQ0_KINDS = ["int", "float", "datetime", "timedelta", "datetime tz", "category", "ordered category", "period", "Int64", "Float64", "string", "object"]
+# Still open on br-frankenpandas-76kq0: pandas' period diff holds DateOffset
+# objects (<-2 * MonthEnds>), fp's NaN.
+_76KQ0_OPEN = {("period", "diff")}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    ("kind", "op"),
+    [
+        pytest.param(kind, op, marks=pytest.mark.xfail(strict=True, reason="period diff: DateOffset objects (76kq0)"))
+        if (kind, op) in _76KQ0_OPEN
+        else (kind, op)
+        for kind in _76KQ0_KINDS
+        for op in _76KQ0_OPS
+    ],
+)
+def test_series_ops_keep_dtype_like_pandas_76kq0(kind: str, op: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _76kq0_show(_76KQ0_OPS[op](m, _76kq0_series(m)[kind]))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m / br-frankenpandas-wm1te: a row gather (take,
+# sort_values, a boolean filter, iloc by positions or a step, head) keeps the
+# frame's column axis whole - int labels, a RangeIndex, repeated names, the
+# axis name, a column MultiIndex, tz-aware datetime labels - now carried by
+# position rather than rebuilt from the names; a numpy bool mask is read
+# through its buffer. NEGATIVE: plain text columns, an int array (positions,
+# not a mask), a list / object array of bools, an empty bool array and a
+# mask of the wrong length answer as pandas.
+def _e186m_axis_frames(m: Any) -> dict[str, Any]:
+    values = np.arange(24.0).reshape(6, 4)
+    zoned = m.date_range("2024-01-01", periods=4, freq="D", tz="US/Eastern")
+    frames = {
+        "text": m.DataFrame(values, columns=["a", "b", "c", "d"]),
+        "int": m.DataFrame(values, columns=[10, 20, 30, 40]),
+        "range": m.DataFrame(values),
+        "repeated": m.DataFrame(values, columns=["a", "a", "b", "c"]),
+        "named": m.DataFrame(values, columns=m.Index(["a", "b", "c", "d"], name="cols")),
+        "multi": m.DataFrame(values, columns=m.MultiIndex.from_tuples([("x", 1), ("x", 2), ("y", 1), ("y", 2)])),
+        "zoned": m.DataFrame(values, columns=zoned),
+    }
+    return frames
+
+
+_E186M_GATHERS = {
+    "take": lambda m, df: df.take([4, 0, 2]),
+    "sort_values": lambda m, df: df.sort_values(df.columns[1], ascending=False),
+    "np mask": lambda m, df: df[np.array([True, False, True, True, False, True])],
+    "loc np mask": lambda m, df: df.loc[np.array([False, True, True, False, False, True])],
+    "iloc np mask": lambda m, df: df.iloc[np.array([True, True, False, False, True, False])],
+    "strided np mask": lambda m, df: df[np.array([True, False] * 6)[::2]],
+    "list mask": lambda m, df: df[[True, False, True, True, False, True]],
+    "object mask": lambda m, df: df[np.array([True, False, True, True, False, True], dtype=object)],
+    "empty mask": lambda m, df: df.iloc[:0][np.array([], dtype=bool)],
+    "short mask": lambda m, df: df[np.array([True, False])],
+    "iloc perm": lambda m, df: df.iloc[np.array([5, 3, 1, 0])],
+    "iloc step": lambda m, df: df.iloc[::2],
+    "iloc reverse": lambda m, df: df.iloc[::-1],
+    "head": lambda m, df: df.head(2),
+}
+
+
+def _e186m_axis_show(frame: Any) -> Any:
+    columns = frame.columns
+    return (
+        type(columns).__name__,
+        [repr(label) for label in columns],
+        getattr(columns, "names", None) and list(columns.names),
+        [repr(label) for label in frame.index],
+        # By repr: a NaN cell equals no other NaN in a list comparison.
+        [[repr(value) for value in row] for row in frame.to_numpy().tolist()],
+    )
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", ["text", "int", "range", "repeated", "named", "multi", "zoned"])
+@pytest.mark.parametrize("op", list(_E186M_GATHERS))
+def test_row_gathers_keep_the_column_axis_like_pandas_e186m(kind: str, op: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _e186m_axis_show(_E186M_GATHERS[op](m, _e186m_axis_frames(m)[kind]))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "key",
+    ["bool array", "strided bool array", "int array", "list of bools", "object array", "empty", "wrong length"],
+)
+def test_series_mask_keys_like_pandas_wm1te(key: str) -> None:
+    # A Series reads the same keys: a numpy bool array (strided too) is a
+    # mask; NEGATIVE: an int array is labels / positions, the others as pandas.
+    def run(m: Any) -> Any:
+        s = m.Series([1.5, 2.5, 3.5, 4.5], index=[3, 2, 1, 0], name="s")
+        keys = {
+            "bool array": np.array([True, False, False, True]),
+            "strided bool array": np.array([True, True, False, False, False, True, True, True])[::2],
+            "int array": np.array([1, 3]),
+            "list of bools": [False, True, True, False],
+            "object array": np.array([True, False, True, False], dtype=object),
+            "empty": np.array([], dtype=bool),
+            "wrong length": np.array([True, False]),
+        }
+        try:
+            got = s[keys[key]]
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        return ([repr(label) for label in got.index], got.tolist())
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: head / tail / fillna / diff / replace keep the
+# frame's column axis whole (int labels, a RangeIndex, repeated names, the
+# axis name, a column MultiIndex, tz-aware labels), now carried by position
+# rather than rebuilt from the names, and a float column holding NaN replaces
+# its numbers on its typed data. NEGATIVE: the text axis; a NaN key, a NaN or
+# int value, a float32 column and a key no value has answer as pandas.
+_E186M_SAME_SHAPE = {
+    "head": lambda m, df: df.head(2),
+    "tail": lambda m, df: df.tail(3),
+    "fillna": lambda m, df: df.where(df > 5).fillna(-1.0),
+    "diff": lambda m, df: df.diff(),
+    "replace": lambda m, df: df.replace(5.0, 50.0),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", ["text", "int", "range", "repeated", "named", "multi", "zoned"])
+@pytest.mark.parametrize("op", list(_E186M_SAME_SHAPE))
+def test_same_shape_ops_keep_the_column_axis_like_pandas_e186m(kind: str, op: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _e186m_axis_show(_E186M_SAME_SHAPE[op](m, _e186m_axis_frames(m)[kind]))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+_E186M_NAN_REPLACE = {
+    "scalar": lambda s: s.replace(0.5, 9.0),
+    "zero key": lambda s: s.replace(0.0, 7.0),
+    "neg zero key": lambda s: s.replace(-0.0, 7.0),
+    "inf key": lambda s: s.replace(np.inf, 3.0),
+    "nan key": lambda s: s.replace(np.nan, 0.0),
+    "int key": lambda s: s.replace(1, 4.0),
+    "int value": lambda s: s.replace(0.5, 4),
+    "nan value": lambda s: s.replace(0.5, np.nan),
+    "dict": lambda s: s.replace({0.25: 8.0, 0.75: 6.0}),
+    "many keys": lambda s: s.replace({float(k) / 4: float(k) + 100 for k in range(40)}),
+    "list": lambda s: s.replace([0.5, 2.0], [1.5, 2.5]),
+    "missing key": lambda s: s.replace(123.0, 1.0),
+    "float32": lambda s: s.astype("float32").replace(0.5, 9.0),
+    "frame": lambda s: s.to_frame().assign(b=s * 2).replace(1.0, -1.0),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186M_NAN_REPLACE))
+def test_replace_on_nan_holding_floats_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        values = [0.5, np.nan, -0.0, 0.25, np.inf, 1.0, np.nan, 0.75, 2.0, 0.5]
+        try:
+            got = _E186M_NAN_REPLACE[case](m.Series(values, name="s"))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+        dtypes = [str(d) for d in got.dtypes] if hasattr(got, "columns") else [str(got.dtype)]
+        return (dtypes, repr(got.to_numpy().tolist()))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-41ma0 / bss5q.4: a wide pass on a host with several L3
+# domains runs on its domain's persistent worker pool. A forked child
+# (multiprocessing's default on Linux) inherits the pools but none of their
+# threads: it must spawn its own workers, not wait forever. NEGATIVE: the
+# child's answer equals the parent's, and pandas'.
+def _41ma0_child_shift(conn: Any) -> None:
+    frame = fpd.DataFrame(np.arange(1_000_000, dtype=float).reshape(1000, 1000))
+    conn.send(frame.shift(1).sum().sum())
+    conn.close()
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+def test_forked_child_runs_wide_passes_41ma0() -> None:
+    import multiprocessing
+
+    frame = fpd.DataFrame(np.arange(1_000_000, dtype=float).reshape(1000, 1000))
+    expected = frame.shift(1).sum().sum()  # the parent's pools are built here
+    context = multiprocessing.get_context("fork")
+    parent_end, child_end = context.Pipe()
+    child = context.Process(target=_41ma0_child_shift, args=(child_end,))
+    child.start()
+    child.join(timeout=60)
+    if child.is_alive():
+        child.kill()
+        pytest.fail("the forked child hung on a wide pass")
+    assert child.exitcode == 0
+    assert parent_end.recv() == expected
+    pd_frame = pd.DataFrame(np.arange(1_000_000, dtype=float).reshape(1000, 1000))
+    assert expected == pd_frame.shift(1).sum().sum()
+
+
+# br-frankenpandas-vk7y9: astype between int64 and datetime64[ns] (naive or
+# zoned) / timedelta64[ns] reads the same nanoseconds, the buffer shared
+# where it can be (int.astype('datetime64[ns]') was a Scalar cast a row).
+# Each result is then used, not only shown. NEGATIVE: an int64 holding
+# numpy's NaT value (int64 min) casts to NaT, missing; a datetime / timedelta
+# holding NaT casts to that int64 value, present; a slice keeps its offset.
+_VK7Y9CAST_NANOS = np.array([0, 1_700_000_000_123_456_789, -5, 86_400_000_000_000, 7, 1_700_000_000_123_456_789], dtype=np.int64)
+_VK7Y9CAST_INAT = np.array([3, np.iinfo(np.int64).min, -2, 9], dtype=np.int64)
+
+
+def _vk7y9cast_sources(m: Any) -> dict[str, Any]:
+    dates = _VK7Y9CAST_NANOS.astype("datetime64[ns]")
+    with_nat = dates.copy()
+    with_nat[[1, 4]] = np.datetime64("NaT")
+    deltas = _VK7Y9CAST_NANOS.astype("timedelta64[ns]")
+    deltas_nat = deltas.copy()
+    deltas_nat[2] = np.timedelta64("NaT")
+    return {
+        "datetime": m.Series(dates, name="t"),
+        "datetime NaT": m.Series(with_nat, name="t"),
+        "datetime UTC": m.Series(dates, name="t").dt.tz_localize("UTC"),
+        "datetime slice": m.Series(dates, name="t").iloc[2:],
+        "timedelta": m.Series(deltas, name="t"),
+        "timedelta NaT": m.Series(deltas_nat, name="t"),
+        "int": m.Series(_VK7Y9CAST_NANOS, name="t"),
+        "int slice": m.Series(_VK7Y9CAST_NANOS, name="t").iloc[1:4],
+        "int iNaT": m.Series(_VK7Y9CAST_INAT, name="t"),
+    }
+
+
+_VK7Y9CAST_TARGETS = {
+    "datetime": ["int64"],
+    "datetime NaT": ["int64"],
+    "datetime UTC": ["int64"],
+    "datetime slice": ["int64"],
+    "timedelta": ["int64"],
+    "timedelta NaT": ["int64"],
+    "int": ["datetime64[ns]", "datetime64[ns, UTC]", "datetime64[ns, America/New_York]", "timedelta64[ns]"],
+    "int slice": ["datetime64[ns]", "timedelta64[ns]"],
+    "int iNaT": ["datetime64[ns]", "timedelta64[ns]"],
+}
+
+_VK7Y9CAST_USES = {
+    "as cast": lambda s: s,
+    "isna": lambda s: s.isna(),
+    "min": lambda s: s.min(),
+    "max": lambda s: s.max(),
+    "diff": lambda s: s.diff(),
+    "sort_values": lambda s: s.sort_values(),
+    "shift": lambda s: s.shift(1),
+    "== first": lambda s: s == s.iloc[0],
+    "iloc[::2]": lambda s: s.iloc[::2],
+    "value_counts": lambda s: s.value_counts(),
+    "to_numpy": lambda s: s.to_numpy(),
+}
+
+
+def _vk7y9cast_show(value: Any) -> Any:
+    if isinstance(value, (pd.Series, fpd.Series)):
+        return ("Series", str(value.dtype), value.name, [repr(x) for x in value.index], [repr(x) for x in value.tolist()])
+    if isinstance(value, np.ndarray):
+        return ("ndarray", str(value.dtype), [repr(x) for x in value.tolist()])
+    return (type(value).__name__, repr(value))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    ("source", "target", "use"),
+    [(source, target, use) for source, targets in _VK7Y9CAST_TARGETS.items() for target in targets for use in _VK7Y9CAST_USES],
+)
+def test_temporal_int64_casts_like_pandas_vk7y9(source: str, target: str, use: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            cast = _vk7y9cast_sources(m)[source].astype(target)
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("cast raises", type(error).__name__)
+        try:
+            return _vk7y9cast_show(_VK7Y9CAST_USES[use](cast))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: df.T reads its columns by position, each kind of
+# homogeneous frame through its own view. NEGATIVE: two columns under one
+# name, float32 beside float64, transpose to float64 as pandas (reading by
+# name saw the first one twice and gave float32).
+def _e186mT_frames(m: Any) -> dict[str, Any]:
+    stamps = np.array(["2024-01-05", "2023-12-31T06:00", "1969-07-20"], dtype="datetime64[ns]")
+    frames = {
+        "float": m.DataFrame({"a": [1.5, 2.5, 3.5], "b": [0.25, -1.0, 2.0]}),
+        "int": m.DataFrame({"a": [1, 2, 3], "b": [4, -5, 6]}),
+        "datetime": m.DataFrame({"a": stamps, "b": stamps[::-1].copy()}),
+        "timedelta": m.DataFrame({"a": stamps - stamps[2], "b": stamps[0] - stamps}),
+        "bool": m.DataFrame({"a": [True, False, True], "b": [False, False, True]}),
+        "string": m.DataFrame({"a": ["x", "y", "z"], "b": ["p", "q", "r"]}),
+        "Int64": m.DataFrame({"a": m.array([1, None, 3], dtype="Int64"), "b": m.array([4, 5, None], dtype="Int64")}),
+        "int + float": m.DataFrame({"a": [1, 2, 3], "b": [0.5, 1.5, 2.5]}),
+        "wide": m.DataFrame(np.arange(150, dtype=float).reshape(3, 50)),
+    }
+    narrow = m.Series(np.array([1.5, 2.25, 3.0], dtype="float32"), name="a").to_frame()
+    wide = m.Series(np.array([3.5, 4.125, 5.0]), name="a").to_frame()
+    frames["a: float32 + float64"] = m.concat([narrow, wide], axis=1)
+    ints = m.Series(np.array([1, 2, 3], dtype="int32"), name="a").to_frame()
+    frames["a: int32 + float32"] = m.concat([ints, narrow], axis=1)
+    return frames
+
+
+_E186MT_OPS = {
+    "T": lambda df: df.T,
+    "T.T": lambda df: df.T.T,
+    "T.iloc[1]": lambda df: df.T.iloc[1],
+    "T.max()": lambda df: df.T.max(),
+}
+
+
+def _e186mT_show(value: Any) -> Any:
+    if isinstance(value, (pd.DataFrame, fpd.DataFrame)):
+        return ("DataFrame", [str(d) for d in value.dtypes], [repr(c) for c in value.columns], [repr(i) for i in value.index], repr(value.to_numpy().tolist()))
+    if isinstance(value, (pd.Series, fpd.Series)):
+        return ("Series", str(value.dtype), repr(value.name), [repr(i) for i in value.index], repr(value.tolist()))
+    return (type(value).__name__, repr(value))
+
+
+_E186MT_FRAMES = ["float", "int", "datetime", "timedelta", "bool", "string", "Int64", "int + float", "wide", "a: float32 + float64", "a: int32 + float32"]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(("frame", "op"), [(frame, op) for frame in _E186MT_FRAMES for op in _E186MT_OPS])
+def test_transpose_reads_every_column_like_pandas_e186m(frame: str, op: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _e186mT_show(_E186MT_OPS[op](_e186mT_frames(m)[frame]))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-05cm6: a row read (iloc / loc) takes pandas' interleaved
+# dtype of the columns: their own when they share one (a masked Int64 /
+# Float64 / boolean, int32, float32, `string`, a category, timedelta even
+# when the row is all NaT), numpy's result type for numbers (int8 + int16 is
+# int16), masked when any column is. NEGATIVE: int64 beside float64 is
+# float64 (no mask), categories that differ, period frequencies that
+# differ, datetime beside timedelta make an object row. Not here: an object
+# row of numbers holds numpy scalars in pandas (np.int64(1)), and a masked
+# gap in an object row is 0xeam's.
+def _05cm6_frames(m: Any) -> dict[str, Any]:
+    st = np.array(["2024-01-05", "NaT"], dtype="datetime64[ns]")
+    return {
+        "Int64": m.DataFrame({"a": m.array([1, None], dtype="Int64"), "b": m.array([4, 5], dtype="Int64")}),
+        "Float64": m.DataFrame({"a": m.array([1.5, None], dtype="Float64"), "b": m.array([4.0, 5.5], dtype="Float64")}),
+        "boolean": m.DataFrame({"a": m.array([True, None], dtype="boolean"), "b": m.array([False, True], dtype="boolean")}),
+        "Int64 + int64": m.DataFrame({"a": m.array([1, None], dtype="Int64"), "b": [4, 5]}),
+        "Int64 + float64": m.DataFrame({"a": m.array([1, None], dtype="Int64"), "b": [4.5, 5.5]}),
+        "Int64 + Float64": m.DataFrame({"a": m.array([1, None], dtype="Int64"), "b": m.array([4.5, None], dtype="Float64")}),
+        "boolean + bool": m.DataFrame({"a": m.array([True, None], dtype="boolean"), "b": [True, False]}),
+        "Float64 + float32": m.DataFrame({"a": m.array([1.5, None], dtype="Float64"), "b": np.array([3.5, 4], dtype="float32")}),
+        "one Int64": m.DataFrame({"a": m.array([1, None], dtype="Int64")}),
+        "int32": m.DataFrame({"a": np.array([1, 2], dtype="int32"), "b": np.array([3, 4], dtype="int32")}),
+        "int32 + int64": m.DataFrame({"a": np.array([1, 2], dtype="int32"), "b": [3, 4]}),
+        "int8 + int16": m.DataFrame({"a": np.array([1, 2], dtype="int8"), "b": np.array([3, 4], dtype="int16")}),
+        "uint8 + int8": m.DataFrame({"a": np.array([1, 2], dtype="uint8"), "b": np.array([3, 4], dtype="int8")}),
+        "int32 + float32": m.DataFrame({"a": np.array([1, 2], dtype="int32"), "b": np.array([3.5, 4], dtype="float32")}),
+        "float32": m.DataFrame({"a": np.array([1.5, 2], dtype="float32"), "b": np.array([3, 4], dtype="float32")}),
+        "int + float": m.DataFrame({"a": [1, 2], "b": [1.5, np.nan]}),
+        "bool": m.DataFrame({"a": [True, False], "b": [False, False]}),
+        "string": m.DataFrame({"a": m.array(["x", None], dtype="string"), "b": m.array(["y", "z"], dtype="string")}),
+        "object text": m.DataFrame({"a": ["x", None], "b": ["y", "z"]}),
+        "object mixed": m.DataFrame({"a": ["x", 1], "b": [2, "y"]}),
+        "datetime": m.DataFrame({"a": st, "b": st[::-1].copy()}),
+        "datetime UTC": m.DataFrame({"a": m.Series(st).dt.tz_localize("UTC"), "b": m.Series(st).dt.tz_localize("UTC")}),
+        "timedelta": m.DataFrame({"a": st - st[0], "b": st[0] - st}),
+        "datetime + timedelta": m.DataFrame({"a": st, "b": st - st[0]}),
+        "category": m.DataFrame({"a": m.Categorical(["x", "y"]), "b": m.Categorical(["y", "x"])}),
+        "category differs": m.DataFrame({"a": m.Categorical(["x", "y"]), "b": m.Categorical(["p", "q"])}),
+        "period": m.DataFrame({"a": m.period_range("2024-01", periods=2, freq="M"), "b": m.period_range("2023-01", periods=2, freq="M")}),
+        "period M + D": m.DataFrame({"a": m.period_range("2024-01", periods=2, freq="M"), "b": m.period_range("2023-01-01", periods=2, freq="D")}),
+    }
+
+
+_05CM6_READS = {
+    "iloc[0]": lambda df: df.iloc[0],
+    "iloc[1]": lambda df: df.iloc[1],
+    "loc[1]": lambda df: df.loc[1],
+    "iloc[1].isna()": lambda df: df.iloc[1].isna(),
+    "iloc[0] category": lambda df: list(df.iloc[0].cat.categories) if str(df.iloc[0].dtype) == "category" else "not category",
+}
+
+
+def _05cm6_show(value: Any) -> Any:
+    if isinstance(value, (pd.Series, fpd.Series)):
+        return ("Series", str(value.dtype), repr(value.name), [repr(x) for x in value.index], [repr(x) for x in value.tolist()])
+    return (type(value).__name__, repr(value))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(("frame", "read"), [(frame, read) for frame in _05cm6_frames(pd) for read in _05CM6_READS])
+def test_row_reads_take_the_interleaved_dtype_like_pandas_05cm6(frame: str, read: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _05cm6_show(_05CM6_READS[read](_05cm6_frames(m)[frame]))
+        except Exception as error:  # noqa: BLE001 - the exception is the outcome
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-zgx6u: np.exp / log / sin ... of a plain float64 / int64
+# Series computes on the column's own kernel where numpy's float64 loop is
+# the same libm function - the same bits as pandas', name and index kept.
+# Under numpy's default error state a result numpy flags (overflow, log(0),
+# log(-1), sin(inf)) warns as pandas' does, and np.errstate(all='raise')
+# raises FloatingPointError as pandas' does. NEGATIVE: a masked Float64, a
+# float32 and a categorical Series keep numpy's dtype rules, and tanh (not
+# libm's in numpy) answers as pandas'.
+_ZGX6ULIBM_UFUNCS = ["exp", "expm1", "log", "log2", "log10", "log1p", "sin", "cos", "tan", "sinh", "cosh", "tanh"]
+_ZGX6ULIBM_SERIES = {
+    "float": lambda m: m.Series(np.linspace(0.01, 37.5, 2001), name="v", index=np.arange(2001) * 3),
+    "float NaN": lambda m: m.Series(np.where(np.arange(1500) % 7 == 0, np.nan, np.linspace(-20.0, 20.0, 1500)), name="v"),
+    "int": lambda m: m.Series(np.arange(-40, 41), name="k"),
+    "overflow": lambda m: m.Series([1.0, 1000.0, -2.0], name="v"),
+    "pole and domain": lambda m: m.Series([0.0, -1.0, 2.0], name="v"),
+    "inf": lambda m: m.Series([float("inf"), 1.0], name="v"),
+    "Float64 (NEGATIVE)": lambda m: m.Series(m.array([0.5, None, 2.0], dtype="Float64"), name="v"),
+    "float32 (NEGATIVE)": lambda m: m.Series(np.array([0.5, 1.5, 2.0], dtype="float32"), name="v"),
+    "category (NEGATIVE)": lambda m: m.Series([1.0, 2.0, 1.0], dtype="category", name="v"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(("series", "ufunc"), [(series, ufunc) for series in _ZGX6ULIBM_SERIES for ufunc in _ZGX6ULIBM_UFUNCS])
+def test_libm_ufuncs_of_a_series_like_pandas_zgx6u(series: str, ufunc: str) -> None:
+    def run(m: Any) -> Any:
+        s = _ZGX6ULIBM_SERIES[series](m)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            try:
+                result = getattr(np, ufunc)(s)
+            except Exception as error:  # noqa: BLE001 - the exception is the outcome
+                return ("raise", type(error).__name__)
+        shown = ("Series", str(result.dtype), result.name, [repr(i) for i in result.index], [repr(x) for x in result.tolist()])
+        return shown, sorted({(w.category.__name__, str(w.message)) for w in caught})
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("ufunc", ["exp", "log", "sin", "cosh"])
+def test_libm_ufuncs_raise_under_errstate_like_pandas_zgx6u(ufunc: str) -> None:
+    values = {"exp": [1.0, 1000.0], "log": [1.0, 0.0], "sin": [1.0, float("inf")], "cosh": [1.0, 1000.0]}[ufunc]
+
+    def run(m: Any) -> Any:
+        with np.errstate(all="raise"):
+            try:
+                return ("value", repr(getattr(np, ufunc)(m.Series(values)).tolist()))
+            except Exception as error:  # noqa: BLE001 - the exception is the outcome
+                return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+    # And a finite answer under errstate('raise') is a value, as pandas'.
+    with np.errstate(all="raise"):
+        assert repr(getattr(np, ufunc)(fpd.Series([0.5, 1.5])).tolist()) == repr(getattr(np, ufunc)(pd.Series([0.5, 1.5])).tolist())
+
+
+# br-frankenpandas-fk877: an int64 Index takes its labels in one bounds pass
+# and a gather (a unit range, an affine range, a typed buffer), and positions
+# of two or more dimensions are numpy's ValueError as in pandas' take.
+# NEGATIVE: a position past the end is IndexError; a negative one counts
+# from the end; an empty take is an empty int64 Index.
+_FK877B_PERM = np.random.default_rng(7).permutation(1000)
+_FK877B_CASES = {
+    "Index(arange) permuted": lambda m: m.Index(np.arange(1000)).take(_FK877B_PERM),
+    "Index affine": lambda m: m.Index(np.arange(0, 30, 3), name="a").take(np.array([7, 2, 9, 0])),
+    "Index typed": lambda m: m.Index(np.array([5, -3, 99, 7, 7])).take(np.array([4, 0, 2, 2])),
+    "Index negative": lambda m: m.Index(np.arange(10, 15)).take(np.array([-1, -5, 0])),
+    "Index empty": lambda m: m.Index(np.arange(5)).take(np.array([], dtype="int64")),
+    "Index past the end (NEGATIVE: IndexError)": lambda m: m.Index(np.arange(5)).take(np.array([5])),
+    "Series.take 2-D": lambda m: m.Series([1.5, 2.5, 3.5]).take(np.array([[0, 1]])),
+    "Series.take a column of positions": lambda m: m.Series([1.5, 2.5, 3.5]).take(np.array([[0], [1]])),
+    "Series.take a nested list": lambda m: m.Series([1.5, 2.5, 3.5]).take([[0, 1]]),
+    "DataFrame.take 2-D": lambda m: m.DataFrame({"a": [1, 2, 3]}).take(np.array([[0, 1]])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FK877B_CASES))
+def test_index_take_and_position_dimensions_like_pandas_fk877(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            return _fk877_shown(_FK877B_CASES[case](m))
+        except (IndexError, ValueError, TypeError) as error:
+            return (type(error).__name__, str(error) if isinstance(error, ValueError) else "")
+
+    assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-n3ktr: index behaviors across kinds, as pandas'. A
+# TimedeltaIndex's labels print as its values do (whole days short, NaT as
+# NaT - a NaT label printed its sentinel); an object index's missing label
+# compares False (True under !=), ordering included; a CategoricalIndex's
+# argmin / argmax compare the codes and a repeated label's get_loc is a mask
+# or a slice; an IntervalIndex factorizes into an IntervalIndex and builds
+# from intervals and missing values (it dropped them); a bool index's
+# element is numpy's bool. NEGATIVE: a non-interval, non-missing element is
+# pandas' TypeError; an unordered CategoricalIndex's min is pandas'
+# TypeError; a missing key is KeyError.
+_N3KTRB_TD = ["1 days", None, "2h", "1 days"]
+_N3KTRB_CASES = {
+    "td labels with NaT, Series repr": lambda m: repr(m.Series([1, 2, 3, 4], index=m.TimedeltaIndex(_N3KTRB_TD))),
+    "td labels whole days, Series repr": lambda m: repr(m.Series([1, 2], index=m.TimedeltaIndex(["1 days", "2 days"]))),
+    "td labels with NaT, frame repr": lambda m: repr(m.DataFrame({"a": [1, 2]}, index=m.TimedeltaIndex(["1 days", None], name="t"))),
+    "td to_frame repr": lambda m: repr(m.TimedeltaIndex(_N3KTRB_TD, name="t").to_frame()),
+    "td column labels repr": lambda m: repr(m.DataFrame([[1, 2]], columns=m.TimedeltaIndex(["1 days", None]))),
+    "object == self": lambda m: list(m.Index(["b", "a", None, "c"]) == m.Index(["b", "a", None, "c"])),
+    "object != self": lambda m: list(m.Index(["b", "a", None, "c"]) != m.Index(["b", "a", None, "c"])),
+    "object < 'c'": lambda m: list(m.Index(["b", "a", None, "c"]) < "c"),
+    "object >= self": lambda m: list(m.Index(["b", "a", None, "c"]) >= m.Index(["b", "a", None, "c"])),
+    "object == None": lambda m: list(m.Index(["b", None]) == None),  # noqa: E711
+    "object != NaN": lambda m: list(m.Index(["b", None]) != np.nan),
+    "object == list": lambda m: list(m.Index(["b", None, "c"]) == ["b", None, "x"]),
+    "object no missing ==": lambda m: list(m.Index(["b", "a"]) == "a"),
+    "category argmin": lambda m: m.CategoricalIndex(["x", "y", "x", None]).argmin(),
+    "category argmax": lambda m: m.CategoricalIndex(["x", "y", "x", None]).argmax(),
+    "ordered category argmax": lambda m: m.CategoricalIndex(["x", "y", "x"], categories=["y", "x"], ordered=True).argmax(),
+    "category get_loc repeated": lambda m: m.CategoricalIndex(["x", "y", "x"]).get_loc("x"),
+    "category get_loc run": lambda m: m.CategoricalIndex(["x", "x", "y"]).get_loc("x"),
+    "category get_loc once": lambda m: m.CategoricalIndex(["x", "y", "x"]).get_loc("y"),
+    "category get_loc missing (NEGATIVE: KeyError)": lambda m: m.CategoricalIndex(["x", "y"]).get_loc("z"),
+    "category min unordered (NEGATIVE: TypeError)": lambda m: m.CategoricalIndex(["x", "y"]).min(),
+    "interval factorize": lambda m: m.IntervalIndex.from_tuples([(0, 1), (1, 2), (0, 1), None]).factorize(),
+    "interval factorize no sentinel": lambda m: m.IntervalIndex.from_tuples([(0, 1), None, (1, 2)]).factorize(use_na_sentinel=False),
+    "interval factorize sorted": lambda m: m.IntervalIndex.from_tuples([(1, 2), (0, 1), (1, 2)]).factorize(sort=True),
+    "IntervalIndex of a list with NaN": lambda m: m.IntervalIndex([m.Interval(0, 1), np.nan]),
+    "IntervalIndex of a list with None": lambda m: m.IntervalIndex([m.Interval(0, 1, closed="left"), None]),
+    "IntervalIndex of an Index with NaN": lambda m: m.IntervalIndex(m.Index([m.Interval(0, 1), np.nan])),
+    "IntervalIndex of intervals": lambda m: m.IntervalIndex([m.Interval(0, 1), m.Interval(1, 2)]),
+    "IntervalIndex of a number (NEGATIVE: TypeError)": lambda m: m.IntervalIndex([m.Interval(0, 1), 3]),
+    "bool index [0]": lambda m: m.Index([True, False])[0],
+    "bool index max": lambda m: m.Index([True, False]).max(),
+    "float equals copy": lambda m: m.Index([2.5, np.nan, 1.0]).equals(m.Index([2.5, np.nan, 1.0])),
+    "float equals ints": lambda m: m.Index([1.0, 2.0]).equals(m.Index([1, 2])),
+    "float equals other floats": lambda m: m.Index([1.0, 2.0]).equals(m.Index([1.0, 3.0])),
+    "float equals longer (NEGATIVE: Python bool)": lambda m: m.Index([1.0, 2.0]).equals(m.Index([1.0, 2.0, 3.0])),
+    "int equals floats (NEGATIVE: Python bool)": lambda m: m.Index([1, 2]).equals(m.Index([1.0, 2.0])),
+}
+
+
+def _n3ktrb_show(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return tuple(_n3ktrb_show(item) for item in value)
+    if isinstance(value, (pd.Index, fpd.Index)):
+        return (type(value).__name__, str(value.dtype), [repr(x) for x in value.tolist()])
+    if isinstance(value, np.ndarray):
+        return ("ndarray", str(value.dtype), [repr(x) for x in value.tolist()])
+    return (type(value).__name__, repr(value))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_N3KTRB_CASES))
+def test_index_behaviors_across_kinds_like_pandas_n3ktr(case: str) -> None:
+    def run(m: Any) -> Any:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                return _n3ktrb_show(_N3KTRB_CASES[case](m))
+            except Exception as error:  # noqa: BLE001 - the exception is the outcome
+                return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-7v4wf: an object column of numbers holding missing values
+# keeps its object dtype and each value's type across ops, as pandas' object
+# array: cumsum / cumprod in Python's arithmetic (a missing cell as 0.0 /
+# 1.0, NaN again), shift's None fill, replace unchanged when nothing matched
+# else soft-converted (ints beside None float64), combine_first's cells as
+# each side held them (a numeric Series' combine_first with an object one
+# is object too), and a DataFrame concat of object columns object.
+# NEGATIVE: text object columns, and numeric columns' other ops, answer as
+# before.
+_7V4WFNA_SERIES = {
+    "ints None": lambda m: m.Series([1, None, 2, 3], dtype=object),
+    "floats NaN": lambda m: m.Series([1.5, np.nan, 2.5], dtype=object),
+    "mixed None": lambda m: m.Series([1, 2.5, None, 4], dtype=object),
+    "text": lambda m: m.Series(["a", None, "c"], dtype=object),
+    "numeric ints": lambda m: m.Series([1, 2, 3]),
+    "numeric floats NaN": lambda m: m.Series([1.5, np.nan, 2.5]),
+}
+_7V4WFNA_OPS = {
+    "cumsum": lambda s: s.cumsum(),
+    "cumsum skipna=False": lambda s: s.cumsum(skipna=False),
+    "cumprod": lambda s: s.cumprod(),
+    "shift(1)": lambda s: s.shift(1),
+    "shift(-1)": lambda s: s.shift(-1),
+    "replace(2, 9)": lambda s: s.replace(2, 9),
+    "replace(no match)": lambda s: s.replace(77, 9),
+    "combine_first": lambda s: s.combine_first(type(s)([5, 6, 7, 8], dtype=object)),
+}
+def _7v4wfna_show(value: Any) -> Any:
+    if isinstance(value, (pd.Series, fpd.Series)):
+        return (str(value.dtype), [repr(x) for x in value.tolist()], [repr(x) for x in value.index])
+    if isinstance(value, (pd.DataFrame, fpd.DataFrame)):
+        return ([str(t) for t in value.dtypes], [[repr(x) for x in value[c].tolist()] for c in value.columns])
+    return (type(value).__name__, repr(value))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(("series", "op"), [(series, op) for series in _7V4WFNA_SERIES for op in _7V4WFNA_OPS])
+def test_object_numbers_with_missing_keep_their_cells_like_pandas_7v4wf(series: str, op: str) -> None:
+    def run(m: Any) -> Any:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                return _7v4wfna_show(_7V4WFNA_OPS[op](_7V4WFNA_SERIES[series](m)))
+            except Exception as error:  # noqa: BLE001 - the exception is the outcome
+                return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+_7V4WFNA_CONCAT = {
+    "object + object": lambda m: m.concat([m.DataFrame({"a": m.Series([1, None], dtype=object)}), m.DataFrame({"a": m.Series([2.5, 3], dtype=object)})]),
+    "object + int64": lambda m: m.concat([m.DataFrame({"a": m.Series([1, 2], dtype=object), "b": [1.5, 2.5]}), m.DataFrame({"a": [3, 4], "b": [3.5, 4.5]})]),
+    "int64 + int64 (NEGATIVE)": lambda m: m.concat([m.DataFrame({"a": [1, 2]}), m.DataFrame({"a": [3, 4]})]),
+    "text + text (NEGATIVE)": lambda m: m.concat([m.DataFrame({"a": ["x", None]}), m.DataFrame({"a": ["y", "z"]})]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_7V4WFNA_CONCAT))
+def test_frame_concat_of_object_columns_like_pandas_7v4wf(case: str) -> None:
+    def run(m: Any) -> Any:
+        return _7v4wfna_show(_7V4WFNA_CONCAT[case](m))
+
+    assert run(fpd) == run(pd)
+
+
+# Still open on br-frankenpandas-7v4wf: Python's equality folds 1, 1.0 and
+# True together in an object column's unique / value_counts (pandas [1]).
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.xfail(strict=True, reason="object dedup by Python equality (7v4wf)")
+def test_object_unique_folds_equal_numbers_like_pandas_7v4wf() -> None:
+    def run(m: Any) -> Any:
+        return [repr(x) for x in m.Series([1, 1.0, True, 2], dtype=object).unique()]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a frame's integer columns against an integer
+# number run on the column's own scalar kernel (no full-length column of the
+# number), with pandas' answers: + - * wrap as int64, / is float64, // and %
+# floor, ** of a non-negative power stays int64. NEGATIVE: a zero divisor, a
+# negative power and a bool column take the broadcast path's answers, and
+# the float / NaN columns beside them answer as before.
+def _e186mint_frame(m: Any) -> Any:
+    return m.DataFrame(
+        {
+            "i": [7, -3, 0, 2**62, -(2**62)],
+            "f": [1.5, np.nan, -2.25, 0.0, 3.0],
+            "b": [True, False, True, True, False],
+        }
+    )
+
+
+_E186MINT_OPS = {
+    "+ 3": lambda d: d[["i", "f"]] + 3,
+    "- 3": lambda d: d[["i", "f"]] - 3,
+    "3 - df": lambda d: 3 - d[["i", "f"]],
+    "* 3": lambda d: d[["i", "f"]] * 3,
+    "/ 3": lambda d: d[["i", "f"]] / 3,
+    "3 / df": lambda d: 3 / d[["i"]],
+    "// 3": lambda d: d[["i", "f"]] // 3,
+    "% 3": lambda d: d[["i", "f"]] % 3,
+    "// -2": lambda d: d[["i"]] // -2,
+    "-7 // df (zeros)": lambda d: -7 // d[["i"]],
+    "// 0 (NEGATIVE)": lambda d: d[["i"]] // 0,
+    "% 0 (NEGATIVE)": lambda d: d[["i"]] % 0,
+    "** 2": lambda d: d[["i"]] ** 2,
+    "** -1 (NEGATIVE)": lambda d: d[["i"]] ** -1,
+    "2 ** df": lambda d: 2 ** d[["i"]].abs().clip(upper=10),
+    "bool + 1 (NEGATIVE)": lambda d: d[["b"]] + 1,
+    "bool * 2 (NEGATIVE)": lambda d: d[["b", "i"]] * 2,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", list(_E186MINT_OPS))
+def test_frame_integer_arithmetic_like_pandas_e186m(op: str) -> None:
+    def run(m: Any) -> Any:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                out = _E186MINT_OPS[op](_e186mint_frame(m))
+            except Exception as error:  # noqa: BLE001 - the exception is the outcome
+                return ("raise", type(error).__name__)
+        return ([str(t) for t in out.dtypes], [[repr(x) for x in out[c].tolist()] for c in out.columns])
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-5s8nr: a stepped slice of a datetime / timedelta index -
+# itself, or a Series' / frame's rows over one - steps over its instants or
+# durations, backwards too (a date_range stays a range, a typed index a view
+# forwards and a buffer of its own backwards), with pandas' labels, dtype,
+# freq, zone and name. NEGATIVE: an int64 and a text index step as before.
+def _5s8nrstep_index(m: Any, kind: str) -> Any:
+    nat = np.datetime64("NaT", "ns")
+    if kind == "date_range":
+        return m.date_range("2024-01-01", periods=11, freq="h", name="t")
+    if kind == "date_range utc":
+        return m.date_range("2024-01-01", periods=11, freq="D", tz="UTC", name="t")
+    if kind == "instants with NaT":
+        stamps = np.array(["2024-01-01T00:00"] * 11, dtype="datetime64[ns]") + np.arange(11) * np.timedelta64(90, "m")
+        stamps[4] = nat
+        return m.DatetimeIndex(stamps, name="t")
+    if kind == "timedelta_range":
+        return m.timedelta_range("1 day", periods=11, freq="6h", name="d")
+    if kind == "durations with NaT":
+        spans = np.arange(11) * np.timedelta64(7, "s")
+        spans[2] = np.timedelta64("NaT", "ns")
+        return m.TimedeltaIndex(spans.astype("timedelta64[ns]"))
+    if kind == "int64 (NEGATIVE)":
+        return m.Index(np.arange(11, dtype="int64") * 3)
+    return m.Index([f"r{i}" for i in range(11)])
+
+
+_5S8NRSTEP_KINDS = [
+    "date_range",
+    "date_range utc",
+    "instants with NaT",
+    "timedelta_range",
+    "durations with NaT",
+    "int64 (NEGATIVE)",
+    "text (NEGATIVE)",
+]
+_5S8NRSTEP_SLICES = {
+    "::-1": slice(None, None, -1),
+    "::-2": slice(None, None, -2),
+    "9:2:-3": slice(9, 2, -3),
+    "::3": slice(None, None, 3),
+    "-1:-5:-1": slice(-1, -5, -1),
+    "5::-1": slice(5, None, -1),
+    "3:3:-1 (empty)": slice(3, 3, -1),
+    "100::-4": slice(100, None, -4),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("target", ["index", "series", "frame"])
+@pytest.mark.parametrize("cut", list(_5S8NRSTEP_SLICES))
+@pytest.mark.parametrize("kind", _5S8NRSTEP_KINDS)
+def test_stepped_slices_of_temporal_indexes_like_pandas_5s8nr(kind: str, cut: str, target: str) -> None:
+    def labels(index: Any) -> Any:
+        return (
+            [str(x) for x in index],
+            str(index.dtype),
+            getattr(index, "freqstr", None),
+            index.name,
+        )
+
+    def run(m: Any) -> Any:
+        index = _5s8nrstep_index(m, kind)
+        sl = _5S8NRSTEP_SLICES[cut]
+        if target == "index":
+            return labels(index[sl])
+        values = np.arange(11, dtype="float64") * 0.5
+        if target == "series":
+            out = m.Series(values, index=index, name="v").iloc[sl]
+            return labels(out.index), out.tolist()
+        out = m.DataFrame({"v": values, "w": np.arange(11)}, index=index).iloc[sl]
+        return labels(out.index), out["v"].tolist(), out["w"].tolist()
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-fk877: an int64 array's positions over a typed int64
+# Index are read in place, wrapped, checked and gathered in one pass, with
+# pandas' labels, dtype and name. NEGATIVE: a position past either end is
+# IndexError; a fill_value is ValueError for an int64 index; int32 / list
+# positions, a float index and a RangeIndex answer as before.
+_FK877C_VALUES = np.random.default_rng(11).integers(-(10**12), 10**12, 997)
+_FK877C_SIGNED = np.random.default_rng(12).integers(-997, 997, 2000)
+_FK877C_CASES = {
+    "typed, signed positions": lambda m: m.Index(_FK877C_VALUES, name="k").take(_FK877C_SIGNED),
+    "typed, all from the end": lambda m: m.Index(_FK877C_VALUES).take(np.arange(-997, 0)),
+    "typed, empty": lambda m: m.Index(_FK877C_VALUES, name="k").take(np.array([], dtype="int64")),
+    "typed, allow_fill without a fill_value": lambda m: m.Index(_FK877C_VALUES).take(np.array([-1, 3]), allow_fill=True),
+    "typed, fill_value not allowed": lambda m: m.Index(_FK877C_VALUES).take(np.array([-1, 3]), allow_fill=False, fill_value=5),
+    "typed, past the end (NEGATIVE: IndexError)": lambda m: m.Index(_FK877C_VALUES).take(np.array([0, 997])),
+    "typed, past the start (NEGATIVE: IndexError)": lambda m: m.Index(_FK877C_VALUES).take(np.array([-998])),
+    "typed, fill_value (NEGATIVE: ValueError)": lambda m: m.Index(_FK877C_VALUES).take(np.array([-1, 3]), fill_value=5),
+    "int32 positions (NEGATIVE)": lambda m: m.Index(_FK877C_VALUES).take(np.array([-1, 3], dtype="int32")),
+    "list positions (NEGATIVE)": lambda m: m.Index(_FK877C_VALUES).take([5, -5]),
+    "RangeIndex (NEGATIVE)": lambda m: m.RangeIndex(5, 50, 5).take(np.array([3, -1])),
+    "float index (NEGATIVE)": lambda m: m.Index(np.array([0.5, -2.0, 7.25])).take(np.array([2, -3])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FK877C_CASES))
+def test_int64_index_takes_signed_positions_in_place_like_pandas_fk877(case: str) -> None:
+    def shown(m: Any) -> Any:
+        try:
+            return _fk877_shown(_FK877C_CASES[case](m))
+        except (IndexError, ValueError, TypeError) as error:
+            return (type(error).__name__, str(error) if isinstance(error, ValueError) else "")
+
+    assert shown(fpd) == shown(pd)
+
+
+# br-frankenpandas-n3ktr: an object Index's argsort is numpy's over its
+# Python objects - None or NaN beside text, or text beside a number, is
+# Python's TypeError; a NaN among floats sorts where numpy's comparisons
+# leave it. NEGATIVE: text alone, numbers alone, one missing label, and a
+# float64 / datetime / categorical index's argsort answer as before.
+_N3KTRSORT_CASES = {
+    "text beside None": lambda m: m.Index(["b", None, "a"], dtype=object),
+    "None twice": lambda m: m.Index([None, None], dtype=object),
+    "text beside NaN": lambda m: m.Index(["a", np.nan, "b"], dtype=object),
+    "ints beside None": lambda m: m.Index([1, None, 2], dtype=object),
+    "floats beside NaN": lambda m: m.Index([1.5, np.nan, 0.5], dtype=object),
+    "int beside text": lambda m: m.Index([1, "a"], dtype=object),
+    "None then text": lambda m: m.Index([None, "a"], dtype=object),
+    "text alone (NEGATIVE)": lambda m: m.Index(["b", "c", "a"]),
+    "ints in object (NEGATIVE)": lambda m: m.Index([3, 1, 2], dtype=object),
+    "one None (NEGATIVE)": lambda m: m.Index([None], dtype=object),
+    "float64 with NaN (NEGATIVE)": lambda m: m.Index([1.5, np.nan, 0.5]),
+    "datetimes (NEGATIVE)": lambda m: m.DatetimeIndex(["2024-01-03", "2024-01-01", None]),
+    "categorical (NEGATIVE)": lambda m: m.CategoricalIndex(["b", "a", "b"]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_N3KTRSORT_CASES))
+def test_object_index_argsort_like_pandas_n3ktr(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return [int(x) for x in _N3KTRSORT_CASES[case](m).argsort()]
+        except TypeError as error:
+            return ("TypeError", str(error))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-vqjvd: an index of a narrow numpy array (int8 ... uint64,
+# float32) keeps that dtype - built, taken, sliced, repeated, its values /
+# to_numpy, astype to another width (astype('int64') leaves it) - and a
+# narrow column's set_index / value_counts / groupby keys label by it, a
+# reset_index giving the column back at its width; DatetimeIndex.year's
+# values are int32. NEGATIVE: int64 / float64 indexes and keys answer as
+# before in every row but an astype to a narrow width (which was refused);
+# a field over NaT is float64.
+_VQJVD_WIDTHS = ["int8", "int16", "int32", "uint8", "uint16", "uint32", "uint64", "float32"]
+
+
+def _vqjvd_values(width: str) -> Any:
+    if width == "float32":
+        return np.array([2.5, -1.25, 0.1, 2.5], dtype="float32")
+    if width.startswith("u"):
+        return np.array([7, 3, 250, 7], dtype=width)
+    return np.array([7, -3, 100, 7], dtype=width)
+
+
+_VQJVD_OPS = {
+    "Index": lambda m, w: m.Index(_vqjvd_values(w), name="k"),
+    "values": lambda m, w: m.Index(_vqjvd_values(w)).values,
+    "to_numpy": lambda m, w: m.Index(_vqjvd_values(w)).to_numpy(),
+    "take": lambda m, w: m.Index(_vqjvd_values(w)).take(np.array([3, 0])),
+    "[::-1]": lambda m, w: m.Index(_vqjvd_values(w))[::-1],
+    "[1:3]": lambda m, w: m.Index(_vqjvd_values(w))[1:3],
+    "repeat": lambda m, w: m.Index(_vqjvd_values(w)).repeat(2),
+    "astype int64": lambda m, w: m.Index(_vqjvd_values(w)).astype("int64"),
+    "astype int16": lambda m, w: m.Index(_vqjvd_values(w)).astype("int16"),
+    "astype float32": lambda m, w: m.Index(_vqjvd_values(w)).astype("float32"),
+    "empty": lambda m, w: m.Index(np.array([], dtype=w)),
+    "value_counts": lambda m, w: m.Series(_vqjvd_values(w)).value_counts().index,
+    "set_index": lambda m, w: m.DataFrame({"k": _vqjvd_values(w), "v": [1.0, 2.0, 3.0, 4.0]}).set_index("k").index,
+    "reset_index": lambda m, w: m.DataFrame({"k": _vqjvd_values(w), "v": [1.0, 2.0, 3.0, 4.0]}).set_index("k").reset_index()["k"],
+    "groupby keys": lambda m, w: m.DataFrame({"k": _vqjvd_values(w), "v": [1.0, 2.0, 3.0, 4.0]}).groupby("k").sum().index,
+    "delete": lambda m, w: m.Index(_vqjvd_values(w), name="k").delete(1),
+    "insert 5": lambda m, w: m.Index(_vqjvd_values(w)).insert(1, 5),
+    "insert 300": lambda m, w: m.Index(_vqjvd_values(w)).insert(1, 300),
+    "insert -1": lambda m, w: m.Index(_vqjvd_values(w)).insert(1, -1),
+    "insert 2**40": lambda m, w: m.Index(_vqjvd_values(w)).insert(1, 2**40),
+    "insert 2.5": lambda m, w: m.Index(_vqjvd_values(w)).insert(1, 2.5),
+    "insert None": lambda m, w: m.Index(_vqjvd_values(w)).insert(1, None),
+    "insert True (NEGATIVE: object)": lambda m, w: m.Index(_vqjvd_values(w)).insert(1, True),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("width", [*_VQJVD_WIDTHS, "int64", "float64"])
+@pytest.mark.parametrize("op", list(_VQJVD_OPS))
+def test_narrow_indexes_keep_their_width_like_pandas_vqjvd(op: str, width: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _VQJVD_OPS[op](m, width)
+        except (TypeError, ValueError, OverflowError) as error:
+            return ("raise", type(error).__name__)
+        # A numpy dtype object, not only its name (an alias numpy's
+        # promotion picks - uint64 as 'Q' or 'L' - compares equal).
+        return (
+            str(out.dtype),
+            isinstance(out.dtype, np.dtype),
+            [repr(x) for x in out.tolist()],
+            getattr(out, "name", None),
+        )
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_datetime_fields_are_int32_arrays_like_pandas_vqjvd() -> None:
+    def run(m: Any) -> Any:
+        year = m.DatetimeIndex(["2024-01-01", "2025-06-01"]).year
+        cast = year.astype("int64")
+        # NEGATIVE: a field over NaT is float64.
+        gappy = m.DatetimeIndex(["2024-01-01", None]).year
+        return (str(year.values.dtype), str(year.to_numpy().dtype), str(cast.dtype), str(gappy.dtype))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-05cm6 / spwrr: an Index under a masked extension dtype
+# (Int64, Int32, UInt8, Float64, Float32, boolean) - built with dtype=,
+# taken, sliced, its repr, values (the masked array), iteration (numpy
+# scalars, NA), to_numpy, isna, unique, astype - and a masked column's
+# value_counts / set_index / groupby keys label by it, reset_index giving
+# the masked column back (an Int64 one came back float64). NEGATIVE: an
+# int64 / float64 / bool index answers as before; a fraction to Int64 and
+# a number to boolean are refused.
+_05CM6M_DATA = {
+    "Int64": [3, None, 1, 3],
+    "Int32": [3, None, 1, 3],
+    "UInt8": [3, None, 1, 3],
+    "Float64": [2.5, None, -1.0, 2.5],
+    "Float32": [2.5, None, -1.0, 2.5],
+    "boolean": [True, None, False, True],
+    "int64 (NEGATIVE)": [3, 2, 1, 3],
+    "float64 (NEGATIVE)": [2.5, None, -1.0, 2.5],
+    "bool (NEGATIVE)": [True, False, False, True],
+}
+
+
+def _05cm6m_index(m: Any, kind: str) -> Any:
+    return m.Index(_05CM6M_DATA[kind], dtype=kind.split(" ")[0])
+
+
+def _05cm6m_frame(m: Any, kind: str) -> Any:
+    keys = m.Series(_05CM6M_DATA[kind], dtype=kind.split(" ")[0])
+    return m.DataFrame({"k": keys, "v": [1, 2, 3, 4]})
+
+
+_05CM6M_OPS = {
+    "Index": lambda m, k: _05cm6m_index(m, k),
+    "repr": lambda m, k: repr(_05cm6m_index(m, k)),
+    "values class": lambda m, k: type(_05cm6m_index(m, k).values).__name__,
+    "to_numpy": lambda m, k: _05cm6m_index(m, k).to_numpy(),
+    "tolist": lambda m, k: _05cm6m_index(m, k).tolist(),
+    "[1]": lambda m, k: _05cm6m_index(m, k)[1],
+    "[0]": lambda m, k: _05cm6m_index(m, k)[0],
+    "take": lambda m, k: _05cm6m_index(m, k).take([3, 1]),
+    "[::-1]": lambda m, k: _05cm6m_index(m, k)[::-1],
+    "isna": lambda m, k: list(_05cm6m_index(m, k).isna()),
+    "unique": lambda m, k: _05cm6m_index(m, k).unique(),
+    "value_counts": lambda m, k: m.Series(_05CM6M_DATA[k], dtype=k.split(" ")[0]).value_counts().index,
+    "value_counts dropna=False": lambda m, k: m.Series(_05CM6M_DATA[k], dtype=k.split(" ")[0]).value_counts(dropna=False).index,
+    "set_index": lambda m, k: _05cm6m_frame(m, k).set_index("k").index,
+    "reset_index": lambda m, k: _05cm6m_frame(m, k).set_index("k").reset_index()["k"],
+    "groupby keys": lambda m, k: _05cm6m_frame(m, k).groupby("k").sum().index,
+    "astype float64": lambda m, k: _05cm6m_index(m, k).astype("float64"),
+    "astype Int64 of a fraction (NEGATIVE)": lambda m, k: m.Index([0.5, 1.0]).astype("Int64"),
+    "astype boolean of ints (NEGATIVE)": lambda m, k: m.Index([3, 1]).astype("boolean"),
+}
+
+
+def _05cm6m_shown(value: Any) -> Any:
+    if isinstance(value, (str, list, bool)) or value is None:
+        return [f"{type(x).__name__}:{x!r}" for x in value] if isinstance(value, list) else repr(value)
+    if hasattr(value, "dtype") and hasattr(value, "__iter__"):
+        return (type(value).__name__, str(value.dtype), [f"{type(x).__name__}:{x!r}" for x in value])
+    return f"{type(value).__name__}:{value!r}"
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", list(_05CM6M_DATA))
+@pytest.mark.parametrize("op", list(_05CM6M_OPS))
+def test_masked_indexes_keep_their_dtype_like_pandas_05cm6(op: str, kind: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _05cm6m_shown(_05CM6M_OPS[op](m, kind))
+        except (TypeError, ValueError) as error:
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a plain int64 Index's slices are views (a run, a
+# step of either sign), unique / duplicated answer from the cached
+# uniqueness, min / max from the ints, drop filters the ints, argsort sorts
+# the ints, to_series / to_frame build the column from the ints (an int32
+# index's at int32, a DatetimeIndex's from its instants) - with pandas'
+# answers; an object index of ints stays object (its to_series / drop came
+# back int64). NEGATIVE: an index holding duplicates, a text index, ties in
+# argsort and a label drop cannot find take the paths they took.
+_E186MIDX_INTS = np.array([5, -3, 9, 0, 7, 2, -8, 4], dtype="int64")
+_E186MIDX_KINDS = {
+    "ints": lambda m: m.Index(_E186MIDX_INTS, name="k"),
+    "int32": lambda m: m.Index(_E186MIDX_INTS.astype("int32"), name="k"),
+    "repeats (NEGATIVE)": lambda m: m.Index(np.array([3, 1, 3, 2, 1, 3, 0, 2])),
+    "text (NEGATIVE)": lambda m: m.Index([f"t{i}" for i in (5, 3, 9, 0, 7, 2, 8, 4)]),
+    "object ints": lambda m: m.Index([int(x) for x in _E186MIDX_INTS], dtype=object),
+}
+_E186MIDX_OPS = {
+    "[2:6]": lambda i: i[2:6],
+    "[::2]": lambda i: i[::2],
+    "[::-1]": lambda i: i[::-1],
+    "[6:1:-2]": lambda i: i[6:1:-2],
+    "[5:5]": lambda i: i[5:5],
+    "unique": lambda i: i.unique(),
+    "duplicated": lambda i: list(i.duplicated()),
+    "duplicated keep=False": lambda i: list(i.duplicated(keep=False)),
+    "min": lambda i: i.min(),
+    "max": lambda i: i.max(),
+    "argsort": lambda i: [int(x) for x in i.argsort()],
+    "drop first two": lambda i: i.drop(list(i[:2])),
+    "drop a missing label (NEGATIVE)": lambda i: i.drop([12345]),
+    "drop missing, ignore": lambda i: i.drop([12345, i[0]], errors="ignore"),
+    "to_series": lambda i: i.to_series(),
+    "to_frame": lambda i: i.to_frame(),
+}
+
+
+def _e186midx_shown(value: Any) -> Any:
+    if hasattr(value, "columns"):
+        return ("frame", [str(t) for t in value.dtypes], repr(value.to_dict("list")), list(value.index))
+    if hasattr(value, "index") and hasattr(value, "dtype"):
+        return ("series", str(value.dtype), value.name, repr(value.tolist()), list(value.index))
+    if hasattr(value, "dtype") and hasattr(value, "tolist"):
+        return (type(value).__name__, str(value.dtype), getattr(value, "name", None), repr(value.tolist()))
+    return f"{type(value).__name__}:{value!r}"
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", list(_E186MIDX_KINDS))
+@pytest.mark.parametrize("op", list(_E186MIDX_OPS))
+def test_int64_index_typed_paths_like_pandas_e186m(op: str, kind: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            return _e186midx_shown(_E186MIDX_OPS[op](_E186MIDX_KINDS[kind](m)))
+        except (KeyError, TypeError, ValueError) as error:
+            return ("raise", type(error).__name__)
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_datetime_index_to_series_like_pandas_e186m() -> None:
+    def run(m: Any) -> Any:
+        stamps = np.array(["2024-01-01T00:00", "NaT", "2024-03-01T12:30"], dtype="datetime64[ns]")
+        naive = m.DatetimeIndex(stamps, name="t").to_series()
+        zoned = m.DatetimeIndex(stamps).tz_localize("UTC").tz_convert("Asia/Tokyo").to_series()
+        return [(str(s.dtype), s.name, [str(x) for x in s.tolist()]) for s in (naive, zoned)]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a typed int64 Index sorts by the radix argsort of
+# its ints (ascending and descending), its union adds what the left lacks
+# through the left's cached lookup and sorts without reading labels, and
+# get_indexer looks the target's ints up as held - with pandas' answers.
+# NEGATIVE: a text index, an int index beside floats, two equal indexes
+# (left unsorted), targets the index lacks (-1) take the paths they took.
+_E186MSORT_LEFT = [7, -2, 15, 0, 9, 3, -11, 4, 12, 5]
+_E186MSORT_CASES = {
+    "sort_values": lambda m: m.Index(_E186MSORT_LEFT).sort_values(),
+    "sort_values desc": lambda m: m.Index(_E186MSORT_LEFT).sort_values(ascending=False),
+    "sort_values repeats desc": lambda m: m.Index([3, 1, 3, 2, 1]).sort_values(ascending=False),
+    "sort_values return_indexer": lambda m: list(m.Index(_E186MSORT_LEFT).sort_values(return_indexer=True)[1]),
+    "argsort": lambda m: [int(x) for x in m.Index(_E186MSORT_LEFT).argsort()],
+    "union": lambda m: m.Index(_E186MSORT_LEFT).union(m.Index([5, 100, -50, 7])),
+    "union sort=False": lambda m: m.Index(_E186MSORT_LEFT).union(m.Index([5, 100, -50, 7]), sort=False),
+    "union repeats": lambda m: m.Index([3, 1, 3]).union(m.Index([3, 3, 3, 2])),
+    "union equal (NEGATIVE: unsorted)": lambda m: m.Index([3, 1, 2]).union(m.Index([3, 1, 2])),
+    "union with floats (NEGATIVE)": lambda m: m.Index([3, 1, 2]).union(m.Index([2.5, 1.0])),
+    "union text (NEGATIVE)": lambda m: m.Index(["b", "a"]).union(m.Index(["c", "a"])),
+    "get_indexer": lambda m: list(m.Index(_E186MSORT_LEFT).get_indexer(m.Index([9, 77, -11, 7]))),
+    "sort_values text (NEGATIVE)": lambda m: m.Index(["b", "c", "a"]).sort_values(ascending=False),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MSORT_CASES))
+def test_int64_index_sorts_and_set_ops_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MSORT_CASES[case](m)
+        if hasattr(out, "dtype") and hasattr(out, "tolist"):
+            return (str(out.dtype), repr(out.tolist()))
+        return [int(x) for x in out]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-vqjvd: an Index of a uint64 array holding a value at or
+# above 2**63 is REFUSED (a ValueError, as a uint64 Series is) - the int64
+# storage cannot hold it, and it came back a float64 index with the value
+# rounded. A refusal, not pandas' answer (pandas holds it as uint64).
+# NEGATIVE: uint64 values below 2**63 are an index of them, as pandas'.
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_uint64_index_past_int64_is_refused_vqjvd() -> None:
+    with pytest.raises(ValueError, match="2\\*\\*63"):
+        fpd.Index(np.array([2**63 + 5, 1], dtype="uint64"))
+    held = np.array([2**63 - 1, 1], dtype="uint64")
+    assert (str(fpd.Index(held).dtype), fpd.Index(held).tolist()) == (str(pd.Index(held).dtype), pd.Index(held).tolist())
+
+
+# br-frankenpandas-76kq0: clip as pandas' where: a cell past a bound becomes
+# the bound as given - a bool Series stays bool while every such bound is a
+# bool (numpy's too) and is object of the cells otherwise, and a bool bound
+# landing in an int / float Series makes it object; a side no cell crosses
+# replaces nothing; scalar bounds the wrong way round swap; ints past 2**53
+# compare with int bounds as the ints they are (as floats 2**60 + 1 and
+# 2**60 tied - the review of the first version). NEGATIVE: the int / float
+# Series' number bounds ((0, 1), (0.5, 1), (None, 0), NaN as no bound) clip
+# as before.
+_76KQ0CLIP_FLAGS = [True, False, True, False, True]
+_76KQ0CLIP_CASES = {
+    "(0, 1)": lambda s: s.clip(0, 1),
+    "(0.5, 1)": lambda s: s.clip(0.5, 1),
+    "(None, 0)": lambda s: s.clip(None, 0),
+    "(False, True)": lambda s: s.clip(False, True),
+    "(np.True_, np.False_) swapped": lambda s: s.clip(np.True_, np.False_),
+    "(True, None)": lambda s: s.clip(True, None),
+    "(np.float64(0.5), None)": lambda s: s.clip(np.float64(0.5), None),
+    "(nan, 0.5)": lambda s: s.clip(np.nan, 0.5),
+    "(False, 2**60 + 1)": lambda s: s.clip(False, 2**60 + 1),
+    "(-(2**60) - 2, True)": lambda s: s.clip(-(2**60) - 2, True),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("data", ["bool", "int", "float", "big int"])
+@pytest.mark.parametrize("case", list(_76KQ0CLIP_CASES))
+def test_bool_series_clip_like_pandas_76kq0(case: str, data: str) -> None:
+    values = {
+        "bool": _76KQ0CLIP_FLAGS,
+        "int": [3, -1, 0, 1, 2],
+        "float": [0.25, 0.75, 1.5, -0.5, 0.5],
+        "big int": [2**60, 2**60 + 1, 2**60 + 2, -(2**60) - 3, 0],
+    }[data]
+
+    def run(m: Any) -> Any:
+        out = _76KQ0CLIP_CASES[case](m.Series(values, name="s"))
+        return (str(out.dtype), [repr(x) for x in out.tolist()], out.name)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a plain int64 Index against a Python int - + - *
+# either way round and the six comparisons - works on the ints as held, with
+# numpy's wrapping int64 answers (an Index named as the left / a bool
+# ndarray), a RangeIndex's comparisons too. NEGATIVE: a bool, a float, an
+# int past int64, a numpy int, // and %, an int32 index, an object index
+# take the paths they took.
+_E186MARITH_VALUES = [3, -1, 7, 0, 2**62, -(2**62), 3]
+_E186MARITH_CASES = {
+    "+ 1": lambda i: i + 1,
+    "1 +": lambda i: 1 + i,
+    "- 4": lambda i: i - 4,
+    "4 -": lambda i: 4 - i,
+    "* 3": lambda i: i * 3,
+    "3 *": lambda i: 3 * i,
+    "+ wraps": lambda i: i + (2**63 - 1),
+    "* wraps": lambda i: i * -4,
+    "== 3": lambda i: i == 3,
+    "!= 3": lambda i: i != 3,
+    "< 3": lambda i: i < 3,
+    "<= 3": lambda i: i <= 3,
+    "> 0": lambda i: i > 0,
+    ">= -1": lambda i: i >= -1,
+    "3 == (reflected)": lambda i: 3 == i,
+    "3 > (reflected)": lambda i: 3 > i,
+    "+ True (NEGATIVE)": lambda i: i + True,
+    "== True (NEGATIVE)": lambda i: i == True,  # noqa: E712
+    "+ 1.5 (NEGATIVE)": lambda i: i + 1.5,
+    "< 2.5 (NEGATIVE)": lambda i: i < 2.5,
+    "+ 2**63 (NEGATIVE)": lambda i: i + 2**63,
+    "== 2**63 (NEGATIVE)": lambda i: i == 2**63,
+    "// 2 (NEGATIVE)": lambda i: i // 2,
+    "% 3 (NEGATIVE)": lambda i: i % 3,
+    "+ np.int64 (NEGATIVE)": lambda i: i + np.int64(2),
+}
+_E186MARITH_KINDS = {
+    "array": lambda m: m.Index(np.array(_E186MARITH_VALUES, dtype="int64"), name="k"),
+    "list": lambda m: m.Index(_E186MARITH_VALUES),
+    "int32 (NEGATIVE)": lambda m: m.Index(np.array([3, -1, 7, 0, 3], dtype="int32"), name="k"),
+    "object (NEGATIVE)": lambda m: m.Index([3, "a", 7], dtype=object),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", list(_E186MARITH_KINDS))
+@pytest.mark.parametrize("case", list(_E186MARITH_CASES))
+def test_int64_index_number_arithmetic_like_pandas_e186m(case: str, kind: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _E186MARITH_CASES[case](_E186MARITH_KINDS[kind](m))
+        except (OverflowError, TypeError, ValueError) as error:
+            return ("raise", type(error).__name__)
+        return (type(out).__name__, str(out.dtype), getattr(out, "name", None), repr(out.tolist()))
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case", ["== 3", "!= 3", "< 3", "<= 3", "> 0", ">= -1", "3 == (reflected)", "3 > (reflected)", "== True (NEGATIVE)", "< 2.5 (NEGATIVE)"]
+)
+def test_range_index_compares_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MARITH_CASES[case](m.RangeIndex(2, 9, 2, name="r"))
+        return (type(out).__name__, str(out.dtype), repr(out.tolist()))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: an Index of a float64 array reads its labels off
+# the buffer (each went out to a Python float through tolist), NaN the
+# missing label; all NaN or empty it is float64 and its values float64 (they
+# were object). Also an index of a declared dtype keeps it when wrapped
+# again or holding a NaN (Index(Index([1, None], dtype='Int64')) and a
+# float32 array with a NaN came back float64; 05cm6, vqjvd). NEGATIVE:
+# floats in a list beside None and an int64 array take the paths they
+# took; an object array of floats is not read as float64 (it keeps its
+# objects, n3ktr).
+_E186MFLOAT_DATA = {
+    "float64": lambda m: np.array([1.5, np.nan, -0.0, np.inf, 2.0, -7.25]),
+    "float64 whole numbers": lambda m: np.array([3.0, 1.0, 2.0]),
+    "float64 all NaN": lambda m: np.array([np.nan, np.nan]),
+    "float64 empty": lambda m: np.array([], dtype="float64"),
+    "float64 strided": lambda m: np.arange(10, dtype="float64")[::3],
+    "float32 with NaN": lambda m: np.array([1.5, np.nan, 2.0], dtype="float32"),
+    "Int64 index again": lambda m: m.Index(m.Index([1, None, 3], dtype="Int64")),
+    "float32 index again": lambda m: m.Index(m.Index(np.array([1.5, np.nan], dtype="float32"))),
+    "list beside None (NEGATIVE)": lambda m: [1.5, None, 2.0],
+    "int64 array (NEGATIVE)": lambda m: np.array([3, 1, 2]),
+    "object array (NEGATIVE)": lambda m: np.array([1.5, None, 2.0], dtype=object),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("data", list(_E186MFLOAT_DATA))
+def test_float_index_of_an_array_like_pandas_e186m(data: str) -> None:
+    def run(m: Any) -> Any:
+        index = m.Index(_E186MFLOAT_DATA[data](m), name="x")
+        series = m.Series(range(len(index)), index=_E186MFLOAT_DATA[data](m))
+        return (
+            type(index).__name__,
+            str(index.dtype),
+            repr(index.tolist()),
+            [bool(x) for x in index.isna()],
+            str(index.values.dtype),
+            repr(index.sort_values().tolist()),
+            str(series.index.dtype),
+            repr(series.sort_index().tolist()),
+        )
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-n3ktr: an Index of a numpy object array of numbers or
+# bools keeps them as objects (pandas 2.x infers only instants and
+# durations from an object array) - built, as a Series' / frame's index=
+# and set as .index - and an object index's values / to_numpy are an
+# object array of its labels as they are. They were an int64 / float64 /
+# bool index, ints beside a NaN floats, and dtype=object's values typed.
+# NEGATIVE: a list of numbers is inferred as before; an object array of
+# strings or of None takes the path it took, one of datetimes is inferred a
+# DatetimeIndex as before.
+_N3KTROBJ_DATA = {
+    "floats beside None": [1.5, None, 2.0],
+    "ints": [3, 1, 2],
+    "ints beside NaN": [3, np.nan, 1],
+    "bools": [True, False, True],
+    "NaN first": [np.nan, 2.5, 1],
+    "numbers beside text": [1, "a", 2.5],
+    "strings (NEGATIVE)": ["b", "a", "c"],
+    "all None (NEGATIVE)": [None, None],
+}
+_N3KTROBJ_BUILDS = {
+    "Index(object array)": lambda m, d: m.Index(np.array(d, dtype=object), name="x"),
+    "Index(object array, dtype=object)": lambda m, d: m.Index(np.array(d, dtype=object), dtype=object),
+    "Index(list, dtype=object)": lambda m, d: m.Index(d, dtype=object),
+    "Series(index=object array)": lambda m, d: m.Series(range(len(d)), index=np.array(d, dtype=object)).index,
+    "s.index = object array": lambda m, d: _n3ktrobj_set_index(m.Series(range(len(d))), np.array(d, dtype=object)),
+    "Index(list) (NEGATIVE)": lambda m, d: m.Index(d),
+}
+
+
+def _n3ktrobj_set_index(series: Any, labels: Any) -> Any:
+    series.index = labels
+    return series.index
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("build", list(_N3KTROBJ_BUILDS))
+@pytest.mark.parametrize("data", list(_N3KTROBJ_DATA))
+def test_object_array_index_keeps_objects_like_pandas_n3ktr(data: str, build: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            index = _N3KTROBJ_BUILDS[build](m, _N3KTROBJ_DATA[data])
+        except (TypeError, ValueError) as error:
+            return ("raise", type(error).__name__)
+        return (
+            type(index).__name__,
+            str(index.dtype),
+            [repr(x) for x in index.tolist()],
+            [bool(x) for x in index.isna()],
+            str(index.values.dtype),
+            [repr(x) for x in index.to_numpy().tolist()],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "build", ["Index(object array)", "Series(index=object array)", "s.index = object array", "Index(list) (NEGATIVE)"]
+)
+def test_object_array_of_datetimes_is_inferred_like_pandas_n3ktr(build: str) -> None:
+    stamps = [datetime.datetime(2020, 1, 1), datetime.datetime(2021, 6, 1), datetime.datetime(2019, 3, 1)]
+
+    def run(m: Any) -> Any:
+        index = _N3KTROBJ_BUILDS[build](m, stamps)
+        return (type(index).__name__, str(index.dtype), [str(x) for x in index.tolist()], str(index.values.dtype))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: an int64 Series' / Index's min, max, argmin,
+# argmax, idxmin and idxmax run on lane kernels (AVX2 where the CPU has it)
+# - the extreme in a late block, repeated later (the first position wins),
+# both int64 ends, ints past 2**53 a double cannot tell apart - with
+# pandas' answers; instants beside NaT too. NEGATIVE: a float Series with
+# NaN, a nullable Int64 Series with NA and an all-equal Series take their
+# own paths.
+def _e186mext_ints() -> list:
+    values = [(k * 37) % 101 - 50 for k in range(1000)]
+    values[613] = 2**60 + 1
+    values[871] = 2**60 + 1
+    values[40] = 2**60
+    values[77] = -(2**63)
+    values[950] = -(2**63)
+    return values
+
+
+_E186MEXT_DATA = {
+    "ints across blocks": lambda m: m.Series(_e186mext_ints(), index=[f"r{k}" for k in range(1000)]),
+    "ints past 2**53": lambda m: m.Series([2**60, 2**60 + 1, 2**60 - 1]),
+    "one int": lambda m: m.Series([7]),
+    "instants beside NaT": lambda m: m.Series(np.array(["2021-01-01", "NaT", "2020-05-01", "2022-02-02"], dtype="datetime64[ns]")),
+    "floats with NaN (NEGATIVE)": lambda m: m.Series([1.5, np.nan, -2.0, 9.0, 9.0]),
+    "nullable Int64 with NA (NEGATIVE)": lambda m: m.Series([3, None, -1, 3], dtype="Int64"),
+    "all equal (NEGATIVE)": lambda m: m.Series([4] * 40),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", ["min", "max", "argmin", "argmax", "idxmin", "idxmax"])
+@pytest.mark.parametrize("data", list(_E186MEXT_DATA))
+def test_series_extremes_like_pandas_e186m(data: str, op: str) -> None:
+    def run(m: Any) -> Any:
+        out = getattr(_E186MEXT_DATA[data](m), op)()
+        return (type(out).__name__, repr(out))
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", ["min", "max", "argmin", "argmax"])
+def test_int64_index_extremes_like_pandas_e186m(op: str) -> None:
+    def run(m: Any) -> Any:
+        out = getattr(m.Index(np.array(_e186mext_ints(), dtype="int64")), op)()
+        return (type(out).__name__, repr(out))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-n3ktr / e186m: Index.drop and delete as pandas'. A
+# DatetimeIndex / TimedeltaIndex drops labels read as instants / durations
+# (a string as get_loc reads one, a numpy datetime64, a Timestamp), keeps
+# its class and name, and keeps its freq where pandas' delete does (one run
+# at either end); a label it does not hold is pandas' KeyError unless
+# errors='ignore'. Strings were compared as text (nothing dropped), the
+# result a plain Index, and delete never kept the freq. An int index drops
+# the int an integral float equals. NEGATIVE: an inner position, a gap and
+# a run given backwards keep no freq; bools are not ints; repeated labels
+# all go.
+_N3KTRDROP_CASES = {
+    "dt drop str middle": lambda m: m.date_range("2020-01-01", periods=5, freq="D", name="t").drop(["2020-01-03"]),
+    "dt drop str first": lambda m: m.date_range("2020-01-01", periods=5, freq="D", name="t").drop(["2020-01-01"]),
+    "dt drop two at end": lambda m: m.date_range("2020-01-01", periods=5, freq="D").drop(["2020-01-04", "2020-01-05"]),
+    "dt drop backwards (NEGATIVE)": lambda m: m.date_range("2020-01-01", periods=5, freq="D").drop(["2020-01-02", "2020-01-01"]),
+    "dt drop Timestamp": lambda m: m.date_range("2020-01-01", periods=5, freq="D").drop([m.Timestamp("2020-01-05")]),
+    "dt drop one str": lambda m: m.date_range("2020-01-01", periods=5, freq="D").drop("2020-01-02"),
+    "dt drop datetime64": lambda m: m.date_range("2020-01-01", periods=5, freq="D").drop([np.datetime64("2020-01-02")]),
+    "dt drop missing": lambda m: m.date_range("2020-01-01", periods=5, freq="D").drop(["2021-01-01"]),
+    "dt drop missing ignore": lambda m: m.date_range("2020-01-01", periods=5, freq="D").drop(["2021-01-01"], errors="ignore"),
+    "dt tz drop str": lambda m: m.date_range("2020-01-01", periods=4, freq="h", tz="Asia/Tokyo").drop(["2020-01-01 01:00"]),
+    "dt repeated drop": lambda m: m.DatetimeIndex(["2020-01-01", "2020-01-02", "2020-01-01"]).drop(["2020-01-01"]),
+    "dt delete 0": lambda m: m.date_range("2020-01-01", periods=5, freq="D").delete(0),
+    "dt delete -1": lambda m: m.date_range("2020-01-01", periods=5, freq="D").delete(-1),
+    "dt delete inner (NEGATIVE)": lambda m: m.date_range("2020-01-01", periods=5, freq="D").delete(2),
+    "dt delete [0, 1]": lambda m: m.date_range("2020-01-01", periods=5, freq="D").delete([0, 1]),
+    "dt delete gap (NEGATIVE)": lambda m: m.date_range("2020-01-01", periods=5, freq="D").delete([0, 2]),
+    "dt delete none": lambda m: m.date_range("2020-01-01", periods=5, freq="D").delete([]),
+    "td drop str": lambda m: m.timedelta_range("1 day", periods=4, freq="D", name="d").drop(["2 days"]),
+    "td drop first": lambda m: m.timedelta_range("1 day", periods=4, freq="D").drop(["1 day"]),
+    "td delete -1": lambda m: m.timedelta_range("1 day", periods=4, freq="D").delete(-1),
+    "td delete inner (NEGATIVE)": lambda m: m.timedelta_range("1 day", periods=4, freq="D").delete(1),
+    "td drop missing": lambda m: m.timedelta_range("1 day", periods=4, freq="D").drop(["9 days"]),
+    "int drop float": lambda m: m.Index([1, 2, 3], name="k").drop([1.0]),
+    "int repeated drop float": lambda m: m.Index([1, 2, 1, 3]).drop([1.0]),
+    "int drop bool ignore (NEGATIVE)": lambda m: m.Index([1, 2, 3]).drop([True], errors="ignore"),
+    "int drop 2.5": lambda m: m.Index([1, 2, 3]).drop([2.5]),
+    "int32 drop": lambda m: m.Index(np.array([4, 5, 6], dtype="int32")).drop([5]),
+    "int delete list": lambda m: m.Index(np.arange(40) * 3).delete([5, 7, 9]),
+    "str delete": lambda m: m.Index(["a", "b", "c"], name="s").delete(1),
+    "period delete": lambda m: m.period_range("2000-01", periods=4, freq="M").delete([0, 3]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_N3KTRDROP_CASES))
+def test_index_drop_and_delete_like_pandas_n3ktr(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _N3KTRDROP_CASES[case](m)
+        except (KeyError, TypeError, ValueError) as error:
+            return ("raise", type(error).__name__)
+        return (type(out).__name__, str(out.dtype), getattr(out, "freqstr", None), out.name, [str(x) for x in out])
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-rc0923-epic-zero-certified-losses-bss5q.3: np.floor /
+# ceil / trunc / rint of a plain float64 Series run on the column's own
+# rounding (they went out to numpy and back) - numpy's bits: NaN, -0.0 and
+# the infinities kept, halves to even under rint, values past 2**53 exact.
+# NEGATIVE: an int64, a float32 and a nullable Float64 Series and an out=
+# array take numpy's path (float64 / float32 / Float64 answers).
+_BSS5Q3ROUND_VALUES = [2.5, -2.5, 0.5, -0.5, 1.5, -0.0, 0.0, np.nan, np.inf, -np.inf, 2.0**53 + 2, 1e300, -1e-300, 7.75]
+_BSS5Q3ROUND_DATA = {
+    "float64": lambda m: m.Series(_BSS5Q3ROUND_VALUES, index=list("abcdefghijklmn"), name="v"),
+    "int64 (NEGATIVE)": lambda m: m.Series([3, -4, 0], name="v"),
+    "float32 (NEGATIVE)": lambda m: m.Series(np.array([2.5, -0.5, np.nan], dtype="float32")),
+    "Float64 (NEGATIVE)": lambda m: m.Series([2.5, None, -1.5], dtype="Float64"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("ufunc", ["floor", "ceil", "trunc", "rint"])
+@pytest.mark.parametrize("data", list(_BSS5Q3ROUND_DATA))
+def test_series_rounding_ufuncs_like_pandas_bss5q3(data: str, ufunc: str) -> None:
+    def run(m: Any) -> Any:
+        out = getattr(np, ufunc)(_BSS5Q3ROUND_DATA[data](m))
+        return (str(out.dtype), out.name, list(out.index), [repr(x) for x in out.tolist()])
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_series_floor_into_out_like_pandas_bss5q3() -> None:
+    # NEGATIVE: an out= array is numpy's path, written in place.
+    def run(m: Any) -> Any:
+        target = np.empty(3)
+        np.floor(m.Series([2.5, -0.5, np.nan]), out=target)
+        return [repr(x) for x in target.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: an all-valid int64 Series' mean sums its ints as
+# numpy does - cast to float64 8192 at a time, each buffer pairwise - in
+# AVX2 lanes, the same bits as pandas' mean at every length (several cast
+# buffers and a tail; the pairwise splits past 128); NEGATIVE: values past
+# 2**51 (cast with the conversion's own rounding, not the lane trick), a
+# nullable Int64 Series with NA and an empty one take their paths.
+def _e186mmean_ints(n: int, big: bool) -> list:
+    values = [((k * 7919) % 1_000_003) - 500_000 for k in range(n)]
+    if big and n > 9001:
+        values[9000] = 2**60 + 3
+        values[9001] = -(2**55) - 1
+    return values
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("n", [1, 7, 8, 129, 1000, 8192, 8193, 20_000, 50_001])
+@pytest.mark.parametrize("big", [False, True])
+def test_int64_series_mean_like_pandas_e186m(n: int, big: bool) -> None:
+    values = _e186mmean_ints(n, big)
+    assert repr(fpd.Series(values).mean()) == repr(pd.Series(values).mean())
+    assert repr(fpd.DataFrame({"a": values}).mean().iloc[0]) == repr(pd.DataFrame({"a": values}).mean().iloc[0])
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_int64_series_mean_other_paths_like_pandas_e186m() -> None:
+    # NEGATIVE: a nullable Int64 Series with NA and an empty int Series.
+    def run(m: Any) -> Any:
+        return (repr(m.Series([3, None, 8], dtype="Int64").mean()), repr(m.Series([], dtype="int64").mean()))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a float Series' argmin / argmax / idxmin /
+# idxmax run on lane kernels - the first position of the least / greatest,
+# -0.0 and 0.0 equal (the first wins), the infinities, repeats in later
+# blocks - and a frame's idxmin / idxmax read each column's count, not its
+# values (a fresh column selection made every value a Scalar). NEGATIVE: a
+# float Series holding NaN (skipped, its own path) and a frame column of
+# NaN only (NaN, as pandas 2.2.3).
+def _e186mfext_floats() -> list:
+    values = [((k * 37) % 101) / 8.0 - 6.0 for k in range(300)]
+    values[12] = -0.0
+    values[250] = 0.0
+    values[100] = 9.5
+    values[260] = 9.5
+    values[30] = -np.inf
+    values[290] = -np.inf
+    return values
+
+
+_E186MFEXT_DATA = {
+    "floats across blocks": lambda m: m.Series(_e186mfext_floats(), index=[f"r{k}" for k in range(300)]),
+    "zeros signed": lambda m: m.Series([-0.0, 0.0, -0.0] * 20),
+    "with inf": lambda m: m.Series([1.0, np.inf, 3.0, np.inf, -np.inf]),
+    "with NaN (NEGATIVE)": lambda m: m.Series([2.0, np.nan, 7.5, np.nan, -1.0]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", ["argmin", "argmax", "idxmin", "idxmax"])
+@pytest.mark.parametrize("data", list(_E186MFEXT_DATA))
+def test_float_series_arg_extremes_like_pandas_e186m(data: str, op: str) -> None:
+    def run(m: Any) -> Any:
+        return repr(getattr(_E186MFEXT_DATA[data](m), op)())
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", ["idxmin", "idxmax"])
+def test_fresh_frame_idx_extremes_like_pandas_e186m(op: str) -> None:
+    def run(m: Any) -> Any:
+        df = m.DataFrame({"a": [3, 1, 4, 1, 5], "b": [2.5, -1.0, 9.0, 9.0, 0.0], "c": ["x", "y", "z", "w", "v"], "n": [np.nan] * 5})
+        out = getattr(df[["a", "b"]], op)()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            missing = getattr(df[["a", "n"]], op)()
+        return (repr(out.tolist()), str(out.dtype), repr(missing.tolist()))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: an all-valid int64 Series' var / std run on AVX2
+# lanes - pandas' nanvar (the whole array cast, its pairwise total, then the
+# pairwise squared deviations) bit for bit at every length and ddof, values
+# past 2**51 too. NEGATIVE: a nullable Int64 Series with NA, one value with
+# ddof=1 (NaN) and a float Series take their own paths.
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("n", [2, 7, 129, 1000, 20_000, 50_001])
+@pytest.mark.parametrize("big", [False, True])
+@pytest.mark.parametrize("ddof", [0, 1])
+def test_int64_series_var_std_like_pandas_e186m(n: int, big: bool, ddof: int) -> None:
+    values = _e186mmean_ints(n, big)
+    if big and n <= 9001:
+        values[-1] = 2**60 + 3
+    for op in ("var", "std"):
+        assert repr(getattr(fpd.Series(values), op)(ddof=ddof)) == repr(getattr(pd.Series(values), op)(ddof=ddof))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_int64_series_var_other_paths_like_pandas_e186m() -> None:
+    def run(m: Any) -> Any:
+        return (
+            repr(m.Series([3, None, 8, 1], dtype="Int64").var()),
+            repr(m.Series([7]).std()),
+            repr(m.Series([1.5, 2.25, -3.0]).std()),
+        )
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a groupby object keeps its single key's grouping
+# for all its calls and column selections, as pandas' keeps its grouper -
+# the same answers as pandas call after call, a text key and an int key,
+# sort=False too. NEGATIVE: a groupby of a changed frame groups afresh, and
+# two keys take their own path.
+def _e186mgb_shown(result: Any) -> Any:
+    if hasattr(result, "columns"):
+        return [(str(label), [repr(v) for v in row]) for label, row in zip(result.index, result.values.tolist())]
+    return [(str(label), repr(value)) for label, value in zip(result.index, result.tolist())]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("key", ["s", "k", ["s", "k"]])
+@pytest.mark.parametrize("sort", [True, False])
+def test_reused_groupby_answers_like_pandas_e186m(key: Any, sort: bool) -> None:
+    def run(m: Any) -> Any:
+        df = m.DataFrame(
+            {
+                "s": ["b", "a", "c", "a", "b", "a", "d"],
+                "k": [3, 1, 2, 1, 3, 1, 7],
+                "x": [1.5, 2.0, -1.0, 4.0, 0.5, 3.0, 9.0],
+                "y": [1, 2, 3, 4, 5, 6, 7],
+            }
+        )
+        g = df.groupby(key, sort=sort)
+        out = []
+        for _ in range(2):
+            out.append(_e186mgb_shown(g.size()))
+            out.append(_e186mgb_shown(g[["x", "y"]].sum()))
+            out.append(_e186mgb_shown(g[["x"]].mean()))
+            out.append(_e186mgb_shown(g["x"].max()))
+            out.append(_e186mgb_shown(g[["y"]].count()))
+        changed = df[df["y"] > 2]
+        out.append(_e186mgb_shown(changed.groupby(key, sort=sort).size()))
+        out.append(_e186mgb_shown(changed.groupby(key, sort=sort)[["x"]].sum()))
+        return out
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: read_json(lines=True) parses each line's values
+# straight into their columns - the columns the union of every line's keys,
+# first seen first, a key a line lacks null there, a repeated key's last
+# value, a nested object or array its JSON text, pandas' bare NaN tokens
+# read - with pandas' answers; a key a line lacks is NaN there (it was None
+# in a text column), a JSON null None. NEGATIVE: a line that is no JSON
+# object is an error. (Not here, open: a uint64 past int64 is float64 -
+# pandas uint64 - and an Infinity token is refused.)
+_E186MJSONL_CASES = {
+    "uniform": '{"a": 1, "b": 2.5, "c": "x", "d": true}\n{"a": 2, "b": -1.0, "c": "y", "d": false}\n',
+    "missing and late keys": '{"a": 1, "b": "p"}\n{"b": "q"}\n{"a": 3, "c": 9.5}\n',
+    "keys reordered": '{"a": 1, "b": 2}\n{"b": 3, "a": 4}\n{"a": 5, "b": 6}\n',
+    "nulls and blank lines": '{"a": null, "b": 1}\n\n{"a": 2, "b": null}\n   \n',
+    "int64 max": '{"a": 9223372036854775807}\n{"a": -9223372036854775808}\n',
+    "escaped key and text": '{"k\\u00e9y": "caf\\u00e9", "q": "a\\"b"}\n{"k\\u00e9y": "x", "q": "y"}\n',
+    "bare NaN tokens": '{"a": NaN, "b": 1}\n{"a": 2.5, "b": NaN}\n',
+    "null beside text": '{"a": "x", "b": 1}\n{"a": null, "b": 2}\n{"b": 3}\n',
+    "mixed int and float": '{"a": 1}\n{"a": 2.5}\n',
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MJSONL_CASES))
+def test_read_json_lines_like_pandas_e186m(case: str) -> None:
+    text = _E186MJSONL_CASES[case]
+
+    def run(m: Any) -> Any:
+        try:
+            out = m.read_json(io.StringIO(text), lines=True)
+        except (ValueError, TypeError) as error:
+            return ("raise", type(error).__name__)
+        return ([str(c) for c in out.columns], [str(t) for t in out.dtypes], [[repr(v) for v in row] for row in out.values.tolist()])
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_read_json_lines_not_an_object_raises_e186m() -> None:
+    # NEGATIVE: a line that is no JSON object is refused - pandas' frame
+    # constructor fails on it (AttributeError), fp says why (ValueError).
+    with pytest.raises(AttributeError):
+        pd.read_json(io.StringIO('{"a": 1}\n[1, 2]\n'), lines=True)
+    with pytest.raises(ValueError, match="JSON object"):
+        fpd.read_json(io.StringIO('{"a": 1}\n[1, 2]\n'), lines=True)
+
+
+# br-frankenpandas-e186m: str.findall / str.split(regex=True) compile their
+# pattern once (re's module functions looked it up per row), and
+# str.encode('utf-8') copies each str's own bytes (each went through
+# Python's codec) - pandas' answers, missing values, empty strings and
+# non-ASCII text included. NEGATIVE: another codec with an error handler
+# (ascii / ignore, latin-1 / replace) still runs Python's codec.
+_E186MSTR_DATA = ["Item_12-ab3", None, "x9y88", "", "café 7", np.nan, "a-b-c", "\U0001F600 1"]
+_E186MSTR_CASES = {
+    "findall digits": lambda s: s.str.findall(r"\d"),
+    "findall groups": lambda s: s.str.findall(r"(\w)(\d)"),
+    "findall flags": lambda s: s.str.findall(r"[A-Z]", flags=2),
+    "split regex": lambda s: s.str.split(r"[-_]", regex=True),
+    "split regex n=1": lambda s: s.str.split(r"[-_ ]", n=1, regex=True),
+    "split literal": lambda s: s.str.split("-"),
+    "encode utf-8": lambda s: s.str.encode("utf-8"),
+    "encode UTF8": lambda s: s.str.encode("UTF8"),
+    "encode ascii ignore (NEGATIVE)": lambda s: s.str.encode("ascii", "ignore"),
+    "encode latin-1 replace (NEGATIVE)": lambda s: s.str.encode("latin-1", "replace"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MSTR_CASES))
+def test_str_findall_split_encode_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MSTR_CASES[case](m.Series(_E186MSTR_DATA, name="s"))
+        return (str(out.dtype), [repr(x) for x in out.tolist()])
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: an all-valid int64 column's shift casts as it moves
+# (float64, NaN in the vacated rows), an all-valid text column held as one
+# byte buffer shifts as its bytes (None in the vacated rows), and
+# df.where / df.mask select each float64 or int64 column from its typed
+# buffers even when a frame mixes the two - pandas' answers, past a 64-row
+# mask word. NEGATIVE: an int fill keeps int64, a nullable Int64 / `string`
+# column keeps its own missing value, a text fill and a nullable-boolean
+# condition take the per-cell path.
+_E186MSW_N = 70
+_E186MSW_INTS = [(i * 37) % 23 - 11 for i in range(_E186MSW_N)]
+_E186MSW_FLOATS = [((i * 13) % 17) / 4 for i in range(_E186MSW_N)]
+_E186MSW_TEXT = [f"k{(i * 7) % 11}" if i % 9 else ("" if i % 2 else "café") for i in range(_E186MSW_N)]
+
+
+def _e186msw_frame(m: Any) -> Any:
+    return m.DataFrame({"x": _E186MSW_FLOATS, "y": _E186MSW_INTS, "s": _E186MSW_TEXT})
+
+
+_E186MSW_SERIES_CASES = {
+    "int shift 1": lambda m: m.Series(_E186MSW_INTS).shift(1),
+    "int shift -3": lambda m: m.Series(_E186MSW_INTS).shift(-3),
+    "int shift 0": lambda m: m.Series(_E186MSW_INTS).shift(0),
+    "int shift past the length": lambda m: m.Series(_E186MSW_INTS).shift(_E186MSW_N + 5),
+    "int shift -length": lambda m: m.Series(_E186MSW_INTS).shift(-_E186MSW_N),
+    "int32 shift": lambda m: m.Series(_E186MSW_INTS, dtype="int32").shift(2),
+    "int shift fill 0 (NEGATIVE)": lambda m: m.Series(_E186MSW_INTS).shift(2, fill_value=0),
+    "Int64 shift (NEGATIVE)": lambda m: m.Series(_E186MSW_INTS, dtype="Int64").shift(2),
+    "text shift 1": lambda m: m.Series(_E186MSW_TEXT).shift(1),
+    "text shift -2": lambda m: m.Series(_E186MSW_TEXT).shift(-2),
+    "text shift 0": lambda m: m.Series(_E186MSW_TEXT).shift(0),
+    "text shift past the length": lambda m: m.Series(_E186MSW_TEXT).shift(-_E186MSW_N - 1),
+    "text window shift": lambda m: m.Series(_E186MSW_TEXT).iloc[5:40].shift(3),
+    "text holding None": lambda m: m.Series(["a", None, "b", np.nan, "c"]).shift(1),
+    "text fill (NEGATIVE)": lambda m: m.Series(_E186MSW_TEXT).shift(2, fill_value="z"),
+    "string dtype (NEGATIVE)": lambda m: m.Series(_E186MSW_TEXT, dtype="string").shift(2),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MSW_SERIES_CASES))
+def test_int_and_text_shift_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MSW_SERIES_CASES[case](m)
+        return (str(out.dtype), [repr(x) for x in out.tolist()], list(out.index))
+
+    assert run(fpd) == run(pd)
+
+
+_E186MSW_FRAME_CASES = {
+    "frame shift": lambda df: df.shift(1),
+    "frame shift -2": lambda df: df.shift(-2),
+    "where": lambda df: df[["x", "y"]].where(df[["x", "y"]] > 1),
+    "mask": lambda df: df[["x", "y"]].mask(df[["x", "y"]] > 1),
+    "where all kept": lambda df: df[["x", "y"]].where(df[["x", "y"]] > -100),
+    "where none kept": lambda df: df[["x", "y"]].where(df[["x", "y"]] > 100),
+    "mask all kept": lambda df: df[["x", "y"]].mask(df[["x", "y"]] > 100),
+    "where int fill": lambda df: df[["y"]].where(df[["y"]] > 0, -1),
+    "mask int fill": lambda df: df[["y"]].mask(df[["y"]] > 0, -1),
+    "where float fill": lambda df: df[["x", "y"]].where(df[["x", "y"]] > 1, 0.5),
+    "where None": lambda df: df[["x", "y"]].where(df[["x", "y"]] > 1, None),
+    "where nan in float": lambda df: df[["x", "y"]].assign(x=df["x"].where(df["x"] > 2)).where(df[["x", "y"]] < 3),
+    "where int32": lambda df: df[["y"]].astype("int32").where(df[["y"]] > 0),
+    "where int fill on mixed (NEGATIVE)": lambda df: df[["x", "y"]].where(df[["x", "y"]] > 1, -1),
+    "where nullable cond (NEGATIVE)": lambda df: df[["x", "y"]].where((df[["x", "y"]] > 1).astype("boolean")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MSW_FRAME_CASES))
+def test_frame_shift_where_mask_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MSW_FRAME_CASES[case](_e186msw_frame(m))
+        return [
+            (name, str(out[name].dtype), [repr(x) for x in out[name].tolist()])
+            for name in out.columns
+        ]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: DataFrame.stack reads its flat `row|column` labels
+# from the stacked frame and each column's label once - pandas' MultiIndex,
+# names and values, a missing cell dropped (or kept under dropna=False /
+# future_stack=True) over every kind of row axis.
+def _e186mstk_frame(m: Any, index: Any) -> Any:
+    return m.DataFrame(
+        {"x": [0.5, np.nan, 2.5, 3.0], "y": [1, 2, 3, 4], 7: [np.nan, np.nan, 1.5, 0.0]},
+        index=index,
+    )
+
+
+_E186MSTK_CASES = {
+    "range rows": lambda m: _e186mstk_frame(m, None).stack(),
+    "text rows": lambda m: _e186mstk_frame(m, ["a", "b", "c", "d"]).stack(),
+    "named rows": lambda m: _e186mstk_frame(m, m.Index([10, 20, 30, 40], name="r")).stack(),
+    "date rows": lambda m: _e186mstk_frame(m, m.date_range("2024-01-01", periods=4)).stack(),
+    "MultiIndex rows": lambda m: _e186mstk_frame(
+        m, m.MultiIndex.from_arrays([["a", "a", "b", "b"], [1, 2, 1, 2]], names=["p", "q"])
+    ).stack(),
+    "no missing": lambda m: _e186mstk_frame(m, None)[["y"]].stack(),
+    "ints and floats": lambda m: _e186mstk_frame(m, None)[["x", "y"]].fillna(0.0).stack(),
+    "dropna=False (NEGATIVE)": lambda m: _e186mstk_frame(m, None).stack(dropna=False),
+    "future_stack (NEGATIVE)": lambda m: _e186mstk_frame(m, None).stack(future_stack=True),
+    "all missing row": lambda m: _e186mstk_frame(m, None)[["x", 7]].stack(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MSTK_CASES))
+def test_frame_stack_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MSTK_CASES[case](m)
+        return (
+            str(out.dtype),
+            [repr(x) for x in out.tolist()],
+            [repr(label) for label in out.index.tolist()],
+            list(out.index.names),
+        )
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a text column held as one byte buffer lists and
+# iterates its strs straight from its bytes (a repeated value made once,
+# a mostly-distinct column each anew), and an int64 replace of up to 16
+# keys scans instead of hashing - pandas' answers. NEGATIVE: a column
+# holding None, the `string` and category dtypes, a float replacement and a
+# float column take their own paths.
+_E186MTL_DISTINCT = [f"v{i}é" for i in range(3000)]
+_E186MTL_CASES = {
+    "repeated": lambda m: m.Series(["a", "bb", "", "a", "ccc"] * 700),
+    "distinct past the sample": lambda m: m.Series(_E186MTL_DISTINCT),
+    "distinct then repeated": lambda m: m.Series(_E186MTL_DISTINCT[:2100] + ["x", "y"] * 600),
+    "row window": lambda m: m.Series(_E186MTL_DISTINCT).iloc[1000:2600],
+    "unicode": lambda m: m.Series(["\U0001F600", "naïve", "日本", ""] * 3),
+    "holding None (NEGATIVE)": lambda m: m.Series(["a", None, "b", np.nan] * 3),
+    "string dtype (NEGATIVE)": lambda m: m.Series(["a", None, "b"] * 3, dtype="string"),
+    "category (NEGATIVE)": lambda m: m.Series(["a", "b", "a"] * 3, dtype="category"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MTL_CASES))
+def test_text_tolist_and_iteration_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        s = _E186MTL_CASES[case](m)
+        return ([repr(x) for x in s.tolist()], [repr(x) for x in s], [type(x).__name__ for x in s.tolist()])
+
+    assert run(fpd) == run(pd)
+
+
+_E186MRP_INTS = [(i * 7) % 23 - 5 for i in range(200)]
+_E186MRP_CASES = {
+    "one key": lambda s: s.replace(3, 99),
+    "one key absent": lambda s: s.replace(1000, 1),
+    "list of keys": lambda s: s.replace([1, 2, 3], [10, 20, 30]),
+    "dict of keys": lambda s: s.replace({-5: 0, 17: -17}),
+    "key to itself": lambda s: s.replace(4, 4),
+    "repeated key last wins": lambda s: s.replace([2, 2], [7, 8]),
+    "repeated key as int and float": lambda s: s.replace([2, 2.0], [7, 8]),
+    "pairs do not chain": lambda s: s.replace([1, 2], [2, 3]),
+    "repeated float key": lambda s: s.astype("float64").replace([2.0, 2.0], [7.5, 8.5]),
+    "repeated NaN key": lambda s: s.astype("float64").where(s > 0).replace([np.nan, np.nan], [5.0, 6.0]),
+    "repeated text key": lambda s: s.astype(str).replace(["2", "2"], ["x", "y"]),
+    "frame repeated key": lambda s: s.to_frame("a").assign(b=s * 2).replace([2, 2], [7, 8])["a"],
+    "more than 16 keys": lambda s: s.replace({k: k * 100 for k in range(-5, 18)}),
+    "float value (NEGATIVE)": lambda s: s.replace(3, 0.5),
+    "float key on ints (NEGATIVE)": lambda s: s.replace(3.0, 9),
+    "float column (NEGATIVE)": lambda s: s.astype("float64").replace(3, 9),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MRP_CASES))
+def test_int64_replace_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MRP_CASES[case](m.Series(_E186MRP_INTS))
+        return (str(out.dtype), [repr(x) for x in out.tolist()])
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: df.where / mask with a DataFrame `other` select
+# two int64 columns as int64 from their buffers beside the float64 ones,
+# DataFrame.cov reads an all-valid int64 column as float64 once, and
+# equals compares int64 / float64 buffers - pandas' answers. NEGATIVE: an
+# int column against a float `other`, unaligned frames, a nullable
+# condition, nullable / bool columns in cov, an int column against a float
+# one in equals.
+def _e186mwd_frames(m: Any) -> Any:
+    n = 70
+    df = m.DataFrame(
+        {
+            "x": [((i * 13) % 17) / 4 for i in range(n)],
+            "z": [(i * 7) % 23 - 11 for i in range(n)],
+        }
+    )
+    return df, df > 1, df * 2
+
+
+_E186MWD_CASES = {
+    "where df other": lambda m, df, cond, other: df.where(cond, other),
+    "mask df other": lambda m, df, cond, other: df.mask(cond, other),
+    "where all true": lambda m, df, cond, other: df.where(df > -100, other),
+    "where none true": lambda m, df, cond, other: df.where(df > 100, other),
+    "where NaN in self": lambda m, df, cond, other: df.assign(x=df["x"].where(df["x"] > 1)).where(cond, other),
+    "mask NaN in other": lambda m, df, cond, other: df.mask(cond, other.assign(x=other["x"].where(other["x"] > 3))),
+    "int self fractional other (NEGATIVE)": lambda m, df, cond, other: df.where(cond, other * 0.5 + 0.25),
+    "unaligned (NEGATIVE)": lambda m, df, cond, other: df.where(cond, other.iloc[::-1]),
+    "nullable cond (NEGATIVE)": lambda m, df, cond, other: df.where(cond.astype("boolean"), other),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MWD_CASES))
+def test_frame_where_mask_frame_other_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        df, cond, other = _e186mwd_frames(m)
+        out = _E186MWD_CASES[case](m, df, cond, other)
+        return [(name, str(out[name].dtype), [repr(v) for v in out[name].tolist()]) for name in out.columns]
+
+    assert run(fpd) == run(pd)
+
+
+_E186MCV_INTS = [(i * 37) % 101 - 50 for i in range(120)]
+_E186MCV_CASES = {
+    "float and int": lambda m: m.DataFrame({"x": [v / 7 for v in _E186MCV_INTS], "z": _E186MCV_INTS[::-1]}).cov(),
+    "ints only": lambda m: m.DataFrame({"a": _E186MCV_INTS, "b": _E186MCV_INTS[::-1]}).cov(),
+    "ddof 0": lambda m: m.DataFrame({"x": [v / 3 for v in _E186MCV_INTS], "z": _E186MCV_INTS}).cov(ddof=0),
+    "min_periods": lambda m: m.DataFrame({"x": [v / 3 for v in _E186MCV_INTS], "z": _E186MCV_INTS}).cov(min_periods=200),
+    "big ints": lambda m: m.DataFrame({"a": [v * 2**55 + 3 for v in _E186MCV_INTS], "b": _E186MCV_INTS}).cov(),
+    "nullable Int64 (NEGATIVE)": lambda m: m.DataFrame({"a": m.array(_E186MCV_INTS[:-1] + [None], dtype="Int64"), "b": _E186MCV_INTS}).cov(),
+    "bool (NEGATIVE)": lambda m: m.DataFrame({"a": [v > 0 for v in _E186MCV_INTS], "b": _E186MCV_INTS}).cov(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MCV_CASES))
+def test_frame_cov_with_int_columns_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MCV_CASES[case](m)
+        return [(name, [round(v, 6) if v == v else "nan" for v in out[name].tolist()]) for name in out.columns]
+
+    assert run(fpd) == run(pd)
+
+
+_E186MEQ_CASES = {
+    "same frame": lambda m: (m.DataFrame({"x": [1.5, np.nan, 3.0], "z": [1, 2, 3]}), m.DataFrame({"x": [1.5, np.nan, 3.0], "z": [1, 2, 3]})),
+    "NaN moved": lambda m: (m.DataFrame({"x": [1.5, np.nan, 3.0]}), m.DataFrame({"x": [1.5, 3.0, np.nan]})),
+    "value differs": lambda m: (m.DataFrame({"z": [1, 2, 3]}), m.DataFrame({"z": [1, 2, 4]})),
+    "signed zero": lambda m: (m.DataFrame({"x": [0.0, 1.0]}), m.DataFrame({"x": [-0.0, 1.0]})),
+    "int vs float (NEGATIVE)": lambda m: (m.DataFrame({"z": [1, 2]}), m.DataFrame({"z": [1.0, 2.0]})),
+    "series NaN": lambda m: (m.Series([1.0, np.nan] * 40), m.Series([1.0, np.nan] * 40)),
+    "series int differs": lambda m: (m.Series(list(range(80))), m.Series(list(range(79)) + [0])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MEQ_CASES))
+def test_equals_on_typed_columns_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        left, right = _E186MEQ_CASES[case](m)
+        return (left.equals(right), right.equals(left), left.equals(left))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: df.loc[list] over a unique int index checks its
+# labels by search / the index's cached lookup, df.reindex makes the
+# target's labels only over an IntervalIndex, and combine_first of
+# unaligned frames selects two int64 columns typed beside the float64 ones
+# - pandas' answers, KeyErrors included. NEGATIVE: a repeated index, a
+# float label that is no int, a missing label, an interval index, a
+# nullable / one-sided int column.
+def _e186mlc_frame(m: Any, index: Any) -> Any:
+    return m.DataFrame({"x": [float(i) / 2 for i in range(6)], "z": list(range(10, 16))}, index=index)
+
+
+_E186MLC_CASES = {
+    "range index": lambda m: _e186mlc_frame(m, None).loc[[4, 0, 2]],
+    "ascending index": lambda m: _e186mlc_frame(m, [1, 3, 5, 7, 9, 11]).loc[[9, 1]],
+    "unsorted index": lambda m: _e186mlc_frame(m, [5, 1, 9, 3, 11, 7]).loc[[3, 5, 11]],
+    "integral float label": lambda m: _e186mlc_frame(m, [5, 1, 9, 3, 11, 7]).loc[[3.0, 9]],
+    "series loc": lambda m: _e186mlc_frame(m, None)["x"].loc[[5, 1]],
+    "one missing (NEGATIVE)": lambda m: _e186mlc_frame(m, None).loc[[1, 99]],
+    "all missing (NEGATIVE)": lambda m: _e186mlc_frame(m, [5, 1, 9, 3, 11, 7]).loc[[2, 4]],
+    "fractional float (NEGATIVE)": lambda m: _e186mlc_frame(m, None).loc[[1, 2.5]],
+    "repeated index (NEGATIVE)": lambda m: _e186mlc_frame(m, [1, 1, 2, 2, 3, 3]).loc[[2, 3]],
+    "reindex range": lambda m: _e186mlc_frame(m, None).reindex(range(0, 9, 2)),
+    "reindex list": lambda m: _e186mlc_frame(m, [5, 1, 9, 3, 11, 7]).reindex([9, 2, 5]),
+    "reindex interval points (NEGATIVE)": lambda m: m.DataFrame(
+        {"x": [1.0, 2.0, 3.0]}, index=m.IntervalIndex.from_breaks([0, 1, 2, 3])
+    ).reindex([0.5, 2.5, 7.0]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MLC_CASES))
+def test_loc_label_list_and_reindex_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _E186MLC_CASES[case](m)
+        except KeyError as error:
+            return ("KeyError", str(error))
+        frame = out.to_frame() if hasattr(out, "to_frame") and not hasattr(out, "columns") else out
+        return (
+            [repr(label) for label in frame.index.tolist()],
+            [(str(name), str(frame[name].dtype), [repr(v) for v in frame[name].tolist()]) for name in frame.columns],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+def _e186mcf_frames(m: Any) -> Any:
+    n = 70
+    df = m.DataFrame(
+        {"x": [float(i % 9) if i % 5 else np.nan for i in range(n)], "z": [(i * 7) % 23 for i in range(n)]},
+        index=list(range(0, 2 * n, 2)),
+    )
+    other = m.DataFrame(
+        {"x": [float(i) / 3 for i in range(n)], "z": [-i for i in range(n)]}, index=list(range(n))
+    )
+    return df, other
+
+
+_E186MCF_CASES = {
+    "unaligned float and int": lambda m, df, other: df.combine_first(other),
+    "other first": lambda m, df, other: other.combine_first(df),
+    "half of itself": lambda m, df, other: df.iloc[::2].combine_first(df),
+    "nullable int (NEGATIVE)": lambda m, df, other: df.astype({"z": "Int64"}).combine_first(other),
+    "int beside float (NEGATIVE)": lambda m, df, other: df.combine_first(other.astype({"z": "float64"})),
+    "column on one side (NEGATIVE)": lambda m, df, other: df.combine_first(other.rename(columns={"z": "w"})),
+}
+
+
+_E186MSV_TEXT = ["b", "a", "", "café", "B", "a", "b", "ab", "\U0001F600", "a"] * 7
+_E186MSV_CASES = {
+    "text then float": lambda df: df.sort_values(["s", "x"]),
+    "text desc then float": lambda df: df.sort_values(["s", "x"], ascending=[False, True]),
+    "int then text": lambda df: df.sort_values(["k", "s"]),
+    "text then int desc": lambda df: df.sort_values(["s", "k"], ascending=[True, False]),
+    "ties keep order": lambda df: df.sort_values(["s"], kind="stable"),
+    "None in text (NEGATIVE)": lambda df: df.assign(
+        s=[text if at % 4 else None for at, text in enumerate(_E186MSV_TEXT)]
+    ).sort_values(["s", "k"]),
+    "NaN in float (NEGATIVE)": lambda df: df.assign(x=df["x"].where(df["k"] > 1)).sort_values(["s", "x"]),
+    "category (NEGATIVE)": lambda df: df.astype({"s": "category"}).sort_values(["s", "k"]),
+}
+
+
+def _e186msv_frame(m: Any) -> Any:
+    n = len(_E186MSV_TEXT)
+    return m.DataFrame({"s": _E186MSV_TEXT, "x": [((i * 13) % 17) / 4 for i in range(n)], "k": [i % 3 for i in range(n)]})
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MSV_CASES))
+def test_sort_values_with_text_keys_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MSV_CASES[case](_e186msv_frame(m))
+        return (out.index.tolist(), [repr(v) for v in out["s"].tolist()])
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MCF_CASES))
+def test_combine_first_unaligned_int_columns_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        df, other = _e186mcf_frames(m)
+        out = _E186MCF_CASES[case](m, df, other)
+        return (
+            out.index.tolist(),
+            [(str(name), str(out[name].dtype), [repr(v) for v in out[name].tolist()]) for name in out.columns],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: memory_usage(deep=True) sizes an object column's
+# strs by CPython's compact-string layout, each kind's base asked of
+# sys.getsizeof once - pandas' bytes for ASCII, latin-1, UCS-2 and UCS-4
+# text, empty strings, None beside text and a text index. NEGATIVE: a
+# float / int column's deep bytes are its shallow ones.
+_E186MMU_CASES = {
+    "ascii": ["alpha", "b", "", "gamma delta"] * 5,
+    "latin-1": ["naïve", "café au lait", "ÿy", "éè"] * 5,
+    "ucs-2": ["Āb", "日本語", "xā"] * 5,
+    "ucs-4": ["\U0001F600!", "a\U0001F601b"] * 5,
+    "None beside text": ["a", None, "bc", None] * 5,
+    "numbers (NEGATIVE)": [1.5, 2.5, 3.5] * 5,
+}
+
+
+_E186MLI_CASES = {
+    "stepped range": lambda m: m.DataFrame({"x": list(range(8))}, index=m.RangeIndex(0, 40, 5)).loc[[35, 5, 10]],
+    "descending range": lambda m: m.DataFrame({"x": list(range(8))}, index=m.RangeIndex(40, 0, -5)).loc[[35, 5]],
+    "numpy int key": lambda m: m.DataFrame({"x": list(range(8))}).loc[np.array([7, 0, 3])],
+    "negative labels": lambda m: m.DataFrame({"x": list(range(4))}, index=[-3, -1, 2, 9]).loc[[-1, 9]],
+    "off the step (NEGATIVE)": lambda m: m.DataFrame({"x": list(range(8))}, index=m.RangeIndex(0, 40, 5)).loc[[5, 7]],
+    "bool beside text (NEGATIVE)": lambda m: m.DataFrame({"x": list(range(4))}, index=["a", True, 2, "b"]).loc[[True, "b"]],
+    "int past int64 (NEGATIVE)": lambda m: m.DataFrame({"x": list(range(4))}).loc[[1, 2**70]],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MLI_CASES))
+def test_loc_int_label_lists_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _E186MLI_CASES[case](m)
+        except (KeyError, TypeError, OverflowError) as error:
+            return type(error).__name__
+        return ([repr(label) for label in out.index.tolist()], out["x"].tolist())
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MMU_CASES))
+def test_memory_usage_deep_of_text_like_pandas_e186m(case: str) -> None:
+    # Each arm its own fresh strs: reading a str's UTF-8 makes CPython keep
+    # it in the object (sys.getsizeof grows), so a list shared by both arms
+    # would be sized after the other arm read it.
+    def fresh(value: Any) -> Any:
+        return value.encode("utf-8").decode("utf-8") if isinstance(value, str) else value
+
+    def run(m: Any) -> Any:
+        values = [fresh(value) for value in _E186MMU_CASES[case]]
+        df = m.DataFrame({"t": values, "k": list(range(len(values)))})
+        by_text = m.DataFrame(
+            {"k": list(range(len(values)))}, index=[fresh(f"r{i}é") for i in range(len(values))]
+        )
+        return (
+            df.memory_usage(deep=True).tolist(),
+            df["t"].memory_usage(deep=True),
+            by_text.memory_usage(deep=True).tolist(),
+        )
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: an outer merge on int keys repeated on either
+# side groups each side's rows by key in one counting pass - pandas' rows,
+# order and dtypes. NEGATIVE: keys too sparse for the dense table, a key
+# holding a missing value, text keys.
+def _e186mmo_frames(m: Any) -> Any:
+    left = m.DataFrame({"k": [(i * 7) % 13 - 3 for i in range(40)], "a": list(range(40))})
+    right = m.DataFrame({"k": [(i * 5) % 17 - 6 for i in range(30)], "b": [float(i) / 2 for i in range(30)]})
+    return left, right
+
+
+_E186MMO_CASES = {
+    "repeated both sides": lambda m, left, right: left.merge(right, on="k", how="outer"),
+    "right repeated only": lambda m, left, right: left.drop_duplicates("k").merge(right, on="k", how="outer"),
+    "disjoint keys": lambda m, left, right: left.merge(right.assign(k=right["k"] + 100), on="k", how="outer"),
+    "empty right": lambda m, left, right: left.merge(right.head(0), on="k", how="outer"),
+    "sparse keys (NEGATIVE)": lambda m, left, right: left.assign(k=left["k"] * 10**9).merge(right, on="k", how="outer"),
+    "missing key (NEGATIVE)": lambda m, left, right: left.assign(k=left["k"].where(left["a"] > 2)).merge(
+        right.astype({"k": "float64"}), on="k", how="outer"
+    ),
+    "text keys (NEGATIVE)": lambda m, left, right: left.astype({"k": str}).merge(right.astype({"k": str}), on="k", how="outer"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MMO_CASES))
+def test_outer_merge_on_repeated_int_keys_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        left, right = _e186mmo_frames(m)
+        out = _E186MMO_CASES[case](m, left, right)
+        return (
+            out.index.tolist(),
+            [(name, str(out[name].dtype), [repr(v) for v in out[name].tolist()]) for name in out.columns],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: groupby head / tail / nth over one int or text key
+# read the groupby object's kept group ids in place (nth through them too,
+# where it built every group's row list) - pandas' rows in row order,
+# called twice on one groupby object. NEGATIVE: two keys, a key holding a
+# missing value and a categorical key take the general path.
+def _e186mgh_frame(m: Any) -> Any:
+    n = 90
+    return m.DataFrame(
+        {
+            "k": [(i * 7) % 11 for i in range(n)],
+            "s": [f"g{(i * 5) % 7}" for i in range(n)],
+            "x": [float(i) for i in range(n)],
+        }
+    )
+
+
+_E186MGH_CASES = {
+    "int head": lambda g: g.head(2),
+    "int tail": lambda g: g.tail(1),
+    "int nth 0": lambda g: g.nth(0),
+    "int nth -1": lambda g: g.nth(-1),
+    "int nth list": lambda g: g.nth([0, 2, -1]),
+    "int nth past the group": lambda g: g.nth(20),
+    "int head negative": lambda g: g.head(-3),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MGH_CASES))
+@pytest.mark.parametrize(
+    "by",
+    ["k", "s", "k unsorted", "two keys (NEGATIVE)", "missing key (NEGATIVE)", "category (NEGATIVE)"],
+)
+def test_groupby_head_tail_nth_like_pandas_e186m(case: str, by: str) -> None:
+    def run(m: Any) -> Any:
+        df = _e186mgh_frame(m)
+        if by == "k unsorted":
+            g = df.groupby("k", sort=False)
+        elif by == "two keys (NEGATIVE)":
+            g = df.groupby(["k", "s"])
+        elif by == "missing key (NEGATIVE)":
+            g = df.assign(k=df["k"].where(df["x"] > 5)).groupby("k")
+        elif by == "category (NEGATIVE)":
+            g = df.astype({"s": "category"}).groupby("s", observed=True)
+        else:
+            g = df.groupby(by)
+        outs = [_E186MGH_CASES[case](g) for _ in range(2)]
+        return [
+            (out.index.tolist(), [(name, [repr(v) for v in out[name].tolist()]) for name in out.columns])
+            for out in outs
+        ]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a MultiIndex sort_index sorts by each level's
+# label ranks through a stable radix lexsort - pandas' row order for
+# ascending / descending / per-level ascending, level= with and without
+# sort_remaining, missing labels first or last, ties in input order.
+# NEGATIVE: a level of mixed ints and text, unordered category levels.
+def _e186mms_frame(m: Any) -> Any:
+    n = 80
+    return m.DataFrame(
+        {
+            "a": [(i * 7) % 5 for i in range(n)],
+            "b": [f"b{(i * 3) % 4}" for i in range(n)],
+            "x": list(range(n)),
+        }
+    ).set_index(["a", "b"])
+
+
+_E186MMS_CASES = {
+    "ascending": lambda df: df.sort_index(),
+    "descending": lambda df: df.sort_index(ascending=False),
+    "per level": lambda df: df.sort_index(ascending=[True, False]),
+    "level b": lambda df: df.sort_index(level="b"),
+    "level b alone": lambda df: df.sort_index(level="b", sort_remaining=False),
+    "missing last": lambda df: df.reset_index().assign(a=lambda d: d["a"].where(d["x"] % 6 > 0)).set_index(["a", "b"]).sort_index(),
+    "missing first": lambda df: df.reset_index()
+    .assign(b=lambda d: d["b"].where(d["x"] % 5 > 0))
+    .set_index(["a", "b"])
+    .sort_index(na_position="first"),
+    "series": lambda df: df["x"].sort_index(ascending=False),
+    "three levels": lambda df: df.reset_index()
+    .assign(y=lambda d: d["x"] * 2)
+    .set_index(["b", "a", "x"])
+    .sort_index(ascending=[False, True, False]),
+    "category levels (NEGATIVE)": lambda df: df.reset_index().astype({"b": "category"}).set_index(["b", "a"]).sort_index(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MMS_CASES))
+def test_multiindex_sort_index_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MMS_CASES[case](_e186mms_frame(m))
+        values = out.tolist() if not hasattr(out, "columns") else out.iloc[:, 0].tolist()
+        return ([repr(label) for label in out.index.tolist()], values)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a MultiIndex shares its levels among the frames
+# and indexes made from it (swaplevel / droplevel / rename / take read them
+# borrowed), a level's int labels group typed for groupby(level=), and
+# loc / xs on an outer key read the level in place - pandas' rows, labels,
+# names and errors for each. NEGATIVE: a missing outer key and an xs key
+# raise KeyError, a level past the last raises, and an edit of one frame's
+# index names leaves its source alone.
+def _e186mlv_frame(m: Any) -> Any:
+    n = 60
+    return m.DataFrame(
+        {
+            "a": [(i * 7) % 5 for i in range(n)],
+            "b": [f"b{(i * 3) % 4}" for i in range(n)],
+            "x": [float(i) for i in range(n)],
+        }
+    ).set_index(["a", "b"])
+
+
+def _e186mlv_renamed(df: Any) -> Any:
+    out = df.copy()
+    out.index = out.index.rename(["p", "q"])
+    return [df.index.names, out.index.names]
+
+
+_E186MLV_CASES = {
+    "swaplevel": lambda df: df.swaplevel(),
+    "swaplevel twice": lambda df: df.swaplevel().swaplevel(),
+    "reorder_levels": lambda df: df.reorder_levels(["b", "a"]),
+    "droplevel a": lambda df: df.droplevel("a"),
+    "droplevel b": lambda df: df["x"].droplevel(1),
+    "loc outer": lambda df: df.loc[3],
+    "loc outer list": lambda df: df.loc[[4, 1]],
+    "loc pair": lambda df: df.loc[(2, "b1")],
+    "xs inner": lambda df: df.xs("b2", level="b"),
+    "xs outer": lambda df: df["x"].xs(0),
+    "groupby level 0": lambda df: df.groupby(level=0).sum(),
+    "groupby level b": lambda df: df.groupby(level="b")["x"].mean(),
+    "series groupby level": lambda df: df["x"].groupby(level="a").max(),
+    "level values": lambda df: df.index.get_level_values(1).tolist(),
+    "levels": lambda df: [list(level) for level in df.index.levels],
+    "unique": lambda df: df.index.unique().tolist(),
+    "take": lambda df: df.iloc[[5, 0, 33]],
+    "head then swap": lambda df: df.head(9).swaplevel().sort_index(),
+    "pickle": lambda df: pickle.loads(pickle.dumps(df)),
+    "rename leaves source (NEGATIVE)": _e186mlv_renamed,
+    "loc missing outer (NEGATIVE)": lambda df: df.loc[9],
+    "xs missing (NEGATIVE)": lambda df: df.xs("b9", level="b"),
+    "level past last (NEGATIVE)": lambda df: df.index.get_level_values(2),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MLV_CASES))
+def test_multiindex_shared_levels_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _E186MLV_CASES[case](_e186mlv_frame(m))
+        except (KeyError, IndexError) as error:
+            return type(error).__name__
+        if isinstance(out, list):
+            return out
+        values = out.tolist() if not hasattr(out, "columns") else out.iloc[:, 0].tolist()
+        return ([repr(label) for label in out.index.tolist()], list(out.index.names), values)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a naive DatetimeIndex's .date makes each
+# datetime.date from its instant (NaT stays NaT, dates before 1970 and after
+# 2038 too), and a groupby on those dates sums like pandas. NEGATIVE: a
+# zoned index's dates are its wall clocks', not its UTC instants'.
+def _e186mdt_index(m: Any, tz: Any = None) -> Any:
+    stamps = ["1969-12-31 23:59", "2021-03-01 00:00", None, "2021-03-01 23:00", "2040-06-15 12:00", "1900-01-01 06:00"]
+    return m.DatetimeIndex(pd.to_datetime(stamps).values, tz=tz) if tz is None else m.DatetimeIndex(stamps).tz_localize(tz)
+
+
+def _e186mdt_groupby(m: Any) -> Any:
+    n = 3000
+    dates = pd.date_range("2021-01-01", periods=n, freq="37min").values
+    frame = m.DataFrame({"x": [float(i % 11) for i in range(n)]}, index=m.DatetimeIndex(dates))
+    out = frame.groupby(frame.index.date)["x"].sum()
+    return [str(label) for label in out.index.tolist()], out.tolist()
+
+
+_E186MDT_CASES = {
+    "naive": lambda m: [repr(d) for d in _e186mdt_index(m).date],
+    "naive dtype": lambda m: str(_e186mdt_index(m).date.dtype),
+    "groupby dates": _e186mdt_groupby,
+    "zoned wall dates (NEGATIVE)": lambda m: [repr(d) for d in _e186mdt_index(m, "Asia/Tokyo").date],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MDT_CASES))
+def test_datetimeindex_date_like_pandas_e186m(case: str) -> None:
+    assert _E186MDT_CASES[case](fpd) == _E186MDT_CASES[case](pd)
+
+
+# br-frankenpandas-e186m: a MultiIndex frame's reset_index makes an int or
+# text level its typed column (int64, object), and a take of its rows -
+# sort_index, iloc, head, a Series' sort_index - gathers the flat labels as
+# bytes and the level labels in row chunks: pandas' columns, dtypes, rows
+# and labels for each. NEGATIVE: a level holding a missing label (text or
+# int) and float / bool / datetime levels keep their own columns.
+def _e186mrs_frame(m: Any, a: Any = None, b: Any = None) -> Any:
+    n = 90
+    a = [(i * 7) % 5 for i in range(n)] if a is None else a
+    b = [f"b{(i * 3) % 4}" for i in range(n)] if b is None else b
+    return m.DataFrame({"a": a, "b": b, "x": [float(i) for i in range(n)]}).set_index(["a", "b"])
+
+
+def _e186mrs_reset(m: Any, **levels: Any) -> Any:
+    out = _e186mrs_frame(m, **levels).reset_index()
+    return [str(dtype) for dtype in out.dtypes], [[repr(v) for v in out[c].tolist()] for c in out.columns]
+
+
+_E186MRS_CASES = {
+    "reset int and text": lambda m: _e186mrs_reset(m),
+    "reset text ops": lambda m: _e186mrs_frame(m).reset_index()["b"].str.upper().tolist()[:7],
+    "reset unnamed": lambda m: list(_e186mrs_frame(m).rename_axis([None, None]).reset_index().columns),
+    "reset negative ints": lambda m: _e186mrs_reset(m, a=[-(i % 3) * 10**12 for i in range(90)]),
+    "reset empty text": lambda m: _e186mrs_reset(m, b=["" if i % 4 else "z" for i in range(90)]),
+    "reset sorted": lambda m: [repr(v) for v in _e186mrs_frame(m).sort_index().reset_index()["b"].tolist()],
+    "sort rows": lambda m: [repr(v) for v in _e186mrs_frame(m).sort_index(ascending=False).index.tolist()],
+    "series sort": lambda m: [repr(v) for v in _e186mrs_frame(m)["x"].sort_index().index.tolist()],
+    "series sort values": lambda m: _e186mrs_frame(m)["x"].sort_index(ascending=[False, True]).tolist(),
+    "iloc step": lambda m: [repr(v) for v in _e186mrs_frame(m).iloc[::3].index.tolist()],
+    "head names": lambda m: list(_e186mrs_frame(m).head(40).index.names),
+    "take then loc": lambda m: _e186mrs_frame(m).sort_index().loc[(3, "b2"), "x"].tolist(),
+    "missing text level (NEGATIVE)": lambda m: _e186mrs_reset(m, b=[None if i % 9 == 0 else f"b{i % 4}" for i in range(90)]),
+    "int level with a missing label (NEGATIVE)": lambda m: _e186mrs_reset(m, a=[None if i % 8 == 0 else i % 5 for i in range(90)]),
+    "float level (NEGATIVE)": lambda m: _e186mrs_reset(m, a=[i / 4 for i in range(90)]),
+    "bool level (NEGATIVE)": lambda m: _e186mrs_reset(m, a=[i % 3 == 0 for i in range(90)]),
+    "datetime level (NEGATIVE)": lambda m: _e186mrs_reset(m, a=list(pd.date_range("2024-01-01", periods=90, freq="D"))),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MRS_CASES))
+def test_multiindex_reset_and_take_like_pandas_e186m(case: str) -> None:
+    assert _E186MRS_CASES[case](fpd) == _E186MRS_CASES[case](pd)
+
+
+# br-frankenpandas-e186m: a float64 column's raw rolling / expanding apply
+# windows are views of one float64 array, each window's missing values
+# counted from a running count: pandas' answers for sums, means, lengths and
+# the array each window is (type, dtype, NaN kept), centred, with
+# min_periods, args / kwargs, an int column, an all-missing stretch.
+# NEGATIVE: raw=False still passes a Series with its labels.
+def _e186mra_series(m: Any, ints: bool = False) -> Any:
+    values = [float(i % 7) if i % 5 else float("nan") for i in range(40)]
+    if ints:
+        values = [i % 7 for i in range(40)]
+    return m.Series(values, index=[f"r{i}" for i in range(40)])
+
+
+def _e186mra_gap(m: Any) -> Any:
+    values = [float("nan") if 10 <= i < 25 else float(i) for i in range(40)]
+    return m.Series(values)
+
+
+_E186MRA_CASES = {
+    "sum": lambda m: _e186mra_series(m).rolling(5).apply(np.sum, raw=True).tolist(),
+    "nansum min_periods": lambda m: _e186mra_series(m).rolling(5, min_periods=2).apply(np.nansum, raw=True).tolist(),
+    "mean centred": lambda m: _e186mra_series(m).rolling(4, center=True, min_periods=1).apply(lambda x: x.mean(), raw=True).tolist(),
+    "length": lambda m: _e186mra_series(m).rolling(6, min_periods=0).apply(len, raw=True).tolist(),
+    "array kind": lambda m: _e186mra_series(m).rolling(3).apply(lambda x: float(isinstance(x, np.ndarray) and x.dtype == np.float64), raw=True).tolist(),
+    "args kwargs": lambda m: _e186mra_series(m).rolling(3).apply(lambda x, a, b=0: x.max() * a + b, raw=True, args=(2,), kwargs={"b": 1}).tolist(),
+    "int column": lambda m: _e186mra_series(m, ints=True).rolling(4).apply(np.prod, raw=True).tolist(),
+    "expanding": lambda m: _e186mra_series(m).expanding(min_periods=3).apply(np.nanmax, raw=True).tolist(),
+    "all-missing stretch": lambda m: _e186mra_gap(m).rolling(5, min_periods=0).apply(lambda x: float(np.isnan(x).sum()), raw=True).tolist(),
+    "gap nansum": lambda m: _e186mra_gap(m).rolling(5, min_periods=1).apply(np.nansum, raw=True).tolist(),
+    "frame": lambda m: _e186mra_series(m).to_frame("v").assign(w=lambda d: d["v"] * 2).rolling(3).apply(np.sum, raw=True).values.tolist(),
+    "expanding frame": lambda m: _e186mra_series(m).to_frame("v").assign(w=lambda d: d["v"] - 1).expanding(2).apply(np.nansum, raw=True).values.tolist(),
+    "series labels (NEGATIVE)": lambda m: _e186mra_series(m).rolling(3).apply(lambda x: float(x.index[0][1:]), raw=False).tolist(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MRA_CASES))
+def test_raw_window_apply_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        return [None if isinstance(v, float) and math.isnan(v) else v for v in _flatten_e186mra(_E186MRA_CASES[case](m))]
+
+    assert run(fpd) == run(pd)
+
+
+def _flatten_e186mra(values: Any) -> list:
+    out = []
+    for value in values:
+        out.extend(_flatten_e186mra(value) if isinstance(value, list) else [value])
+    return out

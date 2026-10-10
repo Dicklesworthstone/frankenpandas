@@ -88,8 +88,8 @@ use std::{
 
 use chrono::Datelike;
 use fp_types::{
-    Interval, IntervalClosed, Period, PeriodFreq, Scalar, Timedelta, TimedeltaComponents,
-    Timestamp, interval_range,
+    Interval, IntervalClosed, NumericWidth, Period, PeriodFreq, Scalar, Timedelta,
+    TimedeltaComponents, Timestamp, interval_range,
 };
 // Dedup / set-op seen-sets key on &IndexLabel and read output order from the
 // INPUT scan (first-seen filter / positional bool), never from map iteration —
@@ -1334,22 +1334,26 @@ impl Int64TwoAffineLabels {
     }
 }
 
+/// `len` values of a shared buffer from `start`, `step` apart; a negative
+/// step reads backwards (`idx[::-1]` of a typed DatetimeIndex is a view, as
+/// numpy's; br-frankenpandas-5s8nr).
 #[derive(Debug, Clone)]
 struct Int64StridedLabels {
     values: Arc<Vec<i64>>,
     start: usize,
-    step: usize,
+    step: isize,
     len: usize,
 }
 
 impl Int64StridedLabels {
-    fn new(values: Arc<Vec<i64>>, start: usize, step: usize, len: usize) -> Option<Self> {
+    fn new(values: Arc<Vec<i64>>, start: usize, step: isize, len: usize) -> Option<Self> {
         if len > 1 && step == 0 {
             return None;
         }
         if len > 0 {
-            let last = start.checked_add(step.checked_mul(len.checked_sub(1)?)?)?;
-            if last >= values.len() {
+            let reach = step.checked_mul(isize::try_from(len - 1).ok()?)?;
+            let last = start.checked_add_signed(reach)?;
+            if start.max(last) >= values.len() {
                 return None;
             }
         }
@@ -1361,32 +1365,94 @@ impl Int64StridedLabels {
         })
     }
 
-    fn materialize(self) -> Vec<IndexLabel> {
-        let mut labels = Vec::with_capacity(self.len);
-        let mut pos = self.start;
-        for offset in 0..self.len {
-            labels.push(IndexLabel::Int64(self.values[pos]));
-            if offset + 1 < self.len {
-                pos = pos
-                    .checked_add(self.step)
-                    .expect("validated Int64 strided range end");
-            }
+    /// The view of `len` of this view's values from its `start`-th, `step`
+    /// apart (either sign): the same buffer, nothing read. `None` for a run
+    /// outside the view.
+    fn sub_view(&self, start: usize, step: isize, len: usize) -> Option<Self> {
+        if len == 0 {
+            return Self::new(Arc::clone(&self.values), 0, 1, 0);
         }
-        labels
+        let reach = step.checked_mul(isize::try_from(len - 1).ok()?)?;
+        let last = start.checked_add_signed(reach)?;
+        if start.max(last) >= self.len {
+            return None;
+        }
+        Self::new(
+            Arc::clone(&self.values),
+            self.position(start),
+            self.step.checked_mul(step)?,
+            len,
+        )
+    }
+
+    fn materialize(self) -> Vec<IndexLabel> {
+        self.iter().map(IndexLabel::Int64).collect()
     }
 
     fn materialize_i64(self) -> Vec<i64> {
-        let mut labels = Vec::with_capacity(self.len);
-        let mut pos = self.start;
-        for offset in 0..self.len {
-            labels.push(self.values[pos]);
-            if offset + 1 < self.len {
-                pos = pos
-                    .checked_add(self.step)
-                    .expect("validated Int64 strided range end");
-            }
+        self.iter().collect()
+    }
+
+    /// The values the view reads, in its order, nothing allocated.
+    fn iter(&self) -> impl Iterator<Item = i64> + '_ {
+        (0..self.len).map(move |offset| self.value_at(offset))
+    }
+
+    /// The buffer position of the view's `offset`-th value (`offset < len`,
+    /// which `new` bounds).
+    fn position(&self, offset: usize) -> usize {
+        self.start
+            .wrapping_add_signed(self.step.wrapping_mul(offset.cast_signed()))
+    }
+
+    /// The value at `offset` of the view (`offset < len`).
+    fn value_at(&self, offset: usize) -> i64 {
+        self.values[self.position(offset)]
+    }
+
+    /// The values the view reads: the buffer's own run when the view is
+    /// contiguous, gathered when strided (an empty view's start may lie
+    /// past the buffer).
+    fn values(&self) -> Cow<'_, [i64]> {
+        match self.len {
+            0 => Cow::Borrowed(&[]),
+            1 => Cow::Borrowed(std::slice::from_ref(&self.values[self.start])),
+            len if self.step == 1 => Cow::Borrowed(&self.values[self.start..self.start + len]),
+            _ => Cow::Owned(self.iter().collect()),
         }
-        labels
+    }
+}
+
+/// The kind of instant a [`TemporalStridedLabels`] backing holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TemporalKind {
+    Datetime,
+    Timedelta,
+}
+
+impl TemporalKind {
+    fn label(self, nanos: i64) -> IndexLabel {
+        match self {
+            Self::Datetime => IndexLabel::Datetime64(nanos),
+            Self::Timedelta => IndexLabel::Timedelta64(nanos),
+        }
+    }
+}
+
+/// A typed DatetimeIndex / TimedeltaIndex backing: label `k` is
+/// `kind.label(view.value_at(k))`, NaT as i64::MIN.
+#[derive(Debug, Clone)]
+struct TemporalStridedLabels {
+    kind: TemporalKind,
+    view: Int64StridedLabels,
+}
+
+impl TemporalStridedLabels {
+    fn materialize(&self) -> Vec<IndexLabel> {
+        self.view
+            .iter()
+            .map(|nanos| self.kind.label(nanos))
+            .collect()
     }
 }
 
@@ -1424,6 +1490,12 @@ struct IndexLabels {
     int64_two_affine: Option<Box<Int64TwoAffineLabels>>,
     int64_strided: Option<Int64StridedLabels>,
     datetime64_affine: Option<Int64AffineLabels>,
+    /// Lazy typed Datetime64 / Timedelta64 backing (br-frankenpandas-lsn8d,
+    /// br-frankenpandas-5s8nr): label `k` is `Datetime64` or `Timedelta64`
+    /// of `values[start + k * step]`, NaT as i64::MIN - an index built from
+    /// an array of instants or durations, and the slices and takes of one,
+    /// without a 32 B enum per row until something reads the labels.
+    temporal_strided: Option<TemporalStridedLabels>,
     /// Lazy typed Int64 backing (br-frankenpandas-dxqpm). `Some(values)` once
     /// computed means every label is `IndexLabel::Int64` and `values` is the
     /// raw `i64` view; `None` once computed means the labels are not all
@@ -1452,6 +1524,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
+            temporal_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         }
@@ -1466,6 +1539,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
+            temporal_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
@@ -1483,6 +1557,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
+            temporal_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
@@ -1497,28 +1572,25 @@ impl IndexLabels {
             int64_two_affine: Some(Box::new(Int64TwoAffineLabels::new(first, second)?)),
             int64_strided: None,
             datetime64_affine: None,
+            temporal_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
     }
 
-    fn new_int64_strided(
-        values: Arc<Vec<i64>>,
-        start: usize,
-        step: usize,
-        len: usize,
-    ) -> Option<Self> {
-        Some(Self {
+    fn new_int64_strided(view: Int64StridedLabels) -> Self {
+        Self {
             materialized: Arc::default(),
             materialized_slice: None,
             int64_unit_range: None,
             int64_affine: None,
             int64_two_affine: None,
-            int64_strided: Some(Int64StridedLabels::new(values, start, step, len)?),
+            int64_strided: Some(view),
             datetime64_affine: None,
+            temporal_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
-        })
+        }
     }
 
     fn new_int64_values(values: Arc<Vec<i64>>) -> Self {
@@ -1532,6 +1604,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
+            temporal_strided: None,
             int64_typed,
             utf8_contiguous: None,
         }
@@ -1546,9 +1619,41 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: Some(Int64AffineLabels::new(start, step, len)?),
+            temporal_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
+    }
+
+    fn new_temporal_strided(kind: TemporalKind, view: Int64StridedLabels) -> Self {
+        Self {
+            materialized: Arc::default(),
+            materialized_slice: None,
+            int64_unit_range: None,
+            int64_affine: None,
+            int64_two_affine: None,
+            int64_strided: None,
+            datetime64_affine: None,
+            temporal_strided: Some(TemporalStridedLabels { kind, view }),
+            int64_typed: OnceLock::new(),
+            utf8_contiguous: None,
+        }
+    }
+
+    /// The typed backing when it holds instants (a DatetimeIndex's).
+    fn datetime64_strided(&self) -> Option<&Int64StridedLabels> {
+        self.temporal_strided
+            .as_ref()
+            .filter(|strided| strided.kind == TemporalKind::Datetime)
+            .map(|strided| &strided.view)
+    }
+
+    /// The typed backing when it holds durations (a TimedeltaIndex's).
+    fn timedelta64_strided(&self) -> Option<&Int64StridedLabels> {
+        self.temporal_strided
+            .as_ref()
+            .filter(|strided| strided.kind == TemporalKind::Timedelta)
+            .map(|strided| &strided.view)
     }
 
     fn new_utf8_contiguous(bytes: Arc<[u8]>, offsets: Arc<[usize]>) -> Self {
@@ -1562,6 +1667,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
+            temporal_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: Some((bytes, offsets)),
         }
@@ -1600,6 +1706,9 @@ impl IndexLabels {
                 if let Some(range) = self.datetime64_affine {
                     return Arc::new(range.materialize_datetime64());
                 }
+                if let Some(strided) = &self.temporal_strided {
+                    return Arc::new(strided.materialize());
+                }
                 if let Some(strided) = self.int64_strided.clone() {
                     return Arc::new(strided.materialize());
                 }
@@ -1631,6 +1740,9 @@ impl IndexLabels {
         }
         if let Some(range) = self.datetime64_affine {
             return range.materialize_datetime64();
+        }
+        if let Some(strided) = &self.temporal_strided {
+            return strided.materialize();
         }
         if let Some((bytes, offsets)) = &self.utf8_contiguous {
             return offsets
@@ -1669,6 +1781,9 @@ impl IndexLabels {
         }
         if let Some(range) = self.datetime64_affine {
             return range.len;
+        }
+        if let Some(strided) = &self.temporal_strided {
+            return strided.view.len;
         }
         if let Some((_, offsets)) = &self.utf8_contiguous {
             return offsets.len() - 1;
@@ -1733,19 +1848,26 @@ impl IndexLabels {
             }
         }
 
-        if let Some(strided) = &self.int64_strided
-            && let Some(offset) = strided.step.checked_mul(start)
-            && let Some(next_start) = strided.start.checked_add(offset)
-            && let Some(labels) =
-                Self::new_int64_strided(Arc::clone(&strided.values), next_start, strided.step, len)
+        if let Some(view) = self
+            .int64_strided
+            .as_ref()
+            .and_then(|strided| strided.sub_view(start, 1, len))
         {
-            return labels;
+            return Self::new_int64_strided(view);
         }
 
         if let Some(Some(values)) = self.int64_typed.get()
-            && let Some(labels) = Self::new_int64_strided(Arc::clone(values), start, 1, len)
+            && let Some(view) = Int64StridedLabels::new(Arc::clone(values), start, 1, len)
         {
-            return labels;
+            return Self::new_int64_strided(view);
+        }
+
+        // A typed DatetimeIndex's / TimedeltaIndex's slice is a view of the
+        // same instants or durations.
+        if let Some(TemporalStridedLabels { kind, view }) = &self.temporal_strided
+            && let Some(view) = view.sub_view(start, 1, len)
+        {
+            return Self::new_temporal_strided(*kind, view);
         }
 
         if let Some(range) = self.datetime64_affine {
@@ -1771,6 +1893,7 @@ impl IndexLabels {
                 int64_two_affine: None,
                 int64_strided: None,
                 datetime64_affine: None,
+                temporal_strided: None,
                 int64_typed: OnceLock::new(),
                 utf8_contiguous: None,
             };
@@ -1787,6 +1910,7 @@ impl IndexLabels {
                 int64_two_affine: None,
                 int64_strided: None,
                 datetime64_affine: None,
+                temporal_strided: None,
                 int64_typed: OnceLock::new(),
                 utf8_contiguous: None,
             };
@@ -1809,6 +1933,9 @@ impl IndexLabels {
         if let Some(range) = self.datetime64_affine {
             return range.position(i64::MIN).is_some();
         }
+        if let Some(strided) = self.datetime64_strided() {
+            return strided.iter().any(|value| value == i64::MIN);
+        }
         if let Some(slice) = &self.materialized_slice {
             return slice
                 .as_slice()
@@ -1820,6 +1947,49 @@ impl IndexLabels {
                 .iter()
                 .any(|label| matches!(label, IndexLabel::Datetime64(value) if *value == i64::MIN))
         })
+    }
+
+    /// The labels when they are held - materialized, or a slice of held
+    /// ones - without materializing a lazy backing.
+    fn held(&self) -> Option<&[IndexLabel]> {
+        if let Some(slice) = &self.materialized_slice {
+            return Some(slice.as_slice());
+        }
+        self.materialized.get().map(|labels| labels.as_slice())
+    }
+
+    /// The label at `position`, a lazy backing's built from its one value
+    /// (no other label made); `None` past the end.
+    fn label_at(&self, position: usize) -> Option<IndexLabel> {
+        if position >= self.len() {
+            return None;
+        }
+        if let Some(labels) = self.held() {
+            return labels.get(position).cloned();
+        }
+        let int = |value: i64| Some(IndexLabel::Int64(value));
+        if let Some(range) = self.int64_unit_range {
+            return int(range.start.checked_add(i64::try_from(position).ok()?)?);
+        }
+        if let Some(range) = self.int64_affine {
+            return int(range.value_at(position));
+        }
+        if let Some(runs) = &self.int64_two_affine {
+            return int(runs.value_at(position));
+        }
+        if let Some(strided) = &self.int64_strided {
+            return int(strided.value_at(position));
+        }
+        if let Some(range) = self.datetime64_affine {
+            return Some(IndexLabel::Datetime64(range.value_at(position)));
+        }
+        if let Some(TemporalStridedLabels { kind, view }) = &self.temporal_strided {
+            return Some(kind.label(view.value_at(position)));
+        }
+        if let Some(Some(values)) = self.int64_typed.get() {
+            return values.get(position).copied().and_then(int);
+        }
+        self.as_slice().get(position).cloned()
     }
 
     fn int64_unit_range(&self) -> Option<Int64UnitRangeLabels> {
@@ -1838,6 +2008,18 @@ impl IndexLabels {
 
     fn datetime64_affine_range(&self) -> Option<Int64AffineLabels> {
         self.datetime64_affine
+    }
+
+    /// The instants of a typed DatetimeIndex backing (see
+    /// `temporal_strided`; NaT as i64::MIN), its labels never made.
+    fn datetime64_nanos(&self) -> Option<Cow<'_, [i64]>> {
+        self.datetime64_strided().map(Int64StridedLabels::values)
+    }
+
+    /// The durations of a typed TimedeltaIndex backing (NaT as i64::MIN),
+    /// its labels never made.
+    fn timedelta64_nanos(&self) -> Option<Cow<'_, [i64]>> {
+        self.timedelta64_strided().map(Int64StridedLabels::values)
     }
 
     /// The raw `i64` view of an all-Int64 label vector, computing and caching
@@ -1915,17 +2097,7 @@ impl IndexLabels {
             return out;
         }
         if let Some(strided) = &self.int64_strided {
-            for position in 0..strided.len {
-                let offset = strided
-                    .step
-                    .checked_mul(position)
-                    .expect("validated Int64 strided range");
-                let index = strided
-                    .start
-                    .checked_add(offset)
-                    .expect("validated Int64 strided range");
-                out.push(source.position(strided.values[index]));
-            }
+            out.extend(strided.iter().map(|value| source.position(value)));
             return out;
         }
         if let Some(Some(values)) = self.int64_typed.get() {
@@ -1957,30 +2129,54 @@ impl IndexLabels {
     }
 
     fn take_i64_values(&self, indices: &[usize]) -> Option<Vec<i64>> {
-        let mut out = Vec::with_capacity(indices.len());
-
+        // A unit range, an affine range and a typed buffer: one bounds pass (a
+        // max, vectorized), then the gather collected rather than pushed - a
+        // push a position kept the loop's state in memory and reloaded the
+        // buffer through two pointers each time (Index(arange).take of a
+        // million random positions 3.3 ms, pandas 0.95; br-frankenpandas-fk877).
+        // In bounds, each value is one of these labels: no overflow.
+        let in_bounds = |len: usize| {
+            indices
+                .iter()
+                .fold(0_usize, |most, &idx| most.max(idx))
+                .checked_add(1)
+                .is_some_and(|end| indices.is_empty() || end <= len)
+        };
         if let Some(range) = self.int64_unit_range {
-            for &idx in indices {
-                if idx >= range.len {
-                    return None;
-                }
-                let offset = i64::try_from(idx).ok()?;
-                out.push(range.start.checked_add(offset)?);
+            if !in_bounds(range.len) {
+                return None;
             }
-            return Some(out);
+            return Some(
+                indices
+                    .iter()
+                    .map(|&idx| range.start.wrapping_add_unsigned(idx as u64))
+                    .collect(),
+            );
+        }
+        if let Some(range) = self.int64_affine {
+            if !in_bounds(range.len) {
+                return None;
+            }
+            return Some(
+                indices
+                    .iter()
+                    .map(|&idx| {
+                        range
+                            .start
+                            .wrapping_add(range.step.wrapping_mul(idx as i64))
+                    })
+                    .collect(),
+            );
+        }
+        if let Some(Some(values)) = self.int64_typed.get() {
+            let values = values.as_slice();
+            if !in_bounds(values.len()) {
+                return None;
+            }
+            return Some(indices.iter().map(|&idx| values[idx]).collect());
         }
 
-        if let Some(range) = self.int64_affine {
-            for &idx in indices {
-                if idx >= range.len {
-                    return None;
-                }
-                let offset = i64::try_from(idx).ok()?;
-                let delta = range.step.checked_mul(offset)?;
-                out.push(range.start.checked_add(delta)?);
-            }
-            return Some(out);
-        }
+        let mut out = Vec::with_capacity(indices.len());
 
         if let Some(runs) = &self.int64_two_affine {
             let runs = **runs;
@@ -1998,24 +2194,59 @@ impl IndexLabels {
                 if idx >= strided.len {
                     return None;
                 }
-                let offset = strided.step.checked_mul(idx)?;
-                let pos = strided.start.checked_add(offset)?;
-                out.push(*strided.values.get(pos)?);
-            }
-            return Some(out);
-        }
-
-        if let Some(Some(values)) = self.int64_typed.get() {
-            for &idx in indices {
-                if idx >= values.len() {
-                    return None;
-                }
-                out.push(*values.get(idx)?);
+                out.push(strided.value_at(idx));
             }
             return Some(out);
         }
 
         None
+    }
+
+    /// [`Self::take_i64_values`] of a unit range or a typed buffer gathered
+    /// into the positions' own buffer (a usize and an i64 share a layout);
+    /// any other backing, or a position past the labels, hands the positions
+    /// back as they came.
+    fn take_i64_values_owned(&self, indices: Vec<usize>) -> Result<Vec<i64>, Vec<usize>> {
+        if let Some(range) = self.int64_unit_range {
+            // Wrapping arithmetic undoes exactly, so a position past the
+            // range is handed back without a bounds pass ahead of the gather
+            // (in bounds, start + position is a label: it cannot wrap).
+            let mut past = 0_usize;
+            let labels: Vec<i64> = indices
+                .into_iter()
+                .map(|position| {
+                    past += usize::from(position >= range.len);
+                    range
+                        .start
+                        .wrapping_add_unsigned(u64::try_from(position).unwrap_or(u64::MAX))
+                })
+                .collect();
+            if past == 0 {
+                return Ok(labels);
+            }
+            return Err(labels
+                .into_iter()
+                .map(|label| {
+                    usize::try_from(label.wrapping_sub(range.start).cast_unsigned())
+                        .unwrap_or(usize::MAX)
+                })
+                .collect());
+        }
+        // The bounds as a max, which vectorizes (`all` stops early, so it
+        // cannot; br-frankenpandas-fk877).
+        if let Some(Some(values)) = self.int64_typed.get()
+            && indices
+                .iter()
+                .fold(0_usize, |most, &position| most.max(position))
+                .checked_add(1)
+                .is_some_and(|end| indices.is_empty() || end <= values.len())
+        {
+            return Ok(indices
+                .into_iter()
+                .map(|position| values[position])
+                .collect());
+        }
+        Err(indices)
     }
 }
 
@@ -2034,6 +2265,7 @@ impl Clone for IndexLabels {
             int64_two_affine: self.int64_two_affine.clone(),
             int64_strided: self.int64_strided.clone(),
             datetime64_affine: self.datetime64_affine,
+            temporal_strided: self.temporal_strided.clone(),
             int64_typed,
             utf8_contiguous: self.utf8_contiguous.clone(),
         }
@@ -2054,6 +2286,11 @@ impl fmt::Debug for IndexLabels {
 
 impl PartialEq for IndexLabels {
     fn eq(&self, other: &Self) -> bool {
+        // Two typed DatetimeIndex backings are equal as their instants
+        // (a Datetime64 label is equal by its nanoseconds, NaT's too).
+        if let (Some(left), Some(right)) = (self.datetime64_nanos(), other.datetime64_nanos()) {
+            return left == right;
+        }
         match (self.int64_affine_range(), other.int64_affine_range()) {
             (Some(left), Some(right)) => left == right,
             (Some(range), None) => range.equals_slice(other.as_slice()),
@@ -2064,6 +2301,50 @@ impl PartialEq for IndexLabels {
 }
 
 impl Eq for IndexLabels {}
+
+/// Whether held datetime labels never descend (`INCREASING`) or never
+/// ascend, in one pass comparing each stamp inline; NaT (i64::MIN) anywhere
+/// answers false, as pandas' monotonic flags. None at the first label that
+/// is not a datetime before any answer, for the generic order to decide.
+/// The flags scanned the labels for NaT, then compared each pair through
+/// IndexLabel::cmp, a call per pair: a fifth of a one-shot resample, which
+/// asks at construction (br-frankenpandas-pirog).
+fn held_datetimes_monotonic<const INCREASING: bool>(labels: &[IndexLabel]) -> Option<bool> {
+    let mut previous = if INCREASING { i64::MIN } else { i64::MAX };
+    for label in labels {
+        let IndexLabel::Datetime64(stamp) = *label else {
+            return None;
+        };
+        let reversed = if INCREASING {
+            stamp < previous
+        } else {
+            stamp > previous
+        };
+        if stamp == i64::MIN || reversed {
+            return Some(false);
+        }
+        previous = stamp;
+    }
+    Some(true)
+}
+
+/// [`held_datetimes_monotonic`] over a typed backing's instants (NaT as
+/// i64::MIN): no label to read, so always an answer.
+fn nanos_monotonic<const INCREASING: bool>(nanos: &[i64]) -> bool {
+    let mut previous = if INCREASING { i64::MIN } else { i64::MAX };
+    for &stamp in nanos {
+        let reversed = if INCREASING {
+            stamp < previous
+        } else {
+            stamp > previous
+        };
+        if stamp == i64::MIN || reversed {
+            return false;
+        }
+        previous = stamp;
+    }
+    true
+}
 
 impl std::ops::Deref for IndexLabels {
     type Target = [IndexLabel];
@@ -2111,11 +2392,23 @@ pub struct Index {
     /// Runtime-only immutable identity for this label vector lineage.
     #[serde(skip, default = "next_index_label_identity")]
     label_identity: u64,
+    /// Whether the labels repeat, once asked - shared by clones as the
+    /// monotonic flags are: a Series' `.loc` / `.at` takes a clone, which
+    /// asked afresh each lookup, a pass over every label
+    /// (br-frankenpandas-lsn8d).
     #[serde(skip)]
-    duplicate_cache: OnceLock<bool>,
-    /// AG-13: Cached sort order for adaptive backend selection.
+    duplicate_cache: Arc<OnceLock<bool>>,
+    /// AG-13: Cached sort order for adaptive backend selection, shared by
+    /// clones (see `duplicate_cache`).
     #[serde(skip)]
-    sort_order_cache: OnceLock<SortOrder>,
+    sort_order_cache: Arc<OnceLock<SortOrder>>,
+    /// The monotonic flags (increasing, decreasing) once asked, shared by
+    /// clones as the labels are: the labels never change, and pandas keeps
+    /// them on its engine - a repeated `is_monotonic_increasing` rescanned
+    /// the labels (0.12 ms over 200k stamps against pandas' 0.2 us), and a
+    /// resampler asked a clone each time (br-frankenpandas-pirog).
+    #[serde(skip)]
+    monotonic_cache: Arc<[OnceLock<bool>; 2]>,
     /// Runtime-only cache for labels-derived AACE semantic fingerprints.
     #[serde(skip)]
     semantic_fingerprint_cache: OnceLock<String>,
@@ -2189,17 +2482,87 @@ pub struct IndexCategories {
 /// under the object dtype (they became the strings '1' and '2';
 /// br-frankenpandas-i20vm); an empty index keeps the dtype it was taken
 /// from (`iloc[:0]` of an int64 index is int64, it read as object; dwyud);
-/// a DatetimeIndex field (`.year`) is numpy's int32 (it was int64; pqjzo).
+/// a DatetimeIndex field (`.year`) is numpy's int32 (it was int64; pqjzo);
+/// an index of a narrower numpy array (int8 ... uint64, float32) holds its
+/// labels as Int64 / Float64 under that width, as a column does
+/// (br-frankenpandas-vqjvd).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeclaredDtype {
     Object,
     Int64,
-    Int32,
+    Width(NumericWidth),
     Float64,
     Bool,
     Datetime64,
     Timedelta64,
+    /// pandas' masked extension dtypes (br-frankenpandas-05cm6 / spwrr):
+    /// Int64 / Float64 / boolean labels, a missing one pandas' NA.
+    Masked(MaskedDtype),
+}
+
+/// A masked extension dtype an [`Index`] is declared with: `Int64`, the
+/// narrow `Int8` ... `UInt64` / `Float32`, `Float64`, `boolean` - labels of
+/// that kind (ints, floats, bools) beside missing ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskedDtype {
+    Int64,
+    Float64,
+    Boolean,
+    Width(NumericWidth),
+}
+
+impl MaskedDtype {
+    /// pandas' name of the dtype ('Int64', 'UInt8', 'Float32', 'boolean').
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Int64 => "Int64",
+            Self::Float64 => "Float64",
+            Self::Boolean => "boolean",
+            Self::Width(width) => width.name(true),
+        }
+    }
+
+    /// The masked dtype pandas' name reads as, None for another.
+    #[must_use]
+    pub fn of_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "Int64" | "Int64Dtype" => Self::Int64,
+            "Float64" | "Float64Dtype" => Self::Float64,
+            "boolean" | "BooleanDtype" => Self::Boolean,
+            _ => match NumericWidth::parse(name)? {
+                (width, true) => Self::Width(width),
+                (_, false) => return None,
+            },
+        })
+    }
+
+    /// Whether a label of this kind - or a missing one - can be held.
+    #[must_use]
+    pub fn holds(self, label: &IndexLabel) -> bool {
+        label.is_missing()
+            || match self {
+                Self::Int64 => matches!(label, IndexLabel::Int64(_)),
+                Self::Width(width) if !width.is_float() => {
+                    matches!(label, IndexLabel::Int64(value) if width.holds_int(*value))
+                }
+                Self::Float64 | Self::Width(_) => matches!(label, IndexLabel::Float64(_)),
+                Self::Boolean => matches!(label, IndexLabel::Bool(_)),
+            }
+    }
+
+    /// The kind pandas' `inferred_type` names its values.
+    const fn inferred_type(self) -> &'static str {
+        match self {
+            Self::Int64 => "integer",
+            Self::Float64 => "floating",
+            Self::Boolean => "boolean",
+            Self::Width(width) if width.is_float() => "floating",
+            Self::Width(_) => "integer",
+        }
+    }
 }
 
 impl DeclaredDtype {
@@ -2209,27 +2572,51 @@ impl DeclaredDtype {
         match self {
             Self::Object => "object",
             Self::Int64 => "int64",
-            Self::Int32 => "int32",
+            Self::Width(width) => width.name(false),
             Self::Float64 => "float64",
             Self::Bool => "bool",
             Self::Datetime64 => "datetime64[ns]",
             Self::Timedelta64 => "timedelta64[ns]",
+            Self::Masked(masked) => masked.name(),
         }
     }
 
     /// The declared dtype pandas' name reads as, None for another.
     #[must_use]
     pub fn of_name(name: &str) -> Option<Self> {
+        if let Some(masked) = MaskedDtype::of_name(name) {
+            return Some(Self::Masked(masked));
+        }
         Some(match name {
             "object" => Self::Object,
             "int64" => Self::Int64,
-            "int32" => Self::Int32,
             "float64" => Self::Float64,
             "bool" => Self::Bool,
             "datetime64[ns]" => Self::Datetime64,
             "timedelta64[ns]" => Self::Timedelta64,
-            _ => return None,
+            _ => match NumericWidth::parse(name)? {
+                (width, false) => Self::Width(width),
+                (_, true) => return None,
+            },
         })
+    }
+
+    /// The masked extension dtype, None for another.
+    #[must_use]
+    pub const fn masked(self) -> Option<MaskedDtype> {
+        match self {
+            Self::Masked(masked) => Some(masked),
+            _ => None,
+        }
+    }
+
+    /// The numpy width of a narrow numeric dtype, None for another.
+    #[must_use]
+    pub const fn width(self) -> Option<NumericWidth> {
+        match self {
+            Self::Width(width) => Some(width),
+            _ => None,
+        }
     }
 }
 
@@ -2402,8 +2789,9 @@ impl Index {
             labels: IndexLabels::new(labels),
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -2464,8 +2852,9 @@ impl Index {
             labels,
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -2499,8 +2888,9 @@ impl Index {
             labels,
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -2525,8 +2915,9 @@ impl Index {
             labels,
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -2562,8 +2953,9 @@ impl Index {
             labels: IndexLabels::new_int64_values(Arc::new(values)),
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -2585,12 +2977,14 @@ impl Index {
         step: usize,
         len: usize,
     ) -> Option<Self> {
+        let view = Int64StridedLabels::new(values, start, isize::try_from(step).ok()?, len)?;
         Some(Self {
-            labels: IndexLabels::new_int64_strided(values, start, step, len)?,
+            labels: IndexLabels::new_int64_strided(view),
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -2613,8 +3007,9 @@ impl Index {
             labels: IndexLabels::new_utf8_contiguous(bytes, offsets),
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -2625,12 +3020,63 @@ impl Index {
         }
     }
 
+    /// The labels at `positions` (each below the length) of an index held as
+    /// one contiguous text buffer, gathered as bytes into another: a
+    /// MultiIndex frame's flat labels were cloned a String a row on every
+    /// take, a tenth of a 200k-row sort_index (br-frankenpandas-e186m).
+    /// `None` for any other backing.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn take_utf8_contiguous(&self, positions: &[usize]) -> Option<Self> {
+        let (bytes, offsets) = self.labels.utf8_contiguous.as_ref()?;
+        let span = |position: usize| offsets[position]..offsets[position + 1];
+        let total = positions.iter().map(|&position| span(position).len()).sum();
+        let mut gathered = Vec::with_capacity(total);
+        let mut gathered_offsets = Vec::with_capacity(positions.len() + 1);
+        gathered_offsets.push(0);
+        for &position in positions {
+            gathered.extend_from_slice(&bytes[span(position)]);
+            gathered_offsets.push(gathered.len());
+        }
+        Some(Self::from_utf8_contiguous(
+            Arc::from(gathered),
+            Arc::from(gathered_offsets),
+        ))
+    }
+
     /// Raw `i64` view of an all-Int64 label vector, computing and caching it
     /// on first request. `None` means at least one label is not Int64.
     #[must_use]
     #[doc(hidden)]
     pub fn int64_label_values(&self) -> Option<Arc<Vec<i64>>> {
         self.labels.int64_view()
+    }
+
+    /// The instants of an index holding them as instants - a typed
+    /// DatetimeIndex backing, a date_range's lazy range or no label at all
+    /// under a declared datetime dtype, NaT as i64::MIN - with no label
+    /// made; `None` for any other backing (br-frankenpandas-lsn8d).
+    #[must_use]
+    pub fn datetime64_label_values(&self) -> Option<Cow<'_, [i64]>> {
+        if let Some(range) = self.labels.datetime64_affine_range() {
+            return Some(Cow::Owned(range.materialize_i64()));
+        }
+        if self.labels.is_empty() && self.declared == Some(DeclaredDtype::Datetime64) {
+            return Some(Cow::Borrowed(&[]));
+        }
+        self.labels.datetime64_nanos()
+    }
+
+    /// The durations of an index holding them as durations - a typed
+    /// TimedeltaIndex backing or no label at all under a declared timedelta
+    /// dtype, NaT as i64::MIN - with no label made; `None` for any other
+    /// backing (br-frankenpandas-5s8nr).
+    #[must_use]
+    pub fn timedelta64_label_values(&self) -> Option<Cow<'_, [i64]>> {
+        if self.labels.is_empty() && self.declared == Some(DeclaredDtype::Timedelta64) {
+            return Some(Cow::Borrowed(&[]));
+        }
+        self.labels.timedelta64_nanos()
     }
 
     /// The cached `i64` label view if already computed (never computes).
@@ -2663,8 +3109,13 @@ impl Index {
         if self.labels.has_lazy_int64_backing() {
             return LabelKinds::INT64;
         }
-        if self.labels.datetime64_affine_range().is_some() {
+        if self.labels.datetime64_affine_range().is_some()
+            || self.labels.datetime64_strided().is_some()
+        {
             return LabelKinds::DATETIME64;
+        }
+        if self.labels.timedelta64_strided().is_some() {
+            return LabelKinds::TIMEDELTA64;
         }
         let cache = INDEX_LABEL_KINDS_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
         if let Some(kinds) = cache
@@ -2681,12 +3132,20 @@ impl Index {
             .fold(LabelKinds::default(), |kinds, label| {
                 kinds.union(LabelKinds::of(label))
             });
+        self.remember_label_kinds(kinds);
+        kinds
+    }
+
+    /// Keeps `kinds` as the label kinds of this label identity, for
+    /// [`Self::label_kinds`]: its own pass, or another that read every label
+    /// (a datetime ascent, br-frankenpandas-pirog).
+    fn remember_label_kinds(&self, kinds: LabelKinds) {
+        let cache = INDEX_LABEL_KINDS_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
         let mut guard = cache.lock().expect("index label kinds cache poisoned");
         if guard.len() >= INDEX_LABEL_KINDS_CACHE_MAX {
             guard.clear();
         }
         guard.insert(self.label_identity, kinds);
-        kinds
     }
 
     #[must_use]
@@ -2708,8 +3167,9 @@ impl Index {
             labels,
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -2729,6 +3189,60 @@ impl Index {
     pub fn from_datetime64(nanos: Vec<i64>) -> Self {
         Self::new(nanos.into_iter().map(IndexLabel::Datetime64).collect())
             .declared_if_empty(DeclaredDtype::Datetime64)
+    }
+
+    /// [`Self::from_datetime64`] over a typed backing: the instants held
+    /// as they are (NaT as i64::MIN), labels made only when something reads
+    /// them, slices views of the same buffer. A DatetimeIndex built from an
+    /// array was a 32 B enum per row (DatetimeIndex(stamps) 6.8 ms a
+    /// million rows, pandas 0.013; br-frankenpandas-lsn8d).
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_datetime64_values(nanos: Vec<i64>) -> Self {
+        Self::from_temporal_values(TemporalKind::Datetime, nanos)
+    }
+
+    /// [`Self::from_timedelta64`] over a typed backing, as
+    /// [`Self::from_datetime64_values`] holds instants: the durations held
+    /// as they are (NaT as i64::MIN). A TimedeltaIndex was a 32 B enum per
+    /// row, made again by every take and slice (TimedeltaIndex(array) 5.3 ms
+    /// a million rows, pandas 0.009; br-frankenpandas-5s8nr).
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_timedelta64_values(nanos: Vec<i64>) -> Self {
+        Self::from_temporal_values(TemporalKind::Timedelta, nanos)
+    }
+
+    fn from_temporal_values(kind: TemporalKind, nanos: Vec<i64>) -> Self {
+        let declared = match kind {
+            TemporalKind::Datetime => DeclaredDtype::Datetime64,
+            TemporalKind::Timedelta => DeclaredDtype::Timedelta64,
+        };
+        let len = nanos.len();
+        let values = Arc::new(nanos);
+        let Some(view) = Int64StridedLabels::new(Arc::clone(&values), 0, 1, len) else {
+            let nanos = Arc::unwrap_or_clone(values);
+            return match kind {
+                TemporalKind::Datetime => Self::from_datetime64(nanos),
+                TemporalKind::Timedelta => Self::from_timedelta64(nanos),
+            };
+        };
+        Self {
+            labels: IndexLabels::new_temporal_strided(kind, view),
+            name: None,
+            label_identity: next_index_label_identity(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
+            monotonic_cache: Default::default(),
+            semantic_fingerprint_cache: OnceLock::new(),
+            row_multiindex: None,
+            tz: None,
+            freq: None,
+            range: None,
+            declared: None,
+            categories: None,
+        }
+        .declared_if_empty(declared)
     }
 
     /// No labels show a type, so an empty index built as `dtype` declares
@@ -2766,6 +3280,15 @@ impl Index {
     #[must_use]
     pub fn labels(&self) -> &[IndexLabel] {
         self.labels.as_slice()
+    }
+
+    /// The label at `position` (`None` past the end), a lazy index's - a
+    /// range, typed instants or durations - built from its one value: no
+    /// other label is made (`s.index[5]` made a million;
+    /// br-frankenpandas-e186m).
+    #[must_use]
+    pub fn label_at(&self, position: usize) -> Option<IndexLabel> {
+        self.labels.label_at(position)
     }
 
     #[must_use]
@@ -2874,8 +3397,11 @@ impl Index {
     }
 
     /// Whether every label (a missing one aside) is one of `categories`.
+    /// FxHash (a float label hashes its spread bits): SipHash of 500k text
+    /// categories was a third of c.value_counts() of them
+    /// (br-frankenpandas-89sri).
     fn labels_within(&self, categories: &IndexCategories) -> bool {
-        let known: std::collections::HashSet<&IndexLabel> = categories.categories.iter().collect();
+        let known: FxHashSet<&IndexLabel> = categories.categories.iter().collect();
         self.labels()
             .iter()
             .all(|label| label.is_missing() || known.contains(label))
@@ -2908,23 +3434,95 @@ impl Index {
 
     /// These labels - selected, sliced or computed from `source`'s - under
     /// the dtype pandas gives them: `source`'s declared object dtype (it
-    /// holds any labels), its int32 while they are ints, and for no label
-    /// at all `source`'s dtype, as pandas' empty slice or selection keeps it
-    /// (br-frankenpandas-i20vm / pqjzo / dwyud). A dtype these labels are
-    /// already declared with stays.
+    /// holds any labels), its narrow width (int32, uint8, float32 ...)
+    /// while they are all ints / all floats, and for no label at all
+    /// `source`'s dtype, as pandas' empty slice or selection keeps it
+    /// (br-frankenpandas-i20vm / pqjzo / dwyud / vqjvd). A dtype these
+    /// labels are already declared with stays.
     #[must_use]
     pub fn with_dtype_of(mut self, source: &Self) -> Self {
         if self.declared.is_none() {
             self.declared = match source.declared {
                 Some(DeclaredDtype::Object) => Some(DeclaredDtype::Object),
-                Some(DeclaredDtype::Int32) if self.is_integer() => Some(DeclaredDtype::Int32),
                 declared if self.is_empty() => {
                     declared.or_else(|| DeclaredDtype::of_name(source.dtype()))
+                }
+                Some(DeclaredDtype::Width(width)) if self.holds_width(width) => {
+                    Some(DeclaredDtype::Width(width))
+                }
+                Some(DeclaredDtype::Masked(masked)) if self.holds_masked(masked) => {
+                    Some(DeclaredDtype::Masked(masked))
                 }
                 _ => None,
             };
         }
         self
+    }
+
+    /// These labels under a masked extension dtype (Int64, UInt8, Float64,
+    /// boolean ...) - a masked column's values made an index - when every
+    /// label is of its kind or missing, else as they are
+    /// (br-frankenpandas-05cm6).
+    #[must_use]
+    pub fn with_masked(self, masked: MaskedDtype) -> Self {
+        if self.holds_masked(masked) {
+            self.with_declared_dtype(Some(DeclaredDtype::Masked(masked)))
+        } else {
+            self
+        }
+    }
+
+    /// The masked extension dtype these labels are declared with, if any.
+    #[must_use]
+    pub fn masked(&self) -> Option<MaskedDtype> {
+        self.declared.and_then(DeclaredDtype::masked)
+    }
+
+    /// Whether every label is of `masked`'s kind or missing.
+    fn holds_masked(&self, masked: MaskedDtype) -> bool {
+        if self.labels.has_lazy_int64_backing() {
+            return matches!(masked, MaskedDtype::Int64)
+                || matches!(masked, MaskedDtype::Width(width) if !width.is_float()
+                    && self.labels.iter().all(|label| masked.holds(label)));
+        }
+        self.labels.iter().all(|label| masked.holds(label))
+    }
+
+    /// These labels under a narrow numpy `width` (int32, uint8, float32 ...),
+    /// as a narrow column's labels made an index are, when every label can
+    /// be held by it, else as they are (br-frankenpandas-vqjvd).
+    #[must_use]
+    pub fn with_width(self, width: NumericWidth) -> Self {
+        if self.is_empty() || self.holds_width(width) {
+            self.with_declared_dtype(Some(DeclaredDtype::Width(width)))
+        } else {
+            self
+        }
+    }
+
+    /// The narrow numpy width these labels are declared with, if any.
+    #[must_use]
+    pub fn width(&self) -> Option<NumericWidth> {
+        self.declared.and_then(DeclaredDtype::width)
+    }
+
+    /// Whether every label can be held under `width`: all ints for an
+    /// integer width, all floats (NaN among them) for float32 - no missing
+    /// label, which numpy's narrow arrays cannot hold.
+    fn holds_width(&self, width: NumericWidth) -> bool {
+        if width.is_float() {
+            return self.labels.iter().all(|label| {
+                matches!(
+                    label,
+                    IndexLabel::Float64(_) | IndexLabel::Null(fp_types::NullKind::NaN)
+                )
+            });
+        }
+        self.labels.has_lazy_int64_backing()
+            || self
+                .labels
+                .iter()
+                .all(|label| matches!(label, IndexLabel::Int64(_)))
     }
 
     /// These labels under `declared` (see [`DeclaredDtype`]); None their
@@ -2945,8 +3543,10 @@ impl Index {
     /// can describe.
     fn holds_only_datetimes(&self) -> bool {
         // A date_range's lazy range is datetimes without its labels made
-        // (br-frankenpandas-so0mr).
-        if self.labels.datetime64_affine_range().is_some() {
+        // (br-frankenpandas-so0mr), as is a typed backing (lsn8d).
+        if self.labels.datetime64_affine_range().is_some()
+            || self.labels.datetime64_strided().is_some()
+        {
             return true;
         }
         self.labels().iter().all(|label| {
@@ -3479,8 +4079,16 @@ impl Index {
     /// generic fallback's dtype). Lets the temporal index reuse the i64 kernels
     /// (`membership_filter_i64` / `union_i64`) — Datetime64/Timedelta64 are
     /// ns-backed but `int64_view()` only matches `IndexLabel::Int64`, so without
-    /// this they fall to the pointer-key `FxHashMap<&IndexLabel>` path.
-    fn all_temporal_ns(labels: &[IndexLabel], datetime: bool) -> Option<Vec<i64>> {
+    /// this they fall to the pointer-key `FxHashMap<&IndexLabel>` path. A
+    /// typed DatetimeIndex backing is its instants, no label read (lsn8d).
+    fn all_temporal_ns(&self, datetime: bool) -> Option<Vec<i64>> {
+        if let Some(nanos) = self.labels.datetime64_nanos() {
+            return (datetime && !nanos.is_empty()).then(|| nanos.into_owned());
+        }
+        if let Some(nanos) = self.labels.timedelta64_nanos() {
+            return (!datetime && !nanos.is_empty()).then(|| nanos.into_owned());
+        }
+        let labels = self.labels();
         if labels.is_empty() {
             return None;
         }
@@ -3503,6 +4111,10 @@ impl Index {
     /// a NaT-bearing temporal index bails to it; a no-NaT index reuses the i64
     /// kernels, where a present timestamp behaves exactly like any other i64.
     fn temporal_ns_present(&self, datetime: bool) -> Option<Vec<i64>> {
+        if let Some(nanos) = self.labels.datetime64_nanos() {
+            return (datetime && !nanos.is_empty() && !nanos.contains(&i64::MIN))
+                .then(|| nanos.into_owned());
+        }
         let labels = self.labels();
         if labels.is_empty() {
             return None;
@@ -3717,10 +4329,19 @@ impl Index {
     /// materialization/comparison for indexes that already carry typed Int64
     /// backing. `sort_by_key` is stable, so duplicate labels keep their
     /// original order just like the generic `IndexLabel` comparator path.
+    /// Positions ordering `vals` ascending, ties in position order (the
+    /// stable order): (value, position) pairs sorted together, where the
+    /// positions were sorted reading each value through a gather per
+    /// compare (br-frankenpandas-e186m).
     fn argsort_i64(vals: &[i64]) -> Vec<usize> {
-        let mut indices: Vec<usize> = (0..vals.len()).collect();
-        indices.sort_by_key(|&idx| vals[idx]);
-        indices
+        let mut pairs: Vec<(i64, usize)> = vals
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(position, value)| (value, position))
+            .collect();
+        pairs.sort_unstable();
+        pairs.into_iter().map(|(_, position)| position).collect()
     }
 
     fn argsort_int64_affine(range: Int64AffineLabels) -> Vec<usize> {
@@ -4004,6 +4625,12 @@ impl Index {
             // map so repeated reindex/align/join don't rebuild it every call
             // (pandas caches its int64 engine). Bit-identical first-occurrence;
             // a duplicate self returns None and keeps the per-call builder.
+            // The target's ints are looked up as they are held - its labels
+            // were made only to be read back as ints (idx.get_indexer(other)
+            // of a million 23.7 ms, pandas 15.9; br-frankenpandas-e186m).
+            if let Some(resolved) = self.unique_int64_positions_of(&target_i64) {
+                return resolved;
+            }
             if let Some(resolved) = self.unsorted_unique_int64_positions(target.labels()) {
                 return resolved;
             }
@@ -4052,6 +4679,25 @@ impl Index {
     ) -> Option<Vec<Option<usize>>> {
         if !matches!(self.sort_order(), SortOrder::AscendingInt64) {
             return None;
+        }
+        // A range answers by arithmetic: its labels were made into a buffer
+        // and searched (df.loc[[...]] on a RangeIndex; br-frankenpandas-e186m).
+        if let Some((start, _, step)) = self.range_span() {
+            let len = self.len();
+            return Some(
+                labels
+                    .iter()
+                    .map(|label| {
+                        let offset = label.exact_int()?.checked_sub(start)?;
+                        if offset.checked_rem(step)? != 0 {
+                            return None;
+                        }
+                        usize::try_from(offset.checked_div(step)?)
+                            .ok()
+                            .filter(|&at| at < len)
+                    })
+                    .collect(),
+            );
         }
         let values = self.labels.int64_view()?;
         // An integral Float64 selector is the int it equals (l5sed).
@@ -4234,6 +4880,26 @@ impl Index {
 
     #[must_use]
     pub fn is_monotonic_increasing(&self) -> bool {
+        *self.monotonic_cache[0].get_or_init(|| self.labels_ascend())
+    }
+
+    fn labels_ascend(&self) -> bool {
+        if let Some(nanos) = self.labels.datetime64_nanos() {
+            return nanos_monotonic::<true>(&nanos);
+        }
+        if let Some(answer) = self
+            .labels
+            .held()
+            .and_then(held_datetimes_monotonic::<true>)
+        {
+            // An ascent read every label as a datetime, none NaT: those are
+            // the label kinds, kept for the next asker (a resampler's axis
+            // check scanned them again on a fresh index).
+            if answer && !self.labels.is_empty() {
+                self.remember_label_kinds(LabelKinds::DATETIME64);
+            }
+            return answer;
+        }
         if self.labels.has_datetime64_nat() {
             return false;
         }
@@ -4279,6 +4945,20 @@ impl Index {
 
     #[must_use]
     pub fn is_monotonic_decreasing(&self) -> bool {
+        *self.monotonic_cache[1].get_or_init(|| self.labels_descend())
+    }
+
+    fn labels_descend(&self) -> bool {
+        if let Some(nanos) = self.labels.datetime64_nanos() {
+            return nanos_monotonic::<false>(&nanos);
+        }
+        if let Some(answer) = self
+            .labels
+            .held()
+            .and_then(held_datetimes_monotonic::<false>)
+        {
+            return answer;
+        }
         if self.labels.has_datetime64_nat() {
             return false;
         }
@@ -4318,6 +4998,13 @@ impl Index {
         if !matches!(self.sort_order(), SortOrder::Unsorted) {
             return self.clone();
         }
+        // Labels known unique (the cached duplicate check, which pandas'
+        // is_unique caches likewise) are their own unique() - it hashed
+        // every label each call (idx.unique() of a million shuffled ints 1.9
+        // ms, pandas 0.001; br-frankenpandas-e186m).
+        if !self.has_duplicates() {
+            return self.clone();
+        }
         // Typed all-Int64 fast path: inline `i64` first-occurrence dedup instead
         // of the pointer-keyed `FxHashMap<&IndexLabel>`. Bit-identical order.
         if let Some(vals) = self.labels.int64_view() {
@@ -4328,7 +5015,7 @@ impl Index {
         // was 0.49x pandas). NaT bails to the pointer-key path (which keeps the
         // one NaT). Bit-identical: same first-occurrence ns order and dtype.
         if let Some(ns) = self.temporal_ns_present(true) {
-            return self.propagate_name(Self::from_datetime64(Self::unique_i64(&ns)));
+            return self.propagate_name(Self::from_datetime64_values(Self::unique_i64(&ns)));
         }
         if let Some(ns) = self.temporal_ns_present(false) {
             return self.propagate_name(Self::from_timedelta64(Self::unique_i64(&ns)));
@@ -4360,7 +5047,8 @@ impl Index {
     pub fn duplicated(&self, keep: DuplicateKeep) -> Vec<bool> {
         let mut result = vec![false; self.labels.len()];
         // Strictly-ascending => no duplicates under any keep mode; skip hashing.
-        if !matches!(self.sort_order(), SortOrder::Unsorted) {
+        // Likewise labels known unique (the cached check; e186m).
+        if !matches!(self.sort_order(), SortOrder::Unsorted) || !self.has_duplicates() {
             return result;
         }
         // Typed all-Int64 fast path: inline `i64` keys (dense bitsets when the
@@ -4454,7 +5142,7 @@ impl Index {
                     .filter_map(|(value, is_duplicated)| (!is_duplicated).then_some(value))
                     .collect();
                 let result = if datetime {
-                    Self::from_datetime64(labels)
+                    Self::from_datetime64_values(labels)
                 } else {
                     Self::from_timedelta64(labels)
                 };
@@ -4509,19 +5197,17 @@ impl Index {
         // DatetimeIndex was 0.37x pandas). Reuse membership_filter_i64 over the ns
         // and rebuild the temporal dtype. Bit-identical: same self-order
         // first-occurrence kept-present labels, inline i64 keys.
-        if let (Some(a_ns), Some(b_ns)) = (
-            Self::all_temporal_ns(self.labels(), true),
-            Self::all_temporal_ns(other.labels(), true),
-        ) {
-            let mut result = Self::from_datetime64(Self::membership_filter_i64(&a_ns, &b_ns, true));
+        if let (Some(a_ns), Some(b_ns)) = (self.all_temporal_ns(true), other.all_temporal_ns(true))
+        {
+            let mut result =
+                Self::from_datetime64_values(Self::membership_filter_i64(&a_ns, &b_ns, true));
             result.name = self.shared_name(other);
             result.tz = joined_tz(self, other);
             return result;
         }
-        if let (Some(a_ns), Some(b_ns)) = (
-            Self::all_temporal_ns(self.labels(), false),
-            Self::all_temporal_ns(other.labels(), false),
-        ) {
+        if let (Some(a_ns), Some(b_ns)) =
+            (self.all_temporal_ns(false), other.all_temporal_ns(false))
+        {
             let mut result =
                 Self::from_timedelta64(Self::membership_filter_i64(&a_ns, &b_ns, true));
             result.name = self.shared_name(other);
@@ -4666,7 +5352,27 @@ impl Index {
         // of enum-keyed maps. It retains pandas' first-seen label ordering while
         // preserving each label's maximum count across the two inputs.
         if let (Some(a_i64), Some(b_i64)) = (self.labels.int64_view(), other.labels.int64_view()) {
-            let mut result = Self::from_i64_values(Self::union_i64(&a_i64, &b_i64));
+            // A unique right side adds what the left lacks, found through the
+            // left's cached lookup (pandas keeps its engine likewise), its
+            // uniqueness the cached check - both were hashed again each call
+            // (a.union(b, sort=False) of a million 47 ms, pandas 32;
+            // br-frankenpandas-e186m). The same values as union_i64's.
+            let values = if other.has_duplicates() {
+                Self::union_i64(&a_i64, &b_i64)
+            } else {
+                let lookup = int64_position_lookup_cached(self.label_identity, &a_i64);
+                let mut out =
+                    Vec::with_capacity(combined_output_capacity(a_i64.len(), b_i64.len()));
+                out.extend_from_slice(&a_i64);
+                out.extend(
+                    b_i64
+                        .iter()
+                        .copied()
+                        .filter(|value| !lookup.contains_key(value)),
+                );
+                out
+            };
+            let mut result = Self::from_i64_values(values);
             result.name = self.shared_name(other);
             result.tz = joined_tz(self, other);
             return result;
@@ -4695,7 +5401,7 @@ impl Index {
             temporal_ns(self_labels, true),
             temporal_ns(other_labels, true),
         ) {
-            let mut result = Self::from_datetime64(Self::union_i64(&a_ns, &b_ns));
+            let mut result = Self::from_datetime64_values(Self::union_i64(&a_ns, &b_ns));
             result.name = self.shared_name(other);
             result.tz = joined_tz(self, other);
             return result;
@@ -4767,8 +5473,16 @@ impl Index {
         result
     }
 
+    /// The labels of this index `other` lacks, named for both - their
+    /// shared name, else none, as pandas names an Index's difference (this
+    /// index's name was kept; br-frankenpandas-ff5ik).
     #[must_use]
     pub fn difference(&self, other: &Self) -> Self {
+        self.difference_labels(other)
+            .rename_index(self.shared_name(other))
+    }
+
+    fn difference_labels(&self, other: &Self) -> Self {
         // Two-pointer merge when both sides are strictly ascending (see
         // intersection / sorted_merge_set_op).
         if let Some(labels) = self.sorted_merge_set_op_i64(other, SetMergeKind::Difference) {
@@ -4790,18 +5504,15 @@ impl Index {
         // pointer-key map — difference over an UNSORTED DatetimeIndex was 0.57x
         // pandas). Reuse membership_filter_i64(keep_present=false). Bit-identical:
         // self-order, labels not in other, first-occurrence dedup, inline i64 keys.
-        if let (Some(a_ns), Some(b_ns)) = (
-            Self::all_temporal_ns(self.labels(), true),
-            Self::all_temporal_ns(other.labels(), true),
-        ) {
-            return self.propagate_name(Self::from_datetime64(Self::membership_filter_i64(
+        if let (Some(a_ns), Some(b_ns)) = (self.all_temporal_ns(true), other.all_temporal_ns(true))
+        {
+            return self.propagate_name(Self::from_datetime64_values(Self::membership_filter_i64(
                 &a_ns, &b_ns, false,
             )));
         }
-        if let (Some(a_ns), Some(b_ns)) = (
-            Self::all_temporal_ns(self.labels(), false),
-            Self::all_temporal_ns(other.labels(), false),
-        ) {
+        if let (Some(a_ns), Some(b_ns)) =
+            (self.all_temporal_ns(false), other.all_temporal_ns(false))
+        {
             return self.propagate_name(Self::from_timedelta64(Self::membership_filter_i64(
                 &a_ns, &b_ns, false,
             )));
@@ -4868,21 +5579,18 @@ impl Index {
         // independent membership_filter_i64(keep_present=false) calls reproduce
         // the shared-`seen` within-half dedup. Bit-identical: self-not-in-other
         // then other-not-in-self, inline i64 keys.
-        if let (Some(a_ns), Some(b_ns)) = (
-            Self::all_temporal_ns(self.labels(), true),
-            Self::all_temporal_ns(other.labels(), true),
-        ) {
+        if let (Some(a_ns), Some(b_ns)) = (self.all_temporal_ns(true), other.all_temporal_ns(true))
+        {
             let mut labels = Self::membership_filter_i64(&a_ns, &b_ns, false);
             labels.extend(Self::membership_filter_i64(&b_ns, &a_ns, false));
-            let mut result = Self::from_datetime64(labels);
+            let mut result = Self::from_datetime64_values(labels);
             result.name = self.shared_name(other);
             result.tz = joined_tz(self, other);
             return result;
         }
-        if let (Some(a_ns), Some(b_ns)) = (
-            Self::all_temporal_ns(self.labels(), false),
-            Self::all_temporal_ns(other.labels(), false),
-        ) {
+        if let (Some(a_ns), Some(b_ns)) =
+            (self.all_temporal_ns(false), other.all_temporal_ns(false))
+        {
             let mut labels = Self::membership_filter_i64(&a_ns, &b_ns, false);
             labels.extend(Self::membership_filter_i64(&b_ns, &a_ns, false));
             let mut result = Self::from_timedelta64(labels);
@@ -4976,8 +5684,9 @@ impl Index {
         // their inner i64 (NaT == i64::MIN sorts first in BOTH paths), and both
         // argsort_i64 (sort_by_key) and the fallback (sort_by) are STABLE, so
         // duplicate-timestamp ties keep input order identically.
-        if let Some(ns) = Self::all_temporal_ns(self.labels(), true)
-            .or_else(|| Self::all_temporal_ns(self.labels(), false))
+        if let Some(ns) = self
+            .all_temporal_ns(true)
+            .or_else(|| self.all_temporal_ns(false))
         {
             return Self::argsort_i64(&ns);
         }
@@ -5003,22 +5712,33 @@ impl Index {
             }
         }
         if let Some(vals) = self.labels.int64_view() {
-            let order = Self::argsort_i64(&vals);
-            let sorted = order.iter().map(|&idx| vals[idx]).collect();
+            // The values sorted themselves: equal ints are indistinguishable,
+            // so no order of positions is needed (an argsort and a gather).
+            let mut sorted = vals.as_ref().clone();
+            sorted.sort_unstable();
             return self.propagate_name(Self::from_i64_values(sorted));
         }
         // Datetime64 / Timedelta64: stable i64 argsort + gather, rebuilt with the
         // temporal dtype (sort_values over a DatetimeIndex was 0.58x pandas).
-        // Bit-identical to the comparison-sort fallback (see argsort).
-        if let Some(ns) = Self::all_temporal_ns(self.labels(), true) {
-            let order = Self::argsort_i64(&ns);
-            let sorted = order.iter().map(|&idx| ns[idx]).collect();
-            return self.propagate_name(Self::from_datetime64(sorted));
+        // NaT last, as pandas' sort_values (na_position='last'): the argsort
+        // puts it, i64::MIN, first (br-frankenpandas-5s8nr).
+        let sorted_nat_last = |ns: &[i64]| -> Vec<i64> {
+            let order = Self::argsort_i64(ns);
+            let mut sorted: Vec<i64> = order.iter().map(|&idx| ns[idx]).collect();
+            let nat = sorted
+                .iter()
+                .take_while(|&&value| value == i64::MIN)
+                .count();
+            sorted.rotate_left(nat);
+            sorted
+        };
+        if let Some(ns) = self.all_temporal_ns(true) {
+            let sorted = sorted_nat_last(&ns);
+            return self.propagate_name(Self::from_datetime64_values(sorted));
         }
-        if let Some(ns) = Self::all_temporal_ns(self.labels(), false) {
-            let order = Self::argsort_i64(&ns);
-            let sorted = order.iter().map(|&idx| ns[idx]).collect();
-            return self.propagate_name(Self::from_timedelta64(sorted));
+        if let Some(ns) = self.all_temporal_ns(false) {
+            let sorted = sorted_nat_last(&ns);
+            return self.propagate_name(Self::from_timedelta64_values(sorted));
         }
         let order = self.argsort();
         self.propagate_name(Self::new(
@@ -5047,6 +5767,58 @@ impl Index {
         }
     }
 
+    /// [`Self::take`] of owned positions: an int64 index's labels (a
+    /// RangeIndex's arithmetic, a typed buffer's values) gathered into the
+    /// positions' own buffer, where take wrote a second one - a page-faulted
+    /// 8 MB a million rows (s.iloc[perm] 0.75x pandas;
+    /// br-frankenpandas-lsn8d). Any other index takes as [`Self::take`].
+    #[must_use]
+    pub fn take_owned(&self, indices: Vec<usize>) -> Self {
+        if self.row_multiindex.is_some() || self.freq.is_some() {
+            return self.take(&indices);
+        }
+        if let Some(taken) = self.take_affine_positions(&indices) {
+            return taken;
+        }
+        match self.labels.take_i64_values_owned(indices) {
+            Ok(values) => self.propagate_name(Self::from_i64_values(values)),
+            Err(indices) => self.take(&indices),
+        }
+    }
+
+    /// numpy's take of signed positions (negative from the end) over a
+    /// typed int64 index, each wrapped, checked and gathered in one pass:
+    /// copying the positions out, bounding, wrapping, bounding again and
+    /// gathering were five passes over a million (idx.take(perm) 2.6 ms,
+    /// pandas 1.06; br-frankenpandas-fk877). `None` for any other backing,
+    /// a freq, or a position out of range.
+    pub fn take_signed_i64<I>(&self, positions: I) -> Option<Self>
+    where
+        I: ExactSizeIterator<Item = i64>,
+    {
+        if self.row_multiindex.is_some() || self.freq.is_some() {
+            return None;
+        }
+        let Some(Some(values)) = self.labels.int64_typed.get() else {
+            return None;
+        };
+        let length = i64::try_from(values.len()).ok()?;
+        let mut missed = 0_usize;
+        let taken: Vec<i64> = positions
+            .map(|at| {
+                let position = usize::try_from(at + ((at >> 63) & length)).unwrap_or(usize::MAX);
+                match values.get(position) {
+                    Some(&value) => value,
+                    None => {
+                        missed += 1;
+                        0
+                    }
+                }
+            })
+            .collect();
+        (missed == 0).then(|| self.propagate_name(Self::from_i64_values(taken)))
+    }
+
     fn take_labels(&self, indices: &[usize]) -> Self {
         // Affine-in, affine-out fast path (br-frankenpandas, BlackThrush): when the
         // backing is an Int64 affine range AND the requested positions are
@@ -5065,6 +5837,15 @@ impl Index {
         }
         if let Some(values) = self.labels.take_i64_values(indices) {
             return self.propagate_name(Self::from_i64_values(values));
+        }
+        // A typed DatetimeIndex takes its instants (lsn8d).
+        if let Some(nanos) = self.labels.datetime64_nanos() {
+            let taken = indices.iter().map(|&position| nanos[position]).collect();
+            return self.propagate_name(Self::from_datetime64_values(taken));
+        }
+        // Text in one buffer takes its bytes (br-frankenpandas-e186m).
+        if let Some(taken) = self.take_utf8_contiguous(indices) {
+            return self.propagate_name(taken);
         }
         self.propagate_name(Self::new(
             indices.iter().map(|&i| self.labels[i].clone()).collect(),
@@ -5132,14 +5913,73 @@ impl Index {
         Some(self.propagate_name(result))
     }
 
+    /// `len` labels from `start`, `step` apart (either sign) of a datetime /
+    /// timedelta / int64 index, its labels never made: a date_range or an
+    /// int64 range stays an arithmetic range, a typed backing is a view of
+    /// the same instants, durations or ints, backwards too, as numpy's slice
+    /// is (name, zone and dtype kept).
+    /// The callers took and cloned every label (`df.iloc[::-1]` over a
+    /// DatetimeIndex 4.9 ms a million rows, pandas 0.01;
+    /// br-frankenpandas-lsn8d, br-frankenpandas-5s8nr). `None` for any
+    /// other backing, an empty run or one outside the index.
+    #[must_use]
+    pub fn stepped(&self, start: usize, step: isize, len: usize) -> Option<Self> {
+        let reach = step.checked_mul(isize::try_from(len.checked_sub(1)?).ok()?)?;
+        if start.max(start.checked_add_signed(reach)?) >= self.len() {
+            return None;
+        }
+        if let Some(range) = self.labels.datetime64_affine_range() {
+            let step = range.step.checked_mul(i64::try_from(step).ok()?)?;
+            let index = Self::from_datetime64_affine_range(range.value_at(start), step, len)?;
+            return Some(self.propagate_name(index));
+        }
+        // An int64 index the same way: an arithmetic range stays one, a
+        // typed buffer or a view of one is a view (`idx[::2]` and a run
+        // made a label each; br-frankenpandas-e186m).
+        if let Some(range) = self.labels.int64_affine_range() {
+            let step = range.step.checked_mul(i64::try_from(step).ok()?)?;
+            let index =
+                Self::new_known_unique_int64_affine_range(range.value_at(start), step, len)?;
+            return Some(self.propagate_name(index));
+        }
+        let labels = if let Some(TemporalStridedLabels { kind, view }) =
+            self.labels.temporal_strided.as_ref()
+        {
+            IndexLabels::new_temporal_strided(*kind, view.sub_view(start, step, len)?)
+        } else if let Some(view) = self.labels.int64_strided.as_ref() {
+            IndexLabels::new_int64_strided(view.sub_view(start, step, len)?)
+        } else if let Some(Some(values)) = self.labels.int64_typed.get() {
+            let whole = Int64StridedLabels::new(Arc::clone(values), 0, 1, values.len())?;
+            IndexLabels::new_int64_strided(whole.sub_view(start, step, len)?)
+        } else {
+            return None;
+        };
+        Some(self.propagate_name(Self {
+            labels,
+            name: None,
+            label_identity: next_index_label_identity(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
+            monotonic_cache: Default::default(),
+            semantic_fingerprint_cache: OnceLock::new(),
+            row_multiindex: None,
+            tz: None,
+            freq: None,
+            range: None,
+            declared: None,
+            categories: None,
+        }))
+    }
+
     #[must_use]
     pub fn slice(&self, start: usize, len: usize) -> Self {
         let mut sliced = self.propagate_name(Self {
             labels: self.labels.slice(start, len),
             name: None,
             label_identity: next_index_label_identity(),
-            duplicate_cache: OnceLock::new(),
-            sort_order_cache: OnceLock::new(),
+            duplicate_cache: Arc::default(),
+            sort_order_cache: Arc::default(),
+            monotonic_cache: Default::default(),
             semantic_fingerprint_cache: OnceLock::new(),
             row_multiindex: None,
             tz: None,
@@ -5578,6 +6418,123 @@ impl Index {
         Ok(self.propagate_name(Self::new(labels)))
     }
 
+    /// pandas' astype to a masked extension dtype (Int64, UInt8, Float32,
+    /// boolean ...): numbers of its kind held as they are (a whole float
+    /// as an int, a float rounded to float32), a missing label or NaN
+    /// pandas' NA (it was refused; br-frankenpandas-05cm6). A value the
+    /// dtype cannot hold exactly - a fraction to an int, an int past a
+    /// narrow width, a number to boolean - is an error, as pandas' "cannot
+    /// safely cast".
+    fn astype_masked(&self, masked: MaskedDtype) -> Result<Self, IndexError> {
+        let refuse = |label: &IndexLabel| {
+            IndexError::TypeError(format!("cannot safely cast {label:?} to {}", masked.name()))
+        };
+        let labels = self
+            .labels()
+            .iter()
+            .map(|label| {
+                if label.is_missing() {
+                    return Ok(IndexLabel::Null(fp_types::NullKind::Null));
+                }
+                Ok(match masked {
+                    MaskedDtype::Boolean => match label {
+                        IndexLabel::Bool(_) => label.clone(),
+                        _ => return Err(refuse(label)),
+                    },
+                    MaskedDtype::Float64 | MaskedDtype::Width(NumericWidth::Float32) => {
+                        #[allow(clippy::cast_precision_loss)] // pandas' int64 -> float64
+                        let value = match label {
+                            IndexLabel::Int64(value) => *value as f64,
+                            IndexLabel::Float64(value) => value.0,
+                            IndexLabel::Bool(flag) => f64::from(u8::from(*flag)),
+                            _ => return Err(refuse(label)),
+                        };
+                        let value = if masked == MaskedDtype::Float64 {
+                            value
+                        } else {
+                            NumericWidth::round_f32(value)
+                        };
+                        IndexLabel::Float64(OrderedF64(value))
+                    }
+                    MaskedDtype::Int64 | MaskedDtype::Width(_) => {
+                        #[allow(clippy::cast_possible_truncation)] // a whole float only
+                        let value = match label {
+                            IndexLabel::Int64(value) => *value,
+                            IndexLabel::Float64(value)
+                                if value.0.fract() == 0.0
+                                    && value.0.abs() < 9_223_372_036_854_775_808.0 =>
+                            {
+                                value.0 as i64
+                            }
+                            IndexLabel::Bool(flag) => i64::from(*flag),
+                            _ => return Err(refuse(label)),
+                        };
+                        if let MaskedDtype::Width(width) = masked
+                            && !width.holds_int(value)
+                        {
+                            return Err(refuse(label));
+                        }
+                        IndexLabel::Int64(value)
+                    }
+                })
+            })
+            .collect::<Result<Vec<_>, IndexError>>()?;
+        Ok(self
+            .propagate_name(Self::new(labels))
+            .with_declared_dtype(Some(DeclaredDtype::Masked(masked))))
+    }
+
+    /// pandas' astype to a narrow numpy width (int8 ... uint64, float32):
+    /// numbers wrapped into an integer width as numpy's cast wraps them
+    /// (int8 of 300 is 44) or rounded to float32, held under that width
+    /// (it was refused; br-frankenpandas-vqjvd). A missing label or NaN has
+    /// no integer (pandas' ValueError), nor has a uint64 at or above 2**63
+    /// a place in the int64 storage.
+    fn astype_width(&self, width: NumericWidth) -> Result<Self, IndexError> {
+        let declared = Some(DeclaredDtype::Width(width));
+        let floats = self.astype_float()?;
+        if width.is_float() {
+            let rounded = floats
+                .labels()
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Float64(value) => {
+                        IndexLabel::Float64(OrderedF64(NumericWidth::round_f32(value.0)))
+                    }
+                    other => other.clone(),
+                })
+                .collect();
+            return Ok(self
+                .propagate_name(Self::new(rounded))
+                .with_declared_dtype(declared));
+        }
+        let ints = floats
+            .labels()
+            .iter()
+            .zip(self.labels().iter())
+            .map(|(float, label)| {
+                let value = match (label, float) {
+                    (IndexLabel::Int64(value), _) => *value,
+                    (_, IndexLabel::Float64(value)) if value.0.is_finite() => value.0 as i64,
+                    _ => {
+                        return Err(IndexError::InvalidArgument(
+                            "Cannot convert non-finite values (NA or inf) to integer".to_owned(),
+                        ));
+                    }
+                };
+                width.wrap_int(value).ok_or_else(|| {
+                    IndexError::InvalidArgument(format!(
+                        "{value} wraps past the int64 storage of {}",
+                        width.name(false)
+                    ))
+                })
+            })
+            .collect::<Result<Vec<i64>, IndexError>>()?;
+        Ok(self
+            .propagate_name(Self::from_i64_values(ints))
+            .with_declared_dtype(declared))
+    }
+
     /// Convert labels to bool (`pd.Index.astype(bool)`): nonzero numbers and
     /// non-empty strings are true; missing and datetime-like labels are
     /// refused. (fvsao.4)
@@ -5671,9 +6628,23 @@ impl Index {
     /// Matches `pd.Index.astype(dtype)` for the generic dtype names this crate
     /// can represent directly.
     pub fn astype(&self, dtype: &str) -> Result<Self, IndexError> {
+        if let Some(masked) = MaskedDtype::of_name(dtype) {
+            return self.astype_masked(masked);
+        }
+        if let Some((width, false)) = NumericWidth::parse(dtype) {
+            return self.astype_width(width);
+        }
         let (out, declared) = match dtype {
-            "int" | "int64" => (self.astype_int(), DeclaredDtype::Int64),
-            "float" | "float64" => (self.astype_float()?, DeclaredDtype::Float64),
+            // The labels' own int64 / float64, whatever width they were
+            // declared (an int32 index's astype('int64') stayed int32).
+            "int" | "int64" => (
+                self.astype_int().with_declared_dtype(None),
+                DeclaredDtype::Int64,
+            ),
+            "float" | "float64" => (
+                self.astype_float()?.with_declared_dtype(None),
+                DeclaredDtype::Float64,
+            ),
             "bool" => (self.astype_bool()?, DeclaredDtype::Bool),
             "str" | "string" | "object" => (self.astype_str(), DeclaredDtype::Object),
             "datetime64[ns]" => {
@@ -6639,10 +7610,35 @@ impl Index {
     #[must_use]
     pub fn inferred_type(&self) -> &'static str {
         if self.labels.is_empty() {
-            return "empty";
+            // No label shows a kind: an index declared a dtype is that
+            // dtype's kind, as pandas (an empty DatetimeIndex said "empty";
+            // br-frankenpandas-lsn8d), an object or undeclared one "empty".
+            return match self.declared {
+                Some(DeclaredDtype::Masked(masked)) => masked.inferred_type(),
+                Some(DeclaredDtype::Width(width)) if width.is_float() => "floating",
+                Some(DeclaredDtype::Int64 | DeclaredDtype::Width(_)) => "integer",
+                Some(DeclaredDtype::Float64) => "floating",
+                Some(DeclaredDtype::Bool) => "boolean",
+                Some(DeclaredDtype::Datetime64) => "datetime64",
+                Some(DeclaredDtype::Timedelta64) => "timedelta64",
+                Some(DeclaredDtype::Object) | None => "empty",
+            };
         }
         if self.labels.has_lazy_int64_backing() {
             return "integer";
+        }
+        // Instants held as instants are Datetime64 labels, NaT among them:
+        // "datetime64" by either branch below, without reading a million of
+        // them per call (an empty slice of a DatetimeIndex asked its dtype:
+        // idx[5:5] 1.3 ms; br-frankenpandas-lsn8d). Durations likewise
+        // (5s8nr).
+        if self.labels.datetime64_strided().is_some()
+            || self.labels.datetime64_affine_range().is_some()
+        {
+            return "datetime64";
+        }
+        if self.labels.timedelta64_strided().is_some() {
+            return "timedelta64";
         }
         let mut non_missing = self.labels.iter().filter(|label| !label.is_missing());
         let Some(first) = non_missing.next() else {
@@ -6732,6 +7728,9 @@ impl Index {
     pub fn hasnans(&self) -> bool {
         if self.labels.has_lazy_int64_backing() {
             return false;
+        }
+        if let Some(nanos) = self.labels.datetime64_nanos() {
+            return nanos.contains(&i64::MIN);
         }
         self.labels.iter().any(IndexLabel::is_missing)
     }
@@ -8393,6 +9392,34 @@ pub fn take_freq(freq: Option<String>, positions: &[usize]) -> Option<String> {
     scale_freq(&freq, step)
 }
 
+/// The freq a `delete` of `positions` (in bounds, in the order given) out
+/// of `len` keeps - pandas' `_get_delete_freq`: the index's own when they
+/// are one run of step 1 that starts at the first position or ends at the
+/// last (one position at either end, none at all), else none. A delete
+/// kept no freq at all (br-frankenpandas-n3ktr).
+#[must_use]
+pub fn delete_freq(freq: Option<String>, positions: &[usize], len: usize) -> Option<String> {
+    let freq = freq?;
+    let run = positions
+        .windows(2)
+        .all(|pair| pair[0].checked_add(1) == Some(pair[1]));
+    let keeps = match (positions.first(), positions.last()) {
+        (Some(&first), Some(&last)) => run && (first == 0 || last + 1 == len),
+        _ => true,
+    };
+    keeps.then_some(freq)
+}
+
+/// [`take_freq`] of numpy's signed take positions as pandas reads them - as
+/// given (`maybe_indices_to_slice`), so a negative one keeps no freq: [-1, -3]
+/// of 'D' was '-2D' and [-1] 'D' from the wrapped positions
+/// (br-frankenpandas-lsn8d). Only an index with a freq reads them.
+fn signed_take_freq(freq: Option<String>, positions: impl Iterator<Item = i64>) -> Option<String> {
+    let freq = freq?;
+    let given: Option<Vec<usize>> = positions.map(|at| usize::try_from(at).ok()).collect();
+    take_freq(Some(freq), &given?)
+}
+
 /// pandas' month-position check: whether every date is a calendar ('ce') or
 /// business ('be') month end, a calendar ('cs') or business ('bs') month
 /// start, in that order of preference.
@@ -8551,6 +9578,98 @@ pub fn infer_datetime_freq(wall: &[i64], instants: &[i64]) -> Option<String> {
     .map(|(unit, rule)| freq_with_count(step / unit, rule))
 }
 
+/// Each instant once, in the order first seen (NaT one value among them).
+fn unique_instants(nanos: &[i64]) -> Vec<i64> {
+    let mut seen = FxHashSet::<i64>::default();
+    nanos
+        .iter()
+        .copied()
+        .filter(|at| seen.insert(*at))
+        .collect()
+}
+
+/// Instants in numpy's datetime order, which a set op's sort reads:
+/// ascending, NaT (i64::MIN) last.
+fn sort_instants_nat_last(nanos: &mut [i64]) {
+    nanos.sort_unstable_by_key(|&at| (at == i64::MIN, at));
+}
+
+/// The instants two ascending runs share, each once, ascending (pandas'
+/// inner join of two increasing indexes, then drop_duplicates).
+fn sorted_shared_instants(left: &[i64], right: &[i64]) -> Vec<i64> {
+    let (mut i, mut j) = (0, 0);
+    let mut shared = Vec::new();
+    while i < left.len() && j < right.len() {
+        match left[i].cmp(&right[j]) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                if shared.last() != Some(&left[i]) {
+                    shared.push(left[i]);
+                }
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    shared
+}
+
+/// Two ascending runs merged, an instant repeated on one side as often as
+/// that side repeats it (pandas' outer join of two increasing indexes, at
+/// most one of them repeating).
+fn merged_instants(left: &[i64], right: &[i64]) -> Vec<i64> {
+    let (mut i, mut j) = (0, 0);
+    let mut merged = Vec::with_capacity(left.len() + right.len());
+    while i < left.len() && j < right.len() {
+        match left[i].cmp(&right[j]) {
+            std::cmp::Ordering::Less => {
+                merged.push(left[i]);
+                i += 1;
+            }
+            std::cmp::Ordering::Greater => {
+                merged.push(right[j]);
+                j += 1;
+            }
+            std::cmp::Ordering::Equal => {
+                let at = left[i];
+                let left_run = left[i..].iter().take_while(|&&next| next == at).count();
+                let right_run = right[j..].iter().take_while(|&&next| next == at).count();
+                merged.extend(std::iter::repeat_n(at, left_run.max(right_run)));
+                i += left_run;
+                j += right_run;
+            }
+        }
+    }
+    merged.extend_from_slice(&left[i..]);
+    merged.extend_from_slice(&right[j..]);
+    merged
+}
+
+/// Each instant of either side, in the order first seen across `left`
+/// then `right`, repeated as often as the side repeating it more does
+/// (pandas' `union_with_duplicates`).
+fn instants_at_larger_count(left: &[i64], right: &[i64]) -> Vec<i64> {
+    let count = |nanos: &[i64]| {
+        let mut counts = FxHashMap::<i64, usize>::default();
+        for &at in nanos {
+            *counts.entry(at).or_default() += 1;
+        }
+        counts
+    };
+    let (left_counts, right_counts) = (count(left), count(right));
+    let mut out = Vec::with_capacity(left.len().max(right.len()));
+    for at in unique_instants(&[left, right].concat()) {
+        let times = left_counts
+            .get(&at)
+            .copied()
+            .unwrap_or(0)
+            .max(right_counts.get(&at).copied().unwrap_or(0));
+        out.extend(std::iter::repeat_n(at, times));
+    }
+    out
+}
+
 /// Public pandas-style datetime index wrapper.
 ///
 /// The canonical storage remains [`Index`] with `Datetime64` labels so existing
@@ -8566,12 +9685,14 @@ impl DatetimeIndex {
     #[must_use]
     pub fn new(nanos: Vec<i64>) -> Self {
         Self {
-            index: Index::from_datetime64(nanos),
+            index: Index::from_datetime64_values(nanos),
         }
     }
 
     pub fn from_index(index: Index) -> Result<Self, IndexError> {
-        if index.labels.datetime64_affine_range().is_none() {
+        if index.labels.datetime64_affine_range().is_none()
+            && index.labels.datetime64_strided().is_none()
+        {
             ensure_index_kind(&index, LabelKinds::DATETIME64, "DatetimeIndex")?;
         }
         Ok(Self { index })
@@ -8793,6 +9914,12 @@ impl DatetimeIndex {
 
     #[must_use]
     pub fn nanos(&self) -> Vec<Option<i64>> {
+        if let Some(nanos) = self.index.labels.datetime64_nanos() {
+            return nanos
+                .iter()
+                .map(|&value| (value != i64::MIN).then_some(value))
+                .collect();
+        }
         self.index
             .labels()
             .iter()
@@ -8845,6 +9972,10 @@ impl DatetimeIndex {
         if let Some(range) = self.index.labels.datetime64_affine_range() {
             return range.materialize_i64();
         }
+        // A typed backing's instants as held (lsn8d).
+        if let Some(nanos) = self.index.labels.datetime64_nanos() {
+            return nanos.into_owned();
+        }
         self.index
             .labels()
             .iter()
@@ -8873,6 +10004,9 @@ impl DatetimeIndex {
         }
         if let Some(range) = self.index.labels.datetime64_affine_range() {
             return Some(range.value_at(pos));
+        }
+        if let Some(strided) = self.index.labels.datetime64_strided() {
+            return Some(strided.value_at(pos));
         }
         Some(match self.index.labels().get(pos)? {
             IndexLabel::Datetime64(nanos) => *nanos,
@@ -9016,24 +10150,106 @@ impl DatetimeIndex {
     /// Pick labels at the given positions, matching `pd.DatetimeIndex.take()`.
     /// Out-of-bounds positions raise [`IndexError::OutOfBounds`].
     pub fn take(&self, positions: &[usize]) -> Result<Self, IndexError> {
-        let labels = self.index.labels();
-        for &p in positions {
-            if p >= labels.len() {
-                return Err(IndexError::OutOfBounds {
-                    position: p,
-                    length: labels.len(),
-                });
-            }
+        let length = self.index.len();
+        if let Some(&position) = positions.iter().find(|&&p| p >= length) {
+            return Err(IndexError::OutOfBounds { position, length });
         }
-        let nanos: Vec<i64> = positions
+        let freq = take_freq(self.freq(), positions);
+        Ok(self.with_instants(self.nanos_at(positions)).with_freq(freq))
+    }
+
+    /// The instants at `positions` (each in bounds), NaT where a label is
+    /// not one: a typed backing or a date_range's range gathered with no
+    /// label made (`idx[perm]` read one position a call, its length
+    /// recomputed each; br-frankenpandas-lsn8d).
+    #[must_use]
+    pub fn nanos_at(&self, positions: &[usize]) -> Vec<i64> {
+        if let Some(range) = self.index.labels.datetime64_affine_range() {
+            return positions.iter().map(|&p| range.value_at(p)).collect();
+        }
+        if let Some(held) = self.index.labels.datetime64_nanos() {
+            return positions.iter().map(|&p| held[p]).collect();
+        }
+        let labels = self.index.labels();
+        positions
             .iter()
             .map(|&p| match labels[p] {
                 IndexLabel::Datetime64(n) => n,
                 _ => i64::MIN,
             })
-            .collect();
-        let freq = take_freq(self.freq(), positions);
-        Ok(self.with_instants(nanos).with_freq(freq))
+            .collect()
+    }
+
+    /// [`Self::nanos_at`] of owned positions: the instants collected into
+    /// their buffer (a usize and an i64 share a layout) - a second
+    /// million-entry buffer was a page-faulted allocation a take
+    /// (idx.take(perm) 0.46x pandas at 1M; br-frankenpandas-lsn8d).
+    #[must_use]
+    pub fn nanos_at_owned(&self, positions: Vec<usize>) -> Vec<i64> {
+        if let Some(range) = self.index.labels.datetime64_affine_range() {
+            return positions.into_iter().map(|p| range.value_at(p)).collect();
+        }
+        if let Some(held) = self.index.labels.datetime64_nanos() {
+            return positions.into_iter().map(|p| held[p]).collect();
+        }
+        let labels = self.index.labels();
+        positions
+            .into_iter()
+            .map(|p| match labels[p] {
+                IndexLabel::Datetime64(n) => n,
+                _ => i64::MIN,
+            })
+            .collect()
+    }
+
+    /// [`Self::take`] of owned positions, its instants gathered into them
+    /// (see [`Self::nanos_at_owned`]).
+    pub fn take_owned(&self, positions: Vec<usize>) -> Result<Self, IndexError> {
+        let length = self.index.len();
+        if let Some(&position) = positions.iter().find(|&&p| p >= length) {
+            return Err(IndexError::OutOfBounds { position, length });
+        }
+        let freq = take_freq(self.freq(), &positions);
+        Ok(self
+            .with_instants(self.nanos_at_owned(positions))
+            .with_freq(freq))
+    }
+
+    /// [`Self::take_owned`] of numpy's signed positions (negative from the
+    /// end), each wrapped, checked and gathered in one pass as numpy's take
+    /// does: wrapping them into a buffer, checking it twice and gathering
+    /// were four passes over a million positions (idx.take(perm) 0.60x
+    /// pandas; br-frankenpandas-lsn8d). `None` when a position is out of
+    /// range.
+    pub fn take_signed<I>(&self, positions: I) -> Option<Self>
+    where
+        I: ExactSizeIterator<Item = i64> + Clone,
+    {
+        let length = i64::try_from(self.index.len()).ok()?;
+        let wrap = |at: i64| usize::try_from(at + ((at >> 63) & length)).ok();
+        let nanos = if let Some(held) = self.index.labels.datetime64_nanos() {
+            let mut missed = 0_usize;
+            let gather = |at: i64| match wrap(at).and_then(|position| held.get(position)) {
+                Some(&nanos) => nanos,
+                None => {
+                    missed += 1;
+                    i64::MIN
+                }
+            };
+            let nanos: Vec<i64> = positions.clone().map(gather).collect();
+            if missed > 0 {
+                return None;
+            }
+            nanos
+        } else {
+            let checked: Option<Vec<usize>> = positions
+                .clone()
+                .map(|at| wrap(at).filter(|&position| position < self.index.len()))
+                .collect();
+            self.nanos_at_owned(checked?)
+        };
+        let freq = signed_take_freq(self.freq(), positions);
+        Some(self.with_instants(nanos).with_freq(freq))
     }
 
     /// Repeat each label `repeats` times, matching `pd.DatetimeIndex.repeat()`.
@@ -9117,15 +10333,26 @@ impl DatetimeIndex {
     #[must_use]
     pub fn shift(&self, periods: i64, freq_nanos: i64) -> Self {
         let delta = periods.saturating_mul(freq_nanos);
-        let nanos: Vec<i64> = self
-            .index
-            .labels()
-            .iter()
-            .map(|label| match label {
-                IndexLabel::Datetime64(n) if *n != i64::MIN => n.saturating_add(delta),
-                _ => i64::MIN,
-            })
-            .collect();
+        let nanos: Vec<i64> = if let Some(held) = self.index.labels.datetime64_nanos() {
+            held.iter()
+                .map(|&n| {
+                    if n == i64::MIN {
+                        n
+                    } else {
+                        n.saturating_add(delta)
+                    }
+                })
+                .collect()
+        } else {
+            self.index
+                .labels()
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Datetime64(n) if *n != i64::MIN => n.saturating_add(delta),
+                    _ => i64::MIN,
+                })
+                .collect()
+        };
         // Every label moves by the same span, so the freq holds (pandas).
         self.with_instants(nanos).with_freq(self.freq())
     }
@@ -9303,31 +10530,54 @@ impl DatetimeIndex {
             .max()
     }
 
-    /// Labels present in both indexes, matching
-    /// `pd.DatetimeIndex.intersection(other)`. Preserves first-seen order
-    /// from `self`.
+    /// `pd.DatetimeIndex.intersection(other)` (pandas' default
+    /// `sort=False`); see [`Self::intersection_sorted`].
     #[must_use]
     pub fn intersection(&self, other: &Self) -> Self {
-        let other_set: FxHashSet<i64> = other
-            .index
-            .labels()
-            .iter()
-            .filter_map(|label| match label {
-                IndexLabel::Datetime64(n) => Some(*n),
-                _ => None,
-            })
-            .collect();
-        let mut seen = FxHashSet::<i64>::default();
-        let nanos: Vec<i64> = self
-            .index
-            .labels()
-            .iter()
-            .filter_map(|label| match label {
-                IndexLabel::Datetime64(n) if other_set.contains(n) && seen.insert(*n) => Some(*n),
-                _ => None,
-            })
-            .collect();
-        // pandas infers the freq of the shared labels.
+        self.intersection_sorted(other, Some(false))
+    }
+
+    /// `pd.DatetimeIndex.intersection(other, sort=)`: an equal index is
+    /// this one, its repeats dropped; an empty side the empty result; two
+    /// tick-freq indexes meet as ranges ([`Self::range_set_op`]), two of one
+    /// other freq as the overlap of the one starting first (freq kept); two
+    /// increasing ones in order; any others in this index's order, each
+    /// shared instant once - sorted, NaT last, unless `sort=False`. The
+    /// freq of the last two is inferred (br-frankenpandas-wvpfb).
+    #[must_use]
+    pub fn intersection_sorted(&self, other: &Self, sort: Option<bool>) -> Self {
+        if self.index == other.index {
+            let result = if self.index.has_duplicates() {
+                self.with_instants(unique_instants(&self.asi8()))
+            } else {
+                self.clone()
+            };
+            return result.named_for(self, other).sorted_if(sort == Some(true));
+        }
+        if self.is_empty() || other.is_empty() {
+            let empty = if self.is_empty() { self } else { other };
+            return empty.emptied().named_for(self, other);
+        }
+        if let Some(result) = self.range_set_op(other, false) {
+            return result;
+        }
+        if let Some(result) = self.fast_intersection(other) {
+            return result;
+        }
+        let (left, right) = (self.asi8(), other.asi8());
+        let nanos = if self.is_monotonic_increasing() && other.is_monotonic_increasing() {
+            sorted_shared_instants(&left, &right)
+        } else {
+            let present: FxHashSet<i64> = right.iter().copied().collect();
+            let mut nanos: Vec<i64> = unique_instants(&left)
+                .into_iter()
+                .filter(|at| present.contains(at))
+                .collect();
+            if sort != Some(false) {
+                sort_instants_nat_last(&mut nanos);
+            }
+            nanos
+        };
         let shared = self.with_joined_instants(other, nanos);
         let freq = shared.inferred_freq();
         shared.with_freq(freq)
@@ -9340,116 +10590,261 @@ impl DatetimeIndex {
         self.union_sorted(other, None)
     }
 
-    /// `pd.DatetimeIndex.union(other, sort=)`: the labels of both, each
-    /// once, sorted (pandas' default `sort=None` returns this index itself
-    /// when `other` is empty or equal, and `other` when this one is empty;
-    /// `sort=False` keeps first-seen order - it never sorted, so
-    /// `[03, 01] | [02]` came back `[03, 01, 02]`). The result carries its
-    /// inferred freq, as pandas'.
+    /// `pd.DatetimeIndex.union(other, sort=)`: an empty or equal `other` is
+    /// this index, an empty one `other` (sorted only for `sort=True`); two
+    /// tick-freq indexes join as ranges ([`Self::range_set_op`]); else two
+    /// increasing ones merge in order (a repeat on one side kept), an
+    /// `other` with repeats gives each instant its larger count, any other
+    /// `other` adds the instants this one lacks - then sorted, NaT last,
+    /// unless `sort=False` (the merge is sorted already). The freq is
+    /// inferred. Instants were each kept once and NaT sorted first
+    /// (br-frankenpandas-wvpfb).
     #[must_use]
     pub fn union_sorted(&self, other: &Self, sort: Option<bool>) -> Self {
-        if sort.is_none() {
-            if other.is_empty() || self.index == other.index {
-                return self.clone();
-            }
-            if self.is_empty() {
-                return other.clone();
-            }
+        if other.is_empty() || self.index == other.index {
+            return self
+                .clone()
+                .named_for(self, other)
+                .sorted_if(sort == Some(true));
         }
-        let mut seen = FxHashSet::<i64>::default();
-        let mut nanos: Vec<i64> = Vec::new();
-        for label in self
-            .index
-            .labels()
-            .iter()
-            .chain(other.index.labels().iter())
+        if self.is_empty() {
+            return other
+                .clone()
+                .named_for(self, other)
+                .sorted_if(sort == Some(true));
+        }
+        if let Some(result) = self.range_set_op(other, true) {
+            return result;
+        }
+        let (left, right) = (self.asi8(), other.asi8());
+        let (left_rising, right_rising) = (
+            self.is_monotonic_increasing(),
+            other.is_monotonic_increasing(),
+        );
+        let nanos = if sort != Some(false)
+            && left_rising
+            && right_rising
+            && !(self.index.has_duplicates() && other.index.has_duplicates())
         {
-            if let IndexLabel::Datetime64(n) = label
-                && seen.insert(*n)
-            {
-                nanos.push(*n);
+            merged_instants(&left, &right)
+        } else if other.index.has_duplicates() {
+            let mut nanos = instants_at_larger_count(&left, &right);
+            if sort != Some(false) {
+                sort_instants_nat_last(&mut nanos);
             }
-        }
-        if sort != Some(false) {
-            nanos.sort_unstable();
-        }
+            nanos
+        } else {
+            let present: FxHashSet<i64> = left.iter().copied().collect();
+            let mut nanos = left.clone();
+            nanos.extend(right.iter().copied().filter(|at| !present.contains(at)));
+            if sort != Some(false) && !(left_rising && right_rising) {
+                sort_instants_nat_last(&mut nanos);
+            }
+            nanos
+        };
         let joined = self.with_joined_instants(other, nanos);
         let freq = joined.inferred_freq();
         joined.with_freq(freq)
     }
 
-    /// Labels in self not in other, matching
-    /// `pd.DatetimeIndex.difference(other)`.
+    /// `pd.DatetimeIndex.difference(other)` (pandas' default `sort=None`);
+    /// see [`Self::difference_sorted`].
     #[must_use]
     pub fn difference(&self, other: &Self) -> Self {
-        let other_set: FxHashSet<i64> = other
-            .index
-            .labels()
-            .iter()
-            .filter_map(|label| match label {
-                IndexLabel::Datetime64(n) => Some(*n),
-                _ => None,
-            })
-            .collect();
-        let mut seen = FxHashSet::<i64>::default();
-        let nanos: Vec<i64> = self
-            .index
-            .labels()
-            .iter()
-            .filter_map(|label| match label {
-                IndexLabel::Datetime64(n) if !other_set.contains(n) && seen.insert(*n) => Some(*n),
-                _ => None,
-            })
-            .collect();
-        // Per br-frankenpandas-6r1lq: difference is asymmetric — pandas
-        // always preserves self.name (unlike union/intersection which use
-        // shared_name).
-        let mut out = self.with_instants(nanos);
-        out.index.tz = joined_tz(&self.index, &other.index);
-        out
+        self.difference_sorted(other, None)
     }
 
-    /// Labels in either but not both, matching
-    /// `pd.DatetimeIndex.symmetric_difference(other)`.
+    /// `pd.DatetimeIndex.difference(other, sort=)`: the instants of this
+    /// index `other` lacks, each once, in this order - sorted, NaT last,
+    /// unless `sort=False`. An equal `other` leaves none, an empty one this
+    /// index's instants unsorted (`sort=True` aside). The freq stays when
+    /// the rows kept are one run already in order (pandas takes them as a
+    /// slice). Named for both: a shared name, else none - it kept this
+    /// index's name (br-frankenpandas-wvpfb).
+    #[must_use]
+    pub fn difference_sorted(&self, other: &Self, sort: Option<bool>) -> Self {
+        if self.index == other.index {
+            return self.emptied().named_for(self, other);
+        }
+        let left = self.asi8();
+        if other.is_empty() {
+            let unique = if self.index.has_duplicates() {
+                self.with_instants(unique_instants(&left))
+            } else {
+                self.clone()
+            };
+            return unique.named_for(self, other).sorted_if(sort == Some(true));
+        }
+        let absent: FxHashSet<i64> = other.asi8().into_iter().collect();
+        let kept: Vec<usize> = (0..left.len())
+            .filter(|&position| !absent.contains(&left[position]))
+            .collect();
+        let run = kept.windows(2).all(|pair| pair[1] == pair[0] + 1);
+        let mut nanos = unique_instants(&kept.iter().map(|&at| left[at]).collect::<Vec<_>>());
+        let ordered = nanos.windows(2).all(|pair| pair[0] <= pair[1]);
+        if sort != Some(false) {
+            sort_instants_nat_last(&mut nanos);
+        }
+        let freq = self
+            .freq()
+            .filter(|_| run && (ordered || sort == Some(false)));
+        self.with_instants(nanos)
+            .with_freq(freq)
+            .with_tz_of(joined_tz(&self.index, &other.index))
+            .named_for(self, other)
+    }
+
+    /// `pd.DatetimeIndex.symmetric_difference(other)` (pandas' default
+    /// `sort=None`); see [`Self::symmetric_difference_sorted`].
     #[must_use]
     pub fn symmetric_difference(&self, other: &Self) -> Self {
-        let self_set: FxHashSet<i64> = self
-            .index
-            .labels()
-            .iter()
-            .filter_map(|label| match label {
-                IndexLabel::Datetime64(n) => Some(*n),
-                _ => None,
-            })
-            .collect();
-        let other_set: FxHashSet<i64> = other
-            .index
-            .labels()
-            .iter()
-            .filter_map(|label| match label {
-                IndexLabel::Datetime64(n) => Some(*n),
-                _ => None,
-            })
-            .collect();
-        let mut seen = FxHashSet::<i64>::default();
-        let mut nanos: Vec<i64> = Vec::new();
-        for label in self.index.labels() {
-            if let IndexLabel::Datetime64(n) = label
-                && !other_set.contains(n)
-                && seen.insert(*n)
-            {
-                nanos.push(*n);
+        self.symmetric_difference_sorted(other, None)
+    }
+
+    /// `pd.DatetimeIndex.symmetric_difference(other, sort=)`: the instants
+    /// of this index `other` lacks, then those of `other` this one lacks,
+    /// each once - sorted, NaT last, unless `sort=False`; named for both
+    /// (br-frankenpandas-wvpfb: never sorted). The freq stays as pandas
+    /// appends the two pieces: each a run of its index under this index's
+    /// tick freq, the second starting a tick after the first ends, and the
+    /// sort leaving them in place.
+    #[must_use]
+    pub fn symmetric_difference_sorted(&self, other: &Self, sort: Option<bool>) -> Self {
+        let (left, right) = (self.asi8(), other.asi8());
+        let (left_unique, right_unique) = (unique_instants(&left), unique_instants(&right));
+        let left_set: FxHashSet<i64> = left_unique.iter().copied().collect();
+        let right_set: FxHashSet<i64> = right_unique.iter().copied().collect();
+        let piece = |instants: &[i64], absent: &FxHashSet<i64>| -> (Vec<i64>, bool) {
+            let kept: Vec<usize> = (0..instants.len())
+                .filter(|&at| !absent.contains(&instants[at]))
+                .collect();
+            let run = kept.windows(2).all(|pair| pair[1] == pair[0] + 1);
+            (kept.into_iter().map(|at| instants[at]).collect(), run)
+        };
+        let (mut nanos, left_run) = piece(&left_unique, &right_set);
+        let (right_piece, right_run) = piece(&right_unique, &left_set);
+        // A piece keeps its index's freq when it is a run of that index's
+        // own (unique) instants; the two join under this index's.
+        let left_freq = self
+            .freq()
+            .filter(|_| left_run && left.len() == left_unique.len());
+        let right_freq = other
+            .freq()
+            .filter(|_| right_run && right.len() == right_unique.len());
+        let tick = left_freq
+            .as_deref()
+            .and_then(tick_count)
+            .and_then(|(count, unit)| count.checked_mul(TICK_UNITS[unit].1));
+        let joins = match (nanos.last(), right_piece.first()) {
+            (Some(&end), Some(&start)) => {
+                right_freq == left_freq
+                    && tick.and_then(|tick| end.checked_add(tick)) == Some(start)
             }
+            (None, Some(_)) => right_freq == left_freq,
+            _ => true,
+        };
+        nanos.extend(right_piece);
+        let ordered = nanos.windows(2).all(|pair| pair[0] <= pair[1]);
+        if sort != Some(false) {
+            sort_instants_nat_last(&mut nanos);
         }
-        for label in other.index.labels() {
-            if let IndexLabel::Datetime64(n) = label
-                && !self_set.contains(n)
-                && seen.insert(*n)
-            {
-                nanos.push(*n);
-            }
+        let freq = left_freq.filter(|_| joins && (ordered || sort == Some(false)));
+        self.with_joined_instants(other, nanos).with_freq(freq)
+    }
+
+    /// pandas' set op of two indexes whose freqs are both ticks
+    /// (`_range_union` / `_range_intersect`): each index's instants as the
+    /// range (first, last + tick, tick), the two met as RangeIndexes. The
+    /// freq is the result range's step, this index's when nothing is left,
+    /// none when the result is no range. `None` unless both freqs are ticks
+    /// (br-frankenpandas-wvpfb).
+    fn range_set_op(&self, other: &Self, union: bool) -> Option<Self> {
+        let as_range = |index: &Self| -> Option<RangeIndex> {
+            let (count, unit) = tick_count(&index.freq()?)?;
+            let tick = count.checked_mul(TICK_UNITS[unit].1)?;
+            let first = index.asi8_at(0)?;
+            let last = index.asi8_at(index.len().checked_sub(1)?)?;
+            RangeIndex::new(first, last.checked_add(tick)?, tick).ok()
+        };
+        let (left, right) = (as_range(self)?, as_range(other)?);
+        let met = if union {
+            left.union(&right)
+        } else {
+            left.intersection(&right)
+        };
+        let freq = if met.is_empty() {
+            self.freq()
+        } else {
+            met.labels
+                .int64_affine_range()
+                .map(|range| duration_tick(range.step))
+        };
+        let nanos = met.int64_label_values()?.as_ref().clone();
+        Some(self.with_joined_instants(other, nanos).with_freq(freq))
+    }
+
+    /// pandas' `_fast_intersect`: two increasing indexes of one freq that is
+    /// no tick and counts one - the instants of the one starting first from
+    /// the other's start to the earlier end, a slice keeping the freq.
+    fn fast_intersection(&self, other: &Self) -> Option<Self> {
+        let freq = self.freq()?;
+        if other.freq().as_deref() != Some(freq.as_str())
+            || !self.is_monotonic_increasing()
+            || split_freq_count(&freq)?.0 != 1
+        {
+            return None;
         }
-        self.with_joined_instants(other, nanos)
+        let (left, right) = if self.asi8_at(0)? <= other.asi8_at(0)? {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        let start = right.asi8_at(0)?;
+        let end = left
+            .asi8_at(left.len() - 1)?
+            .min(right.asi8_at(right.len() - 1)?);
+        let instants = left.asi8();
+        let first = instants.partition_point(|&at| at < start);
+        let stop = instants.partition_point(|&at| at <= end).max(first);
+        let index = left.index.slice(first, stop - first);
+        Some(
+            Self { index }
+                .with_tz_of(joined_tz(&self.index, &other.index))
+                .named_for(self, other),
+        )
+    }
+
+    /// This index with none of its instants (pandas' `self[:0]`: freq,
+    /// zone and name kept).
+    fn emptied(&self) -> Self {
+        Self {
+            index: self.index.slice(0, 0),
+        }
+    }
+
+    /// This index named for the set op of `left` and `right`: their shared
+    /// name, else none (pandas' `get_op_result_name`).
+    fn named_for(self, left: &Self, right: &Self) -> Self {
+        let name = left.name().filter(|_| left.name() == right.name()).cloned();
+        self.rename_index(name)
+    }
+
+    /// This index in `tz` (as set ops join two zones).
+    fn with_tz_of(mut self, tz: Option<String>) -> Self {
+        self.index.tz = tz;
+        self
+    }
+
+    /// This index sorted, NaT last, when `sort` - kept as it is (its freq
+    /// too) when already in order (pandas' `sort_values` for a set op's
+    /// `sort=True`).
+    fn sorted_if(self, sort: bool) -> Self {
+        if !sort || self.index.is_monotonic_increasing() {
+            return self;
+        }
+        let mut nanos = self.asi8();
+        sort_instants_nat_last(&mut nanos);
+        self.with_instants(nanos)
     }
 
     /// Sort labels ascending, matching `pd.DatetimeIndex.sort_values()`.
@@ -9467,6 +10862,9 @@ impl DatetimeIndex {
             })
             .collect();
         nanos.sort_unstable();
+        // NaT (i64::MIN) last, as pandas' na_position='last' (5s8nr).
+        let nat = nanos.iter().take_while(|&&n| n == i64::MIN).count();
+        nanos.rotate_left(nat);
         self.with_instants(nanos)
     }
 
@@ -9712,20 +11110,34 @@ impl DatetimeIndex {
             (None, None) => Ok(self.clone()),
             (None, Some(_)) => Ok(self.wall_index()),
             (Some(zone), None) => {
-                let nanos = self
-                    .index
-                    .labels()
-                    .iter()
-                    .map(|label| match label {
-                        IndexLabel::Datetime64(nanos) => {
-                            fp_types::tz_wall_to_utc_nanos(zone, *nanos)
-                        }
-                        _ => Ok(i64::MIN),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                let localized = Self::new(nanos).rename_index(self.name());
                 // pandas keeps the freq only for UTC, where no wall time moves.
                 let freq = self.index.freq.clone().filter(|_| zone == "UTC");
+                // UTC wall times are their instants: this index under the
+                // zone, its instants shared (they were rebuilt a label at a
+                // time; br-frankenpandas-lsn8d).
+                if zone == "UTC" {
+                    return Ok(Self {
+                        index: self.index.clone().with_tz(Some(zone))?.with_freq(freq),
+                    });
+                }
+                let nanos = match self.index.datetime64_label_values() {
+                    Some(held) => held
+                        .iter()
+                        .map(|&nanos| fp_types::tz_wall_to_utc_nanos(zone, nanos))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    None => self
+                        .index
+                        .labels()
+                        .iter()
+                        .map(|label| match label {
+                            IndexLabel::Datetime64(nanos) => {
+                                fp_types::tz_wall_to_utc_nanos(zone, *nanos)
+                            }
+                            _ => Ok(i64::MIN),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                };
+                let localized = Self::new(nanos).rename_index(self.name());
                 Ok(Self {
                     index: localized.index.with_tz(Some(zone))?.with_freq(freq),
                 })
@@ -10553,11 +11965,22 @@ pub struct TimedeltaIndex {
 }
 
 impl TimedeltaIndex {
+    /// Over a typed backing: the durations held as they are, labels made
+    /// only when something reads them, slices views of the same buffer
+    /// (br-frankenpandas-5s8nr).
     #[must_use]
     pub fn new(nanos: Vec<i64>) -> Self {
         Self {
-            index: Index::from_timedelta64(nanos),
+            index: Index::from_timedelta64_values(nanos),
         }
+    }
+
+    /// The duration at `pos` of a typed backing (NaT as i64::MIN), no label
+    /// made; `None` past the end or for labels held as labels.
+    #[must_use]
+    pub fn held_nanos_at(&self, pos: usize) -> Option<i64> {
+        let view = self.index.labels.timedelta64_strided()?;
+        (pos < view.len).then(|| view.value_at(pos))
     }
 
     pub fn from_index(index: Index) -> Result<Self, IndexError> {
@@ -10839,6 +12262,9 @@ impl TimedeltaIndex {
     /// `Timedelta::NAT` is preserved at the sentinel value.
     #[must_use]
     pub fn asi8(&self) -> Vec<i64> {
+        if let Some(held) = self.index.timedelta64_label_values() {
+            return held.into_owned();
+        }
         self.index
             .labels()
             .iter()
@@ -11501,27 +12927,66 @@ impl TimedeltaIndex {
     /// `pd.TimedeltaIndex.take()`. Out-of-bounds positions raise
     /// [`IndexError::OutOfBounds`].
     pub fn take(&self, positions: &[usize]) -> Result<Self, IndexError> {
-        let labels = self.index.labels();
-        for &p in positions {
-            if p >= labels.len() {
-                return Err(IndexError::OutOfBounds {
-                    position: p,
-                    length: labels.len(),
-                });
-            }
+        let length = self.len();
+        if let Some(&position) = positions.iter().find(|&&p| p >= length) {
+            return Err(IndexError::OutOfBounds { position, length });
         }
-        let nanos: Vec<i64> = positions
-            .iter()
-            .map(|&p| match labels[p] {
-                IndexLabel::Timedelta64(n) => n,
-                _ => Timedelta::NAT,
-            })
-            .collect();
+        // A typed backing's durations gathered as they are (the labels were
+        // made to be read; br-frankenpandas-5s8nr).
+        let nanos: Vec<i64> = if let Some(held) = self.index.timedelta64_label_values() {
+            positions.iter().map(|&p| held[p]).collect()
+        } else {
+            let labels = self.index.labels();
+            positions
+                .iter()
+                .map(|&p| match labels[p] {
+                    IndexLabel::Timedelta64(n) => n,
+                    _ => Timedelta::NAT,
+                })
+                .collect()
+        };
         let mut out = Self::new(nanos);
         if let Some(name) = self.name() {
             out = out.set_name(name);
         }
         Ok(out.with_freq(take_freq(self.freq(), positions)))
+    }
+
+    /// [`Self::take`] of numpy's signed positions (negative from the end),
+    /// its freq that of the positions as given (a negative one keeps none,
+    /// as pandas; br-frankenpandas-lsn8d). `None` when a position is out of
+    /// range. A typed backing's positions are wrapped, checked and gathered
+    /// in one pass, as DatetimeIndex::take_signed (tdi.take(perm) 0.08x
+    /// pandas; br-frankenpandas-5s8nr).
+    pub fn take_signed<I>(&self, positions: I) -> Option<Self>
+    where
+        I: ExactSizeIterator<Item = i64> + Clone,
+    {
+        let length = i64::try_from(self.len()).ok()?;
+        let wrap = |at: i64| usize::try_from(at + ((at >> 63) & length)).ok();
+        let freq = signed_take_freq(self.freq(), positions.clone());
+        if let Some(held) = self.index.timedelta64_label_values() {
+            let mut missed = 0_usize;
+            let gather = |at: i64| match wrap(at).and_then(|position| held.get(position)) {
+                Some(&nanos) => nanos,
+                None => {
+                    missed += 1;
+                    Timedelta::NAT
+                }
+            };
+            let nanos: Vec<i64> = positions.map(gather).collect();
+            if missed > 0 {
+                return None;
+            }
+            let mut out = Self::new(nanos);
+            if let Some(name) = self.name() {
+                out = out.set_name(name);
+            }
+            return Some(out.with_freq(freq));
+        }
+        let wrapped: Option<Vec<usize>> = positions.map(wrap).collect();
+        let taken = self.take(&wrapped?).ok()?;
+        Some(taken.with_freq(freq))
     }
 
     /// Repeat each label `repeats` times, matching
@@ -11549,6 +13014,9 @@ impl TimedeltaIndex {
     #[must_use]
     pub fn isin(&self, values: &[i64]) -> Vec<bool> {
         let needle: FxHashSet<i64> = values.iter().copied().collect();
+        if let Some(held) = self.index.timedelta64_label_values() {
+            return held.iter().map(|nanos| needle.contains(nanos)).collect();
+        }
         self.index
             .labels()
             .iter()
@@ -11872,13 +13340,10 @@ impl TimedeltaIndex {
                 _ => None,
             })
             .collect();
-        let mut out = Self::new(nanos);
-        // Per br-frankenpandas-6r1lq: difference preserves self.name only
-        // (asymmetric op).
-        if let Some(name) = self.name() {
-            out = out.set_name(name);
-        }
-        out
+        // Named for both - a shared name, else none, as pandas (this
+        // index's name was kept; br-frankenpandas-ff5ik).
+        let name = self.name().filter(|_| self.name() == other.name());
+        Self::new(nanos).rename_index(name.cloned())
     }
 
     /// Labels in either but not both, matching
@@ -11933,16 +13398,22 @@ impl TimedeltaIndex {
     /// `na_position='first'` default.
     #[must_use]
     pub fn sort_values(&self) -> Self {
-        let mut nanos: Vec<i64> = self
-            .index
-            .labels()
-            .iter()
-            .filter_map(|label| match label {
-                IndexLabel::Timedelta64(n) => Some(*n),
-                _ => None,
-            })
-            .collect();
+        let mut nanos: Vec<i64> = match self.index.timedelta64_label_values() {
+            Some(held) => held.into_owned(),
+            None => self
+                .index
+                .labels()
+                .iter()
+                .filter_map(|label| match label {
+                    IndexLabel::Timedelta64(n) => Some(*n),
+                    _ => None,
+                })
+                .collect(),
+        };
         nanos.sort_unstable();
+        // NaT (i64::MIN) last, as pandas' na_position='last' (5s8nr).
+        let nat = nanos.iter().take_while(|&&n| n == Timedelta::NAT).count();
+        nanos.rotate_left(nat);
         let mut out = Self::new(nanos);
         if let Some(name) = self.name() {
             out = out.set_name(name);
@@ -12371,7 +13842,14 @@ impl PeriodIndex {
     /// among them), or None for any other label (45fzr).
     #[must_use]
     pub fn from_index(index: &Index) -> Option<Self> {
-        let mut freq = None;
+        // A missing label is the NaT period of the periods' freq, as pandas'
+        // PeriodIndex holds one (a where / insert / reindex over one was an
+        // object Index; br-frankenpandas-n3ktr); no period at all is none.
+        let mut freq = index.labels().iter().find_map(|label| match label {
+            IndexLabel::Period(period) => Some(period.freq),
+            _ => None,
+        });
+        let nat = Period::new(i64::MIN, freq?);
         let values = index
             .labels()
             .iter()
@@ -12380,6 +13858,7 @@ impl PeriodIndex {
                     freq = Some(period.freq);
                     Some(*period)
                 }
+                label if label.is_missing() => Some(nat),
                 _ => None,
             })
             .collect::<Option<Vec<_>>>()?;
@@ -15645,11 +17124,12 @@ impl RangeIndex {
     }
 
     fn difference_ascending(&self, other: &Self) -> Index {
-        // Per br-frankenpandas-6r1lq: difference preserves self.name (not
-        // shared_name like union/intersection).
+        // Named for both - a shared name, else none, as pandas (this
+        // range's name was kept; br-frankenpandas-ff5ik).
+        let shared_name = self.name().filter(|_| self.name() == other.name());
         if let Some(span) = self.single_difference_span_positions(other) {
             let (first, len) = span.unwrap_or((0, 0));
-            if let Some(index) = self.affine_span_index(first, len, self.name()) {
+            if let Some(index) = self.affine_span_index(first, len, shared_name) {
                 return index;
             }
         }
@@ -15661,7 +17141,7 @@ impl RangeIndex {
             }
         }
         let mut idx = Index::from_i64_values(labels);
-        if let Some(name) = self.name() {
+        if let Some(name) = shared_name {
             idx = idx.set_name(name);
         }
         idx
@@ -15929,6 +17409,135 @@ fn mark_category_rank(seen_ranks: &mut [u64], rank: usize) -> bool {
     is_new
 }
 
+/// A CategoricalIndex's categories as pandas' CategoricalDtype makes them
+/// (fp-frame's `normalize_categories` over labels): an int / float mix is
+/// float64, every int its float; a missing category ("Categorical categories
+/// cannot be null") or one equal to another by pandas' equality - 1, 1.0 and
+/// True one value - ("Categorical categories must be unique") is pandas'
+/// ValueError (br-frankenpandas-7zs0a, br-frankenpandas-yrjrc).
+fn normalized_index_categories(
+    mut categories: Vec<IndexLabel>,
+) -> Result<Vec<IndexLabel>, IndexError> {
+    if categories.iter().any(IndexLabel::is_missing) {
+        return Err(IndexError::InvalidArgument(
+            "Categorical categories cannot be null".to_owned(),
+        ));
+    }
+    if categories
+        .iter()
+        .any(|category| matches!(category, IndexLabel::Float64(_)))
+        && categories
+            .iter()
+            .all(|category| matches!(category, IndexLabel::Int64(_) | IndexLabel::Float64(_)))
+    {
+        categories = categories.into_iter().map(floated_label).collect();
+    }
+    let mut seen = FxHashSet::<CategoryLabelKey<'_>>::default();
+    let unique = categories
+        .iter()
+        .all(|category| seen.insert(category_label_key(category)));
+    drop(seen);
+    if !unique {
+        return Err(IndexError::InvalidArgument(
+            "Categorical categories must be unique".to_owned(),
+        ));
+    }
+    Ok(categories)
+}
+
+/// An int label as its float, where every category is a float: a label is
+/// the category it equals (pandas' CategoricalIndex([1], categories=[1.0])
+/// holds 1.0; the label was missing).
+fn floated_label(label: IndexLabel) -> IndexLabel {
+    match label {
+        IndexLabel::Int64(value) => IndexLabel::Float64(OrderedF64(value as f64)),
+        other => other,
+    }
+}
+
+/// Whether labels over `categories` are floats: every category is one.
+fn float_categories(categories: &[IndexLabel]) -> bool {
+    !categories.is_empty()
+        && categories
+            .iter()
+            .all(|category| matches!(category, IndexLabel::Float64(_)))
+}
+
+/// A category label under pandas' equality: a bool, an int a float holds
+/// exactly and a float are one number (1 == 1.0 == True); anything else is
+/// itself.
+#[derive(Hash, PartialEq, Eq)]
+enum CategoryLabelKey<'a> {
+    Number(u64),
+    Label(&'a IndexLabel),
+}
+
+fn category_label_key(label: &IndexLabel) -> CategoryLabelKey<'_> {
+    let number = match label {
+        IndexLabel::Bool(flag) => Some(f64::from(u8::from(*flag))),
+        IndexLabel::Int64(value) => {
+            let float = *value as f64;
+            (float as i128 == i128::from(*value)).then_some(float)
+        }
+        IndexLabel::Float64(value) => Some(value.0),
+        _ => None,
+    };
+    number.map_or(CategoryLabelKey::Label(label), |float| {
+        CategoryLabelKey::Number(if float == 0.0 { 0.0_f64 } else { float }.to_bits())
+    })
+}
+
+/// pandas' `safe_sort` order: numbers (bools, ints, floats) by value first,
+/// then strings, then any other kind in its own order.
+fn safe_sort_cmp(a: &IndexLabel, b: &IndexLabel) -> std::cmp::Ordering {
+    fn number(label: &IndexLabel) -> Option<f64> {
+        match label {
+            IndexLabel::Bool(value) => Some(f64::from(u8::from(*value))),
+            #[allow(clippy::cast_precision_loss)] // only ordering int vs float
+            IndexLabel::Int64(value) => Some(*value as f64),
+            IndexLabel::Float64(value) => Some(value.0),
+            _ => None,
+        }
+    }
+    fn kind(label: &IndexLabel) -> u8 {
+        match label {
+            IndexLabel::Bool(_) | IndexLabel::Int64(_) | IndexLabel::Float64(_) => 0,
+            IndexLabel::Utf8(_) => 1,
+            _ => 2,
+        }
+    }
+    match (a, b) {
+        (IndexLabel::Int64(x), IndexLabel::Int64(y)) => x.cmp(y),
+        _ => match (number(a), number(b)) {
+            (Some(x), Some(y)) => x.total_cmp(&y).then_with(|| a.cmp(b)),
+            _ => kind(a).cmp(&kind(b)).then_with(|| a.cmp(b)),
+        },
+    }
+}
+
+/// What is left of an unordered categorical's categories after a removal,
+/// as pandas takes it (`Index.difference`, sorted by its `safe_sort`):
+/// numbers and strings, or labels of one kind, sorted; any other mix as it
+/// is (pandas' sort fails on it and keeps it).
+fn safe_sort_categories(categories: &mut [IndexLabel]) {
+    let sortable = categories.iter().all(|category| {
+        matches!(
+            category,
+            IndexLabel::Bool(_)
+                | IndexLabel::Int64(_)
+                | IndexLabel::Float64(_)
+                | IndexLabel::Utf8(_)
+        )
+    }) || categories.first().is_some_and(|first| {
+        categories
+            .iter()
+            .all(|category| std::mem::discriminant(category) == std::mem::discriminant(first))
+    });
+    if sortable {
+        categories.sort_by(safe_sort_cmp);
+    }
+}
+
 impl CategoricalIndex {
     fn category_codes_for(labels: &[IndexLabel], categories: &[IndexLabel]) -> Option<Vec<usize>> {
         let map = {
@@ -15977,10 +17586,19 @@ impl CategoricalIndex {
         // First-seen dedup in O(n): a side hash set tracks membership while the
         // categories Vec preserves insertion order, replacing the O(n·k)
         // `categories.contains` linear rescan per label.
-        let labels: Vec<IndexLabel> = labels
+        let mut labels: Vec<IndexLabel> = labels
             .into_iter()
             .map(|label| Self::held(label.into()))
             .collect();
+        // Present labels mixing ints and floats are floats, as pandas' array
+        // of them is float64 ([1, 1.0] one category, [1, 2.5] float64; 7zs0a,
+        // yrjrc).
+        let present = || labels.iter().filter(|label| !label.is_missing());
+        if present().any(|label| matches!(label, IndexLabel::Float64(_)))
+            && present().all(|label| matches!(label, IndexLabel::Int64(_) | IndexLabel::Float64(_)))
+        {
+            labels = labels.into_iter().map(floated_label).collect();
+        }
         let mut categories = Vec::<IndexLabel>::new();
         let mut ranks = FxHashMap::<&IndexLabel, usize>::default();
         let mut category_codes = Vec::<usize>::with_capacity(labels.len());
@@ -16017,30 +17635,26 @@ impl CategoricalIndex {
         categories: Vec<C>,
         ordered: bool,
     ) -> Result<Self, IndexError> {
-        let categories: Vec<IndexLabel> = categories.into_iter().map(Into::into).collect();
-        if categories.iter().any(IndexLabel::is_missing) {
-            return Err(IndexError::InvalidArgument(
-                "Categorical categories cannot be null".to_owned(),
-            ));
-        }
+        let categories =
+            normalized_index_categories(categories.into_iter().map(Into::into).collect())?;
+        let floats = float_categories(&categories);
         // O(n+k) membership: hash the category set once, then place each
         // label in original order.
-        let mut category_map = FxHashMap::<&IndexLabel, usize>::default();
-        let mut unique = true;
-        for (rank, category) in categories.iter().enumerate() {
-            unique &= category_map.insert(category, rank).is_none();
-        }
-        if !unique {
-            return Err(IndexError::InvalidArgument(
-                "Categorical categories must be unique".to_owned(),
-            ));
-        }
+        let category_map: FxHashMap<&IndexLabel, usize> = categories
+            .iter()
+            .enumerate()
+            .map(|(rank, category)| (category, rank))
+            .collect();
         let mut category_codes = Vec::<usize>::with_capacity(labels.len());
         let mut complete = true;
         let labels: Vec<IndexLabel> = labels
             .into_iter()
             .map(|label| {
-                let label = label.into();
+                let label = if floats {
+                    floated_label(label.into())
+                } else {
+                    label.into()
+                };
                 match category_map.get(&label).copied() {
                     Some(rank) => {
                         category_codes.push(rank);
@@ -17105,8 +18719,16 @@ impl CategoricalIndex {
         }
         let mut categories = self.categories.clone();
         categories.extend(new);
+        // As pandas' dtype makes them: True beside 1 a repeat, a float among
+        // ints making every category and label a float (7zs0a, yrjrc).
+        let categories = normalized_index_categories(categories)?;
+        let labels = if float_categories(&categories) {
+            self.labels.iter().cloned().map(floated_label).collect()
+        } else {
+            self.labels.clone()
+        };
         Ok(Self::from_parts(
-            self.labels.clone(),
+            labels,
             categories,
             self.ordered,
             self.name.clone(),
@@ -17118,37 +18740,52 @@ impl CategoricalIndex {
     /// category, and a label of a removed one becomes NaN (it was refused,
     /// no label could be missing; lztvp).
     pub fn remove_categories(&self, removals: &[IndexLabel]) -> Result<Self, IndexError> {
-        let category_set: FxHashSet<&IndexLabel> = self.categories.iter().collect();
+        // A removal names its category by pandas' equality (1 == 1.0;
+        // br-frankenpandas-1r2sj).
+        let category_set: FxHashSet<CategoryLabelKey<'_>> =
+            self.categories.iter().map(category_label_key).collect();
         for cat in removals {
-            if !category_set.contains(cat) {
+            if !category_set.contains(&category_label_key(cat)) {
                 return Err(IndexError::InvalidArgument(format!(
                     "remove_categories: {cat:?} is not a category"
                 )));
             }
         }
-        let removals_set: FxHashSet<&IndexLabel> = removals.iter().collect();
-        let categories: Vec<IndexLabel> = self
+        let removals_set: FxHashSet<CategoryLabelKey<'_>> =
+            removals.iter().map(category_label_key).collect();
+        let mut categories: Vec<IndexLabel> = self
             .categories
             .iter()
-            .filter(|cat| !removals_set.contains(cat))
+            .filter(|cat| !removals_set.contains(&category_label_key(cat)))
             .cloned()
             .collect();
+        // pandas takes what is left of an unordered index's categories
+        // sorted (Index.difference); an ordered one, or nothing removed,
+        // keeps their order (it kept the order).
+        if !self.ordered && removals.iter().any(|removal| !removal.is_missing()) {
+            safe_sort_categories(&mut categories);
+        }
         Ok(self.recategorized(categories, self.ordered))
     }
 
-    /// This index over `categories`: a label no longer among them is NaN,
-    /// as pandas' `set_categories` / `remove_categories`.
+    /// This index over `categories`: each label the category it equals by
+    /// pandas' equality (1 == 1.0), so labels follow categories made floats
+    /// or ints - float labels met int categories under exact equality and
+    /// went missing (br-frankenpandas-1r2sj) - and a label no longer among
+    /// them NaN, as pandas' `set_categories` / `remove_categories`.
     fn recategorized(&self, categories: Vec<IndexLabel>, ordered: bool) -> Self {
-        let kept: FxHashSet<&IndexLabel> = categories.iter().collect();
+        let kept: FxHashMap<CategoryLabelKey<'_>, &IndexLabel> = categories
+            .iter()
+            .map(|category| (category_label_key(category), category))
+            .collect();
         let labels: Vec<IndexLabel> = self
             .labels
             .iter()
             .map(|label| {
-                if kept.contains(label) {
-                    label.clone()
-                } else {
-                    IndexLabel::Null(fp_types::NullKind::NaN)
-                }
+                kept.get(&category_label_key(label))
+                    .map_or(IndexLabel::Null(fp_types::NullKind::NaN), |category| {
+                        (*category).clone()
+                    })
             })
             .collect();
         drop(kept);
@@ -17181,14 +18818,8 @@ impl CategoricalIndex {
         &self,
         new_categories: Vec<L>,
     ) -> Result<Self, IndexError> {
-        let new_categories: Vec<IndexLabel> = new_categories.into_iter().map(Into::into).collect();
-        let mut seen = FxHashSet::<&IndexLabel>::default();
-        if !new_categories.iter().all(|cat| seen.insert(cat)) {
-            return Err(IndexError::InvalidArgument(
-                "Categorical categories must be unique".to_owned(),
-            ));
-        }
-        drop(seen);
+        let new_categories =
+            normalized_index_categories(new_categories.into_iter().map(Into::into).collect())?;
         Ok(self.recategorized(new_categories, self.ordered))
     }
 
@@ -17197,6 +18828,13 @@ impl CategoricalIndex {
     /// new list has a different length; a missing label stays missing.
     pub fn rename_categories<L: Into<IndexLabel>>(&self, new: Vec<L>) -> Result<Self, IndexError> {
         let new: Vec<IndexLabel> = new.into_iter().map(Into::into).collect();
+        // As pandas' dtype makes them (repeats and nulls raise, an int /
+        // float mix floats; 7zs0a, yrjrc): each label renamed to its new one.
+        let new = if new.len() == self.categories.len() {
+            normalized_index_categories(new)?
+        } else {
+            new
+        };
         if new.len() != self.categories.len() {
             return Err(IndexError::InvalidArgument(format!(
                 "rename_categories: expected {} new names, got {}",
@@ -17240,26 +18878,26 @@ impl CategoricalIndex {
                 new.len()
             )));
         }
-        let existing: FxHashSet<&IndexLabel> = self.categories.iter().collect();
+        // Categories compare by pandas' equality (1 == 1.0), each label then
+        // the category it equals (br-frankenpandas-1r2sj).
+        let existing: FxHashSet<CategoryLabelKey<'_>> =
+            self.categories.iter().map(category_label_key).collect();
         for cat in &new {
-            if !existing.contains(cat) {
+            if !existing.contains(&category_label_key(cat)) {
                 return Err(IndexError::InvalidArgument(format!(
                     "reorder_categories: {cat:?} is not an existing category"
                 )));
             }
         }
-        let new_set: FxHashSet<&IndexLabel> = new.iter().collect();
+        let new_set: FxHashSet<CategoryLabelKey<'_>> = new.iter().map(category_label_key).collect();
         if new_set.len() != new.len() {
             return Err(IndexError::InvalidArgument(
                 "reorder_categories: new categories contain duplicates".to_owned(),
             ));
         }
-        Ok(Self::from_parts(
-            self.labels.clone(),
-            new,
-            ordered,
-            self.name.clone(),
-        ))
+        drop(existing);
+        drop(new_set);
+        Ok(self.recategorized(new, ordered))
     }
 
     /// Convert to a flat [`Index`] of utf8 labels, matching
@@ -17527,18 +19165,17 @@ impl CategoricalIndex {
     /// `pd.CategoricalIndex.difference(other)`.
     #[must_use]
     pub fn difference(&self, other: &Self) -> Self {
-        // Per br-frankenpandas-6r1lq: difference preserves self.name (not
-        // shared_name like set_op_via_string applies for union/intersection).
-        let mut out = self.set_op_via_string(other, |left, right| {
+        // Named for both, as set_op_via_string names it - a shared name,
+        // else none, as pandas (this index's name was kept;
+        // br-frankenpandas-ff5ik).
+        self.set_op_via_string(other, |left, right| {
             let right_set: FxHashSet<&&IndexLabel> = right.iter().collect();
             let mut seen = FxHashSet::<&IndexLabel>::default();
             left.into_iter()
                 .filter(|label| !right_set.contains(label) && seen.insert(label))
                 .cloned()
                 .collect()
-        });
-        out.name = self.name.clone();
-        out
+        })
     }
 
     /// Sort labels ascending, matching `pd.CategoricalIndex.sort_values()`.
@@ -18501,6 +20138,10 @@ pub enum IndexError {
     /// pandas' `KeyError(message)`.
     #[error("{0}")]
     KeyError(String),
+    /// pandas' `TypeError(message)`: a cast the dtype cannot hold exactly
+    /// (a masked dtype's "cannot safely cast").
+    #[error("{0}")]
+    TypeError(String),
     /// An unknown zone, or a wall time a DST change skips or repeats.
     #[error(transparent)]
     TimeZone(#[from] fp_types::TimeZoneError),
@@ -18647,6 +20288,42 @@ pub fn joined_tz(left: &Index, right: &Index) -> Option<String> {
         (Some(_), Some(_)) => Some("UTC".to_owned()),
         _ => None,
     }
+}
+
+/// The freq of the index joining two DatetimeIndexes, as pandas'
+/// `_get_join_freq`: the left's when the two can fast-union - one freq,
+/// the left increasing, and the later-starting one starting inside the
+/// other or one tick past its end (an empty side always) - else None. A
+/// freq that is no tick only counts the overlap (a calendar step past the
+/// end is not computed here; such a join keeps no freq). It was dropped:
+/// df.join / merge of date_range indexes answered freq None
+/// (br-frankenpandas-lsn8d).
+#[must_use]
+pub fn joined_freq(left: &Index, right: &Index) -> Option<String> {
+    let freq = left.freq()?;
+    if right.freq() != Some(freq) || !left.is_monotonic_increasing() {
+        return None;
+    }
+    let (Some(left_nanos), Some(right_nanos)) = (
+        left.datetime64_label_values(),
+        right.datetime64_label_values(),
+    ) else {
+        return None;
+    };
+    let (Some(&left_first), Some(&right_first)) = (left_nanos.first(), right_nanos.first()) else {
+        return Some(freq.to_owned());
+    };
+    let (earlier, later_start) = if left_first <= right_first {
+        (&left_nanos, right_first)
+    } else {
+        (&right_nanos, left_first)
+    };
+    let earlier_end = *earlier.last()?;
+    let adjoins = tick_count(freq)
+        .and_then(|(count, unit)| count.checked_mul(TICK_UNITS[unit].1))
+        .and_then(|tick| earlier_end.checked_add(tick))
+        == Some(later_start);
+    (adjoins || earlier.binary_search(&later_start).is_ok()).then(|| freq.to_owned())
 }
 
 /// pandas refuses to join a tz-aware datetime index with a tz-naive one
@@ -19929,14 +21606,21 @@ impl<T> IndexSlice<T> {
 /// Full DataFrame integration is a future step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiIndex {
-    /// One `Vec<IndexLabel>` per level, all the same length (= nrows).
-    levels: Vec<Vec<IndexLabel>>,
+    /// One `Vec<IndexLabel>` per level, all the same length (= nrows), each
+    /// shared: a MultiIndex is cloned with every frame that holds one, and
+    /// its levels were copied label by label - a String a text label - on
+    /// each clone (br-frankenpandas-e186m). Serialized as plain vectors.
+    #[serde(with = "shared_levels")]
+    levels: Vec<Arc<Vec<IndexLabel>>>,
     /// Optional name for each level, typed: set_index([0, 1]) names them the
     /// integers 0 and 1 (fvsao.64).
     names: Vec<Option<LabelName>>,
-    /// Per-level first-seen identity codes, used by duplicate/unique kernels.
+    /// Per-level first-seen identity codes, used by duplicate/unique kernels,
+    /// made on first use: every MultiIndex built (a take, a swap, a sort's
+    /// result) hashed every label of two levels for them
+    /// (br-frankenpandas-e186m).
     #[serde(skip)]
-    identity_codes: Option<Vec<Vec<u32>>>,
+    identity_codes: Arc<std::sync::OnceLock<Option<Vec<Vec<u32>>>>>,
     /// A missing label is a value of its level - pandas' groupby
     /// (dropna=False) keys, NaN inside `levels` - rather than pandas' code
     /// -1 (set_index, from_arrays): an unstack sorts it with the values
@@ -19979,11 +21663,98 @@ fn multi_index_codes_memory_usage(nlevels: usize, len: usize) -> usize {
         .saturating_mul(std::mem::size_of::<isize>())
 }
 
-fn build_multi_index_identity_codes(levels: &[Vec<IndexLabel>]) -> Option<Vec<Vec<u32>>> {
+/// `labels` at `positions` (each below their length), cloned in row chunks
+/// across threads once there are 65,536: a MultiIndex take cloned a String
+/// a text label a row on one thread, two fifths of a 200k-row sort_index
+/// (br-frankenpandas-e186m). In row order, as the serial take.
+#[doc(hidden)]
+#[must_use]
+pub fn take_level_labels(labels: &[IndexLabel], positions: &[usize]) -> Vec<IndexLabel> {
+    const PAR_MIN: usize = 65_536;
+    let take = |part: &[usize]| -> Vec<IndexLabel> {
+        part.iter()
+            .map(|&position| labels[position].clone())
+            .collect()
+    };
+    let workers = cached_available_parallelism().min(8);
+    if workers <= 1 || positions.len() < PAR_MIN {
+        return take(positions);
+    }
+    let chunk = positions.len().div_ceil(workers);
+    let parts: Vec<Vec<IndexLabel>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = positions
+            .chunks(chunk)
+            .map(|part| scope.spawn(move || take(part)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+            })
+            .collect()
+    });
+    let mut taken = Vec::with_capacity(positions.len());
+    for part in parts {
+        taken.extend(part);
+    }
+    taken
+}
+
+/// Each label's first-seen code, as a MultiIndex numbers a level (see
+/// [`MultiIndex::from_two_arrays_with_identity_codes`]): 0 for the first
+/// label, a new label the next number, a repeated one its first's. Labels
+/// in strictly increasing int order are distinct - each its own position,
+/// unhashed. None past u32 codes.
+#[doc(hidden)]
+#[must_use]
+pub fn first_seen_label_codes(labels: &[IndexLabel]) -> Option<Vec<u32>> {
+    let len = u32::try_from(labels.len()).ok()?;
+    let increasing_ints = matches!(labels.first(), None | Some(IndexLabel::Int64(_)))
+        && labels
+            .windows(2)
+            .all(|pair| matches!(pair, [IndexLabel::Int64(a), IndexLabel::Int64(b)] if a < b));
+    if increasing_ints {
+        return Some((0..len).collect());
+    }
+    let mut seen =
+        FxHashMap::<&IndexLabel, u32>::with_capacity_and_hasher(labels.len(), Default::default());
+    Some(
+        labels
+            .iter()
+            .map(|label| {
+                let next = seen.len() as u32;
+                *seen.entry(label).or_insert(next)
+            })
+            .collect(),
+    )
+}
+
+/// Two levels' first-seen `codes` over `len` rows kept as
+/// [`build_multi_index_identity_codes`] keeps its own: none for no rows, nor
+/// past its slot cap (the levels' cardinalities, a code's maximum plus one,
+/// multiplied).
+fn capped_identity_codes(codes: Vec<Vec<u32>>, len: usize) -> Option<Vec<Vec<u32>>> {
+    if len == 0 || codes.len() != 2 {
+        return None;
+    }
+    let slot_cap = len.saturating_mul(8).max(1024);
+    let cardinality = |level: &[u32]| level.iter().max().map_or(0, |&code| code as usize + 1);
+    let level0_cardinality = cardinality(&codes[0]);
+    if level0_cardinality > slot_cap
+        || level0_cardinality.checked_mul(cardinality(&codes[1]))? > slot_cap
+    {
+        return None;
+    }
+    Some(codes)
+}
+
+fn build_multi_index_identity_codes(levels: &[Arc<Vec<IndexLabel>>]) -> Option<Vec<Vec<u32>>> {
     if levels.len() != 2 {
         return None;
     }
-    let len = levels.first().map_or(0, Vec::len);
+    let len = levels.first().map_or(0, |level| level.len());
     if len == 0 || levels[1].len() != len {
         return None;
     }
@@ -19992,7 +21763,7 @@ fn build_multi_index_identity_codes(levels: &[Vec<IndexLabel>]) -> Option<Vec<Ve
     let mut level0_positions =
         FxHashMap::<&IndexLabel, u32>::with_capacity_and_hasher(len, Default::default());
     let mut level0_codes = Vec::with_capacity(len);
-    for label in &levels[0] {
+    for label in levels[0].iter() {
         if let Some(&code) = level0_positions.get(label) {
             level0_codes.push(code);
         } else {
@@ -20009,7 +21780,7 @@ fn build_multi_index_identity_codes(levels: &[Vec<IndexLabel>]) -> Option<Vec<Ve
     let mut level1_positions =
         FxHashMap::<&IndexLabel, u32>::with_capacity_and_hasher(len, Default::default());
     let mut level1_codes = Vec::with_capacity(len);
-    for label in &levels[1] {
+    for label in levels[1].iter() {
         if let Some(&code) = level1_positions.get(label) {
             level1_codes.push(code);
         } else {
@@ -20026,6 +21797,31 @@ fn build_multi_index_identity_codes(levels: &[Vec<IndexLabel>]) -> Option<Vec<Ve
     Some(vec![level0_codes, level1_codes])
 }
 
+/// (De)serializes [`MultiIndex`]' shared levels as plain nested vectors, the
+/// format they had before they were shared.
+mod shared_levels {
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::IndexLabel;
+
+    pub(super) fn serialize<S: Serializer>(
+        levels: &[Arc<Vec<IndexLabel>>],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let plain: Vec<&Vec<IndexLabel>> = levels.iter().map(AsRef::as_ref).collect();
+        plain.serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<Arc<Vec<IndexLabel>>>, D::Error> {
+        Vec::<Vec<IndexLabel>>::deserialize(deserializer)
+            .map(|levels| levels.into_iter().map(Arc::new).collect())
+    }
+}
+
 impl PartialEq for MultiIndex {
     fn eq(&self, other: &Self) -> bool {
         self.levels == other.levels && self.names == other.names
@@ -20034,11 +21830,19 @@ impl PartialEq for MultiIndex {
 
 impl MultiIndex {
     fn from_levels_and_names(levels: Vec<Vec<IndexLabel>>, names: Vec<Option<LabelName>>) -> Self {
-        let identity_codes = build_multi_index_identity_codes(&levels);
+        Self::from_shared_levels_and_names(levels.into_iter().map(Arc::new).collect(), names)
+    }
+
+    /// [`Self::from_levels_and_names`] over levels already shared: a
+    /// rename, a swap or a drop of levels reuses them as they are.
+    fn from_shared_levels_and_names(
+        levels: Vec<Arc<Vec<IndexLabel>>>,
+        names: Vec<Option<LabelName>>,
+    ) -> Self {
         Self {
             levels,
             names,
-            identity_codes,
+            identity_codes: Arc::default(),
             missing_is_a_level: false,
         }
     }
@@ -20057,8 +21861,16 @@ impl MultiIndex {
         self.missing_is_a_level
     }
 
+    /// The levels' first-seen identity codes (see the field), made now if
+    /// not yet.
+    fn identity_codes(&self) -> Option<&Vec<Vec<u32>>> {
+        self.identity_codes
+            .get_or_init(|| build_multi_index_identity_codes(&self.levels))
+            .as_ref()
+    }
+
     fn compact_two_level_identity_layout(&self) -> Option<CompactIdentityCodeLayout<'_>> {
-        let codes = self.identity_codes.as_ref()?;
+        let codes = self.identity_codes()?;
         if codes.len() != 2 || codes[0].len() != self.len() || codes[1].len() != self.len() {
             return None;
         }
@@ -20096,7 +21908,7 @@ impl MultiIndex {
     /// Number of rows (entries) in this MultiIndex.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.levels.first().map_or(0, Vec::len)
+        self.levels.first().map_or(0, |level| level.len())
     }
 
     /// Whether this MultiIndex has zero entries.
@@ -20385,7 +22197,10 @@ impl MultiIndex {
                 context: "MultiIndex.rename names length".to_owned(),
             });
         }
-        Ok(Self::from_levels_and_names(self.levels.clone(), names))
+        Ok(Self::from_shared_levels_and_names(
+            self.levels.clone(),
+            names,
+        ))
     }
 
     /// Rename one MultiIndex level, matching `pd.MultiIndex.rename(name, level=...)`.
@@ -20398,7 +22213,10 @@ impl MultiIndex {
         }
         let mut names = self.names.clone();
         names[level] = name;
-        Ok(Self::from_levels_and_names(self.levels.clone(), names))
+        Ok(Self::from_shared_levels_and_names(
+            self.levels.clone(),
+            names,
+        ))
     }
 
     fn shared_names(&self, other: &Self) -> Vec<Option<LabelName>> {
@@ -20531,35 +22349,13 @@ impl MultiIndex {
     /// the distinct non-missing labels, numbers (bools, ints, floats) by
     /// value first, then strings, then any other kind in its own order.
     fn level_catalog(level: &[IndexLabel]) -> Vec<IndexLabel> {
-        fn number(label: &IndexLabel) -> Option<f64> {
-            match label {
-                IndexLabel::Bool(value) => Some(f64::from(u8::from(*value))),
-                #[allow(clippy::cast_precision_loss)] // only ordering int vs float
-                IndexLabel::Int64(value) => Some(*value as f64),
-                IndexLabel::Float64(value) => Some(value.0),
-                _ => None,
-            }
-        }
-        fn kind(label: &IndexLabel) -> u8 {
-            match label {
-                IndexLabel::Bool(_) | IndexLabel::Int64(_) | IndexLabel::Float64(_) => 0,
-                IndexLabel::Utf8(_) => 1,
-                _ => 2,
-            }
-        }
         let mut seen = FxHashMap::<&IndexLabel, ()>::default();
         let mut catalog: Vec<IndexLabel> = level
             .iter()
             .filter(|label| !label.is_missing() && seen.insert(label, ()).is_none())
             .cloned()
             .collect();
-        catalog.sort_by(|a, b| match (a, b) {
-            (IndexLabel::Int64(x), IndexLabel::Int64(y)) => x.cmp(y),
-            _ => match (number(a), number(b)) {
-                (Some(x), Some(y)) => x.total_cmp(&y).then_with(|| a.cmp(b)),
-                _ => kind(a).cmp(&kind(b)).then_with(|| a.cmp(b)),
-            },
-        });
+        catalog.sort_by(safe_sort_cmp);
         catalog
     }
 
@@ -20713,26 +22509,30 @@ impl MultiIndex {
     /// additionally counts string bytes, mirroring `Index::memory_usage`.
     #[must_use]
     pub fn memory_usage(&self, deep: bool) -> usize {
-        let level_bytes = self.levels.iter().flatten().fold(0usize, |total, label| {
-            total.saturating_add(match label {
-                IndexLabel::Int64(_)
-                | IndexLabel::Float64(_)
-                | IndexLabel::Timedelta64(_)
-                | IndexLabel::Datetime64(_)
-                | IndexLabel::Object(_)
-                | IndexLabel::Period(_)
-                | IndexLabel::Interval(_)
-                | IndexLabel::Null(_) => 8,
-                IndexLabel::Bool(_) => 1,
-                IndexLabel::Utf8(value) => {
-                    if deep {
-                        std::mem::size_of::<String>().saturating_add(value.len())
-                    } else {
-                        std::mem::size_of::<String>()
-                    }
-                }
-            })
-        });
+        let level_bytes =
+            self.levels
+                .iter()
+                .flat_map(|level| level.iter())
+                .fold(0usize, |total, label| {
+                    total.saturating_add(match label {
+                        IndexLabel::Int64(_)
+                        | IndexLabel::Float64(_)
+                        | IndexLabel::Timedelta64(_)
+                        | IndexLabel::Datetime64(_)
+                        | IndexLabel::Object(_)
+                        | IndexLabel::Period(_)
+                        | IndexLabel::Interval(_)
+                        | IndexLabel::Null(_) => 8,
+                        IndexLabel::Bool(_) => 1,
+                        IndexLabel::Utf8(value) => {
+                            if deep {
+                                std::mem::size_of::<String>().saturating_add(value.len())
+                            } else {
+                                std::mem::size_of::<String>()
+                            }
+                        }
+                    })
+                });
         level_bytes.saturating_add(multi_index_codes_memory_usage(self.nlevels(), self.len()))
     }
 
@@ -20753,7 +22553,7 @@ impl MultiIndex {
     pub fn dtypes(&self) -> Vec<&'static str> {
         self.levels
             .iter()
-            .map(|level| Index::new(level.clone()).dtype())
+            .map(|level| Index::new(level.to_vec()).dtype())
             .collect()
     }
 
@@ -21109,11 +22909,20 @@ impl MultiIndex {
                 length: self.levels.len(),
             });
         }
-        let mut idx = Index::new(self.levels[level].clone());
+        let mut idx = Index::new(self.levels[level].to_vec());
         if let Some(name) = self.names.get(level).and_then(|n| n.as_ref()) {
             idx = idx.set_name(name);
         }
         Ok(idx)
+    }
+
+    /// One level's labels, row by row, borrowed - [`Self::get_level_values`]
+    /// copies them into an Index (a million labels, each text one a String,
+    /// for a read; br-frankenpandas-e186m). None past the last level.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn level_labels(&self, level: usize) -> Option<&[IndexLabel]> {
+        self.levels.get(level).map(|level| level.as_slice())
     }
 
     /// Get the tuple of labels at a specific position.
@@ -21135,14 +22944,11 @@ impl MultiIndex {
             }
         }
 
-        let mut levels = Vec::with_capacity(self.nlevels());
-        for level in &self.levels {
-            let selected = positions
-                .iter()
-                .map(|&position| level[position].clone())
-                .collect();
-            levels.push(selected);
-        }
+        let levels = self
+            .levels
+            .iter()
+            .map(|level| take_level_labels(level, positions))
+            .collect();
 
         // Rows of the same levels: a missing label stays what it was.
         Ok(Self::from_levels_and_names(levels, self.names.clone())
@@ -21193,9 +22999,12 @@ impl MultiIndex {
 
         let mut levels = self.levels.clone();
         for (level_idx, label) in item.into_iter().enumerate() {
-            levels[level_idx].insert(loc, label);
+            Arc::make_mut(&mut levels[level_idx]).insert(loc, label);
         }
-        Ok(Self::from_levels_and_names(levels, self.names.clone()))
+        Ok(Self::from_shared_levels_and_names(
+            levels,
+            self.names.clone(),
+        ))
     }
 
     /// Drop every occurrence of the provided tuples.
@@ -22212,7 +24021,7 @@ impl MultiIndex {
         self.ensure_same_nlevels(other)?;
         let mut levels = Vec::with_capacity(self.nlevels());
         for level_idx in 0..self.nlevels() {
-            let mut level = self.levels[level_idx].clone();
+            let mut level = self.levels[level_idx].to_vec();
             level.extend(other.levels[level_idx].iter().cloned());
             levels.push(level);
         }
@@ -22231,7 +24040,7 @@ impl MultiIndex {
         let mut levels = Vec::with_capacity(self.nlevels());
         for level in &self.levels {
             let mut repeated = Vec::with_capacity(repeat_output_capacity(level.len(), repeats));
-            for label in level {
+            for label in level.iter() {
                 for _ in 0..repeats {
                     repeated.push(label.clone());
                 }
@@ -22609,6 +24418,43 @@ impl MultiIndex {
         Ok(Self::from_levels_and_names(arrays, vec![None; nlevels]))
     }
 
+    /// [`Self::from_arrays`] of two levels whose first-seen identity codes
+    /// (each level's labels numbered in the order they first appear) the
+    /// caller already holds - a stack numbers each row's label and each
+    /// column's once, where hashing the levels reads both labels of every
+    /// row (br-frankenpandas-e186m). The codes are kept under the same caps
+    /// as hashed ones.
+    ///
+    /// # Errors
+    /// `LengthMismatch` when the two levels or their codes differ in length.
+    #[doc(hidden)]
+    pub fn from_two_arrays_with_identity_codes(
+        arrays: [Vec<IndexLabel>; 2],
+        codes: [Vec<u32>; 2],
+    ) -> Result<Self, IndexError> {
+        let len = arrays[0].len();
+        if let Some(short) = [arrays[1].len(), codes[0].len(), codes[1].len()]
+            .into_iter()
+            .find(|&other| other != len)
+        {
+            return Err(IndexError::LengthMismatch {
+                expected: len,
+                actual: short,
+                context: "two-level array or identity code length mismatch".to_owned(),
+            });
+        }
+        let levels: Vec<Arc<Vec<IndexLabel>>> =
+            Vec::from(arrays).into_iter().map(Arc::new).collect();
+        let identity_codes = capped_identity_codes(Vec::from(codes), len);
+        debug_assert_eq!(identity_codes, build_multi_index_identity_codes(&levels));
+        Ok(Self {
+            levels,
+            names: vec![None; 2],
+            identity_codes: Arc::new(std::sync::OnceLock::from(identity_codes)),
+            missing_is_a_level: false,
+        })
+    }
+
     /// Construct a MultiIndex from frame-like columns.
     ///
     /// Matches `pd.MultiIndex.from_frame(frame)` at the payload level:
@@ -22890,15 +24736,15 @@ impl MultiIndex {
         new_names.remove(level);
 
         if new_levels.len() == 1 {
-            let mut idx = Index::new(new_levels.into_iter().next().unwrap());
+            let mut idx = Index::new(new_levels[0].to_vec());
             if let Some(ref name) = new_names[0] {
                 idx = idx.set_name(name);
             }
             Ok(MultiIndexOrIndex::Index(idx))
         } else {
-            Ok(MultiIndexOrIndex::Multi(Self::from_levels_and_names(
-                new_levels, new_names,
-            )))
+            Ok(MultiIndexOrIndex::Multi(
+                Self::from_shared_levels_and_names(new_levels, new_names),
+            ))
         }
     }
 
@@ -22916,7 +24762,7 @@ impl MultiIndex {
         let mut new_names = self.names.clone();
         new_levels.swap(i, j);
         new_names.swap(i, j);
-        Ok(Self::from_levels_and_names(new_levels, new_names))
+        Ok(Self::from_shared_levels_and_names(new_levels, new_names))
     }
 
     /// Reorder levels according to the given order.
@@ -22952,12 +24798,14 @@ impl MultiIndex {
             seen[idx] = true;
         }
 
-        let new_levels: Vec<Vec<IndexLabel>> =
-            order.iter().map(|&idx| self.levels[idx].clone()).collect();
+        let new_levels: Vec<Arc<Vec<IndexLabel>>> = order
+            .iter()
+            .map(|&idx| Arc::clone(&self.levels[idx]))
+            .collect();
         let new_names: Vec<Option<LabelName>> =
             order.iter().map(|&idx| self.names[idx].clone()).collect();
 
-        Ok(Self::from_levels_and_names(new_levels, new_names))
+        Ok(Self::from_shared_levels_and_names(new_levels, new_names))
     }
 }
 
@@ -23377,6 +25225,279 @@ mod tests {
     }
 
     #[test]
+    fn typed_datetime_index_reads_its_instants_lsn8d() {
+        // A DatetimeIndex built from an array holds its instants, NaT as
+        // i64::MIN: kinds, asi8, takes, monotonic flags, slices, sorts and
+        // set ops answer from them, equal to the labelled build's
+        // (br-frankenpandas-lsn8d).
+        const NAT: i64 = i64::MIN;
+        let nanos = vec![30, 10, NAT, 20, 10];
+        let typed = Index::from_datetime64_values(nanos.clone());
+        let labelled = Index::from_datetime64(nanos.clone());
+        assert_eq!(typed.label_kinds(), LabelKinds::DATETIME64);
+        let dti = DatetimeIndex::from_index(typed.clone()).unwrap();
+        assert_eq!(dti.asi8(), nanos);
+        assert_eq!(dti.asi8_at(2), Some(NAT));
+        assert_eq!(dti.asi8_at(5), None);
+        assert_eq!(dti.take(&[4, 0]).unwrap().asi8(), vec![10, 30]);
+        assert!(dti.take(&[5]).is_err());
+        assert!(
+            typed.labels.materialized.get().is_none(),
+            "no label made by reading the instants"
+        );
+        assert_eq!(typed, labelled);
+        assert_eq!(typed.slice(1, 3).labels(), labelled.slice(1, 3).labels());
+        let every_other = typed.stepped(0, 2, 3).unwrap();
+        assert_eq!(
+            DatetimeIndex::from_index(every_other).unwrap().asi8(),
+            vec![30, NAT, 10]
+        );
+        assert!(labelled.stepped(0, 2, 3).is_none(), "no instants held");
+        assert!(typed.stepped(1, 2, 3).is_none(), "a run past the buffer");
+        assert_eq!(
+            typed.take(&[4, 0, 2]).labels(),
+            labelled.take(&[4, 0, 2]).labels()
+        );
+        assert_eq!(typed.argsort(), labelled.argsort());
+        assert_eq!(
+            typed.sort_values().labels(),
+            labelled.sort_values().labels()
+        );
+        assert_eq!(typed.unique().labels(), labelled.unique().labels());
+        let other = Index::from_datetime64_values(vec![20, 40]);
+        assert_eq!(
+            typed.union_with(&other).labels(),
+            labelled.union_with(&other).labels()
+        );
+        assert_eq!(
+            typed.difference(&other).labels(),
+            labelled.difference(&other).labels()
+        );
+        // An empty index declared datetime holds no instant; an empty plain
+        // index declares nothing.
+        assert_eq!(
+            Index::from_datetime64(Vec::new())
+                .datetime64_label_values()
+                .as_deref(),
+            Some(&[][..])
+        );
+        assert!(Index::new(Vec::new()).datetime64_label_values().is_none());
+        // NEGATIVE: NaT anywhere is neither ascending nor descending, and an
+        // int index is no DatetimeIndex.
+        assert!(!typed.is_monotonic_increasing() && !typed.is_monotonic_decreasing());
+        let rising = Index::from_datetime64_values(vec![1, 2, 2, 3]);
+        assert!(rising.is_monotonic_increasing() && !rising.is_monotonic_decreasing());
+        assert!(!Index::from_datetime64_values(vec![3, NAT]).is_monotonic_decreasing());
+        assert!(DatetimeIndex::from_index(Index::from_i64_values(vec![1, 2])).is_err());
+        // A strided view reads every other instant; an empty slice of it,
+        // its start past the buffer, reads nothing.
+        let view = crate::IndexLabels::new_temporal_strided(
+            crate::TemporalKind::Datetime,
+            crate::Int64StridedLabels::new(Arc::new(vec![1, 2, 3, 4, 5]), 0, 2, 3).unwrap(),
+        );
+        assert_eq!(view.datetime64_nanos().unwrap().as_ref(), &[1, 3, 5]);
+        assert_eq!(
+            view.slice(1, 2).datetime64_nanos().unwrap().as_ref(),
+            &[3, 5]
+        );
+        assert!(view.slice(3, 0).datetime64_nanos().unwrap().is_empty());
+    }
+
+    #[test]
+    fn temporal_index_steps_either_way_without_its_labels_5s8nr() {
+        // A typed DatetimeIndex / TimedeltaIndex, a slice of one and a
+        // date_range step over their instants or durations, backwards too,
+        // as the take of the same positions: name and zone kept, no label
+        // made (br-frankenpandas-5s8nr).
+        const NAT: i64 = i64::MIN;
+        let typed = Index::from_datetime64_values(vec![10, NAT, 30, 40, 50])
+            .with_tz(Some("UTC"))
+            .unwrap()
+            .set_name("t");
+        let tail = typed.slice(1, 4);
+        let affine = Index::from_datetime64_affine_range(100, 7, 6)
+            .unwrap()
+            .set_name("r");
+        let durations = Index::from_timedelta64_values(vec![5, 6, NAT, 8]);
+        for (index, step, positions) in [
+            (&typed, -1, &[4, 3, 2, 1, 0][..]),
+            (&typed, -2, &[4, 2, 0][..]),
+            (&typed, -3, &[3, 0][..]),
+            (&typed, 2, &[1, 3][..]),
+            (&tail, -1, &[3, 2, 1, 0][..]),
+            (&tail, -2, &[2, 0][..]),
+            (&affine, -1, &[5, 4, 3, 2, 1, 0][..]),
+            (&affine, -2, &[4, 2, 0][..]),
+            (&affine, 3, &[0, 3][..]),
+            (&durations, -1, &[3, 2, 1, 0][..]),
+            (&durations, -2, &[2, 0][..]),
+        ] {
+            let stepped = index.stepped(positions[0], step, positions.len()).unwrap();
+            assert!(stepped.labels.materialized.get().is_none());
+            assert_eq!(stepped.labels(), index.take(positions).labels());
+            assert_eq!(stepped.name(), index.name(), "{step} {positions:?}");
+            assert_eq!(stepped.tz(), index.tz(), "{step} {positions:?}");
+        }
+        let fresh = Index::from_datetime64_values(vec![1, 2, 3]);
+        let back = fresh.stepped(2, -1, 3).unwrap();
+        assert!(fresh.labels.materialized.get().is_none());
+        let buffer = |index: &Index| {
+            Arc::clone(&index.labels.temporal_strided.as_ref().unwrap().view.values)
+        };
+        assert!(
+            Arc::ptr_eq(&buffer(&back), &buffer(&fresh)),
+            "a view, nothing copied"
+        );
+        assert_eq!(
+            DatetimeIndex::from_index(back.clone()).unwrap().asi8(),
+            vec![3, 2, 1]
+        );
+        // Views compose: back again, a slice of a backwards one, a step of it.
+        assert_eq!(back.stepped(2, -1, 3).unwrap().labels(), fresh.labels());
+        let reversed = typed.stepped(4, -1, 5).unwrap();
+        assert_eq!(
+            reversed.slice(1, 3).labels(),
+            typed.take(&[3, 2, 1]).labels()
+        );
+        assert_eq!(
+            reversed.stepped(1, 2, 2).unwrap().labels(),
+            typed.take(&[3, 1]).labels()
+        );
+        // A typed int index steps over its ints the same way (e186m), an
+        // int range stays one.
+        let ints = Index::from_i64_values(vec![1, 7, 3]);
+        assert_eq!(
+            ints.stepped(2, -1, 3).unwrap().labels(),
+            ints.take(&[2, 1, 0]).labels()
+        );
+        let range = Index::new_known_unique_int64_affine_range(10, 5, 4).unwrap();
+        let back = range.stepped(3, -2, 2).unwrap();
+        assert!(back.labels.int64_affine_range().is_some(), "still a range");
+        assert_eq!(back.labels(), range.take(&[3, 1]).labels());
+        // NEGATIVE: a text or a labelled datetime index has no typed values
+        // to step over; a run reaching outside the index (past a slice's end
+        // though inside its buffer), or an empty one, is no answer.
+        assert!(
+            Index::new(vec![
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("b".to_owned())
+            ])
+            .stepped(1, -1, 2)
+            .is_none()
+        );
+        let labelled = Index::new(vec![IndexLabel::Datetime64(1), IndexLabel::Datetime64(2)]);
+        assert!(labelled.stepped(1, -1, 2).is_none());
+        assert!(typed.stepped(4, -2, 4).is_none());
+        assert!(typed.stepped(1, 2, 3).is_none());
+        assert!(typed.stepped(5, -1, 1).is_none());
+        assert!(typed.slice(0, 3).stepped(0, 2, 3).is_none());
+        assert!(tail.stepped(4, -1, 1).is_none());
+        assert!(affine.stepped(6, -1, 2).is_none());
+        assert!(typed.stepped(0, 1, 0).is_none());
+    }
+
+    #[test]
+    fn typed_timedelta_index_reads_its_durations_5s8nr() {
+        // A TimedeltaIndex holds its durations as they are; every read
+        // answers as the labelled index does (br-frankenpandas-5s8nr).
+        const NAT: i64 = i64::MIN;
+        let nanos = vec![50, NAT, 10, 40, 30];
+        let typed = Index::from_timedelta64_values(nanos.clone());
+        let labelled = Index::from_timedelta64(nanos.clone());
+        assert_eq!(typed.labels(), labelled.labels());
+        assert_eq!(typed.label_kinds(), LabelKinds::TIMEDELTA64);
+        assert_eq!(typed.inferred_type(), labelled.inferred_type());
+        assert_eq!(typed.inferred_type(), "timedelta64");
+        assert_eq!(
+            typed.timedelta64_label_values().as_deref(),
+            Some(&nanos[..])
+        );
+        assert_eq!(typed.slice(1, 3).labels(), labelled.slice(1, 3).labels());
+        assert_eq!(
+            typed.stepped(0, 2, 3).unwrap().labels(),
+            &[
+                IndexLabel::Timedelta64(50),
+                IndexLabel::Timedelta64(10),
+                IndexLabel::Timedelta64(30)
+            ]
+        );
+        assert_eq!(
+            typed.take(&[4, 0, 2]).labels(),
+            labelled.take(&[4, 0, 2]).labels()
+        );
+        assert_eq!(typed.argsort(), labelled.argsort());
+        assert_eq!(typed.unique().labels(), labelled.unique().labels());
+        let other = Index::from_timedelta64_values(vec![20, 40]);
+        assert_eq!(
+            typed.union_with(&other).labels(),
+            labelled.union_with(&other).labels()
+        );
+        // The wrapper reads them in place: asi8, a take of signed positions
+        // (name and the positions' freq kept), one duration.
+        let index = TimedeltaIndex::new(nanos.clone()).set_name("d");
+        assert_eq!(index.asi8(), nanos);
+        assert_eq!(index.held_nanos_at(1), Some(NAT));
+        assert_eq!(index.held_nanos_at(5), None);
+        let taken = index.take_signed([-1_i64, 0, 2].into_iter()).unwrap();
+        assert_eq!(taken.asi8(), vec![30, 50, 10]);
+        assert_eq!(taken.name(), index.name());
+        assert_eq!(index.take(&[3, 1]).unwrap().asi8(), vec![40, NAT]);
+        // NEGATIVES: a position past either end is refused; durations are no
+        // DatetimeIndex and read as no instants, instants as no durations.
+        assert!(index.take_signed([5_i64].into_iter()).is_none());
+        assert!(index.take_signed([-6_i64].into_iter()).is_none());
+        assert!(index.take(&[5]).is_err());
+        assert!(DatetimeIndex::from_index(typed.clone()).is_err());
+        assert!(typed.datetime64_label_values().is_none());
+        assert!(
+            Index::from_datetime64_values(vec![1, 2])
+                .timedelta64_label_values()
+                .is_none()
+        );
+        assert!(TimedeltaIndex::from_index(Index::from_datetime64_values(vec![1, 2])).is_err());
+        assert_eq!(
+            Index::from_timedelta64_values(Vec::new())
+                .timedelta64_label_values()
+                .as_deref(),
+            Some(&[][..])
+        );
+    }
+
+    #[test]
+    fn label_at_reads_one_label_of_each_backing_e186m() {
+        // label_at answers as labels()[i] on every backing, a lazy one's
+        // labels never made for it (br-frankenpandas-e186m).
+        const NAT: i64 = i64::MIN;
+        let indexes = [
+            Index::default_range(5),
+            Index::from_range(3, 30, 7),
+            Index::from_range(10, -5, -4),
+            Index::from_i64_values(vec![4, -1, 9]),
+            Index::from_datetime64_affine_range(1_000, 60, 4).unwrap(),
+            Index::from_datetime64_values(vec![5, NAT, 3]),
+            Index::from_timedelta64_values(vec![NAT, 7, 2]),
+            Index::from_timedelta64_values(vec![1, 2, 3, 4, 5, 6])
+                .stepped(1, 2, 3)
+                .unwrap(),
+            Index::new(vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(3)]),
+        ];
+        for index in &indexes {
+            let lazy = index.labels.held().is_none();
+            let read: Vec<Option<IndexLabel>> =
+                (0..index.len()).map(|at| index.label_at(at)).collect();
+            if lazy {
+                assert!(index.labels.held().is_none(), "label_at made the labels");
+            }
+            let expected: Vec<Option<IndexLabel>> =
+                index.labels().iter().cloned().map(Some).collect();
+            assert_eq!(read, expected);
+            // NEGATIVE: past the end there is none.
+            assert_eq!(index.label_at(index.len()), None);
+        }
+        assert_eq!(Index::default_range(0).label_at(0), None);
+    }
+
+    #[test]
     fn date_range_affine_matches_eager_labels_for_each_parameter_form() {
         let expected = |start: i64, step: i64, len: usize| {
             (0..len)
@@ -23552,13 +25673,154 @@ mod tests {
         let floats = Index::new(vec![IndexLabel::Float64(OrderedF64(1.5))]);
         assert_eq!(floats.slice(0, 0).dtype(), "float64");
         // int32 while the labels are ints (pqjzo).
-        let int32 = ints().with_declared_dtype(Some(DeclaredDtype::Int32));
+        let int32 =
+            ints().with_declared_dtype(Some(DeclaredDtype::Width(fp_types::NumericWidth::Int32)));
         assert_eq!(int32.take(&[0]).dtype(), "int32");
         let halves = Index::new(vec![IndexLabel::Float64(OrderedF64(0.5))]);
         assert_eq!(halves.with_dtype_of(&int32).dtype(), "float64");
         // NEGATIVE: labels of their own read their own dtype.
         assert_eq!(ints().take(&[0]).dtype(), "int64");
         assert_eq!(object.with_declared_dtype(None).dtype(), "int64");
+    }
+
+    #[test]
+    fn narrow_indexes_keep_their_width_vqjvd() {
+        // An index of a narrow numpy array's values holds them under that
+        // width through takes and slices; astype wraps / rounds into one and
+        // astype('int64') leaves it (br-frankenpandas-vqjvd).
+        use fp_types::NumericWidth;
+
+        use crate::DeclaredDtype;
+        for (name, width) in [
+            ("int8", NumericWidth::Int8),
+            ("uint16", NumericWidth::UInt16),
+            ("int32", NumericWidth::Int32),
+            ("uint64", NumericWidth::UInt64),
+            ("float32", NumericWidth::Float32),
+        ] {
+            assert_eq!(
+                DeclaredDtype::of_name(name),
+                Some(DeclaredDtype::Width(width))
+            );
+            assert_eq!(DeclaredDtype::Width(width).name(), name);
+        }
+        assert_eq!(
+            DeclaredDtype::of_name("Int32"),
+            Some(DeclaredDtype::Masked(crate::MaskedDtype::Width(
+                NumericWidth::Int32
+            ))),
+            "a masked dtype is no numpy width"
+        );
+        let ints = Index::from_i64_values(vec![300, -5, 7]).with_width(NumericWidth::Int32);
+        assert_eq!(ints.dtype(), "int32");
+        assert_eq!(ints.take(&[2, 0]).dtype(), "int32");
+        assert_eq!(ints.slice(1, 2).dtype(), "int32");
+        assert_eq!(ints.astype("int64").unwrap().dtype(), "int64");
+        assert_eq!(ints.astype("float64").unwrap().dtype(), "float64");
+        let int8 = ints.astype("int8").unwrap();
+        assert_eq!(int8.dtype(), "int8");
+        assert_eq!(
+            int8.labels(),
+            &[
+                IndexLabel::Int64(44),
+                IndexLabel::Int64(-5),
+                IndexLabel::Int64(7)
+            ]
+        );
+        assert_eq!(
+            ints.astype("uint8").unwrap().labels()[1],
+            IndexLabel::Int64(251)
+        );
+        let floats = Index::new(vec![
+            IndexLabel::Float64(OrderedF64(0.1)),
+            IndexLabel::Float64(OrderedF64(f64::NAN)),
+        ]);
+        let float32 = floats.astype("float32").unwrap();
+        assert_eq!(float32.dtype(), "float32");
+        assert_eq!(
+            float32.labels()[0],
+            IndexLabel::Float64(OrderedF64(f64::from(0.1_f32)))
+        );
+        assert_eq!(float32.take(&[1, 0]).dtype(), "float32");
+        assert_eq!(
+            Index::new(Vec::new()).astype("uint8").unwrap().dtype(),
+            "uint8"
+        );
+        // NEGATIVE: a missing label or NaN has no integer, a negative value
+        // no uint64 in the storage; labels a width cannot hold (a missing
+        // one, floats under an int width) keep their own dtype.
+        assert!(floats.astype("int16").is_err());
+        assert!(Index::from_i64_values(vec![-1]).astype("uint64").is_err());
+        let gappy = Index::new(vec![
+            IndexLabel::Int64(1),
+            IndexLabel::Null(fp_types::NullKind::Null),
+        ]);
+        assert_eq!(gappy.with_width(NumericWidth::Int32).width(), None);
+        assert_eq!(floats.clone().with_width(NumericWidth::Int16).width(), None);
+        assert_eq!(floats.clone().with_dtype_of(&ints).dtype(), "float64");
+        assert_eq!(Index::from_i64_values(vec![1]).dtype(), "int64");
+    }
+
+    #[test]
+    fn masked_indexes_keep_their_dtype_05cm6() {
+        // An index under a masked extension dtype holds labels of its kind
+        // beside missing ones through takes and slices; astype casts into
+        // one exactly or refuses (br-frankenpandas-05cm6).
+        use fp_types::{NullKind, NumericWidth};
+
+        use crate::{DeclaredDtype, MaskedDtype};
+        for (name, masked) in [
+            ("Int64", MaskedDtype::Int64),
+            ("Float64", MaskedDtype::Float64),
+            ("boolean", MaskedDtype::Boolean),
+            ("UInt8", MaskedDtype::Width(NumericWidth::UInt8)),
+            ("Float32", MaskedDtype::Width(NumericWidth::Float32)),
+        ] {
+            assert_eq!(
+                DeclaredDtype::of_name(name),
+                Some(DeclaredDtype::Masked(masked))
+            );
+            assert_eq!(masked.name(), name);
+        }
+        let missing = IndexLabel::Null(NullKind::Null);
+        let ints = Index::new(vec![
+            IndexLabel::Int64(3),
+            missing.clone(),
+            IndexLabel::Int64(1),
+        ])
+        .with_masked(MaskedDtype::Int64);
+        assert_eq!(ints.dtype(), "Int64");
+        assert_eq!(ints.take(&[2, 1]).dtype(), "Int64");
+        assert_eq!(ints.slice(0, 2).dtype(), "Int64");
+        assert_eq!(ints.take(&[]).dtype(), "Int64");
+        let cast = Index::new(vec![
+            IndexLabel::Float64(OrderedF64(2.0)),
+            IndexLabel::Float64(OrderedF64(f64::NAN)),
+        ])
+        .astype("Int32")
+        .unwrap();
+        assert_eq!(cast.dtype(), "Int32");
+        assert_eq!(cast.labels(), &[IndexLabel::Int64(2), missing]);
+        let floats = ints.astype("Float32").unwrap();
+        assert_eq!(
+            floats.masked(),
+            Some(MaskedDtype::Width(NumericWidth::Float32))
+        );
+        assert_eq!(floats.labels()[0], IndexLabel::Float64(OrderedF64(3.0)));
+        assert_eq!(ints.astype("float64").unwrap().dtype(), "float64");
+        // NEGATIVE: a fraction to an int, an int past a narrow width or a
+        // number to boolean is refused; labels of another kind (text) or a
+        // bool under an int dtype take no masked dtype; plain ints stay
+        // int64.
+        let half = Index::new(vec![IndexLabel::Float64(OrderedF64(0.5))]);
+        assert!(half.astype("Int64").is_err());
+        assert!(Index::from_i64_values(vec![300]).astype("Int8").is_err());
+        assert!(Index::from_i64_values(vec![1]).astype("boolean").is_err());
+        let text = Index::new(vec![IndexLabel::Utf8("a".to_owned())]);
+        assert_eq!(text.with_masked(MaskedDtype::Int64).masked(), None);
+        let flags = Index::new(vec![IndexLabel::Bool(true)]);
+        assert_eq!(flags.with_masked(MaskedDtype::Int64).masked(), None);
+        assert_eq!(Index::from_i64_values(vec![1, 2]).dtype(), "int64");
     }
 
     #[test]
@@ -23626,6 +25888,265 @@ mod tests {
         );
         assert_eq!(crate::take_freq(daily(), &[0, 1, 3]), None);
         assert_eq!(crate::take_freq(None, &[]), None);
+    }
+
+    #[test]
+    fn delete_freq_keeps_it_for_a_run_at_either_end_n3ktr() {
+        // pandas' _get_delete_freq over 5 positions: none, one end, a run of
+        // step 1 from the start or to the end keep 'D'.
+        let daily = || Some("D".to_owned());
+        let keeping: [&[usize]; 6] = [&[], &[0], &[4], &[0, 1], &[3, 4], &[0, 1, 2, 3, 4]];
+        for kept in keeping {
+            assert_eq!(
+                crate::delete_freq(daily(), kept, 5).as_deref(),
+                Some("D"),
+                "{kept:?}"
+            );
+        }
+        // NEGATIVE: an inner position, a gap, a step of 2, the run given
+        // backwards, and no freq to keep.
+        let losing: [&[usize]; 5] = [&[2], &[0, 2], &[0, 1, 3], &[1, 0], &[3, 4, 2]];
+        for dropped in losing {
+            assert_eq!(crate::delete_freq(daily(), dropped, 5), None, "{dropped:?}");
+        }
+        assert_eq!(crate::delete_freq(None, &[0], 5), None);
+    }
+
+    #[test]
+    fn levels_are_shared_and_copied_on_write_e186m() {
+        // A clone, a rename, a swap and a drop share the source's level
+        // allocations; an insert copies the level it writes, the source
+        // keeping its labels (br-frankenpandas-e186m).
+        let text = |values: &[&str]| -> Vec<IndexLabel> {
+            values
+                .iter()
+                .map(|value| IndexLabel::Utf8((*value).to_owned()))
+                .collect()
+        };
+        let source = MultiIndex::from_arrays(vec![
+            [3, 1, 3].map(IndexLabel::Int64).to_vec(),
+            text(&["x", "y", "z"]),
+        ])
+        .unwrap();
+        let shares = |other: &MultiIndex, mine: usize, theirs: usize| {
+            Arc::ptr_eq(&source.levels[mine], &other.levels[theirs])
+        };
+        assert!(shares(&source.clone(), 0, 0) && shares(&source.clone(), 1, 1));
+        let renamed = source
+            .rename(vec![Some(crate::LabelName::from("p")), None])
+            .unwrap();
+        assert!(shares(&renamed, 0, 0) && shares(&renamed, 1, 1));
+        let swapped = source.swaplevel(0, 1).unwrap();
+        assert!(shares(&swapped, 0, 1) && shares(&swapped, 1, 0));
+        assert_eq!(swapped.level_labels(0), source.level_labels(1));
+        let three = MultiIndex::from_arrays(vec![
+            [3, 1, 3].map(IndexLabel::Int64).to_vec(),
+            text(&["x", "y", "z"]),
+            text(&["u", "u", "v"]),
+        ])
+        .unwrap();
+        let Ok(crate::MultiIndexOrIndex::Multi(dropped)) = three.droplevel(1) else {
+            unreachable!("three levels less one is a MultiIndex");
+        };
+        assert!(Arc::ptr_eq(&three.levels[2], &dropped.levels[1]));
+        // NEGATIVE: an insert writes its own copy - the source and its other
+        // clones keep three rows, and the inserted index answers its tuple.
+        let held = source.clone();
+        let grown = source
+            .insert(
+                1,
+                vec![IndexLabel::Int64(7), IndexLabel::Utf8("w".to_owned())],
+            )
+            .unwrap();
+        assert_eq!(grown.len(), 4);
+        assert_eq!(source.len(), 3);
+        assert_eq!(
+            held.level_labels(1),
+            Some(text(&["x", "y", "z"]).as_slice())
+        );
+        assert_eq!(
+            grown.level_labels(1),
+            Some(text(&["x", "w", "y", "z"]).as_slice())
+        );
+        assert!(!shares(&grown, 0, 0));
+        // The identity codes of an equal index made apart: shared levels
+        // compare by their labels.
+        let rebuilt = MultiIndex::from_arrays(vec![
+            [3, 1, 3].map(IndexLabel::Int64).to_vec(),
+            text(&["x", "y", "z"]),
+        ])
+        .unwrap();
+        assert_eq!(rebuilt, held);
+        assert_eq!(rebuilt.identity_codes(), held.identity_codes());
+    }
+
+    #[test]
+    fn level_and_contiguous_takes_match_the_label_take_e186m() {
+        // A level's labels taken in row chunks across threads (past 65,536
+        // rows) and a one-buffer text index's bytes give the labels a take
+        // one at a time gives, in row order (br-frankenpandas-e186m).
+        let level: Vec<IndexLabel> = (0..7)
+            .map(|k| {
+                if k % 2 == 0 {
+                    IndexLabel::Int64(k)
+                } else {
+                    IndexLabel::Utf8(format!("t{k}"))
+                }
+            })
+            .collect();
+        let positions: Vec<usize> = (0..70_001).map(|row| (row * 5 + 3) % 7).collect();
+        let serial: Vec<IndexLabel> = positions.iter().map(|&p| level[p].clone()).collect();
+        assert_eq!(crate::take_level_labels(&level, &positions), serial);
+        assert_eq!(
+            crate::take_level_labels(&level, &positions[..9]),
+            serial[..9].to_vec()
+        );
+        assert!(crate::take_level_labels(&level, &[]).is_empty());
+        let multi = MultiIndex::from_arrays(vec![level.clone(), level.clone()]).unwrap();
+        let taken = multi.take(&positions).unwrap();
+        assert_eq!(taken.level_labels(1), Some(serial.as_slice()));
+        // A text index in one buffer: "ab", "", "c", "dé".
+        let text = Index::from_utf8_contiguous(
+            Arc::from("abcdé".as_bytes()),
+            Arc::from(vec![0, 2, 2, 3, 6]),
+        );
+        let gathered = text.take_utf8_contiguous(&[3, 0, 1, 3]).unwrap();
+        let utf8 = |s: &str| IndexLabel::Utf8(s.to_owned());
+        assert_eq!(
+            gathered.labels(),
+            [utf8("dé"), utf8("ab"), utf8(""), utf8("dé")].as_slice()
+        );
+        assert_eq!(
+            text.take(&[2, 3]).labels(),
+            [utf8("c"), utf8("dé")].as_slice()
+        );
+        // NEGATIVE: an index of text labels held one by one has no buffer
+        // to gather - the caller takes its labels.
+        let held = Index::new(vec![utf8("ab"), utf8("c")]);
+        assert!(held.take_utf8_contiguous(&[1]).is_none());
+        assert_eq!(
+            held.take(&[1, 0]).labels(),
+            [utf8("c"), utf8("ab")].as_slice()
+        );
+    }
+
+    #[test]
+    fn range_positions_by_arithmetic_and_borrowed_levels_e186m() {
+        // An ascending range answers its int labels by arithmetic, an
+        // integral float its int; off the step, past either end or not a
+        // number, none (br-frankenpandas-e186m).
+        let stepped = Index::from_range(0, 40, 5);
+        let wanted = [
+            IndexLabel::Int64(35),
+            IndexLabel::Int64(5),
+            IndexLabel::Int64(7),
+            IndexLabel::Float64(crate::OrderedF64(10.0)),
+            IndexLabel::Int64(40),
+            IndexLabel::Int64(-5),
+            IndexLabel::Utf8("5".to_owned()),
+        ];
+        assert_eq!(
+            stepped.sorted_unique_int64_positions(&wanted),
+            Some(vec![Some(7), Some(1), None, Some(2), None, None, None])
+        );
+        // NEGATIVE: a descending range is no ascending index - the caller
+        // takes the unsorted lookup.
+        assert_eq!(
+            Index::from_range(40, 0, -5).sorted_unique_int64_positions(&wanted),
+            None
+        );
+        // A level's labels borrowed as they are held; none past the last.
+        let multi = MultiIndex::from_arrays(vec![
+            vec![IndexLabel::Int64(1), IndexLabel::Int64(2)],
+            vec![
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("b".to_owned()),
+            ],
+        ])
+        .unwrap();
+        assert_eq!(
+            multi.level_labels(1),
+            Some(
+                [
+                    IndexLabel::Utf8("a".to_owned()),
+                    IndexLabel::Utf8("b".to_owned())
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(multi.level_labels(2), None);
+        // The identity codes wait for their first reader, then answer.
+        assert!(multi.identity_codes.get().is_none());
+        assert_eq!(multi.identity_codes(), Some(&vec![vec![0, 1], vec![0, 1]]));
+    }
+
+    #[test]
+    fn two_arrays_with_codes_match_hashed_ones_e186m() {
+        // A caller's first-seen codes give the MultiIndex from_arrays builds
+        // by hashing both levels (br-frankenpandas-e186m).
+        let rows: Vec<IndexLabel> = [5, 5, 9, 2, 2].map(IndexLabel::Int64).to_vec();
+        let columns: Vec<IndexLabel> = ["y", "x", "y", "x", "y"]
+            .map(|name| IndexLabel::Utf8(name.to_owned()))
+            .to_vec();
+        let given = MultiIndex::from_two_arrays_with_identity_codes(
+            [rows.clone(), columns.clone()],
+            [vec![0, 0, 1, 2, 2], vec![0, 1, 0, 1, 0]],
+        )
+        .unwrap();
+        let hashed = MultiIndex::from_arrays(vec![rows.clone(), columns.clone()]).unwrap();
+        assert_eq!(given, hashed);
+        assert_eq!(given.identity_codes(), hashed.identity_codes());
+        assert!(given.identity_codes().is_some());
+        // NEGATIVE: levels or codes of another length are refused.
+        assert!(
+            MultiIndex::from_two_arrays_with_identity_codes(
+                [rows.clone(), columns[..4].to_vec()],
+                [vec![0, 0, 1, 2, 2], vec![0, 1, 0, 1]],
+            )
+            .is_err()
+        );
+        assert!(
+            MultiIndex::from_two_arrays_with_identity_codes(
+                [rows, columns],
+                [vec![0, 0, 1, 2], vec![0, 1, 0, 1, 0]],
+            )
+            .is_err()
+        );
+        // A label's first-seen code: increasing ints their positions, any
+        // other labels numbered as they first appear.
+        let ints = |values: &[i64]| {
+            values
+                .iter()
+                .copied()
+                .map(IndexLabel::Int64)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            crate::first_seen_label_codes(&ints(&[2, 5, 9])),
+            Some(vec![0, 1, 2])
+        );
+        assert_eq!(crate::first_seen_label_codes(&[]), Some(vec![]));
+        let text = ["b", "a", "b", "c", "a"].map(|s| IndexLabel::Utf8(s.to_owned()));
+        assert_eq!(
+            crate::first_seen_label_codes(&text),
+            Some(vec![0, 1, 0, 2, 1])
+        );
+        // NEGATIVE: ints out of order or repeated are not their positions.
+        assert_eq!(
+            crate::first_seen_label_codes(&ints(&[9, 5, 9, 2])),
+            Some(vec![0, 1, 0, 2])
+        );
+        assert_eq!(
+            crate::first_seen_label_codes(&ints(&[1, 1, 2])),
+            Some(vec![0, 0, 1])
+        );
+        // No rows, no codes - as hashing keeps none.
+        let empty = MultiIndex::from_two_arrays_with_identity_codes(
+            [Vec::new(), Vec::new()],
+            [vec![], vec![]],
+        )
+        .unwrap();
+        assert!(empty.identity_codes().is_none());
     }
 
     #[test]
@@ -25412,13 +27933,230 @@ mod tests {
     }
 
     #[test]
-    fn difference_preserves_self_name_even_when_other_differs_6r1lq() {
-        // Per br-frankenpandas-6r1lq: difference is asymmetric — pandas
-        // preserves self.name regardless of whether other has the same name.
+    fn datetime_take_owned_gathers_into_its_positions_lsn8d() {
+        // take_owned / nanos_at_owned equal take / nanos_at over a typed
+        // index, a date_range's range (a steady step keeps its freq scaled)
+        // and labels holding NaT (br-frankenpandas-lsn8d).
+        let day = 86_400_000_000_000_i64;
+        let typed = super::DatetimeIndex::new((0..50).map(|k| k * day + 7).collect());
+        let ranged = super::DatetimeIndex::from_index(
+            Index::from_datetime64_affine_range(3 * day, day, 50)
+                .unwrap()
+                .with_freq(Some("D".to_owned())),
+        )
+        .unwrap();
+        let labelled = super::DatetimeIndex::from_index(Index::new(
+            (0..50_i64)
+                .map(|k| {
+                    if k % 9 == 4 {
+                        IndexLabel::Datetime64(i64::MIN)
+                    } else {
+                        IndexLabel::Datetime64(k * day)
+                    }
+                })
+                .collect(),
+        ))
+        .unwrap();
+        for index in [&typed, &ranged, &labelled] {
+            for positions in [vec![49_usize, 0, 7, 7, 31], vec![2, 4, 6, 8], Vec::new()] {
+                assert_eq!(
+                    index.nanos_at_owned(positions.clone()),
+                    index.nanos_at(&positions)
+                );
+                let owned = index.take_owned(positions.clone()).unwrap();
+                let borrowed = index.take(&positions).unwrap();
+                assert_eq!(owned.values(), borrowed.values());
+                assert_eq!(owned.freq(), borrowed.freq());
+            }
+            // NEGATIVE: a position past the end is the same error.
+            assert!(matches!(
+                index.take_owned(vec![1, 50]),
+                Err(super::IndexError::OutOfBounds {
+                    position: 50,
+                    length: 50
+                })
+            ));
+        }
+        assert_eq!(
+            ranged.take_owned(vec![2, 4, 6]).unwrap().freq().as_deref(),
+            Some("2D")
+        );
+    }
+
+    #[test]
+    fn datetime_take_signed_wraps_checks_and_gathers_lsn8d() {
+        // take_signed of numpy's positions (negative from the end) equals
+        // take_owned of them wrapped, over a typed index, a date_range's
+        // range (freq scaled by a steady step) and labels holding NaT
+        // (br-frankenpandas-lsn8d).
+        let day = 86_400_000_000_000_i64;
+        let typed = super::DatetimeIndex::new((0..50).map(|k| k * day + 7).collect());
+        let ranged = super::DatetimeIndex::from_index(
+            Index::from_datetime64_affine_range(3 * day, day, 50)
+                .unwrap()
+                .with_freq(Some("D".to_owned())),
+        )
+        .unwrap();
+        let labelled = super::DatetimeIndex::from_index(Index::new(
+            (0..50_i64)
+                .map(|k| {
+                    if k % 9 == 4 {
+                        IndexLabel::Datetime64(i64::MIN)
+                    } else {
+                        IndexLabel::Datetime64(k * day)
+                    }
+                })
+                .collect(),
+        ))
+        .unwrap();
+        for index in [&typed, &ranged, &labelled] {
+            let signed = [49_i64, -50, 7, -1, 31, 0];
+            let wrapped = vec![49_usize, 0, 7, 49, 31, 0];
+            let taken = index.take_signed(signed.iter().copied()).unwrap();
+            let owned = index.take_owned(wrapped).unwrap();
+            assert_eq!(taken.values(), owned.values());
+            assert_eq!(taken.name(), owned.name());
+            let steady = index.take_signed([2_i64, 4, 6].into_iter()).unwrap();
+            assert_eq!(
+                steady.freq(),
+                index.take_owned(vec![2, 4, 6]).unwrap().freq()
+            );
+            assert!(index.take_signed(std::iter::empty()).unwrap().is_empty());
+            // NEGATIVE: one position past either end is out of range.
+            assert!(index.take_signed([1_i64, 50].into_iter()).is_none());
+            assert!(index.take_signed([-51_i64, 1].into_iter()).is_none());
+            assert!(index.take_signed([i64::MIN].into_iter()).is_none());
+        }
+        let freq_of = |positions: &[i64]| {
+            ranged
+                .take_signed(positions.iter().copied())
+                .unwrap()
+                .freq()
+        };
+        assert_eq!(freq_of(&[2, 4, 6]).as_deref(), Some("2D"));
+        assert_eq!(freq_of(&[6, 4, 2]).as_deref(), Some("-2D"));
+        assert_eq!(freq_of(&[3]).as_deref(), Some("D"));
+        // NEGATIVE: pandas reads a negative position as given - no slice, no
+        // freq - though its wrapped positions step evenly.
+        assert_eq!(freq_of(&[-48, -46, -44]), None);
+        assert_eq!(freq_of(&[-1]), None);
+    }
+
+    #[test]
+    fn timedelta_take_signed_wraps_checks_and_gathers_lsn8d() {
+        // take_signed of numpy's positions equals take of them wrapped (NaT
+        // kept, the name kept), its freq that of the positions as given
+        // (br-frankenpandas-lsn8d).
+        let hour = 3_600_000_000_000_i64;
+        let index = super::TimedeltaIndex::new(
+            (0..12_i64)
+                .map(|k| if k == 5 { i64::MIN } else { k * hour })
+                .collect(),
+        )
+        .set_name("d")
+        .with_freq(Some("h".to_owned()));
+        let taken = index.take_signed([11_i64, -12, 5, -1].into_iter()).unwrap();
+        let wrapped = index.take(&[11, 0, 5, 11]).unwrap();
+        assert_eq!(taken.asi8(), wrapped.asi8());
+        assert_eq!(taken.name(), wrapped.name());
+        let freq_of =
+            |positions: &[i64]| index.take_signed(positions.iter().copied()).unwrap().freq();
+        assert_eq!(freq_of(&[1, 3, 5]).as_deref(), Some("2h"));
+        assert_eq!(freq_of(&[]).as_deref(), Some("h"));
+        // NEGATIVE: a negative position keeps no freq, though the wrapped
+        // positions step evenly; one past either end is out of range.
+        assert_eq!(freq_of(&[-11, -9, -7]), None);
+        assert!(index.take_signed([12_i64].into_iter()).is_none());
+        assert!(index.take_signed([-13_i64].into_iter()).is_none());
+    }
+
+    #[test]
+    fn take_owned_gathers_int64_labels_into_their_positions_lsn8d() {
+        // take_owned equals take over a named RangeIndex (the unit range),
+        // a stepped range, a typed int64 index, a text index and a dated
+        // range holding a freq: shuffled, reversed, repeated, stepped and no
+        // positions (br-frankenpandas-lsn8d).
+        let day = 86_400_000_000_000_i64;
+        let unit = Index::from_range(5, 45, 1).rename_index(Some("r"));
+        let stepped = Index::from_range(100, -20, -3);
+        let typed = Index::from_i64_values((0..40).map(|k| (k * 7919) % 101 - 50).collect());
+        let text = Index::new((0..40).map(|k| IndexLabel::Utf8(format!("k{k}"))).collect());
+        let dated = Index::from_datetime64_affine_range(3 * day, day, 40)
+            .unwrap()
+            .with_freq(Some("D".to_owned()));
+        for index in [&unit, &stepped, &typed, &text, &dated] {
+            let len = index.len();
+            for positions in [
+                (0..len).map(|k| (k * 17) % len).collect::<Vec<usize>>(),
+                (0..len).rev().collect(),
+                vec![len - 1, 0, 7, 7, 31],
+                vec![2, 3, 4],
+                Vec::new(),
+            ] {
+                let owned = index.take_owned(positions.clone());
+                let borrowed = index.take(&positions);
+                assert_eq!(owned.labels(), borrowed.labels());
+                assert_eq!(owned.name(), borrowed.name());
+                assert_eq!(owned.freq(), borrowed.freq());
+            }
+        }
+        assert_eq!(
+            unit.labels.take_i64_values_owned(vec![3, 39, 0]),
+            Ok(vec![8, 44, 5])
+        );
+        // NEGATIVE: a position past the range - or past every usize - is
+        // handed back as it came, never made a label; a text index's too.
+        assert_eq!(
+            unit.labels
+                .take_i64_values_owned(vec![3, 40, 0, usize::MAX]),
+            Err(vec![3, 40, 0, usize::MAX])
+        );
+        assert_eq!(
+            text.labels.take_i64_values_owned(vec![1, 2]),
+            Err(vec![1, 2])
+        );
+    }
+
+    #[test]
+    fn joined_freq_keeps_a_fast_union_s_freq_lsn8d() {
+        // pandas' _get_join_freq: two daily ranges that overlap or adjoin
+        // join under 'D' (br-frankenpandas-lsn8d).
+        let day = 86_400_000_000_000_i64;
+        let range = |start: i64, n: i64| {
+            Index::from_datetime64_values((0..n).map(|k| start + k * day).collect())
+                .with_freq(Some("D".to_owned()))
+        };
+        let six = range(0, 6);
+        let joined = crate::joined_freq;
+        assert_eq!(joined(&six, &range(day, 5)).as_deref(), Some("D"));
+        assert_eq!(joined(&six, &range(6 * day, 3)).as_deref(), Some("D"));
+        assert_eq!(joined(&range(6 * day, 3), &six).as_deref(), Some("D"));
+        assert_eq!(joined(&six, &range(0, 0)).as_deref(), Some("D"));
+        // NEGATIVE: a gap between them, another freq, none on one side.
+        assert_eq!(joined(&six, &range(8 * day, 3)), None);
+        let two_day = range(day, 5).with_freq(Some("2D".to_owned()));
+        assert_eq!(joined(&six, &two_day), None);
+        assert_eq!(
+            joined(&six, &Index::from_datetime64_values(vec![day])),
+            None
+        );
+    }
+
+    #[test]
+    fn difference_is_named_for_both_ff5ik() {
+        // TEST-CHANGE (br-frankenpandas-ff5ik): this test asserted 6r1lq's
+        // "difference keeps self.name"; pandas 2.2.3 names an Index's
+        // difference by the shared name, none when the names differ
+        // (checked live for seven index types).
         let left = Index::from_i64(vec![1, 2, 3]).set_name("left_axis");
         let right = Index::from_i64(vec![2, 3, 4]).set_name("right_axis");
-        let result = left.difference(&right);
-        assert_eq!(result.name().map(|n| n.as_str()), Some("left_axis"));
+        assert_eq!(left.difference(&right).name(), None);
+        // NEGATIVE: a shared name stays.
+        let same = Index::from_i64(vec![2, 3, 4]).set_name("left_axis");
+        assert_eq!(
+            left.difference(&same).name().map(|n| n.as_str()),
+            Some("left_axis")
+        );
     }
 
     #[test]
@@ -28536,6 +31274,64 @@ mod tests {
                 "{name}: monotonic alias must preserve increasing semantics",
             );
         }
+    }
+
+    #[test]
+    fn held_datetime_monotonic_flags_in_one_pass_pirog() {
+        // br-frankenpandas-pirog: held datetime labels answer both flags in
+        // one pass, as pandas' DatetimeIndex: equal neighbours keep an
+        // ascent, a descending pair breaks it, NaT anywhere breaks both.
+        // NEGATIVE: datetimes followed by a text label leave the pass at the
+        // text, and the generic label order answers, as before - it ranks
+        // text below a datetime, so an ascent into text is no ascent (pandas
+        // False too: a Timestamp and a str do not compare).
+        for (name, stamps, increasing, decreasing) in [
+            ("equal neighbours", vec![1, 1, 2], true, false),
+            ("all equal", vec![5, 5, 5], true, true),
+            ("descending pair", vec![1, 3, 2], false, false),
+            ("descending", vec![3, 2, 2], false, true),
+            ("NaT first", vec![i64::MIN, 1, 2], false, false),
+            ("NaT last of a descent", vec![2, 1, i64::MIN], false, false),
+            ("empty", vec![], true, true),
+        ] {
+            let index = Index::from_datetime64(stamps);
+            assert_eq!(
+                (
+                    index.is_monotonic_increasing(),
+                    index.is_monotonic_decreasing()
+                ),
+                (increasing, decreasing),
+                "{name}"
+            );
+        }
+        let mixed = Index::new(vec![
+            IndexLabel::Datetime64(1),
+            IndexLabel::Datetime64(2),
+            IndexLabel::Utf8("a".to_owned()),
+        ]);
+        assert!(!mixed.is_monotonic_increasing());
+        assert!(!mixed.is_monotonic_decreasing());
+        // The flags are remembered, shared by clones (a clone asked first
+        // answers the original); an index taken from a remembered one
+        // answers its own order.
+        let ascending = Index::from_datetime64(vec![1, 2, 3]);
+        assert!(ascending.clone().is_monotonic_increasing());
+        assert_eq!(ascending.monotonic_cache[0].get(), Some(&true));
+        assert!(ascending.is_monotonic_increasing());
+        let reversed = ascending.take(&[2, 1, 0]);
+        assert!(!reversed.is_monotonic_increasing());
+        assert!(reversed.is_monotonic_decreasing());
+        // An ascent read every label: the label kinds are kept from it (no
+        // second pass for a resampler's axis check). NEGATIVE: the mixed
+        // index's pass stopped at the text, so its kinds are its own.
+        let fresh = Index::from_datetime64(vec![4, 5, 6]);
+        assert!(fresh.is_monotonic_increasing());
+        let kept = crate::INDEX_LABEL_KINDS_CACHE
+            .get()
+            .and_then(|cache| cache.lock().ok()?.get(&fresh.label_identity).copied());
+        assert_eq!(kept, Some(crate::LabelKinds::DATETIME64));
+        assert_eq!(fresh.label_kinds(), crate::LabelKinds::DATETIME64);
+        assert!(mixed.label_kinds().intersects(crate::LabelKinds::UTF8));
     }
 
     #[test]
@@ -36093,8 +38889,9 @@ mod tests {
 
         let sorted = dt.sort_values();
         let sorted_alias = dt.sort();
-        // NAT sorts first (na_position='first' default).
-        assert_eq!(sorted.values(), vec![None, Some(a), Some(b), Some(c)]);
+        // NaT sorts last: pandas' sort_values defaults to na_position='last'
+        // (pandas 2.2.3 live; this pinned it first - 5s8nr).
+        assert_eq!(sorted.values(), vec![Some(a), Some(b), Some(c), None]);
         assert_eq!(sorted_alias.values(), sorted.values());
         assert_eq!(sorted.name().map(|n| n.as_str()), Some("ts"));
         assert_eq!(sorted_alias.name().map(|n| n.as_str()), Some("ts"));
@@ -36120,7 +38917,8 @@ mod tests {
 
         let sorted = td.sort_values();
         let sorted_alias = td.sort();
-        assert_eq!(sorted.values(), vec![None, Some(100), Some(200), Some(300)]);
+        // NaT last, as pandas (see the DatetimeIndex test above).
+        assert_eq!(sorted.values(), vec![Some(100), Some(200), Some(300), None]);
         assert_eq!(sorted_alias.values(), sorted.values());
         assert_eq!(sorted.name().map(|n| n.as_str()), Some("d"));
         assert_eq!(sorted_alias.name().map(|n| n.as_str()), Some("d"));
@@ -36610,10 +39408,9 @@ mod tests {
         assert_eq!(left.intersection(&mismatched).name(), None);
         assert_eq!(left.union(&mismatched).name(), None);
         assert_eq!(left.symmetric_difference(&mismatched).name(), None);
-        assert_eq!(
-            left.difference(&mismatched).name().map(|n| n.as_str()),
-            Some("k")
-        );
+        // TEST-CHANGE (br-frankenpandas-ff5ik): pandas 2.2.3 names a
+        // difference by the shared name too - it asserted "k" (6r1lq).
+        assert_eq!(left.difference(&mismatched).name(), None);
 
         // intersection (self-order) and this single-span difference keep lazy
         // affine backing; union/symmetric materialize because reconciling the
@@ -37628,6 +40425,125 @@ mod tests {
         );
         assert!(super::CategoricalIndex::with_categories(vec!["a"], vec![nan()], false).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn categorical_index_editors_compare_numbers_1r2sj() {
+        // A CategoricalIndex whose categories an int / float mix made
+        // floats takes int categories back by pandas' equality: its labels
+        // follow them (they went missing), and an int removal names its
+        // float category (br-frankenpandas-1r2sj).
+        use super::CategoricalIndex;
+        let float = |value: f64| IndexLabel::Float64(OrderedF64(value));
+        let floated =
+            CategoricalIndex::from_values(vec![IndexLabel::Int64(3), IndexLabel::Int64(1)], false)
+                .add_categories(vec![float(2.5)])
+                .unwrap();
+        let reset = floated
+            .set_categories(vec![IndexLabel::Int64(1), IndexLabel::Int64(3)])
+            .unwrap();
+        assert_eq!(
+            reset.labels(),
+            &[IndexLabel::Int64(3), IndexLabel::Int64(1)]
+        );
+        let removed = floated.remove_categories(&[IndexLabel::Int64(1)]).unwrap();
+        assert_eq!(removed.labels()[0], float(3.0));
+        assert!(removed.labels()[1].is_missing());
+        // What is left of an unordered index's categories is sorted, as
+        // pandas' Index.difference takes it; an ordered one keeps them.
+        assert_eq!(removed.categories(), &[float(2.5), float(3.0)]);
+        let kept = floated
+            .as_ordered()
+            .remove_categories(&[IndexLabel::Int64(1)])
+            .unwrap();
+        assert_eq!(kept.categories(), &[float(3.0), float(2.5)]);
+        let reordered = floated
+            .reorder_categories(
+                vec![IndexLabel::Int64(1), float(2.5), IndexLabel::Int64(3)],
+                false,
+            )
+            .unwrap();
+        assert_eq!(reordered.labels().len(), 2);
+        assert!(!reordered.labels()[0].is_missing());
+        // NEGATIVE: a label set_categories drops is NaN.
+        let dropped = floated.set_categories(vec![IndexLabel::Int64(3)]).unwrap();
+        assert!(dropped.labels()[1].is_missing());
+    }
+
+    #[test]
+    fn categorical_index_categories_like_pandas_7zs0a() {
+        // pandas' CategoricalDtype over a CategoricalIndex: categories equal
+        // by pandas' equality (1 / 1.0 / True) are its ValueError from the
+        // constructor and the editors; an int / float mix makes every
+        // category and label a float; labels of values mixing ints and
+        // floats are floats (br-frankenpandas-7zs0a, br-frankenpandas-yrjrc).
+        use super::CategoricalIndex;
+        let float = |value: f64| IndexLabel::Float64(OrderedF64(value));
+        let unique = |result: Result<CategoricalIndex, super::IndexError>| {
+            matches!(result, Err(super::IndexError::InvalidArgument(message))
+                if message == "Categorical categories must be unique")
+        };
+        assert!(unique(CategoricalIndex::with_categories(
+            vec![IndexLabel::Int64(1)],
+            vec![IndexLabel::Int64(1), float(1.0)],
+            false
+        )));
+        assert!(unique(CategoricalIndex::with_categories(
+            vec![IndexLabel::Int64(1)],
+            vec![IndexLabel::Int64(1), IndexLabel::Bool(true)],
+            false
+        )));
+        let mixed = CategoricalIndex::with_categories(
+            vec![IndexLabel::Int64(1), IndexLabel::Int64(3)],
+            vec![IndexLabel::Int64(1), float(2.5), IndexLabel::Int64(3)],
+            false,
+        )
+        .unwrap();
+        assert_eq!(mixed.categories(), &[float(1.0), float(2.5), float(3.0)]);
+        assert_eq!(mixed.labels(), &[float(1.0), float(3.0)]);
+        let ints =
+            CategoricalIndex::from_values(vec![IndexLabel::Int64(3), IndexLabel::Int64(1)], false);
+        let added = ints.add_categories(vec![float(2.5)]).unwrap();
+        assert_eq!(added.categories(), &[float(3.0), float(1.0), float(2.5)]);
+        assert_eq!(added.labels(), &[float(3.0), float(1.0)]);
+        assert!(unique(ints.add_categories(vec![IndexLabel::Bool(true)])));
+        assert!(unique(
+            ints.set_categories(vec![IndexLabel::Int64(1), float(1.0)])
+        ));
+        let set = ints
+            .set_categories(vec![IndexLabel::Int64(1), float(2.5), IndexLabel::Int64(3)])
+            .unwrap();
+        assert_eq!(set.labels(), &[float(3.0), float(1.0)]);
+        let renamed = ints
+            .rename_categories(vec![IndexLabel::Int64(10), float(2.5)])
+            .unwrap();
+        assert_eq!(renamed.labels(), &[float(10.0), float(2.5)]);
+        assert!(unique(
+            ints.rename_categories(vec![IndexLabel::Int64(10), float(10.0)])
+        ));
+        let values = CategoricalIndex::from_values(
+            vec![IndexLabel::Int64(1), float(1.0), float(2.5)],
+            false,
+        );
+        assert_eq!(values.categories(), &[float(1.0), float(2.5)]);
+        // NEGATIVE: ints alone and text with an int stay as given.
+        let kept = CategoricalIndex::with_categories(
+            vec![IndexLabel::Int64(2)],
+            vec![IndexLabel::Int64(1), IndexLabel::Int64(2)],
+            false,
+        )
+        .unwrap();
+        assert_eq!(kept.labels(), &[IndexLabel::Int64(2)]);
+        let text = CategoricalIndex::with_categories(
+            vec![IndexLabel::from("a")],
+            vec![IndexLabel::from("a"), IndexLabel::Int64(1)],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            text.categories(),
+            &[IndexLabel::from("a"), IndexLabel::Int64(1)]
+        );
     }
 
     #[test]
@@ -39715,7 +42631,7 @@ mod tests {
         let without_sidecar = super::MultiIndex {
             levels: mi.levels.clone(),
             names: mi.names.clone(),
-            identity_codes: None,
+            identity_codes: Arc::new(std::sync::OnceLock::from(None)),
             missing_is_a_level: false,
         };
         assert!(

@@ -4010,6 +4010,17 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     let mi_back: MultiIndex = serde_json::from_str(&mi_json)?;
     assert_eq!(mi.nlevels(), mi_back.nlevels());
     assert_eq!(mi.len(), mi_back.len());
+    assert_eq!(mi_back, mi);
+    // Shared levels go out as plain label arrays, one per level
+    // (br-frankenpandas-e186m).
+    let mi_wire: serde_json::Value = serde_json::from_str(&mi_json)?;
+    let level_lengths: Option<Vec<usize>> = mi_wire["levels"].as_array().map(|levels| {
+        levels
+            .iter()
+            .filter_map(|level| level.as_array().map(Vec::len))
+            .collect()
+    });
+    assert_eq!(level_lengths, Some(vec![4, 4]));
 
     // Series round-trip.
     let s = Series::from_values(

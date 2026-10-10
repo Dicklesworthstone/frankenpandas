@@ -39,10 +39,10 @@ block-storage = ["lazy-transpose-view"]
 [dependencies]
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
-fp-columnar = { path = "../fp-columnar", version = "0.4.0" }
-fp-index = { path = "../fp-index", version = "0.4.0" }
-fp-runtime = { path = "../fp-runtime", version = "0.4.0" }
-fp-types = { path = "../fp-types", version = "0.4.0" }
+fp-columnar = { path = "../fp-columnar", version = "0.5.0" }
+fp-index = { path = "../fp-index", version = "0.5.0" }
+fp-runtime = { path = "../fp-runtime", version = "0.5.0" }
+fp-types = { path = "../fp-types", version = "0.5.0" }
 regex = { workspace = true }
 rustc-hash = "2"
 serde = { workspace = true }
@@ -52,6 +52,10 @@ tracing = { workspace = true, optional = true }
 ucd = { workspace = true }
 unicode-casefold = { workspace = true }
 unicode-normalization = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rayon = { workspace = true }
+rustix = { workspace = true }
 
 [package.metadata.docs.rs]
 all-features = true

@@ -27,7 +27,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "0.4.0"
+version = "0.5.0"
 # The LICENSE file is MIT plus a non-MIT rider on AI-assistant usage, which is
 # not expressible as a standard SPDX expression. The file itself is therefore the
 # license of record; no `license = "MIT"` SPDX field is set (it would understate
@@ -80,6 +80,15 @@ regex = "1.13.1"
 rust_xlsxwriter = "0.99.0"
 rusqlite = { version = "0.40.2", features = ["bundled", "column_decltype"] }
 ryu = "1.0.23"
+# Only its safe CPU-affinity calls (fp-frame, Linux): a column-parallel pass
+# whose data fits in one L3 keeps its workers in the caller's L3 domain on a
+# host with several (br-frankenpandas-41ma0). Already in the tree through
+# other crates; no new crate is fetched.
+rustix = { version = "1.1.5", default-features = false, features = ["std", "thread"] }
+# fp-frame (Linux): each L3 domain's persistent worker pool, its threads
+# pinned to the domain (br-frankenpandas-rc0923-epic-zero-certified-losses-bss5q.4).
+# Already in the tree (sas7bdat); no new crate is fetched.
+rayon = "1.12.0"
 sas7bdat = "0.9.0"
 sas_xport = "0.4.1"
 scraper = "0.27.0"

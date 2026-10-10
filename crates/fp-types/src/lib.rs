@@ -1249,6 +1249,32 @@ impl<'a> PandasReductions<'a> {
         self.mean_total() / self.count as f64
     }
 
+    /// nanops' mean of int64 values whose slots holding `missing` (a
+    /// datetime64 column's NaT) it fills with 0: the total added as float64
+    /// through numpy's cast buffer, 8192 at a time - as [`Self::mean`] adds
+    /// an int column - read straight off `values`, over the count of the
+    /// others. A filled copy and a presence bitmap the sum only re-zeroed
+    /// made a datetime mean 0.37x pandas (br-frankenpandas-vk7y9). NaN when
+    /// every slot is missing.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // pandas' float values and count
+    pub fn int64_mean_skipping(values: &[i64], missing: i64) -> f64 {
+        let count = values.iter().filter(|&&value| value != missing).count();
+        if count == 0 {
+            return f64::NAN;
+        }
+        let mut total = 0.0;
+        for chunk in values.chunks(NUMPY_CAST_BUFFER) {
+            let fill = |start: usize, block: &mut [f64]| {
+                for (slot, &value) in block.iter_mut().zip(&chunk[start..]) {
+                    *slot = if value == missing { 0.0 } else { value as f64 };
+                }
+            };
+            total += numpy_pairwise_sum_by(chunk.len(), &fill);
+        }
+        total / count as f64
+    }
+
     /// `Series.var(ddof=ddof)`; NaN with `ddof` or fewer present values.
     #[must_use]
     #[allow(clippy::cast_precision_loss)] // pandas' float count
@@ -22824,6 +22850,49 @@ mod pandas_reductions_9iim6 {
         let inf = reductions(&[1.0, f64::INFINITY, 2.0, 5.0], None);
         assert_eq!(inf[0], f64::INFINITY);
         assert!(inf[2..].iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
+    fn int64_mean_skipping_is_the_filled_mean_vk7y9() {
+        // A datetime64 mean read straight off its nanos, NaT as 0, is the
+        // bit-identical mean of the filled copy under its presence bits -
+        // across cast-buffer chunks, with NaT anywhere (br-frankenpandas-vk7y9).
+        const NAT: i64 = i64::MIN;
+        let nanos: Vec<i64> = (0..20_000_i64)
+            .map(|k| {
+                if k % 13 == 5 {
+                    NAT
+                } else {
+                    1_577_836_800_000_000_000 + k * 3_600_000_000_123
+                }
+            })
+            .collect();
+        let mut present = vec![0_u64; nanos.len().div_ceil(64)];
+        let filled: Vec<i64> = nanos
+            .iter()
+            .enumerate()
+            .map(|(i, &ns)| {
+                if ns == NAT {
+                    0
+                } else {
+                    present[i / 64] |= 1 << (i % 64);
+                    ns
+                }
+            })
+            .collect();
+        let expected = PandasReductions::new(
+            ReductionValues::Int(&filled),
+            Some(&present),
+            MissingLayout::Numpy,
+        )
+        .mean();
+        assert_eq!(
+            PandasReductions::int64_mean_skipping(&nanos, NAT).to_bits(),
+            expected.to_bits()
+        );
+        // NEGATIVE: every slot missing is NaN, not a mean of the zeros.
+        assert!(PandasReductions::int64_mean_skipping(&[NAT, NAT], NAT).is_nan());
+        assert!(PandasReductions::int64_mean_skipping(&[], NAT).is_nan());
     }
 }
 
