@@ -21609,6 +21609,54 @@ fn multi_index_codes_memory_usage(nlevels: usize, len: usize) -> usize {
         .saturating_mul(std::mem::size_of::<isize>())
 }
 
+/// Each label's first-seen code, as a MultiIndex numbers a level (see
+/// [`MultiIndex::from_two_arrays_with_identity_codes`]): 0 for the first
+/// label, a new label the next number, a repeated one its first's. Labels
+/// in strictly increasing int order are distinct - each its own position,
+/// unhashed. None past u32 codes.
+#[doc(hidden)]
+#[must_use]
+pub fn first_seen_label_codes(labels: &[IndexLabel]) -> Option<Vec<u32>> {
+    let len = u32::try_from(labels.len()).ok()?;
+    let increasing_ints = matches!(labels.first(), None | Some(IndexLabel::Int64(_)))
+        && labels
+            .windows(2)
+            .all(|pair| matches!(pair, [IndexLabel::Int64(a), IndexLabel::Int64(b)] if a < b));
+    if increasing_ints {
+        return Some((0..len).collect());
+    }
+    let mut seen =
+        FxHashMap::<&IndexLabel, u32>::with_capacity_and_hasher(labels.len(), Default::default());
+    Some(
+        labels
+            .iter()
+            .map(|label| {
+                let next = seen.len() as u32;
+                *seen.entry(label).or_insert(next)
+            })
+            .collect(),
+    )
+}
+
+/// Two levels' first-seen `codes` over `len` rows kept as
+/// [`build_multi_index_identity_codes`] keeps its own: none for no rows, nor
+/// past its slot cap (the levels' cardinalities, a code's maximum plus one,
+/// multiplied).
+fn capped_identity_codes(codes: Vec<Vec<u32>>, len: usize) -> Option<Vec<Vec<u32>>> {
+    if len == 0 || codes.len() != 2 {
+        return None;
+    }
+    let slot_cap = len.saturating_mul(8).max(1024);
+    let cardinality = |level: &[u32]| level.iter().max().map_or(0, |&code| code as usize + 1);
+    let level0_cardinality = cardinality(&codes[0]);
+    if level0_cardinality > slot_cap
+        || level0_cardinality.checked_mul(cardinality(&codes[1]))? > slot_cap
+    {
+        return None;
+    }
+    Some(codes)
+}
+
 fn build_multi_index_identity_codes(levels: &[Vec<IndexLabel>]) -> Option<Vec<Vec<u32>>> {
     if levels.len() != 2 {
         return None;
@@ -24217,6 +24265,42 @@ impl MultiIndex {
         Ok(Self::from_levels_and_names(arrays, vec![None; nlevels]))
     }
 
+    /// [`Self::from_arrays`] of two levels whose first-seen identity codes
+    /// (each level's labels numbered in the order they first appear) the
+    /// caller already holds - a stack numbers each row's label and each
+    /// column's once, where hashing the levels reads both labels of every
+    /// row (br-frankenpandas-e186m). The codes are kept under the same caps
+    /// as hashed ones.
+    ///
+    /// # Errors
+    /// `LengthMismatch` when the two levels or their codes differ in length.
+    #[doc(hidden)]
+    pub fn from_two_arrays_with_identity_codes(
+        arrays: [Vec<IndexLabel>; 2],
+        codes: [Vec<u32>; 2],
+    ) -> Result<Self, IndexError> {
+        let len = arrays[0].len();
+        if let Some(short) = [arrays[1].len(), codes[0].len(), codes[1].len()]
+            .into_iter()
+            .find(|&other| other != len)
+        {
+            return Err(IndexError::LengthMismatch {
+                expected: len,
+                actual: short,
+                context: "two-level array or identity code length mismatch".to_owned(),
+            });
+        }
+        let levels = Vec::from(arrays);
+        let identity_codes = capped_identity_codes(Vec::from(codes), len);
+        debug_assert_eq!(identity_codes, build_multi_index_identity_codes(&levels));
+        Ok(Self {
+            levels,
+            names: vec![None; 2],
+            identity_codes,
+            missing_is_a_level: false,
+        })
+    }
+
     /// Construct a MultiIndex from frame-like columns.
     ///
     /// Matches `pd.MultiIndex.from_frame(frame)` at the payload level:
@@ -25670,6 +25754,75 @@ mod tests {
             assert_eq!(crate::delete_freq(daily(), dropped, 5), None, "{dropped:?}");
         }
         assert_eq!(crate::delete_freq(None, &[0], 5), None);
+    }
+
+    #[test]
+    fn two_arrays_with_codes_match_hashed_ones_e186m() {
+        // A caller's first-seen codes give the MultiIndex from_arrays builds
+        // by hashing both levels (br-frankenpandas-e186m).
+        let rows: Vec<IndexLabel> = [5, 5, 9, 2, 2].map(IndexLabel::Int64).to_vec();
+        let columns: Vec<IndexLabel> = ["y", "x", "y", "x", "y"]
+            .map(|name| IndexLabel::Utf8(name.to_owned()))
+            .to_vec();
+        let given = MultiIndex::from_two_arrays_with_identity_codes(
+            [rows.clone(), columns.clone()],
+            [vec![0, 0, 1, 2, 2], vec![0, 1, 0, 1, 0]],
+        )
+        .unwrap();
+        let hashed = MultiIndex::from_arrays(vec![rows.clone(), columns.clone()]).unwrap();
+        assert_eq!(given, hashed);
+        assert_eq!(given.identity_codes, hashed.identity_codes);
+        assert!(given.identity_codes.is_some());
+        // NEGATIVE: levels or codes of another length are refused.
+        assert!(
+            MultiIndex::from_two_arrays_with_identity_codes(
+                [rows.clone(), columns[..4].to_vec()],
+                [vec![0, 0, 1, 2, 2], vec![0, 1, 0, 1]],
+            )
+            .is_err()
+        );
+        assert!(
+            MultiIndex::from_two_arrays_with_identity_codes(
+                [rows, columns],
+                [vec![0, 0, 1, 2], vec![0, 1, 0, 1, 0]],
+            )
+            .is_err()
+        );
+        // A label's first-seen code: increasing ints their positions, any
+        // other labels numbered as they first appear.
+        let ints = |values: &[i64]| {
+            values
+                .iter()
+                .copied()
+                .map(IndexLabel::Int64)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            crate::first_seen_label_codes(&ints(&[2, 5, 9])),
+            Some(vec![0, 1, 2])
+        );
+        assert_eq!(crate::first_seen_label_codes(&[]), Some(vec![]));
+        let text = ["b", "a", "b", "c", "a"].map(|s| IndexLabel::Utf8(s.to_owned()));
+        assert_eq!(
+            crate::first_seen_label_codes(&text),
+            Some(vec![0, 1, 0, 2, 1])
+        );
+        // NEGATIVE: ints out of order or repeated are not their positions.
+        assert_eq!(
+            crate::first_seen_label_codes(&ints(&[9, 5, 9, 2])),
+            Some(vec![0, 1, 0, 2])
+        );
+        assert_eq!(
+            crate::first_seen_label_codes(&ints(&[1, 1, 2])),
+            Some(vec![0, 0, 1])
+        );
+        // No rows, no codes - as hashing keeps none.
+        let empty = MultiIndex::from_two_arrays_with_identity_codes(
+            [Vec::new(), Vec::new()],
+            [vec![], vec![]],
+        )
+        .unwrap();
+        assert!(empty.identity_codes.is_none());
     }
 
     #[test]

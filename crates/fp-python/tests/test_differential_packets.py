@@ -35167,3 +35167,301 @@ def test_read_json_lines_not_an_object_raises_e186m() -> None:
         pd.read_json(io.StringIO('{"a": 1}\n[1, 2]\n'), lines=True)
     with pytest.raises(ValueError, match="JSON object"):
         fpd.read_json(io.StringIO('{"a": 1}\n[1, 2]\n'), lines=True)
+
+
+# br-frankenpandas-e186m: str.findall / str.split(regex=True) compile their
+# pattern once (re's module functions looked it up per row), and
+# str.encode('utf-8') copies each str's own bytes (each went through
+# Python's codec) - pandas' answers, missing values, empty strings and
+# non-ASCII text included. NEGATIVE: another codec with an error handler
+# (ascii / ignore, latin-1 / replace) still runs Python's codec.
+_E186MSTR_DATA = ["Item_12-ab3", None, "x9y88", "", "café 7", np.nan, "a-b-c", "\U0001F600 1"]
+_E186MSTR_CASES = {
+    "findall digits": lambda s: s.str.findall(r"\d"),
+    "findall groups": lambda s: s.str.findall(r"(\w)(\d)"),
+    "findall flags": lambda s: s.str.findall(r"[A-Z]", flags=2),
+    "split regex": lambda s: s.str.split(r"[-_]", regex=True),
+    "split regex n=1": lambda s: s.str.split(r"[-_ ]", n=1, regex=True),
+    "split literal": lambda s: s.str.split("-"),
+    "encode utf-8": lambda s: s.str.encode("utf-8"),
+    "encode UTF8": lambda s: s.str.encode("UTF8"),
+    "encode ascii ignore (NEGATIVE)": lambda s: s.str.encode("ascii", "ignore"),
+    "encode latin-1 replace (NEGATIVE)": lambda s: s.str.encode("latin-1", "replace"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MSTR_CASES))
+def test_str_findall_split_encode_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MSTR_CASES[case](m.Series(_E186MSTR_DATA, name="s"))
+        return (str(out.dtype), [repr(x) for x in out.tolist()])
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: an all-valid int64 column's shift casts as it moves
+# (float64, NaN in the vacated rows), an all-valid text column held as one
+# byte buffer shifts as its bytes (None in the vacated rows), and
+# df.where / df.mask select each float64 or int64 column from its typed
+# buffers even when a frame mixes the two - pandas' answers, past a 64-row
+# mask word. NEGATIVE: an int fill keeps int64, a nullable Int64 / `string`
+# column keeps its own missing value, a text fill and a nullable-boolean
+# condition take the per-cell path.
+_E186MSW_N = 70
+_E186MSW_INTS = [(i * 37) % 23 - 11 for i in range(_E186MSW_N)]
+_E186MSW_FLOATS = [((i * 13) % 17) / 4 for i in range(_E186MSW_N)]
+_E186MSW_TEXT = [f"k{(i * 7) % 11}" if i % 9 else ("" if i % 2 else "café") for i in range(_E186MSW_N)]
+
+
+def _e186msw_frame(m: Any) -> Any:
+    return m.DataFrame({"x": _E186MSW_FLOATS, "y": _E186MSW_INTS, "s": _E186MSW_TEXT})
+
+
+_E186MSW_SERIES_CASES = {
+    "int shift 1": lambda m: m.Series(_E186MSW_INTS).shift(1),
+    "int shift -3": lambda m: m.Series(_E186MSW_INTS).shift(-3),
+    "int shift 0": lambda m: m.Series(_E186MSW_INTS).shift(0),
+    "int shift past the length": lambda m: m.Series(_E186MSW_INTS).shift(_E186MSW_N + 5),
+    "int shift -length": lambda m: m.Series(_E186MSW_INTS).shift(-_E186MSW_N),
+    "int32 shift": lambda m: m.Series(_E186MSW_INTS, dtype="int32").shift(2),
+    "int shift fill 0 (NEGATIVE)": lambda m: m.Series(_E186MSW_INTS).shift(2, fill_value=0),
+    "Int64 shift (NEGATIVE)": lambda m: m.Series(_E186MSW_INTS, dtype="Int64").shift(2),
+    "text shift 1": lambda m: m.Series(_E186MSW_TEXT).shift(1),
+    "text shift -2": lambda m: m.Series(_E186MSW_TEXT).shift(-2),
+    "text shift 0": lambda m: m.Series(_E186MSW_TEXT).shift(0),
+    "text shift past the length": lambda m: m.Series(_E186MSW_TEXT).shift(-_E186MSW_N - 1),
+    "text window shift": lambda m: m.Series(_E186MSW_TEXT).iloc[5:40].shift(3),
+    "text holding None": lambda m: m.Series(["a", None, "b", np.nan, "c"]).shift(1),
+    "text fill (NEGATIVE)": lambda m: m.Series(_E186MSW_TEXT).shift(2, fill_value="z"),
+    "string dtype (NEGATIVE)": lambda m: m.Series(_E186MSW_TEXT, dtype="string").shift(2),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MSW_SERIES_CASES))
+def test_int_and_text_shift_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MSW_SERIES_CASES[case](m)
+        return (str(out.dtype), [repr(x) for x in out.tolist()], list(out.index))
+
+    assert run(fpd) == run(pd)
+
+
+_E186MSW_FRAME_CASES = {
+    "frame shift": lambda df: df.shift(1),
+    "frame shift -2": lambda df: df.shift(-2),
+    "where": lambda df: df[["x", "y"]].where(df[["x", "y"]] > 1),
+    "mask": lambda df: df[["x", "y"]].mask(df[["x", "y"]] > 1),
+    "where all kept": lambda df: df[["x", "y"]].where(df[["x", "y"]] > -100),
+    "where none kept": lambda df: df[["x", "y"]].where(df[["x", "y"]] > 100),
+    "mask all kept": lambda df: df[["x", "y"]].mask(df[["x", "y"]] > 100),
+    "where int fill": lambda df: df[["y"]].where(df[["y"]] > 0, -1),
+    "mask int fill": lambda df: df[["y"]].mask(df[["y"]] > 0, -1),
+    "where float fill": lambda df: df[["x", "y"]].where(df[["x", "y"]] > 1, 0.5),
+    "where None": lambda df: df[["x", "y"]].where(df[["x", "y"]] > 1, None),
+    "where nan in float": lambda df: df[["x", "y"]].assign(x=df["x"].where(df["x"] > 2)).where(df[["x", "y"]] < 3),
+    "where int32": lambda df: df[["y"]].astype("int32").where(df[["y"]] > 0),
+    "where int fill on mixed (NEGATIVE)": lambda df: df[["x", "y"]].where(df[["x", "y"]] > 1, -1),
+    "where nullable cond (NEGATIVE)": lambda df: df[["x", "y"]].where((df[["x", "y"]] > 1).astype("boolean")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MSW_FRAME_CASES))
+def test_frame_shift_where_mask_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MSW_FRAME_CASES[case](_e186msw_frame(m))
+        return [
+            (name, str(out[name].dtype), [repr(x) for x in out[name].tolist()])
+            for name in out.columns
+        ]
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: DataFrame.stack reads its flat `row|column` labels
+# from the stacked frame and each column's label once - pandas' MultiIndex,
+# names and values, a missing cell dropped (or kept under dropna=False /
+# future_stack=True) over every kind of row axis.
+def _e186mstk_frame(m: Any, index: Any) -> Any:
+    return m.DataFrame(
+        {"x": [0.5, np.nan, 2.5, 3.0], "y": [1, 2, 3, 4], 7: [np.nan, np.nan, 1.5, 0.0]},
+        index=index,
+    )
+
+
+_E186MSTK_CASES = {
+    "range rows": lambda m: _e186mstk_frame(m, None).stack(),
+    "text rows": lambda m: _e186mstk_frame(m, ["a", "b", "c", "d"]).stack(),
+    "named rows": lambda m: _e186mstk_frame(m, m.Index([10, 20, 30, 40], name="r")).stack(),
+    "date rows": lambda m: _e186mstk_frame(m, m.date_range("2024-01-01", periods=4)).stack(),
+    "MultiIndex rows": lambda m: _e186mstk_frame(
+        m, m.MultiIndex.from_arrays([["a", "a", "b", "b"], [1, 2, 1, 2]], names=["p", "q"])
+    ).stack(),
+    "no missing": lambda m: _e186mstk_frame(m, None)[["y"]].stack(),
+    "ints and floats": lambda m: _e186mstk_frame(m, None)[["x", "y"]].fillna(0.0).stack(),
+    "dropna=False (NEGATIVE)": lambda m: _e186mstk_frame(m, None).stack(dropna=False),
+    "future_stack (NEGATIVE)": lambda m: _e186mstk_frame(m, None).stack(future_stack=True),
+    "all missing row": lambda m: _e186mstk_frame(m, None)[["x", 7]].stack(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MSTK_CASES))
+def test_frame_stack_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MSTK_CASES[case](m)
+        return (
+            str(out.dtype),
+            [repr(x) for x in out.tolist()],
+            [repr(label) for label in out.index.tolist()],
+            list(out.index.names),
+        )
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a text column held as one byte buffer lists and
+# iterates its strs straight from its bytes (a repeated value made once,
+# a mostly-distinct column each anew), and an int64 replace of up to 16
+# keys scans instead of hashing - pandas' answers. NEGATIVE: a column
+# holding None, the `string` and category dtypes, a float replacement and a
+# float column take their own paths.
+_E186MTL_DISTINCT = [f"v{i}é" for i in range(3000)]
+_E186MTL_CASES = {
+    "repeated": lambda m: m.Series(["a", "bb", "", "a", "ccc"] * 700),
+    "distinct past the sample": lambda m: m.Series(_E186MTL_DISTINCT),
+    "distinct then repeated": lambda m: m.Series(_E186MTL_DISTINCT[:2100] + ["x", "y"] * 600),
+    "row window": lambda m: m.Series(_E186MTL_DISTINCT).iloc[1000:2600],
+    "unicode": lambda m: m.Series(["\U0001F600", "naïve", "日本", ""] * 3),
+    "holding None (NEGATIVE)": lambda m: m.Series(["a", None, "b", np.nan] * 3),
+    "string dtype (NEGATIVE)": lambda m: m.Series(["a", None, "b"] * 3, dtype="string"),
+    "category (NEGATIVE)": lambda m: m.Series(["a", "b", "a"] * 3, dtype="category"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MTL_CASES))
+def test_text_tolist_and_iteration_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        s = _E186MTL_CASES[case](m)
+        return ([repr(x) for x in s.tolist()], [repr(x) for x in s], [type(x).__name__ for x in s.tolist()])
+
+    assert run(fpd) == run(pd)
+
+
+_E186MRP_INTS = [(i * 7) % 23 - 5 for i in range(200)]
+_E186MRP_CASES = {
+    "one key": lambda s: s.replace(3, 99),
+    "one key absent": lambda s: s.replace(1000, 1),
+    "list of keys": lambda s: s.replace([1, 2, 3], [10, 20, 30]),
+    "dict of keys": lambda s: s.replace({-5: 0, 17: -17}),
+    "key to itself": lambda s: s.replace(4, 4),
+    "repeated key last wins": lambda s: s.replace([2, 2], [7, 8]),
+    "repeated key as int and float": lambda s: s.replace([2, 2.0], [7, 8]),
+    "pairs do not chain": lambda s: s.replace([1, 2], [2, 3]),
+    "repeated float key": lambda s: s.astype("float64").replace([2.0, 2.0], [7.5, 8.5]),
+    "repeated NaN key": lambda s: s.astype("float64").where(s > 0).replace([np.nan, np.nan], [5.0, 6.0]),
+    "repeated text key": lambda s: s.astype(str).replace(["2", "2"], ["x", "y"]),
+    "frame repeated key": lambda s: s.to_frame("a").assign(b=s * 2).replace([2, 2], [7, 8])["a"],
+    "more than 16 keys": lambda s: s.replace({k: k * 100 for k in range(-5, 18)}),
+    "float value (NEGATIVE)": lambda s: s.replace(3, 0.5),
+    "float key on ints (NEGATIVE)": lambda s: s.replace(3.0, 9),
+    "float column (NEGATIVE)": lambda s: s.astype("float64").replace(3, 9),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MRP_CASES))
+def test_int64_replace_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MRP_CASES[case](m.Series(_E186MRP_INTS))
+        return (str(out.dtype), [repr(x) for x in out.tolist()])
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: df.where / mask with a DataFrame `other` select
+# two int64 columns as int64 from their buffers beside the float64 ones,
+# DataFrame.cov reads an all-valid int64 column as float64 once, and
+# equals compares int64 / float64 buffers - pandas' answers. NEGATIVE: an
+# int column against a float `other`, unaligned frames, a nullable
+# condition, nullable / bool columns in cov, an int column against a float
+# one in equals.
+def _e186mwd_frames(m: Any) -> Any:
+    n = 70
+    df = m.DataFrame(
+        {
+            "x": [((i * 13) % 17) / 4 for i in range(n)],
+            "z": [(i * 7) % 23 - 11 for i in range(n)],
+        }
+    )
+    return df, df > 1, df * 2
+
+
+_E186MWD_CASES = {
+    "where df other": lambda m, df, cond, other: df.where(cond, other),
+    "mask df other": lambda m, df, cond, other: df.mask(cond, other),
+    "where all true": lambda m, df, cond, other: df.where(df > -100, other),
+    "where none true": lambda m, df, cond, other: df.where(df > 100, other),
+    "where NaN in self": lambda m, df, cond, other: df.assign(x=df["x"].where(df["x"] > 1)).where(cond, other),
+    "mask NaN in other": lambda m, df, cond, other: df.mask(cond, other.assign(x=other["x"].where(other["x"] > 3))),
+    "int self fractional other (NEGATIVE)": lambda m, df, cond, other: df.where(cond, other * 0.5 + 0.25),
+    "unaligned (NEGATIVE)": lambda m, df, cond, other: df.where(cond, other.iloc[::-1]),
+    "nullable cond (NEGATIVE)": lambda m, df, cond, other: df.where(cond.astype("boolean"), other),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MWD_CASES))
+def test_frame_where_mask_frame_other_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        df, cond, other = _e186mwd_frames(m)
+        out = _E186MWD_CASES[case](m, df, cond, other)
+        return [(name, str(out[name].dtype), [repr(v) for v in out[name].tolist()]) for name in out.columns]
+
+    assert run(fpd) == run(pd)
+
+
+_E186MCV_INTS = [(i * 37) % 101 - 50 for i in range(120)]
+_E186MCV_CASES = {
+    "float and int": lambda m: m.DataFrame({"x": [v / 7 for v in _E186MCV_INTS], "z": _E186MCV_INTS[::-1]}).cov(),
+    "ints only": lambda m: m.DataFrame({"a": _E186MCV_INTS, "b": _E186MCV_INTS[::-1]}).cov(),
+    "ddof 0": lambda m: m.DataFrame({"x": [v / 3 for v in _E186MCV_INTS], "z": _E186MCV_INTS}).cov(ddof=0),
+    "min_periods": lambda m: m.DataFrame({"x": [v / 3 for v in _E186MCV_INTS], "z": _E186MCV_INTS}).cov(min_periods=200),
+    "big ints": lambda m: m.DataFrame({"a": [v * 2**55 + 3 for v in _E186MCV_INTS], "b": _E186MCV_INTS}).cov(),
+    "nullable Int64 (NEGATIVE)": lambda m: m.DataFrame({"a": m.array(_E186MCV_INTS[:-1] + [None], dtype="Int64"), "b": _E186MCV_INTS}).cov(),
+    "bool (NEGATIVE)": lambda m: m.DataFrame({"a": [v > 0 for v in _E186MCV_INTS], "b": _E186MCV_INTS}).cov(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MCV_CASES))
+def test_frame_cov_with_int_columns_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MCV_CASES[case](m)
+        return [(name, [round(v, 6) if v == v else "nan" for v in out[name].tolist()]) for name in out.columns]
+
+    assert run(fpd) == run(pd)
+
+
+_E186MEQ_CASES = {
+    "same frame": lambda m: (m.DataFrame({"x": [1.5, np.nan, 3.0], "z": [1, 2, 3]}), m.DataFrame({"x": [1.5, np.nan, 3.0], "z": [1, 2, 3]})),
+    "NaN moved": lambda m: (m.DataFrame({"x": [1.5, np.nan, 3.0]}), m.DataFrame({"x": [1.5, 3.0, np.nan]})),
+    "value differs": lambda m: (m.DataFrame({"z": [1, 2, 3]}), m.DataFrame({"z": [1, 2, 4]})),
+    "signed zero": lambda m: (m.DataFrame({"x": [0.0, 1.0]}), m.DataFrame({"x": [-0.0, 1.0]})),
+    "int vs float (NEGATIVE)": lambda m: (m.DataFrame({"z": [1, 2]}), m.DataFrame({"z": [1.0, 2.0]})),
+    "series NaN": lambda m: (m.Series([1.0, np.nan] * 40), m.Series([1.0, np.nan] * 40)),
+    "series int differs": lambda m: (m.Series(list(range(80))), m.Series(list(range(79)) + [0])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MEQ_CASES))
+def test_equals_on_typed_columns_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        left, right = _E186MEQ_CASES[case](m)
+        return (left.equals(right), right.equals(left), left.equals(left))
+
+    assert run(fpd) == run(pd)

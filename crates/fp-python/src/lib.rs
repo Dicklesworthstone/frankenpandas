@@ -1171,9 +1171,54 @@ fn typed_column_list(py: Python<'_>, column: &Column) -> PyResult<Option<Py<PyAn
             .as_bool_slice()
             .map(|data| PyList::new(py, data))
             .transpose()?,
+        DType::Utf8 if column.categorical().is_none() => column
+            .as_utf8_window()
+            .map(|(bytes, offsets)| text_list(py, bytes, offsets))
+            .transpose()?,
         _ => None,
     };
     Ok(list.map(|list| list.into_any().unbind()))
+}
+
+/// The strs of a text column held as one byte buffer (`offsets` its rows'
+/// bounds), a value it repeats made once: its cells went through the Scalar
+/// view a check at a time, a str made a row (s.tolist() of 300k strings over
+/// 500 values 15.9 ms, pandas 1.15; br-frankenpandas-e186m). A column whose
+/// first 2,048 rows are mostly distinct makes each str anew.
+fn text_list<'py>(
+    py: Python<'py>,
+    bytes: &[u8],
+    offsets: &[usize],
+) -> PyResult<Bound<'py, PyList>> {
+    const SAMPLE: usize = 2_048;
+    let rows = offsets.len() - 1;
+    let mut made: FxHashMap<&[u8], Bound<'py, pyo3::types::PyString>> = FxHashMap::default();
+    let mut repeating = true;
+    let mut strs = Vec::with_capacity(rows);
+    for (row, bounds) in offsets.windows(2).enumerate() {
+        let cell = &bytes[bounds[0]..bounds[1]];
+        let text = |cell| {
+            std::str::from_utf8(cell)
+                .map(|text| pyo3::types::PyString::new(py, text))
+                .map_err(|error| PyErr::new::<pyo3::exceptions::PyValueError, _>(error.to_string()))
+        };
+        if !repeating {
+            strs.push(text(cell)?);
+            continue;
+        }
+        if let Some(seen) = made.get(cell) {
+            strs.push(seen.clone());
+        } else {
+            let made_now = text(cell)?;
+            made.insert(cell, made_now.clone());
+            strs.push(made_now);
+        }
+        if row + 1 == SAMPLE && made.len() > SAMPLE / 2 {
+            repeating = false;
+            made.clear();
+        }
+    }
+    PyList::new(py, strs)
 }
 
 /// A column's values as pandas materializes a run of them (repr cells,
@@ -25839,6 +25884,46 @@ fn narrowed_to(series: Series, width: Option<NumericWidth>) -> PyResult<Series> 
         .map_err(frame_error_to_py)
 }
 
+/// A stack's two identity code levels, a kept cell at a time: its row's and
+/// its column's first-seen codes ([`fp_index::first_seen_label_codes`]),
+/// each renumbered in the order the kept cells first show it - a row or a
+/// column whose cells were all dropped takes no number.
+struct StackCodes {
+    row_codes: Vec<u32>,
+    column_codes: Vec<u32>,
+    renumbered: [Vec<u32>; 2],
+    next: [u32; 2],
+    codes: [Vec<u32>; 2],
+}
+
+impl StackCodes {
+    fn new(row_codes: Vec<u32>, column_codes: Vec<u32>, cells: usize) -> Self {
+        let distinct = |codes: &[u32]| codes.iter().max().map_or(0, |&code| code as usize + 1);
+        Self {
+            renumbered: [
+                vec![u32::MAX; distinct(&row_codes)],
+                vec![u32::MAX; distinct(&column_codes)],
+            ],
+            row_codes,
+            column_codes,
+            next: [0; 2],
+            codes: [Vec::with_capacity(cells), Vec::with_capacity(cells)],
+        }
+    }
+
+    fn push(&mut self, row: usize, column: usize) {
+        let own = [self.row_codes[row], self.column_codes[column]];
+        for (level, code) in own.into_iter().enumerate() {
+            let slot = &mut self.renumbered[level][code as usize];
+            if *slot == u32::MAX {
+                *slot = self.next[level];
+                self.next[level] += 1;
+            }
+            self.codes[level].push(*slot);
+        }
+    }
+}
+
 fn wrap_frame(result: Result<DataFrame, fp_frame::FrameError>) -> PyResult<PyDataFrame> {
     result
         .map(|inner| PyDataFrame { inner })
@@ -39069,7 +39154,7 @@ impl PySeries {
         // holding them, under the points themselves (pandas' pointwise
         // get_indexer; they were all NaN, br-frankenpandas-s08y7).
         if holds_intervals(self.inner.index())
-            && let Some(mapped) = interval_point_targets(self.inner.index(), target.inner.labels())?
+            && let Some(mapped) = interval_point_targets(self.inner.index(), &target.inner)?
         {
             let mapped = Bound::new(
                 py,
@@ -44111,6 +44196,15 @@ impl PyDataFrame {
                 .column_at(position)
                 .expect("candidate column in bounds")
                 .clone();
+            // An all-valid int64 column read as float64 once - the values
+            // each pair read cell by cell (to_f64), in the same row order -
+            // so every pair takes the typed two-pass: a frame holding one
+            // int column covaried 0.19x pandas (br-frankenpandas-e186m).
+            let col = if col.dtype() == DType::Int64 && col.as_i64_slice().is_some() {
+                col.astype(DType::Float64)?
+            } else {
+                col
+            };
             let s = Series::new(col_name.clone(), self.inner.index().clone(), col)?;
             if s.hasnans() {
                 has_nans = true;
@@ -55803,8 +55897,7 @@ impl PyDataFrame {
         {
             // Points over an IntervalIndex take the rows of the intervals
             // holding them, under the points (they were all NaN; s08y7).
-            if let Some(mapped) = interval_point_targets(self.inner.index(), target.inner.labels())?
-            {
+            if let Some(mapped) = interval_point_targets(self.inner.index(), &target.inner)? {
                 let mapped = Bound::new(
                     py,
                     PyIndex {
@@ -56480,34 +56573,71 @@ impl PyDataFrame {
         // The column level is named after the column axis (an unstack's
         // moved level; it was unnamed).
         names.push(self.inner.columns_name().cloned());
-        let row_labels = index.labels();
         let columns = self.inner.column_names();
-        let mut arrays: Vec<Vec<IndexLabel>> = vec![Vec::new(); row_levels.len() + 1];
-        let mut flat = Vec::new();
-        let mut keep = Vec::new();
-        for (row, row_label) in row_labels.iter().enumerate() {
-            for (col, name) in columns.iter().enumerate() {
+        // The column level is the typed column labels (0, not '0'), each
+        // looked up once, not once a cell.
+        let column_labels: Vec<IndexLabel> = columns
+            .iter()
+            .map(|name| self.inner.column_label(name))
+            .collect();
+        // A cell is dropped only when missing: a column holding none keeps
+        // every cell without a mask bit read for each.
+        let all_kept = !drop_missing || values.validity().all();
+        let total = index.len() * columns.len();
+        let mut arrays: Vec<Vec<IndexLabel>> = (0..=row_levels.len())
+            .map(|_| Vec::with_capacity(total))
+            .collect();
+        let mut keep = Vec::with_capacity(if all_kept { 0 } else { total });
+        // Over one row level, the two levels' first-seen identity codes:
+        // each row's label and each column's numbered once, renumbered as
+        // the kept cells first show them - the MultiIndex hashed both
+        // labels of every cell for them (stack 0.19x pandas;
+        // br-frankenpandas-e186m).
+        let mut numbering = match row_levels.as_slice() {
+            [rows] => fp_index::first_seen_label_codes(rows)
+                .zip(fp_index::first_seen_label_codes(&column_labels))
+                .map(|(row_codes, column_codes)| StackCodes::new(row_codes, column_codes, total)),
+            _ => None,
+        };
+        for row in 0..index.len() {
+            for (col, label) in column_labels.iter().enumerate() {
                 let position = row * columns.len() + col;
-                if drop_missing && !values.validity().get(position) {
-                    continue;
+                if !all_kept {
+                    if !values.validity().get(position) {
+                        continue;
+                    }
+                    keep.push(position);
                 }
                 for (array, level) in arrays.iter_mut().zip(&row_levels) {
                     array.push(level[row].clone());
                 }
-                // The column level is the typed column labels (0, not '0').
-                arrays[row_levels.len()].push(self.inner.column_label(name));
-                flat.push(IndexLabel::Utf8(format!("{row_label}|{name}")));
-                keep.push(position);
+                arrays[row_levels.len()].push(label.clone());
+                if let Some(numbering) = &mut numbering {
+                    numbering.push(row, col);
+                }
             }
         }
-        let levels = fp_index::MultiIndex::from_arrays(arrays)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-            .set_names(names);
-        let index = Index::new(flat)
+        let levels = match (numbering, <[Vec<IndexLabel>; 2]>::try_from(arrays)) {
+            (Some(numbering), Ok(arrays)) => {
+                fp_index::MultiIndex::from_two_arrays_with_identity_codes(arrays, numbering.codes)
+            }
+            (_, Ok(arrays)) => fp_index::MultiIndex::from_arrays(Vec::from(arrays)),
+            (_, Err(arrays)) => fp_index::MultiIndex::from_arrays(arrays),
+        }
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+        .set_names(names);
+        // The flat labels are the stacked frame's own `row|column` composite
+        // ones (formatted again, a String a cell, they were the same text).
+        let (flat, values) = if all_kept {
+            (stacked.index().clone(), values.clone())
+        } else {
+            (stacked.index().take(&keep), values.take_positions(&keep))
+        };
+        let index = flat
+            .rename_index(None::<LabelName>)
             .with_row_multiindex(levels)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let out =
-            Series::new("", index, values.take_positions(&keep)).map_err(frame_error_to_py)?;
+        let out = Series::new("", index, values).map_err(frame_error_to_py)?;
         Ok(Py::new(py, PySeries { inner: out })?.into_any())
     }
 
@@ -58995,11 +59125,15 @@ fn label_point(label: &IndexLabel) -> Option<f64> {
 /// stays, a missing row), any other target itself; None when `index` holds
 /// no intervals or no number target is held. An overlapping index is
 /// pandas' "cannot reindex on an axis with duplicate labels" (s08y7).
-fn interval_point_targets(
-    index: &Index,
-    targets: &[IndexLabel],
-) -> PyResult<Option<Vec<IndexLabel>>> {
-    if !holds_intervals(index) || !targets.iter().any(|label| label_point(label).is_some()) {
+fn interval_point_targets(index: &Index, target: &Index) -> PyResult<Option<Vec<IndexLabel>>> {
+    // The target's labels are made only over intervals: every reindex
+    // materialized them here (a range target's 33% of df.reindex;
+    // br-frankenpandas-e186m).
+    if !holds_intervals(index) {
+        return Ok(None);
+    }
+    let targets = target.labels();
+    if !targets.iter().any(|label| label_point(label).is_some()) {
         return Ok(None);
     }
     let (intervals, overlapping) = index_intervals(index);
@@ -59092,14 +59226,19 @@ fn loc_missing_labels_error(
     wanted: &[IndexLabel],
     key: &Bound<'_, PyAny>,
 ) -> PyResult<Option<PyErr>> {
-    // A unique datetime / timedelta / text index answers from its lookup
-    // cached by label identity, which the rows' resolution reads next; any
-    // other from a set of its labels - a SipHash set of a million labels was
-    // half of df.loc[idx[::3]] (br-frankenpandas-lsn8d).
+    // A unique datetime / timedelta / text / int index answers from its
+    // lookup cached by label identity (an ascending int one by search),
+    // which the rows' resolution reads next; any other from a set of its
+    // labels - a SipHash set of a million labels was half of
+    // df.loc[idx[::3]] (br-frankenpandas-lsn8d), an Fx set of a RangeIndex's
+    // 43% of df.loc[[...]] (br-frankenpandas-e186m). An integral float
+    // label is the int it equals either way.
     let resolved = index
         .unique_datetime64_positions(wanted)
         .or_else(|| index.unique_timedelta64_positions(wanted))
-        .or_else(|| index.unique_utf8_positions(wanted));
+        .or_else(|| index.unique_utf8_positions(wanted))
+        .or_else(|| index.sorted_unique_int64_positions(wanted))
+        .or_else(|| index.unsorted_unique_int64_positions(wanted));
     let found: Vec<bool> = match resolved {
         Some(positions) => positions.iter().map(Option::is_some).collect(),
         None => {
@@ -62851,11 +62990,24 @@ impl PySeriesStringAccessor {
     /// str.encode; the core's returned byte lengths (4qg5w.8).
     #[pyo3(signature = (encoding, errors="strict"))]
     fn encode(&self, py: Python<'_>, encoding: &str, errors: &str) -> PyResult<PySeries> {
+        // UTF-8 (by any of Python's names for it) is a str's own bytes, which
+        // never fail to encode: copied straight - each str went out to
+        // Python's codec (0.71x pandas; br-frankenpandas-e186m).
+        let utf8 = matches!(
+            encoding
+                .to_ascii_lowercase()
+                .replace(['-', '_'], "")
+                .as_str(),
+            "utf8" | "u8" | "utf"
+        );
         let values = self
             .series
             .values()
             .iter()
             .map(|value| match value {
+                Scalar::Utf8(text) if utf8 => Ok(Scalar::Object(fp_types::ObjectValue::bytes(
+                    text.as_bytes().to_vec(),
+                ))),
                 Scalar::Utf8(text) => {
                     let encoded = pyo3::types::PyString::new(py, text)
                         .call_method1("encode", (encoding, errors))?;
@@ -63229,17 +63381,20 @@ impl PySeriesStringAccessor {
             let inner = self.string_frame(positional_column_range(df)?);
             return Ok(Py::new(py, PyDataFrame { inner })?.into_any());
         }
-        let re = py.import("re")?;
+        // A regex pattern compiled once (re.split per row looked it up in re's
+        // cache each time); maxsplit by keyword: positional is deprecated in
+        // Python 3.13.
+        let compiled = match pat {
+            Some(pat) if is_regex => Some(py.import("re")?.call_method1("compile", (pat,))?),
+            _ => None,
+        };
+        let options = PyDict::new(py);
+        options.set_item("maxsplit", n.max(0))?;
         let lists = self.python_lists(py, |text| {
-            let pieces = match pat {
-                // maxsplit by keyword: positional is deprecated in Python 3.13.
-                Some(pat) if is_regex => {
-                    let options = PyDict::new(py);
-                    options.set_item("maxsplit", n.max(0))?;
-                    re.call_method("split", (pat, text), Some(&options))?
-                }
-                Some(pat) => text.call_method1("split", (pat, n))?,
-                None => text.call_method1("split", (py.None(), n))?,
+            let pieces = match (pat, &compiled) {
+                (_, Some(compiled)) => compiled.call_method("split", (text,), Some(&options))?,
+                (Some(pat), None) => text.call_method1("split", (pat, n))?,
+                (None, None) => text.call_method1("split", (py.None(), n))?,
             };
             Ok(pieces.unbind())
         })?;
@@ -63276,9 +63431,11 @@ impl PySeriesStringAccessor {
     /// (Python's `re.findall`, so one group gives the group's text).
     #[pyo3(signature = (pat, flags=0))]
     fn findall(&self, py: Python<'_>, pat: &str, flags: i64) -> PyResult<PySeries> {
-        let re = py.import("re")?;
+        // Compiled once, as pandas' (re.findall per row ran re's Python-level
+        // compile cache lookup each time: 0.52x pandas; br-frankenpandas-e186m).
+        let compiled = py.import("re")?.call_method1("compile", (pat, flags))?;
         self.python_lists(py, |text| {
-            Ok(re.call_method1("findall", (pat, text, flags))?.unbind())
+            Ok(compiled.call_method1("findall", (text,))?.unbind())
         })
     }
     /// pandas' `partition(sep=' ', expand=True)` / `rpartition`; with

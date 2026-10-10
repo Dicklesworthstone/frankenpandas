@@ -4088,6 +4088,41 @@ impl std::hash::Hash for ScalarKey<'_> {
 type GroupKey<'a> = Vec<ScalarKey<'a>>;
 type GroupMap<'a> = FxHashMap<GroupKey<'a>, Vec<usize>>;
 
+/// `replacements` with a key given more than once kept at its LAST pair
+/// only, as pandas' replace takes them: it finds each key's rows among the
+/// original values, then writes the pairs in order, so the last write
+/// stands - [2, 2] -> [7, 8] writes 8, a NaN key twice its second value
+/// (every replace path here wrote the first; br-frankenpandas-e186m). Keys
+/// match as [`scalar_key_allow_missing`] keys them, every missing value one
+/// key.
+fn last_pair_per_key(
+    replacements: &[(Scalar, Scalar)],
+) -> std::borrow::Cow<'_, [(Scalar, Scalar)]> {
+    fn key_of(key: &Scalar) -> ScalarKey<'_> {
+        if key.is_missing() {
+            ScalarKey::Null(NullKind::Null)
+        } else {
+            scalar_key_allow_missing(key)
+        }
+    }
+    let mut last: FxHashMap<ScalarKey<'_>, usize> =
+        FxHashMap::with_capacity_and_hasher(replacements.len(), Default::default());
+    for (position, (key, _)) in replacements.iter().enumerate() {
+        last.insert(key_of(key), position);
+    }
+    if last.len() == replacements.len() {
+        return std::borrow::Cow::Borrowed(replacements);
+    }
+    std::borrow::Cow::Owned(
+        replacements
+            .iter()
+            .enumerate()
+            .filter(|(position, (key, _))| last[&key_of(key)] == *position)
+            .map(|(_, pair)| pair.clone())
+            .collect(),
+    )
+}
+
 fn scalar_key_allow_missing(value: &Scalar) -> ScalarKey<'_> {
     match value {
         Scalar::Null(kind) => ScalarKey::Null(*kind),
@@ -15947,27 +15982,17 @@ impl Series {
     /// both Series have identical names, index labels, and values (including
     /// NaN == NaN semantics for null positions).
     pub fn equals(&self, other: &Self) -> bool {
-        if self.index.labels() != other.index.labels() {
+        // Equal indexes (one shared, or typed labels compared) materialize
+        // no label; the labels one by one only otherwise - a zone apart, say
+        // (s.equals built two million-label views; br-frankenpandas-e186m).
+        if self.index != other.index && self.index.labels() != other.index.labels() {
             return false;
         }
         // NB: pandas Series.equals() ignores the Series name (only shape,
         // index, and NaN-aware values matter) — br-frankenpandas. DataFrame
         // column labels, by contrast, are data and ARE compared by
         // DataFrame::equals.
-        let lv = self.values();
-        let rv = other.values();
-        if lv.len() != rv.len() {
-            return false;
-        }
-        for (a, b) in lv.iter().zip(rv.iter()) {
-            if a.is_missing() && b.is_missing() {
-                continue;
-            }
-            if a != b {
-                return false;
-            }
-        }
-        true
+        same_cells(&self.column, &other.column)
     }
 
     /// Assert that this Series is equal to another according to the specified options (matching `pandas.testing.assert_series_equal`).
@@ -20307,12 +20332,14 @@ impl Series {
         if self.is_empty() {
             return Ok(self.clone());
         }
+        let replacements = last_pair_per_key(replacements);
         if let Some(meta) = &self.categorical
-            && let Some(out) = self.categorical_replace(meta, replacements)
+            && let Some(out) = self.categorical_replace(meta, &replacements)
         {
             return Ok(out);
         }
-        let replacements = self.replace_keys_by_value(replacements);
+        let by_value = self.replace_keys_by_value(&replacements);
+        let replacements = last_pair_per_key(&by_value);
         let out = self.keeping_width(self.replace_storage(&replacements), false)?;
         let writes_missing = replacements.iter().any(|(_, value)| value.is_missing());
         self.holding_replaced(out, writes_missing, |before| {
@@ -20573,13 +20600,35 @@ impl Series {
                 .iter()
                 .all(|(_, v)| matches!(v, Scalar::Int64(_)))
             {
-                let out_i64: Vec<i64> = vals
+                // A handful of keys: a direct `==` scan (one key a select,
+                // which vectorizes) beats a hash probe a row - s.replace(5, 6)
+                // 0.62x pandas (br-frankenpandas-e186m). `find` keeps the
+                // first occurrence, as `or_insert`.
+                const LINEAR_MAX: usize = 16;
+                let pairs: Vec<(i64, i64)> = replacements
                     .iter()
-                    .map(|&v| match idx.get(&v) {
-                        Some(Scalar::Int64(nv)) => *nv,
-                        _ => v,
+                    .filter_map(|(k, v)| match (k, v) {
+                        (Scalar::Int64(k), Scalar::Int64(v)) => Some((*k, *v)),
+                        _ => None,
                     })
                     .collect();
+                let out_i64: Vec<i64> = match pairs.as_slice() {
+                    &[(key, to)] => vals
+                        .iter()
+                        .map(|&v| if v == key { to } else { v })
+                        .collect(),
+                    few if few.len() <= LINEAR_MAX => vals
+                        .iter()
+                        .map(|&v| few.iter().find(|(k, _)| v == *k).map_or(v, |&(_, to)| to))
+                        .collect(),
+                    _ => vals
+                        .iter()
+                        .map(|&v| match idx.get(&v) {
+                            Some(Scalar::Int64(nv)) => *nv,
+                            _ => v,
+                        })
+                        .collect(),
+                };
                 return Series::new(
                     self.name.clone(),
                     self.index.clone(),
@@ -25276,6 +25325,32 @@ impl Series {
             };
             return Self::new(self.name.clone(), self.index.clone(), column);
         }
+        // An all-valid int64 column shifts to pandas' float64, NaN in the
+        // vacated rows: the values cast as they move, the vacated rows one
+        // invalid range holding 0.0 (read as Null(NaN), as the astype made
+        // them) - it went through values(), a Scalar per row, then astype
+        // (df.shift() of an int column 17 ms at 300k rows, pandas 0.44;
+        // br-frankenpandas-e186m).
+        if periods != 0
+            && self.column.dtype() == DType::Int64
+            && let Some(data) = self.column.as_i64_slice()
+        {
+            let n = data.len();
+            let p = periods.unsigned_abs().min(n as u64) as usize;
+            let mut out = Vec::with_capacity(n);
+            let vacated = if periods > 0 {
+                out.resize(p, 0.0);
+                out.extend(data[..n - p].iter().map(|&value| value as f64));
+                (0, p)
+            } else {
+                out.extend(data[p..].iter().map(|&value| value as f64));
+                out.resize(n, 0.0);
+                (n - p, p)
+            };
+            let validity = fp_columnar::ValidityMask::from_invalid_ranges(Arc::from([vacated]), n);
+            let column = Column::from_f64_values_with_validity(out, validity);
+            return Self::new(self.name.clone(), self.index.clone(), column);
+        }
         // A datetime/timedelta column fills the gap with NaT, as pandas (the
         // NaN fill read back as nan;
         // br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
@@ -25484,6 +25559,49 @@ impl Series {
                 let column = Column::from_temporal_nanos_holding_nat(dtype, out, validity);
                 return Self::new(self.name.clone(), self.index.clone(), column);
             }
+        }
+
+        // An all-valid text column held as one byte buffer shifts as its
+        // bytes: the moved rows' span copied once, their offsets rebased,
+        // the vacated rows the missing fill - it went through values(), a
+        // String clone per row (s.shift() of 300k strings 8 ms, pandas 0.75;
+        // br-frankenpandas-e186m).
+        if dtype == DType::Utf8
+            && !self.column.is_pandas_string()
+            && let Scalar::Null(gap) = &fill_value
+            && let Some((bytes, offsets)) = self.column.as_utf8_window()
+        {
+            let p = periods.unsigned_abs().min(n as u64) as usize;
+            let (rows, vacated) = if periods >= 0 {
+                (0..n - p, (0, p))
+            } else {
+                (p..n, (n - p, p))
+            };
+            let (first, last) = (offsets[rows.start], offsets[rows.end]);
+            let rebased = offsets[rows.start + 1..=rows.end]
+                .iter()
+                .map(|&offset| offset - first);
+            let mut out_offsets = Vec::with_capacity(n + 1);
+            if periods >= 0 {
+                out_offsets.resize(p + 1, 0);
+                out_offsets.extend(rebased);
+            } else {
+                out_offsets.push(0);
+                out_offsets.extend(rebased);
+                out_offsets.resize(n + 1, last - first);
+            }
+            let invalid: Arc<[(usize, usize)]> = if p == 0 {
+                Arc::from([])
+            } else {
+                Arc::from([vacated])
+            };
+            let column = Column::from_utf8_values_with_gap(
+                bytes[first..last].to_vec(),
+                out_offsets,
+                fp_columnar::ValidityMask::from_invalid_ranges(invalid, n),
+                *gap,
+            );
+            return Self::new(self.name.clone(), self.index.clone(), column);
         }
 
         let vals = self.column.values();
@@ -72516,6 +72634,223 @@ fn categories_kept(source: &Column, result: Column) -> Column {
     }
 }
 
+/// Whether two columns hold the same cells, as `equals` compares them: a
+/// missing cell matches a missing one, any other cell an equal one (the
+/// Scalars' `==`: 1 and 1.0 differ, -0.0 and 0.0 do not). Two int64 or two
+/// float64 columns compare their buffers - the Scalar views were built and
+/// walked (df.equals 0.25x pandas; br-frankenpandas-e186m).
+fn same_cells(left: &Column, right: &Column) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    if left.dtype() == DType::Int64
+        && right.dtype() == DType::Int64
+        && let Some((own, others)) = left.as_i64_slice().zip(right.as_i64_slice())
+    {
+        return own == others;
+    }
+    if left.dtype() == DType::Float64
+        && right.dtype() == DType::Float64
+        && let Some(((own, own_valid), (others, others_valid))) = left
+            .as_f64_slice_with_validity()
+            .zip(right.as_f64_slice_with_validity())
+    {
+        if own_valid.all() && others_valid.all() {
+            return own
+                .iter()
+                .zip(others)
+                .all(|(&mine, &theirs)| mine == theirs || (mine.is_nan() && theirs.is_nan()));
+        }
+        let missing =
+            |data: &[f64], valid: &ValidityMask, row: usize| !valid.get(row) || data[row].is_nan();
+        return (0..own.len()).all(|row| {
+            match (
+                missing(own, own_valid, row),
+                missing(others, others_valid, row),
+            ) {
+                (true, true) => true,
+                (false, false) => own[row] == others[row],
+                _ => false,
+            }
+        });
+    }
+    left.values()
+        .iter()
+        .zip(right.values())
+        .all(|(mine, theirs)| (mine.is_missing() && theirs.is_missing()) || mine == theirs)
+}
+
+/// Two all-valid int64 columns' values, side by side.
+fn int64_pair<'a>(mine: &'a Column, theirs: &'a Column) -> Option<(&'a [i64], &'a [i64])> {
+    if mine.dtype() != DType::Int64 || theirs.dtype() != DType::Int64 {
+        return None;
+    }
+    mine.as_i64_slice().zip(theirs.as_i64_slice())
+}
+
+/// `other` of a typed `where` / `mask` select ([`where_mask_typed_column`]).
+#[derive(Clone, Copy)]
+enum TypedWhereFill {
+    Missing,
+    Float(f64),
+    Int(i64),
+}
+
+/// One column's typed `where` / `mask` select under a condition column over
+/// the very same rows, or None when it takes the general per-cell path:
+/// - a Float64 column (any gaps), `other` missing or a finite float. A
+///   condition cell keeps self only as a PRESENT Bool of the mode's
+///   polarity; everything else takes `other` (the general path's
+///   `aligned_condition_cells` rule; yf758). A kept cell is the self value
+///   (present, or missing when self is missing / NaN), a replaced one the
+///   finite fill or missing.
+/// - an all-valid Int64 column under an all-valid Bool condition, `other` an
+///   int (the column stays Int64; eydcr) or missing: the general path's Int64
+///   values with Null(NaN) cells, made float64 by `nullable_kept`, or Int64
+///   when every row keeps self.
+fn where_mask_typed_column(
+    column: &Column,
+    cond_column: &Column,
+    fill: TypedWhereFill,
+    mask_mode: bool,
+) -> Option<Column> {
+    if column.dtype() == DType::Int64 {
+        let values = column.as_i64_slice()?;
+        let keeps = cond_column.as_bool_slice()?;
+        if keeps.len() != values.len() || values.is_empty() {
+            return None;
+        }
+        let kept = |keep: bool| keep != mask_mode;
+        return match fill {
+            TypedWhereFill::Int(fill) => Some(Column::from_i64_values_owned(
+                values
+                    .iter()
+                    .zip(keeps)
+                    .map(|(&value, &keep)| if kept(keep) { value } else { fill })
+                    .collect(),
+            )),
+            TypedWhereFill::Missing if keeps.iter().all(|&keep| kept(keep)) => {
+                Some(Column::from_i64_values_owned(values.to_vec()))
+            }
+            // A replaced row holds 0.0 under a cleared bit, read as
+            // Null(NaN) as the general path's astype made it.
+            TypedWhereFill::Missing => {
+                let words = keeps
+                    .chunks(64)
+                    .map(|rows| {
+                        rows.iter().enumerate().fold(0_u64, |word, (bit, &keep)| {
+                            word | (u64::from(kept(keep)) << bit)
+                        })
+                    })
+                    .collect();
+                Some(Column::from_f64_values_with_validity(
+                    values
+                        .iter()
+                        .zip(keeps)
+                        .map(|(&value, &keep)| if kept(keep) { value as f64 } else { 0.0 })
+                        .collect(),
+                    fp_columnar::ValidityMask::from_words(words, values.len()),
+                ))
+            }
+            TypedWhereFill::Float(_) => None,
+        };
+    }
+    if column.dtype() != DType::Float64 {
+        return None;
+    }
+    let fill = match fill {
+        TypedWhereFill::Missing => None,
+        TypedWhereFill::Float(fill) => Some(fill),
+        TypedWhereFill::Int(_) => return None,
+    };
+    let (sd, sv) = column.as_f64_slice_with_validity()?;
+    // An all-valid bool condition is read from its buffer, not its Scalar
+    // view.
+    let cond_bools = cond_column.as_bool_slice();
+    let cond_vals: &[Scalar] = if cond_bools.is_some() {
+        &[]
+    } else {
+        cond_column.values()
+    };
+    if cond_bools.map_or(cond_vals.len(), <[bool]>::len) != sd.len() {
+        return None;
+    }
+    if let Some(keeps) = cond_bools
+        && sv.all()
+    {
+        // Every missing cell of the result holds NaN - a kept one its
+        // source's, a replaced one the missing fill's - so the buffer's NaN
+        // mask is the result's.
+        let replaced = fill.unwrap_or(f64::NAN);
+        return Some(Column::from_f64_values(
+            sd.iter()
+                .zip(keeps)
+                .map(|(&value, &keep)| if keep != mask_mode { value } else { replaced })
+                .collect(),
+        ));
+    }
+    let n = sd.len();
+    let mut out = vec![0.0_f64; n];
+    let mut out_valid = fp_columnar::ValidityMask::all_valid(n);
+    for i in 0..n {
+        let cell = cond_bools.map_or_else(|| cond_vals[i].clone(), |bools| Scalar::Bool(bools[i]));
+        let keep_self = match &cell {
+            Scalar::Bool(b) => {
+                // where: keep self iff cond true; mask: iff cond false.
+                if mask_mode { !*b } else { *b }
+            }
+            // A MISSING condition is not a missing RESULT. The condition
+            // is a SELECTOR: undecidable means "not the keep-branch", so
+            // the cell takes `other` in BOTH modes. This arm used to
+            // propagate the condition's missingness into the output
+            // (`out_valid.set(i, false)`), which is what
+            // br-frankenpandas-yf758's two translation-covariance
+            // proptests caught.
+            //
+            // MEASURED, live pandas 2.2.3, nullable-boolean cond
+            // [NA, True, False] over [1.0, 2.0, 3.0] with other=99.0:
+            // ```text
+            //   df.where(cond, 99.0) -> [99.0, 2.0, 99.0]
+            //   df.mask (cond, 99.0) -> [99.0, 99.0, 3.0]
+            // ```
+            // Row 0 is the NA-cond cell and takes 99.0 in BOTH modes;
+            // pandas never yields NaN there. Rows 1-2 differ between the
+            // modes, which is the control proving this is about the
+            // selector and not about the data.
+            //
+            // br-frankenpandas-fixture-divergence-triage-9s0c4 already
+            // established this and fixed the DataFrame-`other` variants
+            // (see `where_and_mask_treat_a_null_condition_as_false`);
+            // this SCALAR-`other` typed path is the sibling it missed.
+            //
+            // The non-Bool arm collapses into the same rule and for the
+            // same reason. `aligned_condition_cells` — the general
+            // path's reader — maps EVERY non-Bool cell (Null or
+            // otherwise) to `None`, and the general path then keeps only
+            // on `Some(true)` for where / `Some(false)` for mask. The old
+            // `_ => mask_mode` arm therefore also disagreed in mask mode:
+            // it KEPT SELF on a non-Bool cond where the general path
+            // takes `other`. A typed fast path has to be bit-identical
+            // to the path it short-circuits, so keep-self is now exactly
+            // "a PRESENT Bool of the right polarity" and everything else
+            // takes `other`.
+            _ => false,
+        };
+        if keep_self {
+            out[i] = sd[i];
+            if !(sv.get(i) && !sd[i].is_nan()) {
+                out_valid.set(i, false);
+            }
+        } else if let Some(fill) = fill {
+            out[i] = fill;
+        } else {
+            out[i] = f64::NAN;
+            out_valid.set(i, false);
+        }
+    }
+    Some(Column::from_f64_values_with_validity(out, out_valid))
+}
+
 /// `result` in `source`'s nullable dtype (Int64 / Float64 / boolean) when
 /// `source` is nullable and `result` holds the same kind of values: pandas'
 /// masked arrays keep their dtype through a selection or a fill (`where`,
@@ -89295,24 +89630,19 @@ impl DataFrame {
 
     /// Keep values where `cond` is True; replace others with `other`.
     ///
-    /// Typed Float64 fast path shared by `where_cond` and `mask`
-    /// (br-frankenpandas-mz8hj). Fires when the index is identical to `cond`'s
-    /// AND unique (so the Left alignment is the identity — for a duplicate-label
-    /// index the general path maps each self row to cond's FIRST occurrence of
-    /// that label, which positional access would not reproduce), `other` is a
-    /// finite Float64 fill, and every column is Float64 with a contiguous
-    /// backing — selecting straight from the f64 + validity slices into a typed
-    /// output, skipping the cond reindex, the per-element self `Scalar`
-    /// materialization, and the `Column::from_values` revalidation. Returns
-    /// `None` to fall back.
-    ///
-    /// Bit-identical to the general select: `cond == Bool(keep_self)` keeps the
-    /// self value (present Float64, or its missing scalar when self is
-    /// missing/NaN — a cleared bit + datum materializes the same Null(NaN) /
-    /// Float64(NaN)); the other Bool keeps the finite fill; `cond == Null` (and
-    /// any non-Bool cond) yields Null(NaN) for where / the self value for mask,
-    /// exactly the general arms (`Null(_) => Null(NaN)`, `_ => fill`/`val`).
-    fn where_mask_typed_f64(
+    /// Typed fast path shared by `where_cond` and `mask` (br-frankenpandas-mz8hj,
+    /// eydcr). Fires when the index is identical to `cond`'s AND unique (so the
+    /// Left alignment is the identity — for a duplicate-label index the general
+    /// path maps each self row to cond's FIRST occurrence of that label, which
+    /// positional access would not reproduce) and every column takes a typed
+    /// select ([`where_mask_typed_column`]: a Float64 or an all-valid Int64
+    /// column, each under its own fills) — selecting straight from the typed
+    /// buffers, skipping the cond reindex, the per-element self `Scalar`
+    /// materialization, and the `Column::from_values` revalidation. A frame
+    /// mixing the two took the general path for every column (`df.where(cond)`
+    /// of a float and an int column 35 ms at 300k rows, pandas 2.5;
+    /// br-frankenpandas-e186m). Returns `None` to fall back.
+    fn where_mask_typed(
         &self,
         cond: &Self,
         other: Option<&Scalar>,
@@ -89322,9 +89652,10 @@ impl DataFrame {
         // as the general path's Null(NaN) fill does: `df.where(cond)` took
         // that path for every cell (108 ms against pandas' 11 ms at 2 x 1M).
         let fill = match other {
-            None | Some(Scalar::Null(_)) => None,
-            Some(Scalar::Float64(fill)) if fill.is_nan() => None,
-            Some(Scalar::Float64(fill)) if fill.is_finite() => Some(*fill),
+            None | Some(Scalar::Null(_)) => TypedWhereFill::Missing,
+            Some(Scalar::Float64(fill)) if fill.is_nan() => TypedWhereFill::Missing,
+            Some(Scalar::Float64(fill)) if fill.is_finite() => TypedWhereFill::Float(*fill),
+            Some(Scalar::Int64(fill)) => TypedWhereFill::Int(*fill),
             Some(_) => return None,
         };
         // Keyed by name: a repeated column key takes the positional path (i17d4).
@@ -89332,7 +89663,7 @@ impl DataFrame {
             return None;
         }
         for name in &self.column_order {
-            if !matches!(self.columns[name].dtype(), DType::Float64)
+            if !matches!(self.columns[name].dtype(), DType::Float64 | DType::Int64)
                 || !cond.columns.contains_key(name)
             {
                 return None;
@@ -89340,172 +89671,17 @@ impl DataFrame {
         }
         // Column-parallel (br-frankenpandas-wheremask-par): each column's
         // where/mask select is independent, so spread them across par_map_columns
-        // scope workers. The closure returns None when a column can't take the
-        // typed path (non-contiguous Float64 or a cond/self length mismatch); if
-        // ANY column bails the whole typed attempt returns None and the caller
-        // falls through to the general Scalar path — preserving the old
-        // early-`?`/`return None` semantics, just computed in parallel.
-        // Bit-identical: identical per-column select arm, reassembled in
-        // column_order.
+        // scope workers. A column that can't take the typed select makes the
+        // whole typed attempt return None and the caller falls through to the
+        // general Scalar path. Bit-identical: identical per-column select arm,
+        // reassembled in column_order.
         let computed = match self.par_map_columns(&self.column_order, |name| {
-            let Some((sd, sv)) = self.columns[name].as_f64_slice_with_validity() else {
-                return Ok(None);
-            };
-            // An all-valid bool condition is read from its buffer, not its
-            // Scalar view.
-            let cond_column = &cond.columns[name];
-            let cond_bools = cond_column.as_bool_slice();
-            let cond_vals: &[Scalar] = if cond_bools.is_some() {
-                &[]
-            } else {
-                cond_column.values()
-            };
-            if cond_bools.map_or(cond_vals.len(), <[bool]>::len) != sd.len() {
-                return Ok(None);
-            }
-            let n = sd.len();
-            let mut out = vec![0.0_f64; n];
-            let mut out_valid = fp_columnar::ValidityMask::all_valid(n);
-            for i in 0..n {
-                let cell =
-                    cond_bools.map_or_else(|| cond_vals[i].clone(), |bools| Scalar::Bool(bools[i]));
-                let keep_self = match &cell {
-                    Scalar::Bool(b) => {
-                        // where: keep self iff cond true; mask: iff cond false.
-                        if mask_mode { !*b } else { *b }
-                    }
-                    // A MISSING condition is not a missing RESULT. The condition
-                    // is a SELECTOR: undecidable means "not the keep-branch", so
-                    // the cell takes `other` in BOTH modes. This arm used to
-                    // propagate the condition's missingness into the output
-                    // (`out_valid.set(i, false)`), which is what
-                    // br-frankenpandas-yf758's two translation-covariance
-                    // proptests caught.
-                    //
-                    // MEASURED, live pandas 2.2.3, nullable-boolean cond
-                    // [NA, True, False] over [1.0, 2.0, 3.0] with other=99.0:
-                    // ```text
-                    //   df.where(cond, 99.0) -> [99.0, 2.0, 99.0]
-                    //   df.mask (cond, 99.0) -> [99.0, 99.0, 3.0]
-                    // ```
-                    // Row 0 is the NA-cond cell and takes 99.0 in BOTH modes;
-                    // pandas never yields NaN there. Rows 1-2 differ between the
-                    // modes, which is the control proving this is about the
-                    // selector and not about the data.
-                    //
-                    // br-frankenpandas-fixture-divergence-triage-9s0c4 already
-                    // established this and fixed the DataFrame-`other` variants
-                    // (see `where_and_mask_treat_a_null_condition_as_false`);
-                    // this SCALAR-`other` typed path is the sibling it missed.
-                    //
-                    // The non-Bool arm collapses into the same rule and for the
-                    // same reason. `aligned_condition_cells` — the general
-                    // path's reader — maps EVERY non-Bool cell (Null or
-                    // otherwise) to `None`, and the general path then keeps only
-                    // on `Some(true)` for where / `Some(false)` for mask. The old
-                    // `_ => mask_mode` arm therefore also disagreed in mask mode:
-                    // it KEPT SELF on a non-Bool cond where the general path
-                    // takes `other`. A typed fast path has to be bit-identical
-                    // to the path it short-circuits, so keep-self is now exactly
-                    // "a PRESENT Bool of the right polarity" and everything else
-                    // takes `other`.
-                    _ => false,
-                };
-                if keep_self {
-                    out[i] = sd[i];
-                    if !(sv.get(i) && !sd[i].is_nan()) {
-                        out_valid.set(i, false);
-                    }
-                } else if let Some(fill) = fill {
-                    out[i] = fill;
-                } else {
-                    out[i] = f64::NAN;
-                    out_valid.set(i, false);
-                }
-            }
-            Ok(Some(Column::from_f64_values_with_validity(out, out_valid)))
-        }) {
-            Ok(c) => c,
-            Err(e) => return Some(Err(e)),
-        };
-        if !computed.iter().all(Option::is_some) {
-            return None;
-        }
-        // The columns by position under this frame's axes, a column and a
-        // row MultiIndex kept (a name-keyed rebuild made df.where(cond) of
-        // MultiIndex columns a plain Index; br-frankenpandas-e186m).
-        let columns = computed
-            .into_iter()
-            .map(|column| column.expect("all columns checked is_some"))
-            .collect();
-        Some(Ok(self.with_columns_at_positions(columns)))
-    }
-
-    /// Keep values where `cond` is True; replace others with `other`.
-    ///
-    /// Typed Int64 fast path shared by `where_cond` and `mask`
-    /// (br-frankenpandas-eydcr). The Int64 analogue of [`where_mask_typed_f64`],
-    /// but deliberately narrower: it fires only when `other` is an Int64 fill,
-    /// the index is identical to `cond`'s AND unique (the Left alignment is then
-    /// the identity), every self column is an all-valid Int64 contiguous backing
-    /// (`as_i64_slice`), and every cond column is an all-valid `Bool` contiguous
-    /// backing (`as_bool_slice`). Under those gates NO missing values are ever
-    /// produced — each output datum is `self_int` (keep) or `fill_int`
-    /// (replace) — so the result is a pure all-valid Int64 column built straight
-    /// from the i64 slices, skipping the cond reindex, the per-element `Scalar`
-    /// materialization, and the `Column::from_values` dtype-inference +
-    /// revalidation. Returns `None` (caller keeps the Scalar path) for any
-    /// cond-null / non-Bool cond / non-Int64 column / fractional or
-    /// non-finite fill — those arms can introduce Null(NaN) or upcast to
-    /// Float64, which this all-valid-Int64 path does not model.
-    ///
-    /// Bit-identical to the general select over this gated input: for `where`,
-    /// `cond == Bool(true)` keeps `Int64(self)` and `Bool(false)` takes the
-    /// `Int64(fill)`; `mask` swaps the two arms. Both produce the same Int64
-    /// scalar at every row, and `from_i64_values` yields the same all-valid
-    /// Int64 column `Column::from_values` would infer from those scalars.
-    fn where_mask_typed_i64(
-        &self,
-        cond: &Self,
-        other: Option<&Scalar>,
-        mask_mode: bool,
-    ) -> Option<Result<Self, FrameError>> {
-        let &Scalar::Int64(fill) = other? else {
-            return None;
-        };
-        // Keyed by name: a repeated column key takes the positional path (i17d4).
-        if self.index != cond.index || !self.index.is_unique() || self.has_repeated_column_keys() {
-            return None;
-        }
-        for name in &self.column_order {
-            if !matches!(self.columns[name].dtype(), DType::Int64)
-                || !cond.columns.contains_key(name)
-            {
-                return None;
-            }
-        }
-        // Column-parallel (br-frankenpandas-wheremask-par): see
-        // where_mask_typed_f64. Each column's typed Int64 select is independent;
-        // a None bail (non-contiguous Int64 self / non-Bool cond / length
-        // mismatch) makes the whole typed attempt fall through to the Scalar path.
-        let computed = match self.par_map_columns(&self.column_order, |name| {
-            let Some(sd) = self.columns[name].as_i64_slice() else {
-                return Ok(None);
-            };
-            let Some(cb) = cond.columns[name].as_bool_slice() else {
-                return Ok(None);
-            };
-            if cb.len() != sd.len() {
-                return Ok(None);
-            }
-            let n = sd.len();
-            let mut out = vec![0_i64; n];
-            for i in 0..n {
-                // where: keep self iff cond true; mask: iff cond false.
-                let keep_self = if mask_mode { !cb[i] } else { cb[i] };
-                out[i] = if keep_self { sd[i] } else { fill };
-            }
-            Ok(Some(Column::from_i64_values_owned(out)))
+            Ok(where_mask_typed_column(
+                &self.columns[name],
+                &cond.columns[name],
+                fill,
+                mask_mode,
+            ))
         }) {
             Ok(c) => c,
             Err(e) => return Some(Err(e)),
@@ -89645,10 +89821,7 @@ impl DataFrame {
     }
 
     fn where_cond_storage(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
-        if let Some(result) = self.where_mask_typed_f64(cond, other, false) {
-            return result;
-        }
-        if let Some(result) = self.where_mask_typed_i64(cond, other, false) {
+        if let Some(result) = self.where_mask_typed(cond, other, false) {
             return result;
         }
         let fill = other.cloned().unwrap_or(Scalar::Null(NullKind::NaN));
@@ -89703,10 +89876,7 @@ impl DataFrame {
     ///
     /// Matches `df.mask(cond, other)`. Inverse of `where_cond`.
     pub fn mask(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
-        if let Some(result) = self.where_mask_typed_f64(cond, other, true) {
-            return result;
-        }
-        if let Some(result) = self.where_mask_typed_i64(cond, other, true) {
+        if let Some(result) = self.where_mask_typed(cond, other, true) {
             return result;
         }
         let fill = other.cloned().unwrap_or(Scalar::Null(NullKind::NaN));
@@ -89746,78 +89916,114 @@ impl DataFrame {
         Ok(self.with_columns_at_positions(new_columns))
     }
 
+    /// The typed select of [`Self::where_cond_df`] (`mask_mode` false: a
+    /// true condition keeps self) and [`Self::mask_df_other`] (true: a true
+    /// condition takes other) when `cond` and `other` share this unique
+    /// index, without a row MultiIndex or a repeated column key (the fast
+    /// paths key columns by name; i17d4): each column a pair of float64
+    /// columns, gaps and all, or of all-valid int64 ones, under an all-valid
+    /// bool condition. The per-cell path materialized 3 Scalar Vecs per
+    /// column and cloned a Scalar per cell (5M clones at 5 cols x 1M rows -
+    /// df.where(cond, other) was 0.12x pandas), and a frame holding an int
+    /// column took it for every column (0.15x; br-frankenpandas-e186m).
+    /// Bit-identical to the per-cell select: a kept cell is self's datum,
+    /// present iff self's is, a replaced one other's; two int64 columns hold
+    /// no missing value, their result the Int64 the per-cell values infer.
+    /// None when a column does not fit.
+    fn where_mask_df_aligned_typed(
+        &self,
+        cond: &Self,
+        other: &Self,
+        mask_mode: bool,
+    ) -> Option<Result<Self, FrameError>> {
+        if self.index != cond.index
+            || self.index != other.index
+            || !self.index.is_unique()
+            || self.row_multiindex.is_some()
+            || self.has_repeated_column_keys()
+        {
+            return None;
+        }
+        let n = self.index.len();
+        let fits = |name: &String| {
+            let (Some(cond_col), Some(theirs)) = (cond.columns.get(name), other.columns.get(name))
+            else {
+                return false;
+            };
+            let mine = &self.columns[name];
+            cond_col
+                .as_bool_slice()
+                .is_some_and(|keeps| keeps.len() == n)
+                && mine.len() == n
+                && theirs.len() == n
+                && (int64_pair(mine, theirs).is_some()
+                    || mine.as_f64_slice_with_validity().is_some()
+                        && theirs.as_f64_slice_with_validity().is_some())
+        };
+        if !self.column_order.iter().all(fits) {
+            return None;
+        }
+        let computed = self.par_map_columns(&self.column_order, |name| {
+            let keeps = cond.columns[name]
+                .as_bool_slice()
+                .expect("fits checked the condition");
+            let (mine, theirs) = (&self.columns[name], &other.columns[name]);
+            if let Some((own, others)) = int64_pair(mine, theirs) {
+                return Ok(Column::from_i64_values_owned(
+                    keeps
+                        .iter()
+                        .zip(own.iter().zip(others))
+                        .map(
+                            |(&keep, (&kept, &taken))| if keep != mask_mode { kept } else { taken },
+                        )
+                        .collect(),
+                ));
+            }
+            let (own, own_valid) = mine
+                .as_f64_slice_with_validity()
+                .expect("fits checked self");
+            let (others, others_valid) = theirs
+                .as_f64_slice_with_validity()
+                .expect("fits checked other");
+            let out: Vec<f64> = keeps
+                .iter()
+                .zip(own.iter().zip(others))
+                .map(|(&keep, (&kept, &taken))| if keep != mask_mode { kept } else { taken })
+                .collect();
+            // A mask bit read per row only when a side holds a gap.
+            let mut valid = fp_columnar::ValidityMask::all_valid(n);
+            if !own_valid.all() || !others_valid.all() {
+                for (row, &keep) in keeps.iter().enumerate() {
+                    let present = if keep != mask_mode {
+                        own_valid.get(row)
+                    } else {
+                        others_valid.get(row)
+                    };
+                    if !present {
+                        valid.set(row, false);
+                    }
+                }
+            }
+            Ok(Column::from_f64_values_with_validity(out, valid))
+        });
+        Some(computed.and_then(|columns| {
+            let mut result_cols = BTreeMap::new();
+            for (name, column) in self.column_order.iter().zip(columns) {
+                result_cols.insert(name.clone(), column);
+            }
+            Self::new_with_axis(self.index.clone(), result_cols, self.column_order.clone())
+        }))
+    }
+
     /// Keep values where `cond` is True, replacing False positions with
     /// corresponding values from `other` DataFrame.
     ///
     /// Matches `df.where(cond, other=df)`.
     pub fn where_cond_df(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
-        // Typed select fast path: identical unique index across self/cond/other,
-        // every column two-sided Float64 with an all-valid Bool cond. The general
-        // path below materializes 3 Scalar Vecs per column and clones a Scalar per
-        // cell (5M clones at 5 cols x 1M rows — df.where(cond,other) was 0.12x
-        // pandas). Select straight from the f64 + validity slices via the bool
-        // slice into a typed output. Bit-identical to the per-cell Scalar select:
-        // cond True keeps self (present iff self valid), cond False takes other
-        // (present iff other valid); an all-valid cond has no Null cell. The
-        // fast paths key columns by name, so a repeated key takes the general
-        // path, which pairs by position (i17d4).
-        let repeated_keys = self.has_repeated_column_keys();
-        if self.index == cond.index
-            && self.index == other.index
-            && self.index.is_unique()
-            && self.row_multiindex.is_none()
-            && !repeated_keys
-            && self.column_order.iter().all(|name| {
-                self.columns[name].as_f64_slice_with_validity().is_some()
-                    && cond
-                        .columns
-                        .get(name)
-                        .is_some_and(|c| c.as_bool_slice().is_some())
-                    && other
-                        .columns
-                        .get(name)
-                        .is_some_and(|c| c.as_f64_slice_with_validity().is_some())
-            })
-        {
-            let n = self.index.len();
-            let ok = self.column_order.iter().all(|name| {
-                self.columns[name].len() == n
-                    && cond.columns[name].len() == n
-                    && other.columns[name].len() == n
-            });
-            if ok {
-                let computed = self.par_map_columns(&self.column_order, |name| {
-                    let (sx, sv) = self.columns[name].as_f64_slice_with_validity().unwrap();
-                    let (ox, ov) = other.columns[name].as_f64_slice_with_validity().unwrap();
-                    let cb = cond.columns[name].as_bool_slice().unwrap();
-                    let mut out = vec![0.0_f64; n];
-                    let mut valid = fp_columnar::ValidityMask::all_valid(n);
-                    for i in 0..n {
-                        if cb[i] {
-                            out[i] = sx[i];
-                            if !sv.get(i) {
-                                valid.set(i, false);
-                            }
-                        } else {
-                            out[i] = ox[i];
-                            if !ov.get(i) {
-                                valid.set(i, false);
-                            }
-                        }
-                    }
-                    Ok(Column::from_f64_values_with_validity(out, valid))
-                })?;
-                let mut result_cols = BTreeMap::new();
-                for (name, column) in self.column_order.iter().zip(computed) {
-                    result_cols.insert(name.clone(), column);
-                }
-                return Self::new_with_axis(
-                    self.index.clone(),
-                    result_cols,
-                    self.column_order.clone(),
-                );
-            }
+        if let Some(result) = self.where_mask_df_aligned_typed(cond, other, false) {
+            return result;
         }
+        let repeated_keys = self.has_repeated_column_keys();
 
         let cond_plan = align_left_or_positional(&self.index, &cond.index);
         validate_alignment_plan(&cond_plan)?;
@@ -89922,66 +90128,10 @@ impl DataFrame {
     ///
     /// Matches `df.mask(cond, other=df)`.
     pub fn mask_df_other(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
-        // Typed select fast path — inverse of where_cond_df's (cond True -> OTHER,
-        // False -> self). Same gate/semantics; avoids the per-cell Scalar select.
-        // A repeated column key takes the positional general path (i17d4).
-        let repeated_keys = self.has_repeated_column_keys();
-        if self.index == cond.index
-            && self.index == other.index
-            && self.index.is_unique()
-            && self.row_multiindex.is_none()
-            && !repeated_keys
-            && self.column_order.iter().all(|name| {
-                self.columns[name].as_f64_slice_with_validity().is_some()
-                    && cond
-                        .columns
-                        .get(name)
-                        .is_some_and(|c| c.as_bool_slice().is_some())
-                    && other
-                        .columns
-                        .get(name)
-                        .is_some_and(|c| c.as_f64_slice_with_validity().is_some())
-            })
-        {
-            let n = self.index.len();
-            let ok = self.column_order.iter().all(|name| {
-                self.columns[name].len() == n
-                    && cond.columns[name].len() == n
-                    && other.columns[name].len() == n
-            });
-            if ok {
-                let computed = self.par_map_columns(&self.column_order, |name| {
-                    let (sx, sv) = self.columns[name].as_f64_slice_with_validity().unwrap();
-                    let (ox, ov) = other.columns[name].as_f64_slice_with_validity().unwrap();
-                    let cb = cond.columns[name].as_bool_slice().unwrap();
-                    let mut out = vec![0.0_f64; n];
-                    let mut valid = fp_columnar::ValidityMask::all_valid(n);
-                    for i in 0..n {
-                        if cb[i] {
-                            out[i] = ox[i];
-                            if !ov.get(i) {
-                                valid.set(i, false);
-                            }
-                        } else {
-                            out[i] = sx[i];
-                            if !sv.get(i) {
-                                valid.set(i, false);
-                            }
-                        }
-                    }
-                    Ok(Column::from_f64_values_with_validity(out, valid))
-                })?;
-                let mut result_cols = BTreeMap::new();
-                for (name, column) in self.column_order.iter().zip(computed) {
-                    result_cols.insert(name.clone(), column);
-                }
-                return Self::new_with_axis(
-                    self.index.clone(),
-                    result_cols,
-                    self.column_order.clone(),
-                );
-            }
+        if let Some(result) = self.where_mask_df_aligned_typed(cond, other, true) {
+            return result;
         }
+        let repeated_keys = self.has_repeated_column_keys();
 
         let cond_plan = align_left_or_positional(&self.index, &cond.index);
         validate_alignment_plan(&cond_plan)?;
@@ -98625,10 +98775,19 @@ impl DataFrame {
             F64(&'a [f64]),
             I64(&'a [i64]),
         }
+        // A float column whose missing rows are its NaN ones gathers its
+        // data, NaN and all, which `from_f64_values` marks missing again (a
+        // column holding one went cell by cell through Scalars: stack 0.16x
+        // pandas; br-frankenpandas-e186m).
         let numeric_cols: Option<Vec<NumSlice>> = col_refs
             .iter()
             .map(|c| {
                 if let Some(s) = c.as_f64_slice() {
+                    Some(NumSlice::F64(s))
+                } else if c.dtype() == DType::Float64
+                    && c.nan_missing_exact()
+                    && let Some((s, _)) = c.as_f64_slice_with_validity()
+                {
                     Some(NumSlice::F64(s))
                 } else {
                     c.as_i64_slice().map(NumSlice::I64)
@@ -105681,11 +105840,11 @@ impl DataFrame {
                 };
                 // A missing numpy value compares False (True under !=), as in
                 // pandas; it was carried as missing (br-frankenpandas-zwfz3).
-                for (i, b) in bools.iter_mut().enumerate() {
-                    if !validity.get(i) {
-                        *b = op == ComparisonOp::Ne;
-                    }
-                }
+                // By its invalid runs: a bit was read per row of a column
+                // holding none (df > 0.5 0.29x pandas; br-frankenpandas-e186m).
+                validity.for_each_invalid_range(|start, len| {
+                    bools[start..start + len].fill(op == ComparisonOp::Ne);
+                });
                 result_cols.push(Column::from_bool_values(bools));
                 continue;
             }
@@ -108455,13 +108614,8 @@ impl DataFrame {
                 Some(c) => c,
                 None => return false,
             };
-            for (left, right) in sc.values().iter().zip(oc.values().iter()) {
-                if left.is_missing() && right.is_missing() {
-                    continue;
-                }
-                if left != right {
-                    return false;
-                }
+            if !same_cells(sc, oc) {
+                return false;
             }
         }
         true
@@ -125708,7 +125862,7 @@ mod tests {
     /// above, which the 9s0c4 fix missed (br-frankenpandas-yf758).
     ///
     /// That test covers `where_cond_df` / `mask_df_other`. The scalar-`other`
-    /// entry points reach `where_mask_typed_f64`, a separate typed fast path that
+    /// entry points reach `where_mask_typed` (then Float64-only), a separate typed fast path that
     /// still propagated the condition's missingness into the result and, in mask
     /// mode, kept self on a non-Bool condition where the general path takes
     /// `other`.
@@ -125778,7 +125932,7 @@ mod tests {
     /// The property br-frankenpandas-yf758's proptests actually assert, reduced
     /// to its cause: the answer must not depend on which internal path ran.
     ///
-    /// `where_mask_typed_f64` engages only for Float64 columns, so an Int64 frame
+    /// `where_mask_typed` engaged only for Float64 columns then, so an Int64 frame
     /// took the general Scalar path and a Float64 frame took the typed path. The
     /// two disagreed on a null condition, so translating the data (Int64 -> f64)
     /// changed the answer and `where(x + c, cond, fill + c)` stopped equalling
@@ -126791,6 +126945,187 @@ mod tests {
             IndexLabel::Utf8("y".into()),
         ]);
         assert_eq!(relabeled.columns_tz(), None);
+    }
+
+    #[test]
+    fn int_text_shift_and_mixed_where_answer_typed_e186m() {
+        // An int64 column shifts to float64, NaN in the vacated rows; a text
+        // column held as one buffer to its moved strings, None in them; a
+        // frame mixing float64 and int64 columns selects each from its
+        // buffers (br-frankenpandas-e186m).
+        let ints = Series::new(
+            "y",
+            Index::from_range(0, 4, 1),
+            Column::from_i64_values_owned(vec![4, -2, 7, 9]),
+        )
+        .unwrap();
+        let shifted = ints.shift(1).unwrap();
+        assert_eq!(shifted.column().dtype(), DType::Float64);
+        assert_eq!(
+            shifted.values(),
+            [
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(4.0),
+                Scalar::Float64(-2.0),
+                Scalar::Float64(7.0)
+            ]
+        );
+        let back = ints.shift(-6).unwrap();
+        assert_eq!(back.column().dtype(), DType::Float64);
+        assert!(back.values().iter().all(Scalar::is_missing));
+        // NEGATIVE: shift(0) and an int fill keep int64.
+        assert_eq!(ints.shift(0).unwrap().column().dtype(), DType::Int64);
+        let filled = ints.shift_with_fill_value(2, Scalar::Int64(0)).unwrap();
+        assert_eq!(filled.column().dtype(), DType::Int64);
+        assert_eq!(filled.values(), [0, 0, 4, -2].map(Scalar::Int64));
+
+        let text = Series::new(
+            "s",
+            Index::from_range(0, 4, 1),
+            Column::from_utf8_contiguous(b"abcdefg".to_vec(), vec![0, 1, 3, 3, 7]),
+        )
+        .unwrap();
+        let utf8 = |s: &str| Scalar::Utf8(s.to_owned());
+        assert_eq!(
+            text.shift(2).unwrap().values(),
+            [
+                Scalar::Null(NullKind::Null),
+                Scalar::Null(NullKind::Null),
+                utf8("a"),
+                utf8("bc")
+            ]
+        );
+        assert_eq!(
+            text.shift(-1).unwrap().values(),
+            [
+                utf8("bc"),
+                utf8(""),
+                utf8("defg"),
+                Scalar::Null(NullKind::Null)
+            ]
+        );
+        // A row window shifts its own rows.
+        let window = text.iloc_slice(Some(1), Some(4)).unwrap();
+        assert_eq!(
+            window.shift(1).unwrap().values(),
+            [Scalar::Null(NullKind::Null), utf8("bc"), utf8("")]
+        );
+
+        let frame = DataFrame::new(
+            Index::from_range(0, 3, 1),
+            BTreeMap::from([
+                (
+                    "x".to_owned(),
+                    Column::from_f64_values(vec![0.5, f64::NAN, 3.0]),
+                ),
+                ("y".to_owned(), Column::from_i64_values_owned(vec![1, 2, 3])),
+            ]),
+        )
+        .unwrap();
+        let cond = frame
+            .compare_scalar_df(&Scalar::Float64(1.5), fp_columnar::ComparisonOp::Gt)
+            .unwrap();
+        let kept = frame.where_cond(&cond, None).unwrap();
+        assert_eq!(kept.column("y").unwrap().dtype(), DType::Float64);
+        assert_eq!(
+            kept.column("y").unwrap().values(),
+            [
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(2.0),
+                Scalar::Float64(3.0)
+            ]
+        );
+        assert!(
+            kept.column("x").unwrap().values()[..2]
+                .iter()
+                .all(Scalar::is_missing)
+        );
+        // A kept NaN is self's own cell - missing, read as its source reads
+        // it (Float64(NaN) of a NaN-exact buffer), never the fill.
+        let masked = frame.mask(&cond, Some(&Scalar::Float64(-1.0))).unwrap();
+        let masked_x = masked.column("x").unwrap().values();
+        assert_eq!(masked_x[0], Scalar::Float64(0.5));
+        assert!(masked_x[1].is_missing());
+        assert_eq!(masked_x[2], Scalar::Float64(-1.0));
+        // NEGATIVE: every int row kept stays int64; an int fill on the float
+        // column answers through the per-cell path all the same.
+        let all = frame
+            .compare_scalar_df(&Scalar::Int64(0), fp_columnar::ComparisonOp::Gt)
+            .unwrap();
+        assert_eq!(
+            frame
+                .where_cond(&all, None)
+                .unwrap()
+                .column("y")
+                .unwrap()
+                .dtype(),
+            DType::Int64
+        );
+        let int_fill = frame.where_cond(&cond, Some(&Scalar::Int64(-1))).unwrap();
+        assert_eq!(
+            int_fill.column("y").unwrap().values(),
+            [Scalar::Int64(-1), Scalar::Int64(2), Scalar::Int64(3)]
+        );
+        assert_eq!(
+            int_fill.column("x").unwrap().values()[0],
+            Scalar::Float64(-1.0)
+        );
+    }
+
+    #[test]
+    fn replace_keeps_a_repeated_keys_last_pair_e186m() {
+        // pandas writes the pairs in order over the original values: a key
+        // given twice is its last pair's (br-frankenpandas-e186m).
+        let ints = Series::new(
+            "k",
+            Index::from_range(0, 4, 1),
+            Column::from_i64_values_owned(vec![1, 2, 3, 2]),
+        )
+        .unwrap();
+        let pairs = |given: &[(i64, i64)]| {
+            given
+                .iter()
+                .map(|&(key, to)| (Scalar::Int64(key), Scalar::Int64(to)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ints.replace(&pairs(&[(2, 7), (2, 8)])).unwrap().values(),
+            [1, 8, 3, 8].map(Scalar::Int64)
+        );
+        // An int key and its float over an int column; a NaN key twice.
+        let int_and_float = [
+            (Scalar::Int64(2), Scalar::Int64(7)),
+            (Scalar::Float64(2.0), Scalar::Int64(8)),
+        ];
+        assert_eq!(
+            ints.replace(&int_and_float).unwrap().values(),
+            [1, 8, 3, 8].map(Scalar::Int64)
+        );
+        let floats = Series::new(
+            "f",
+            Index::from_range(0, 3, 1),
+            Column::from_f64_values(vec![1.0, f64::NAN, 2.0]),
+        )
+        .unwrap();
+        let nan_twice = [
+            (Scalar::Float64(f64::NAN), Scalar::Float64(5.0)),
+            (Scalar::Null(NullKind::NaN), Scalar::Float64(6.0)),
+        ];
+        assert_eq!(
+            floats.replace(&nan_twice).unwrap().values()[1],
+            Scalar::Float64(6.0)
+        );
+        // NEGATIVE: the pairs do not chain (1 -> 2 leaves that 2 alone), and
+        // a long run of distinct keys is kept whole.
+        assert_eq!(
+            ints.replace(&pairs(&[(1, 2), (2, 3)])).unwrap().values(),
+            [2, 3, 3, 3].map(Scalar::Int64)
+        );
+        let many: Vec<(i64, i64)> = (0..40).map(|key| (key, key + 100)).collect();
+        assert_eq!(
+            ints.replace(&pairs(&many)).unwrap().values(),
+            [101, 102, 103, 102].map(Scalar::Int64)
+        );
     }
 
     #[test]
