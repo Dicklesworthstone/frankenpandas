@@ -72577,10 +72577,12 @@ fn restored_order(origin: &[usize]) -> Vec<usize> {
 }
 
 /// The row MultiIndex of frames or Series stacked one after another when
-/// each has a row MultiIndex of as many levels: their tuples in order, a
-/// level named where every piece names it alike, as pandas' concat - the
-/// pieces' flat labels came back as a plain Index (br-frankenpandas-e186m).
-/// None when a piece has none or another number of levels.
+/// each has a row MultiIndex of at least the first one's levels: their
+/// tuples in order over the first one's levels (pandas' MultiIndex.append
+/// keeps that many; a deeper piece came back as text,
+/// br-frankenpandas-ljr0a), a level named where every piece names it alike;
+/// the pieces' flat labels came back as a plain Index
+/// (br-frankenpandas-e186m). None when a piece has none or fewer levels.
 fn concat_row_multiindexes<'a>(
     pieces: impl IntoIterator<Item = Option<&'a fp_index::MultiIndex>>,
 ) -> PyResult<Option<fp_index::MultiIndex>> {
@@ -72591,7 +72593,7 @@ fn concat_row_multiindexes<'a>(
         return Ok(None);
     };
     let nlevels = first.nlevels();
-    if multis.iter().any(|multi| multi.nlevels() != nlevels) {
+    if multis.iter().any(|multi| multi.nlevels() < nlevels) {
         return Ok(None);
     }
     let arrays: Vec<Vec<IndexLabel>> = (0..nlevels)
@@ -72621,6 +72623,56 @@ fn concat_row_multiindexes<'a>(
     fp_index::MultiIndex::from_arrays(arrays)
         .map(|multi| Some(multi.set_names(names)))
         .map_err(index_error_to_py)
+}
+
+/// pandas' Index.append of row indexes stacked one after another where
+/// some hold a row MultiIndex but [`concat_row_multiindexes`] makes none (a
+/// flat piece, a shallower one after the first): every piece's values in
+/// order - a MultiIndex piece's tuples, a flat one's labels - as a
+/// MultiIndex where all are tuples of one length (pandas' from_tuples),
+/// else an object Index of them as they are. The pieces' text was joined:
+/// '0|p' beside 'z' (br-frankenpandas-ljr0a).
+fn appended_row_index(
+    py: Python<'_>,
+    pieces: &[&Index],
+) -> PyResult<(Index, Option<fp_index::MultiIndex>)> {
+    let values = PyList::empty(py);
+    for index in pieces {
+        match index.row_multiindex() {
+            Some(multi) => {
+                for row in 0..multi.len() {
+                    let tuple = (0..multi.nlevels())
+                        .map(|level| index_label_to_py(py, multi.label_at(level, row)))
+                        .collect::<PyResult<Vec<_>>>()?;
+                    values.append(PyTuple::new(py, tuple)?)?;
+                }
+            }
+            None => {
+                for label in index.labels() {
+                    values.append(index_label_to_py(py, label)?)?;
+                }
+            }
+        }
+    }
+    // pandas: MultiIndex.from_tuples of the values, and where that fails
+    // (a label that is no tuple, tuples of other lengths) an object Index of
+    // them as they are.
+    let module = py.import("frankenpandas")?;
+    if !values.is_empty()
+        && values.iter().all(|value| value.is_instance_of::<PyTuple>())
+        && let Ok(built) = module
+            .getattr("MultiIndex")?
+            .getattr("from_tuples")?
+            .call1((&values,))
+        && let Ok(multi) = built.extract::<PyRef<'_, PyMultiIndex>>()
+    {
+        let multi = multi.inner.clone();
+        return Ok((multi.to_flat_index(MULTIINDEX_FLAT_SEP), Some(multi)));
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("tupleize_cols", false)?;
+    let built = module.getattr("Index")?.call((values,), Some(&kwargs))?;
+    Ok((index_arg_index(&built)?, None))
 }
 
 /// [`keyed_rows`] whose key levels are named `key_names`; each index level
@@ -80668,6 +80720,18 @@ fn concat_objects(
                     Series::new(out.name(), index, out.column().clone())
                         .map_err(frame_error_to_py)?
                 }
+                None if !ignore_index
+                    && indexes.iter().any(|index| index.row_multiindex().is_some()) =>
+                {
+                    let index = match appended_row_index(py, &indexes)? {
+                        (flat, Some(multi)) => {
+                            flat.with_row_multiindex(multi).map_err(index_error_to_py)?
+                        }
+                        (index, None) => index,
+                    };
+                    Series::new(out.name(), index, out.column().clone())
+                        .map_err(frame_error_to_py)?
+                }
                 None => out,
             };
             return PySeries { inner: out }.into_py_any(py);
@@ -80804,6 +80868,12 @@ fn concat_objects(
         if let Some(multi) = concat_row_multiindexes(frames.iter().map(DataFrame::row_multiindex))?
         {
             out = out.with_row_multiindex(multi).map_err(frame_error_to_py)?;
+        } else if pieces.iter().any(|index| index.row_multiindex().is_some()) {
+            let (index, multi) = appended_row_index(py, &pieces)?;
+            out = out.with_index(index).map_err(frame_error_to_py)?;
+            if let Some(multi) = multi {
+                out = out.with_row_multiindex(multi).map_err(frame_error_to_py)?;
+            }
         }
     }
     if ignore_index {

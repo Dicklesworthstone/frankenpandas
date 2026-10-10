@@ -35737,9 +35737,12 @@ impl Series {
     }
 
     /// The categorical Series of `codes` into `categories` (first-seen),
-    /// the categories sorted as pandas' factorize sorts them - in the order
-    /// of appearance only when they do not order among themselves (mixed
-    /// kinds) - and the codes renumbered to match.
+    /// the categories sorted as pandas' factorize sorts them - numbers,
+    /// bools and text mixed as its safe_sort's `_sort_mixed` (the numbers
+    /// and bools by value, then the text; they kept their order of
+    /// appearance: br-frankenpandas-kbnmj), in the order of appearance only
+    /// when they do not order among themselves (other mixed kinds) - and the
+    /// codes renumbered to match.
     fn sorted_categorical(
         name: impl Into<LabelName>,
         index: Index,
@@ -35758,11 +35761,37 @@ impl Series {
         let sortable = categories.first().is_some_and(|first| {
             kind(first) < 5 && categories.iter().all(|c| kind(c) == kind(first))
         });
-        let categories = if sortable {
+        // A number, a bool (0 / 1) or text: pandas' _sort_mixed order (an
+        // int beside a float compared as numpy's object sort does, as f64).
+        #[allow(clippy::cast_precision_loss)]
+        let number = |value: &Scalar| match value {
+            Scalar::Int64(v) => Some(*v as f64),
+            Scalar::Float64(v) => Some(*v),
+            Scalar::Bool(b) => Some(f64::from(u8::from(*b))),
+            _ => None,
+        };
+        let mixed = !sortable
+            && categories
+                .iter()
+                .all(|c| number(c).is_some() || matches!(c, Scalar::Utf8(_)));
+        let categories = if sortable || mixed {
             let mut order: Vec<usize> = (0..categories.len()).collect();
-            order.sort_by(|&a, &b| {
-                compare_scalars_with_na_position(&categories[a], &categories[b], true, false)
-            });
+            if sortable {
+                order.sort_by(|&a, &b| {
+                    compare_scalars_with_na_position(&categories[a], &categories[b], true, false)
+                });
+            } else {
+                order.sort_by(|&a, &b| match (&categories[a], &categories[b]) {
+                    (Scalar::Int64(x), Scalar::Int64(y)) => x.cmp(y),
+                    (Scalar::Utf8(x), Scalar::Utf8(y)) => x.cmp(y),
+                    (Scalar::Utf8(_), _) => std::cmp::Ordering::Greater,
+                    (_, Scalar::Utf8(_)) => std::cmp::Ordering::Less,
+                    (x, y) => number(x)
+                        .zip(number(y))
+                        .and_then(|(x, y)| x.partial_cmp(&y))
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                });
+            }
             let mut rank = vec![0_i32; categories.len()];
             for (new, &old) in order.iter().enumerate() {
                 rank[old] = i32::try_from(new).expect("codes fit i32");
@@ -205890,6 +205919,58 @@ mod tests {
     }
 
     // ── Categorical tests ──
+
+    #[test]
+    fn mixed_categories_sort_numbers_then_text_kbnmj() {
+        // pandas 2.2.3: Categorical(['b', 2, 'a', 1.5, True]).categories is
+        // [True, 1.5, 2, 'a', 'b'] (safe_sort's _sort_mixed: the numbers and
+        // bools by value, then the text), codes [4, 2, 3, 1, 0]
+        // (br-frankenpandas-kbnmj).
+        let s = Series::from_categorical(
+            "c",
+            vec![
+                Scalar::Utf8("b".into()),
+                Scalar::Int64(2),
+                Scalar::Utf8("a".into()),
+                Scalar::Float64(1.5),
+                Scalar::Bool(true),
+            ],
+            false,
+        )
+        .unwrap();
+        let cat = s.cat().unwrap();
+        assert_eq!(
+            cat.categories(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Float64(1.5),
+                Scalar::Int64(2),
+                Scalar::Utf8("a".into()),
+                Scalar::Utf8("b".into()),
+            ]
+        );
+        assert_eq!(s.category_codes(), Some(vec![4, 2, 3, 1, 0]));
+        // NEGATIVE: a timestamp beside an int and text does not order -
+        // pandas keeps the order of appearance.
+        let unordered = Series::from_categorical(
+            "c",
+            vec![
+                Scalar::Datetime64(5),
+                Scalar::Int64(1),
+                Scalar::Utf8("a".into()),
+            ],
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            unordered.cat().unwrap().categories(),
+            &[
+                Scalar::Datetime64(5),
+                Scalar::Int64(1),
+                Scalar::Utf8("a".into())
+            ]
+        );
+    }
 
     #[test]
     fn categorical_from_values() {

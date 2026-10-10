@@ -36793,3 +36793,95 @@ def test_truncate_asfreq_like_pandas_rdcj4(case: str) -> None:
     if case.startswith("truncate inverted") or case.startswith("truncate unsorted"):
         assert expected == ("raise", "ValueError")
     assert _rdcj4_outcome(case, fpd) == expected
+
+
+# br-frankenpandas-ljr0a: concat of a MultiIndex piece beside a flat one, or
+# beside a MultiIndex of another depth, is pandas' MultiIndex.append - an
+# object Index of tuples and labels, or the first piece's levels when every
+# later one is at least as deep (fp joined the tuples' text: '0|p' beside
+# 'z'). NEGATIVE: MultiIndexes of one depth stay a MultiIndex, ignore_index
+# is a RangeIndex, keys make their own levels.
+def _ljr0a_pieces(m: Any) -> Any:
+    df = m.DataFrame({"a": [0, 1, 2], "b": ["p", "q", "p"], "x": [1.0, 2.0, 3.0]}).set_index(["a", "b"])
+    flat = m.DataFrame({"x": [9.0]}, index=["z"])
+    three = df.assign(c=1).set_index("c", append=True)
+    tuples = m.DataFrame({"x": [8.0]}, index=m.Index([(7, "w")], tupleize_cols=False))
+    return df, flat, three, tuples
+
+
+_LJR0A_CASES = {
+    "mi + flat": lambda m, d, f, t, u: m.concat([d, f]),
+    "flat + mi": lambda m, d, f, t, u: m.concat([f, d]),
+    "mi + deeper mi": lambda m, d, f, t, u: m.concat([d, t]),
+    "deeper mi + mi": lambda m, d, f, t, u: m.concat([t, d]),
+    "mi + flat + mi": lambda m, d, f, t, u: m.concat([d, f, d]),
+    "Series mi + flat": lambda m, d, f, t, u: m.concat([d["x"], f["x"]]),
+    "Series mi + deeper": lambda m, d, f, t, u: m.concat([d["x"], t["x"]]),
+    "mi + flat of tuples": lambda m, d, f, t, u: m.concat([d, u]),
+    "mi + flat, then loc": lambda m, d, f, t, u: m.concat([d, f]).loc["z"],
+    "mi + mi (NEGATIVE)": lambda m, d, f, t, u: m.concat([d, d]),
+    "ignore_index (NEGATIVE)": lambda m, d, f, t, u: m.concat([d, f], ignore_index=True),
+    "keys (NEGATIVE)": lambda m, d, f, t, u: m.concat([d, d], keys=["k1", "k2"]),
+}
+
+
+def _ljr0a_outcome(case: str, m: Any) -> Any:
+    try:
+        out = _LJR0A_CASES[case](m, *_ljr0a_pieces(m))
+    except Exception as e:
+        return ("raise", type(e).__name__)
+    if not hasattr(out, "index"):
+        return repr(out)
+    return (
+        type(out.index).__name__,
+        [repr(label) for label in out.index.tolist()],
+        list(out.index.names),
+        repr(out.values.tolist()),
+    )
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LJR0A_CASES))
+def test_concat_multiindex_beside_other_indexes_like_pandas_ljr0a(case: str) -> None:
+    assert _ljr0a_outcome(case, fpd) == _ljr0a_outcome(case, pd)
+
+
+# br-frankenpandas-kbnmj (part 2): categories of numbers, bools and text
+# mixed sort as pandas' safe_sort (_sort_mixed): the numbers and bools by
+# value, then the text - fp kept their order of appearance - and the codes,
+# value_counts and sort_values follow. NEGATIVE: one kind sorts as before,
+# and a mix pandas cannot order (a date or bytes beside an int) keeps the
+# order of appearance.
+_KBNMJ_VALUES = {
+    "int text float": [1, "a", 2.5, None, "a", 1],
+    "text int float bool": ["b", 2, "a", 1.5, True],
+    "bools ints floats text": [True, 2, "x", 0.5, False],
+    "numbers and bools": [True, 2, 0.5],
+    "nan beside": [1, "a", float("nan"), 2],
+    "ints (NEGATIVE)": [3, 1, 2],
+    "text (NEGATIVE)": ["b", "a"],
+}
+
+
+def _kbnmj_outcome(case: str, m: Any) -> Any:
+    import datetime
+
+    unorderable = {
+        "date beside int (NEGATIVE)": [datetime.date(2024, 1, 2), 1, "a", datetime.date(2024, 1, 1)],
+        "bytes beside int (NEGATIVE)": [b"x", 1, "a"],
+    }
+    values = list(unorderable.get(case, _KBNMJ_VALUES.get(case, [])))
+    s = m.Series(values, dtype=object).astype("category")
+    counts = s.value_counts(sort=False)
+    return (
+        [repr(c) for c in s.cat.categories.tolist()],
+        s.cat.codes.tolist(),
+        [repr(c) for c in counts.index.tolist()],
+        [repr(v) for v in s.sort_values().tolist()],
+    )
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", [*list(_KBNMJ_VALUES), "date beside int (NEGATIVE)", "bytes beside int (NEGATIVE)"])
+def test_mixed_categories_sort_like_pandas_kbnmj(case: str) -> None:
+    assert _kbnmj_outcome(case, fpd) == _kbnmj_outcome(case, pd)
