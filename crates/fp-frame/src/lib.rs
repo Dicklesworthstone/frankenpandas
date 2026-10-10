@@ -4999,6 +4999,20 @@ fn fill_reindex_positions(
         .collect())
 }
 
+/// An int index held as values one constant, nonzero step apart
+/// throughout (two or more; an np.arange target): its first value, the
+/// step and the length, read in one pass over the values.
+fn arithmetic_ints(index: &Index) -> Option<(i64, i64, usize)> {
+    let values = index.int64_label_values()?;
+    let (&first, &second) = (values.first()?, values.get(1)?);
+    let step = second.checked_sub(first).filter(|&step| step != 0)?;
+    // A fold, not a search: it vectorizes.
+    let even = values.windows(2).fold(true, |even, pair| {
+        even & (pair[1].wrapping_sub(pair[0]) == step)
+    });
+    even.then_some((first, step, values.len()))
+}
+
 /// A datetime index held as instants one constant, nonzero step apart
 /// throughout (two or more, no NaT): its first instant, the step and the
 /// length, read in one pass over the instants.
@@ -28892,6 +28906,29 @@ impl Series {
         self.keeping_extension_dtype(self.keeping_width(self.nlargest_storage(n), false))
     }
 
+    /// The `n` best (position, value) pairs of `data`, best first - `better`
+    /// strictly orders two values, positions ascending among equals as
+    /// pandas' keep='first' - read in one pass: a buffer of the best `n`
+    /// that a value enters only past the `n`-th. Every pair was collected
+    /// and selected among (s.nlargest(5) 2.8 ms over 300k floats, pandas
+    /// 2.45; br-frankenpandas-84b8p). `n` at least 1.
+    fn best_n_by<T: Copy>(
+        data: &[T],
+        n: usize,
+        better: impl Fn(&T, &T) -> bool,
+    ) -> Vec<(usize, T)> {
+        let mut best: Vec<(usize, T)> = Vec::with_capacity(n + 1);
+        for (position, &value) in data.iter().enumerate() {
+            if best.len() == n && !better(&value, &best[n - 1].1) {
+                continue;
+            }
+            let at = best.partition_point(|(_, held)| !better(&value, held));
+            best.insert(at, (position, value));
+            best.truncate(n);
+        }
+        best
+    }
+
     fn nlargest_storage(&self, n: usize) -> Result<Self, FrameError> {
         // Per br-frankenpandas-9978d: use Scalar::semantic_cmp instead of
         // to_f64-based extraction. The old impl silently filtered out
@@ -28905,7 +28942,12 @@ impl Series {
         // fp-types), tie-break (position ascending) identical. Skips the `values()`
         // Vec<Scalar> materialization and per-compare semantic_cmp dispatch.
         if let Some(data) = self.column.as_f64_slice() {
-            let mut indexed: Vec<(usize, f64)> = data.iter().copied().enumerate().collect();
+            let mut indexed: Vec<(usize, f64)> =
+                if n > 0 && n <= 64 && n.saturating_mul(2) <= data.len() {
+                    Self::best_n_by(data, n, |a, b| a > b)
+                } else {
+                    data.iter().copied().enumerate().collect()
+                };
             let len = indexed.len();
             let cmp = |a: &(usize, f64), b: &(usize, f64)| {
                 b.1.partial_cmp(&a.1)
@@ -28933,7 +28975,12 @@ impl Series {
         // with position-ascending tie-break — bit-identical to the Scalar
         // `semantic_cmp` path. Skips the values() Scalar materialization.
         if let Some(data) = self.column.as_i64_slice() {
-            let mut indexed: Vec<(usize, i64)> = data.iter().copied().enumerate().collect();
+            let mut indexed: Vec<(usize, i64)> =
+                if n > 0 && n <= 64 && n.saturating_mul(2) <= data.len() {
+                    Self::best_n_by(data, n, |a, b| a > b)
+                } else {
+                    data.iter().copied().enumerate().collect()
+                };
             let len = indexed.len();
             let cmp = |a: &(usize, i64), b: &(usize, i64)| b.1.cmp(&a.1).then(a.0.cmp(&b.0));
             if n > 0 && n.saturating_mul(2) <= len {
@@ -29033,7 +29080,12 @@ impl Series {
         // `semantic_cmp` on Float64 is exactly `partial_cmp().unwrap_or(Equal)` (fp-types) so
         // this is BIT-IDENTICAL; skips the values() Vec<Scalar> + semantic_cmp dispatch.
         if let Some(data) = self.column.as_f64_slice() {
-            let mut indexed: Vec<(usize, f64)> = data.iter().copied().enumerate().collect();
+            let mut indexed: Vec<(usize, f64)> =
+                if n > 0 && n <= 64 && n.saturating_mul(2) <= data.len() {
+                    Self::best_n_by(data, n, |a, b| a < b)
+                } else {
+                    data.iter().copied().enumerate().collect()
+                };
             let len = indexed.len();
             let cmp = |a: &(usize, f64), b: &(usize, f64)| {
                 a.1.partial_cmp(&b.1)
@@ -29060,7 +29112,12 @@ impl Series {
         // Typed Int64 fast path (mirror): ascending with position tie-break,
         // bit-identical to the Scalar semantic_cmp path. Skips values() materialization.
         if let Some(data) = self.column.as_i64_slice() {
-            let mut indexed: Vec<(usize, i64)> = data.iter().copied().enumerate().collect();
+            let mut indexed: Vec<(usize, i64)> =
+                if n > 0 && n <= 64 && n.saturating_mul(2) <= data.len() {
+                    Self::best_n_by(data, n, |a, b| a < b)
+                } else {
+                    data.iter().copied().enumerate().collect()
+                };
             let len = indexed.len();
             let cmp = |a: &(usize, i64), b: &(usize, i64)| a.1.cmp(&b.1).then(a.0.cmp(&b.0));
             if n > 0 && n.saturating_mul(2) <= len {
@@ -95280,6 +95337,25 @@ impl DataFrame {
         // the fallback resolver can borrow it for `get_indexer`, which needs the
         // target's typed backing + sort_order.
         let new_index = target.clone().rename_index(self.index.name());
+        // A unit-range source (a RangeIndex) and an arithmetic run of int
+        // labels inside it: the rows are a stepped selection, each column a
+        // view (num.reindex(range(0, n, 2)) resolved and gathered every row:
+        // 1.16 ms at 200k rows, pandas 0.87; br-frankenpandas-k3evq).
+        if let Some((source_start, source_len)) = self.index.int64_unit_range_labels()
+            && let Some((target_start, step, len)) = target
+                .int64_affine_labels()
+                .or_else(|| arithmetic_ints(target))
+            && len > 0
+            && let Some(first) = target_start.checked_sub(source_start)
+            && let Ok(first) = usize::try_from(first)
+            && let Ok(step) = isize::try_from(step)
+            && fp_columnar::affine_positions_fit(first, step, len, source_len)
+            && let Some(rows) = self.take_rows_affine_unchecked(first, step, len, true)
+        {
+            let mut rows = rows?;
+            rows.index = new_index;
+            return Ok(rows);
+        }
         // Int labels on both sides resolve without a label made
         // (reindex_positions_typed).
         let positions: Vec<Option<usize>> =
@@ -205997,6 +206073,42 @@ mod tests {
     }
 
     // ── Categorical tests ──
+
+    #[test]
+    fn few_largest_and_smallest_rows_in_one_pass_84b8p() {
+        // nlargest / nsmallest of a few rows keep pandas' keep='first' among
+        // equal values, in order, as the select of every row did
+        // (br-frankenpandas-84b8p).
+        let floats = Series::new(
+            "x",
+            Index::from_range(0, 8, 1),
+            Column::from_f64_values(vec![3.0, 7.0, 7.0, -0.0, 0.0, 9.0, 7.0, 1.0]),
+        )
+        .unwrap();
+        assert!(floats.column().as_f64_slice().is_some());
+        let rows = |s: Series| s.index().labels().to_vec();
+        let at = |positions: &[i64]| {
+            positions
+                .iter()
+                .copied()
+                .map(IndexLabel::Int64)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rows(floats.nlargest(3).unwrap()), at(&[5, 1, 2]));
+        assert_eq!(rows(floats.nsmallest(2).unwrap()), at(&[3, 4]));
+        let ints = Series::new(
+            "k",
+            Index::from_range(0, 6, 1),
+            Column::from_i64_values(vec![4, 4, 1, 9, 1, 4]),
+        )
+        .unwrap();
+        assert_eq!(rows(ints.nlargest(2).unwrap()), at(&[3, 0]));
+        assert_eq!(rows(ints.nsmallest(1).unwrap()), at(&[2]));
+        // NEGATIVE: n past half the rows (the select) and n of 0 answer the
+        // same order; nothing is kept for 0.
+        assert_eq!(rows(ints.nlargest(5).unwrap()), at(&[3, 0, 1, 5, 2]));
+        assert!(rows(ints.nlargest(0).unwrap()).is_empty());
+    }
 
     #[test]
     fn mixed_categories_sort_numbers_then_text_kbnmj() {

@@ -3423,6 +3423,17 @@ impl Index {
             .map(|range| (range.start, range.step, range.len))
     }
 
+    /// The first label, step and length of int labels held as an arithmetic
+    /// run (a range): label `k` is `Int64(first + k * step)`. None for any
+    /// other labels.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn int64_affine_labels(&self) -> Option<(i64, i64, usize)> {
+        self.labels
+            .int64_affine_range()
+            .map(|range| (range.start, range.step, range.len))
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.labels.len()

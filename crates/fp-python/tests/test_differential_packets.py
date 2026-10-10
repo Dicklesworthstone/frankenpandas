@@ -36936,3 +36936,80 @@ def _step_outcome(case: str, m: Any) -> Any:
 @pytest.mark.parametrize("case", list(_STEP_CASES))
 def test_stepped_rows_like_pandas_e186m(case: str) -> None:
     assert _step_outcome(case, fpd) == _step_outcome(case, pd)
+
+
+# br-frankenpandas-84b8p: nlargest / nsmallest of a few rows read the
+# values once - the same rows, order and keep='first' ties as pandas'.
+# NEGATIVE: n past 64 or past half the rows takes the select, and keep=
+# 'last' / 'all' their own paths.
+_TOPN_RNG = np.random.default_rng(84)
+_TOPN_FLOATS = list(np.round(_TOPN_RNG.random(500) * 20) / 2)
+_TOPN_INTS = [int(v) for v in _TOPN_RNG.integers(0, 30, 500)]
+_TOPN_CASES = {
+    "float largest 5": lambda m: m.Series(_TOPN_FLOATS).nlargest(5),
+    "float smallest 7": lambda m: m.Series(_TOPN_FLOATS).nsmallest(7),
+    "int largest 1": lambda m: m.Series(_TOPN_INTS).nlargest(1),
+    "int smallest 64": lambda m: m.Series(_TOPN_INTS).nsmallest(64),
+    "float largest 64": lambda m: m.Series(_TOPN_FLOATS).nlargest(64),
+    "signed zeros": lambda m: m.Series([0.0, -0.0, 1.0, -0.0, 0.0]).nsmallest(2),
+    "frame column largest 3": lambda m: m.DataFrame({"v": _TOPN_INTS, "w": _TOPN_FLOATS}).nlargest(3, "v"),
+    "largest 65 (NEGATIVE)": lambda m: m.Series(_TOPN_INTS).nlargest(65),
+    "past half (NEGATIVE)": lambda m: m.Series(_TOPN_FLOATS[:10]).nlargest(6),
+    "keep last (NEGATIVE)": lambda m: m.Series(_TOPN_INTS).nlargest(4, keep="last"),
+}
+
+
+def _topn_outcome(case: str, m: Any) -> Any:
+    out = _TOPN_CASES[case](m)
+    values = out.values.tolist() if hasattr(out, "columns") else out.tolist()
+    return [repr(v) for v in out.index.tolist()], repr(values)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TOPN_CASES))
+def test_nlargest_nsmallest_few_like_pandas_84b8p(case: str) -> None:
+    assert _topn_outcome(case, fpd) == _topn_outcome(case, pd)
+
+
+# br-frankenpandas-k3evq: a RangeIndex frame reindexed onto an arithmetic
+# int range inside it takes the rows as a stepped selection (views) - the
+# same rows, index, dtypes and name as pandas'. NEGATIVE: targets partly or
+# wholly outside the rows give NaN rows (and float columns) through the
+# label path, as does a source that is no range.
+def _k3evq_frame(m: Any) -> Any:
+    frame = m.DataFrame({"x": [float(i) / 2 for i in range(40)], "k": list(range(40))})
+    frame.index.name = "row"
+    return frame
+
+
+_K3EVQ_CASES = {
+    "every other": lambda m: _k3evq_frame(m).reindex(range(0, 40, 2)),
+    "backwards": lambda m: _k3evq_frame(m).reindex(range(39, -1, -3)),
+    "inner run": lambda m: _k3evq_frame(m).reindex(range(5, 12)),
+    "Series every third": lambda m: _k3evq_frame(m)["k"].reindex(range(1, 40, 3)),
+    "empty range": lambda m: _k3evq_frame(m).reindex(range(0)),
+    "arange every fourth": lambda m: _k3evq_frame(m).reindex(np.arange(0, 40, 4)),
+    "arange wrapping (NEGATIVE)": lambda m: _k3evq_frame(m).reindex(np.array([0, 2, 4, -9223372036854775806])),
+    "past the end (NEGATIVE)": lambda m: _k3evq_frame(m).reindex(range(30, 50, 5)),
+    "before the start (NEGATIVE)": lambda m: _k3evq_frame(m).reindex(range(-4, 4, 2)),
+    "source not a range (NEGATIVE)": lambda m: _k3evq_frame(m).set_index(m.Index([i * 2 for i in range(40)])).reindex(range(0, 20, 4)),
+    "target not a range (NEGATIVE)": lambda m: _k3evq_frame(m).reindex([3, 1, 4, 1, 5]),
+}
+
+
+def _k3evq_outcome(case: str, m: Any) -> Any:
+    out = _K3EVQ_CASES[case](m)
+    frame = out.to_frame() if not hasattr(out, "columns") else out
+    return (
+        type(out.index).__name__,
+        [repr(label) for label in out.index.tolist()],
+        out.index.name,
+        [str(frame[c].dtype) for c in frame.columns],
+        repr(frame.values.tolist()),
+    )
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_K3EVQ_CASES))
+def test_reindex_onto_a_range_like_pandas_k3evq(case: str) -> None:
+    assert _k3evq_outcome(case, fpd) == _k3evq_outcome(case, pd)
