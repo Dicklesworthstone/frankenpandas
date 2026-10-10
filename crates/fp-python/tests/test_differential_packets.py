@@ -36119,3 +36119,70 @@ _LOC6W_CASES = {
 @pytest.mark.parametrize("case", list(_LOC6W_CASES))
 def test_loc_bool_beside_int_labels_6w07o(case: str) -> None:
     assert _LOC6W_CASES[case](fpd) == _LOC6W_CASES[case](pd)
+
+
+# br-frankenpandas-e186m: a MultiIndex row take (sort_index, iloc, head,
+# take) gathers its levels' first-seen codes and shares their distinct
+# labels; the taken index's labels, flat labels, lookups and every op on it
+# answer as pandas'. concat keeps its pieces' MultiIndex - frames and Series
+# (a flat '/'-joined Index came back). NEGATIVE: a level holding a missing
+# label keeps it through the codes, a level of distinct ints (its rows its
+# own uniques), an empty frame, two takes of the same levels in different
+# orders are different indexes, ignore_index and flat frames concatenate
+# as before.
+def _codes172_frame(m: Any, with_missing: bool = False) -> Any:
+    n = 60
+    b = [f"b{(i * 7) % 5}" for i in range(n)]
+    if with_missing:
+        b = [None if i % 11 == 0 else value for i, value in enumerate(b)]
+    return m.DataFrame({"a": [(i * 3) % 4 for i in range(n)], "b": b, "x": [float(i) for i in range(n)]}).set_index(["a", "b"])
+
+
+def _codes172_rows(out: Any) -> Any:
+    if not hasattr(out, "index"):
+        return repr(out)
+    values = out.tolist() if not hasattr(out, "columns") else out.iloc[:, 0].tolist()
+    return [repr(label) for label in out.index.tolist()], list(out.index.names), values
+
+
+_CODES172_CASES = {
+    "sort then loc outer": lambda m: _codes172_frame(m).sort_index().loc[2],
+    "sort then loc pair": lambda m: _codes172_frame(m).sort_index().loc[(1, "b3")],
+    "sort then xs": lambda m: _codes172_frame(m).sort_index().xs("b4", level="b"),
+    "sort then swaplevel": lambda m: _codes172_frame(m).sort_index().swaplevel(),
+    "sort then droplevel": lambda m: _codes172_frame(m).sort_index().droplevel("a"),
+    "sort then reset_index": lambda m: _codes172_frame(m).sort_index(ascending=False).reset_index(),
+    "sort then level values": lambda m: _codes172_frame(m).sort_index().index.get_level_values(1).tolist(),
+    "sort then unique": lambda m: _codes172_frame(m).sort_index().index.unique().tolist(),
+    "sort then duplicated": lambda m: _codes172_frame(m).sort_index().index.duplicated().tolist(),
+    "sort then isin": lambda m: _codes172_frame(m).sort_index().index.isin([(1, "b3"), (0, "b0")]).tolist(),
+    "sort then flat": lambda m: [repr(v) for v in _codes172_frame(m).sort_index().index.to_flat_index().tolist()],
+    "sort then pickle": lambda m: pickle.loads(pickle.dumps(_codes172_frame(m).sort_index())),
+    "sort then groupby level": lambda m: _codes172_frame(m).sort_index().groupby(level="b").sum(),
+    "sort then unstack": lambda m: _codes172_frame(m).groupby(level=["a", "b"]).sum().sort_index().unstack(),
+    "sort then equals": lambda m: _codes172_frame(m).sort_index().index.equals(_codes172_frame(m).sort_index().index),
+    "sort then concat": lambda m: m.concat([_codes172_frame(m).sort_index().head(5), _codes172_frame(m).iloc[::7]]),
+    "concat names differ": lambda m: m.concat([_codes172_frame(m).head(3), _codes172_frame(m).head(2).rename_axis(["a", "c"])]),
+    "concat series": lambda m: m.concat([_codes172_frame(m)["x"].head(4), _codes172_frame(m)["x"].iloc[::-9]]),
+    "concat with keys": lambda m: m.concat([_codes172_frame(m).head(2), _codes172_frame(m).tail(2)], keys=["p", "q"]),
+    "concat ignore_index (NEGATIVE)": lambda m: m.concat([_codes172_frame(m).head(2), _codes172_frame(m).tail(2)], ignore_index=True),
+    "concat flat frames (NEGATIVE)": lambda m: m.concat([_codes172_frame(m).reset_index().head(2), _codes172_frame(m).reset_index().tail(2)]),
+    "iloc step then tail": lambda m: _codes172_frame(m).iloc[::3].tail(4),
+    "take then series sort": lambda m: _codes172_frame(m).take([5, 1, 40, 2])["x"].sort_index(ascending=False),
+    "head then loc list": lambda m: _codes172_frame(m).head(30).loc[[(2, "b2"), (0, "b0")]],
+    "missing label kept (NEGATIVE)": lambda m: _codes172_frame(m, with_missing=True).sort_index(na_position="first"),
+    "missing label reset (NEGATIVE)": lambda m: _codes172_frame(m, with_missing=True).sort_index().reset_index(),
+    "distinct int level (NEGATIVE)": lambda m: m.DataFrame({"k": range(9, 0, -1), "t": list("abcabcabc"), "x": range(9)}).set_index(["k", "t"]).sort_index().iloc[::2],
+    "empty (NEGATIVE)": lambda m: _codes172_frame(m).head(0).sort_index(),
+    "other order is another index (NEGATIVE)": lambda m: _codes172_frame(m).iloc[[0, 1]].index.equals(_codes172_frame(m).iloc[[1, 0]].index),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_CODES172_CASES))
+def test_multiindex_coded_takes_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _CODES172_CASES[case](m)
+        return out if isinstance(out, (list, bool)) else _codes172_rows(out)
+
+    assert run(fpd) == run(pd)

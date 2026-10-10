@@ -4021,6 +4021,12 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
             .collect()
     });
     assert_eq!(level_lengths, Some(vec![4, 4]));
+    // A taken MultiIndex - its levels held as codes - goes out as the same
+    // plain rows (br-frankenpandas-e186m).
+    let taken = mi.take(&[3, 0])?;
+    let taken_back: MultiIndex = serde_json::from_str(&serde_json::to_string(&taken)?)?;
+    assert_eq!(taken_back, taken);
+    assert_eq!(taken_back.get_tuple(0), mi.get_tuple(3));
 
     // Series round-trip.
     let s = Series::from_values(

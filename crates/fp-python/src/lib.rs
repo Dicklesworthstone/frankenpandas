@@ -62203,15 +62203,7 @@ fn multiindex_take(
     multi: &fp_index::MultiIndex,
     positions: &[usize],
 ) -> PyResult<fp_index::MultiIndex> {
-    let arrays = (0..multi.nlevels())
-        .map(|level| {
-            let labels = level_labels(multi, level)?;
-            Ok(fp_index::take_level_labels(labels, positions))
-        })
-        .collect::<PyResult<Vec<Vec<IndexLabel>>>>()?;
-    Ok(fp_index::MultiIndex::from_arrays(arrays)
-        .map_err(index_error_to_py)?
-        .set_names(multi.names().to_vec()))
+    multi.take(positions).map_err(index_error_to_py)
 }
 
 /// The rows of `frame` at `positions`, its row MultiIndex kept whole.
@@ -62262,11 +62254,6 @@ fn multiindex_sort_rows(
             order.into_iter().map(|position| (position, asc)).collect()
         }
     };
-    // Each level borrowed: two copies of every level were made for the
-    // sort (br-frankenpandas-e186m).
-    let levels: Vec<&[IndexLabel]> = (0..multi.nlevels())
-        .map(|position| multi.level_labels(position).unwrap_or_default())
-        .collect();
     let na_first = match na_position {
         "first" => true,
         "last" => false,
@@ -62282,11 +62269,19 @@ fn multiindex_sort_rows(
     // br-frankenpandas-e186m).
     let keys: Option<Vec<Vec<u64>>> = order
         .iter()
-        .map(|&(position, asc)| label_rank_keys(levels[position], asc, na_first))
+        .map(|&(position, asc)| {
+            let (uniques, codes) = multi.level_codes(position)?;
+            Some(label_rank_keys(uniques, codes, asc, na_first))
+        })
         .collect();
     if let Some(keys) = keys.filter(|keys| !keys.is_empty()) {
         return Ok(fp_columnar::radix_argsort_multi_u64(&keys));
     }
+    // Each level borrowed: two copies of every level were made for the
+    // sort (br-frankenpandas-e186m).
+    let levels: Vec<&[IndexLabel]> = (0..multi.nlevels())
+        .map(|position| multi.level_labels(position).unwrap_or_default())
+        .collect();
     let mut rows: Vec<usize> = (0..multi.len()).collect();
     rows.sort_by(|&a, &b| {
         for &(position, asc) in &order {
@@ -62309,22 +62304,20 @@ fn multiindex_sort_rows(
     Ok(rows)
 }
 
-/// Each row's key for a stable radix lexsort over `labels` in the order
+/// Each row's key for a stable radix lexsort over a level - its distinct
+/// labels `uniques` and each row's code into them - in the order
 /// [`multiindex_sort_rows`]' comparator gives: distinct labels ranked by
 /// `IndexLabel::cmp` (labels it calls equal share a rank), reversed when
 /// descending, a missing label first or last (`na_first`) whatever the
-/// direction. None past u32 distinct labels.
-fn label_rank_keys(labels: &[IndexLabel], ascending: bool, na_first: bool) -> Option<Vec<u64>> {
-    let codes = fp_index::first_seen_label_codes(labels)?;
-    let distinct = codes.iter().max().map_or(0, |&code| code as usize + 1);
-    let mut first_row = vec![usize::MAX; distinct];
-    for (row, &code) in codes.iter().enumerate() {
-        let first = &mut first_row[code as usize];
-        if *first == usize::MAX {
-            *first = row;
-        }
-    }
-    let label_of = |code: usize| &labels[first_row[code]];
+/// direction.
+fn label_rank_keys(
+    uniques: &[IndexLabel],
+    codes: &[u32],
+    ascending: bool,
+    na_first: bool,
+) -> Vec<u64> {
+    let distinct = uniques.len();
+    let label_of = |code: usize| &uniques[code];
     let mut present: Vec<usize> = (0..distinct)
         .filter(|&code| !label_of(code).is_missing())
         .collect();
@@ -62338,21 +62331,19 @@ fn label_rank_keys(labels: &[IndexLabel], ascending: bool, na_first: bool) -> Op
         rank_of[code] = rank;
     }
     let missing_key = if na_first { 0 } else { rank + 2 };
-    Some(
-        codes
-            .iter()
-            .map(|&code| {
-                let code = code as usize;
-                if label_of(code).is_missing() {
-                    missing_key
-                } else if ascending {
-                    1 + rank_of[code]
-                } else {
-                    1 + rank - rank_of[code]
-                }
-            })
-            .collect(),
-    )
+    codes
+        .iter()
+        .map(|&code| {
+            let code = code as usize;
+            if label_of(code).is_missing() {
+                missing_key
+            } else if ascending {
+                1 + rank_of[code]
+            } else {
+                1 + rank - rank_of[code]
+            }
+        })
+        .collect()
 }
 
 fn frame_rows_keeping_multiindex(frame: &DataFrame, positions: &[usize]) -> PyResult<DataFrame> {
@@ -72065,6 +72056,53 @@ fn restored_order(origin: &[usize]) -> Vec<usize> {
     order
 }
 
+/// The row MultiIndex of frames or Series stacked one after another when
+/// each has a row MultiIndex of as many levels: their tuples in order, a
+/// level named where every piece names it alike, as pandas' concat - the
+/// pieces' flat labels came back as a plain Index (br-frankenpandas-e186m).
+/// None when a piece has none or another number of levels.
+fn concat_row_multiindexes<'a>(
+    pieces: impl IntoIterator<Item = Option<&'a fp_index::MultiIndex>>,
+) -> PyResult<Option<fp_index::MultiIndex>> {
+    let Some(multis) = pieces.into_iter().collect::<Option<Vec<_>>>() else {
+        return Ok(None);
+    };
+    let Some(first) = multis.first() else {
+        return Ok(None);
+    };
+    let nlevels = first.nlevels();
+    if multis.iter().any(|multi| multi.nlevels() != nlevels) {
+        return Ok(None);
+    }
+    let arrays: Vec<Vec<IndexLabel>> = (0..nlevels)
+        .map(|level| {
+            multis
+                .iter()
+                .flat_map(|multi| {
+                    multi
+                        .level_labels(level)
+                        .unwrap_or_default()
+                        .iter()
+                        .cloned()
+                })
+                .collect()
+        })
+        .collect();
+    let names: Vec<Option<LabelName>> = (0..nlevels)
+        .map(|level| {
+            let name = first.names()[level].clone();
+            multis
+                .iter()
+                .all(|multi| multi.names()[level] == name)
+                .then_some(name)
+                .flatten()
+        })
+        .collect();
+    fp_index::MultiIndex::from_arrays(arrays)
+        .map(|multi| Some(multi.set_names(names)))
+        .map_err(index_error_to_py)
+}
+
 /// [`keyed_rows`] whose key levels are named `key_names`; each index level
 /// keeps the name its pieces share.
 fn keyed_group_rows(
@@ -80095,6 +80133,23 @@ fn concat_objects(
                 }
                 _ => out,
             };
+            let multi = if ignore_index {
+                None
+            } else {
+                concat_row_multiindexes(indexes.iter().map(|index| index.row_multiindex()))?
+            };
+            let out = match multi {
+                Some(multi) => {
+                    let index = out
+                        .index()
+                        .clone()
+                        .with_row_multiindex(multi)
+                        .map_err(index_error_to_py)?;
+                    Series::new(out.name(), index, out.column().clone())
+                        .map_err(frame_error_to_py)?
+                }
+                None => out,
+            };
             return PySeries { inner: out }.into_py_any(py);
         };
         let pieces: Vec<&Index> = series.iter().map(Series::index).collect();
@@ -80225,6 +80280,10 @@ fn concat_objects(
         let pieces: Vec<&Index> = pieces.iter().collect();
         if let Some(index) = mixed_zone_rows(py, &pieces)? {
             out = out.with_index(index).map_err(frame_error_to_py)?;
+        }
+        if let Some(multi) = concat_row_multiindexes(frames.iter().map(DataFrame::row_multiindex))?
+        {
+            out = out.with_row_multiindex(multi).map_err(frame_error_to_py)?;
         }
     }
     if ignore_index {

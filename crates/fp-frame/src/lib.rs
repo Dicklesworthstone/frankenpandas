@@ -78609,15 +78609,10 @@ impl DataFrame {
                 row_multiindex.len()
             )));
         }
-        let mut arrays = Vec::with_capacity(row_multiindex.nlevels());
-        for level in 0..row_multiindex.nlevels() {
-            // The level borrowed: it was copied whole (a String a text label)
-            // for the rows a take keeps (br-frankenpandas-e186m).
-            let level_values = row_multiindex.level_labels(level).unwrap_or_default();
-            arrays.push(fp_index::take_level_labels(level_values, positions));
-        }
-
-        Ok(fp_index::MultiIndex::from_arrays(arrays)?.set_names(row_multiindex.names().to_vec()))
+        // The MultiIndex's own take: its levels' codes gathered, where every
+        // kept row's labels were cloned and the index built again from them
+        // (br-frankenpandas-e186m).
+        Ok(row_multiindex.take(positions)?)
     }
 
     fn flatten_row_multiindex(row_multiindex: &fp_index::MultiIndex, sep: &str) -> Index {
