@@ -36186,3 +36186,215 @@ def test_multiindex_coded_takes_like_pandas_e186m(case: str) -> None:
         return out if isinstance(out, (list, bool)) else _codes172_rows(out)
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a MultiIndex level's values are an index over the
+# level's own rows, and a frame's MultiIndex axis keeps its flat labels:
+# get_level_values by position and name (after a sort or take too), its
+# dtype and name, df.index read again and again, a renamed axis; .loc on a
+# sorted index reads its levels' codes, and so does xs. NEGATIVE: a level past the last is
+# IndexError, an unknown name KeyError, an axis set anew answers its own
+# labels, not a kept one, a missing key is KeyError (loc and xs), and a date string on a
+# datetime level takes the comparison path.
+def _lev173_frame(m: Any) -> Any:
+    n = 24
+    return m.DataFrame(
+        {"a": [(i * 5) % 3 for i in range(n)], "b": [f"t{(i * 7) % 4}" for i in range(n)], "x": [float(i) for i in range(n)]}
+    ).set_index(["a", "b"])
+
+
+def _lev173_values(index: Any, level: Any) -> Any:
+    values = index.get_level_values(level)
+    return [repr(v) for v in values.tolist()], str(values.dtype), values.name
+
+
+def _lev173_reset_axis(m: Any) -> Any:
+    df = _lev173_frame(m)
+    df.index.tolist()
+    df.index = m.MultiIndex.from_arrays([list(range(24)), ["z"] * 24], names=["p", "q"])
+    return [repr(v) for v in df.index.tolist()][:3], list(df.index.names), _lev173_values(df.index, "q")
+
+
+def _lev173_error(m: Any, level: Any) -> Any:
+    try:
+        _lev173_frame(m).index.get_level_values(level)
+    except (IndexError, KeyError) as error:
+        return type(error).__name__
+    return "no error"
+
+
+def _lev173_rows(out: Any) -> Any:
+    values = out.tolist() if not hasattr(out, "columns") else out.iloc[:, 0].tolist()
+    return [repr(label) for label in out.index.tolist()], list(out.index.names), values
+
+
+def _lev173_loc_error(m: Any, key: Any) -> Any:
+    try:
+        _lev173_frame(m).sort_index().loc[key]
+    except KeyError as error:
+        return "KeyError"
+    return "no error"
+
+
+def _lev173_xs_error(m: Any, key: Any) -> Any:
+    try:
+        _lev173_frame(m).sort_index().xs(key, level="b")
+    except KeyError as error:
+        return "KeyError"
+    return "no error"
+
+
+_LEV173_CASES = {
+    "position 0": lambda m: _lev173_values(_lev173_frame(m).index, 0),
+    "name b": lambda m: _lev173_values(_lev173_frame(m).index, "b"),
+    "after sort": lambda m: _lev173_values(_lev173_frame(m).sort_index().index, 1),
+    "after take": lambda m: _lev173_values(_lev173_frame(m).take([9, 2, 2, 17]).index, "a"),
+    "unique after sort": lambda m: _lev173_frame(m).sort_index().index.get_level_values(0).unique().tolist(),
+    "index read twice": lambda m: (lambda df: [repr(v) for v in df.index.tolist()] == [repr(v) for v in df.index.tolist()])(_lev173_frame(m)),
+    "renamed levels": lambda m: _lev173_values(_lev173_frame(m).rename_axis(["p", "q"]).index, "q"),
+    "axis set anew (NEGATIVE)": _lev173_reset_axis,
+    "sorted loc outer key": lambda m: _lev173_rows(_lev173_frame(m).sort_index().loc[2]),
+    "sorted loc pair": lambda m: _lev173_rows(_lev173_frame(m).sort_index().loc[(1, "t3")]),
+    "sorted loc key list": lambda m: _lev173_rows(_lev173_frame(m).sort_index().loc[[0, 2]]),
+    "sorted loc missing key (NEGATIVE)": lambda m: _lev173_loc_error(m, 7),
+    "sorted loc missing second key (NEGATIVE)": lambda m: _lev173_loc_error(m, (1, "zz")),
+    "sorted loc date string (NEGATIVE)": lambda m: _lev173_rows(
+        m.DataFrame({"d": list(pd.date_range("2024-01-30", periods=6, freq="D")) * 2, "k": list("ab") * 6, "x": range(12)})
+        .set_index(["d", "k"]).sort_index().loc["2024-02"]
+    ),
+    "sorted xs inner": lambda m: _lev173_rows(_lev173_frame(m).sort_index().xs("t2", level="b")),
+    "sorted xs keep level": lambda m: _lev173_rows(_lev173_frame(m).sort_index().xs(1, level="a", drop_level=False)),
+    "sorted xs missing (NEGATIVE)": lambda m: _lev173_xs_error(m, "t9"),
+    "level past the last (NEGATIVE)": lambda m: _lev173_error(m, 2),
+    "unknown name (NEGATIVE)": lambda m: _lev173_error(m, "zz"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LEV173_CASES))
+def test_multiindex_level_values_like_pandas_e186m(case: str) -> None:
+    assert _LEV173_CASES[case](fpd) == _LEV173_CASES[case](pd)
+
+
+# br-frankenpandas-e186m: a MultiIndex frame's flat labels are made when an
+# op first reads them - swaplevel, droplevel, a sort or take make none - and
+# every op that does read them answers as pandas': arithmetic aligning two
+# MultiIndex frames, a join on the index, reindex, to_csv, duplicated,
+# groupby on levels, loc after a swap. NEGATIVE: frames whose MultiIndexes
+# hold the same tuples in other orders align by tuple, frames sharing no
+# tuple give all NaN, and reindexing duplicate labels is pandas' ValueError.
+def _flat174_frame(m: Any, flip: bool = False) -> Any:
+    n = 12
+    a = [(i * 5) % 3 for i in range(n)]
+    b = [f"q{(i * 7) % 4}" for i in range(n)]
+    frame = m.DataFrame({"a": a, "b": b, "x": [float(i) for i in range(n)]}).set_index(["a", "b"]).groupby(level=["a", "b"]).sum()
+    return frame.iloc[::-1] if flip else frame
+
+
+def _flat174_rows(out: Any) -> Any:
+    if isinstance(out, (str, list, bool)) or not hasattr(out, "index"):
+        return repr(out)
+    values = out.tolist() if not hasattr(out, "columns") else [out[c].tolist() for c in out.columns]
+    return [repr(label) for label in out.index.tolist()], list(out.index.names), repr(values)
+
+
+def _flat174_reindex_error(m: Any) -> Any:
+    try:
+        _flat174_frame(m).droplevel("a").reindex(["q0", "q3", "zz"])
+    except ValueError:
+        return "ValueError"
+    return "no error"
+
+
+_FLAT174_CASES = {
+    "swap then align add": lambda m: _flat174_frame(m).swaplevel().sort_index() + _flat174_frame(m).swaplevel(),
+    "sorted add reversed": lambda m: _flat174_frame(m).sort_index() + _flat174_frame(m, flip=True),
+    "droplevel then reindex duplicates (NEGATIVE)": _flat174_reindex_error,
+    "droplevel then unique reindex": lambda m: _flat174_frame(m).iloc[:4].droplevel("a").reindex(["q2", "zz"]),
+    "swap then loc tuple": lambda m: _flat174_frame(m).swaplevel().loc[("q2", 1)],
+    "swap then to_csv": lambda m: _flat174_frame(m).swaplevel().to_csv(),
+    "take then duplicated": lambda m: m.concat([_flat174_frame(m).iloc[:3], _flat174_frame(m).iloc[1:4]]).index.duplicated().tolist(),
+    "sort then join": lambda m: _flat174_frame(m).sort_index().join(_flat174_frame(m).rename(columns={"x": "y"}).iloc[::2], how="left"),
+    "swap then groupby level": lambda m: _flat174_frame(m).swaplevel().groupby(level=0).sum(),
+    "swap then reset_index": lambda m: _flat174_frame(m).swaplevel().reset_index(),
+    "other order aligns by tuple (NEGATIVE)": lambda m: _flat174_frame(m) - _flat174_frame(m, flip=True),
+    "no shared tuple (NEGATIVE)": lambda m: _flat174_frame(m).iloc[:3] + _flat174_frame(m).iloc[3:6],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FLAT174_CASES))
+def test_multiindex_flat_index_made_on_read_like_pandas_e186m(case: str) -> None:
+    assert _flat174_rows(_FLAT174_CASES[case](fpd)) == _flat174_rows(_FLAT174_CASES[case](pd))
+
+
+# br-frankenpandas-upecu: MultiIndex axes built different ways - from tuples
+# (a Series / DataFrame constructor, an index assigned), by set_index, by a
+# groupby - hold the same flat labels, so ops over two align by tuple:
+# arithmetic, reindex onto a MultiIndex, align, nlargest / nsmallest keep
+# the MultiIndex; and index.names is writable (frame, Series, standalone;
+# 4qg5w.9). NEGATIVE: a flat Index's union with a MultiIndex is an Index of
+# tuples, names of the wrong length raise ValueError, and a copy keeps its
+# own names when the original's are set.
+def _sep175_tuples(m: Any) -> Any:
+    return m.MultiIndex.from_tuples([(0, "p"), (1, "q"), (2, "r")], names=["a", "b"])
+
+
+def _sep175_set_index(m: Any) -> Any:
+    return m.DataFrame({"a": [2, 1, 0], "b": ["r", "q", "p"], "x": [30.0, 20.0, 10.0]}).set_index(["a", "b"])
+
+
+def _sep175_rows(out: Any) -> Any:
+    if isinstance(out, (str, list, bool, tuple)) or not hasattr(out, "index"):
+        return repr(out)
+    values = out.tolist() if not hasattr(out, "columns") else [out[c].tolist() for c in out.columns]
+    return type(out.index).__name__, [repr(label) for label in out.index.tolist()], list(out.index.names), repr(values)
+
+
+def _sep175_names(m: Any, frame: bool) -> Any:
+    target = _sep175_set_index(m) if frame else _sep175_set_index(m)["x"]
+    kept = target.copy()
+    target.index.names = ["u", "v"]
+    return list(target.index.names), list(target.reset_index().columns), list(kept.index.names)
+
+
+def _sep175_bad_names(m: Any) -> Any:
+    try:
+        _sep175_set_index(m).index.names = ["only"]
+    except ValueError:
+        return "ValueError"
+    return "no error"
+
+
+def _sep175_standalone(m: Any) -> Any:
+    mi = _sep175_tuples(m)
+    mi.names = ["k1", "k2"]
+    return list(mi.names), mi.tolist()
+
+
+_SEP175_CASES = {
+    "series tuples + set_index": lambda m: m.Series([1.0, 2.0, 3.0], index=_sep175_tuples(m)) + _sep175_set_index(m)["x"],
+    "frame tuples + set_index": lambda m: m.DataFrame({"x": [1.0, 2.0, 3.0]}, index=_sep175_tuples(m)) + _sep175_set_index(m),
+    "assigned index - groupby": lambda m: (lambda d: (setattr(d, "index", _sep175_tuples(m)), d)[1])(m.DataFrame({"x": [5.0, 6.0, 7.0]}))
+    - _sep175_set_index(m).groupby(level=["a", "b"]).sum(),
+    "groupby + set_index": lambda m: m.DataFrame({"a": [0, 1, 0], "b": ["p", "q", "p"], "x": [1.0, 2.0, 3.0]}).groupby(["a", "b"]).sum()
+    + _sep175_set_index(m),
+    "reindex onto tuples": lambda m: _sep175_set_index(m)["x"].reindex(_sep175_tuples(m)),
+    "reindex new tuple": lambda m: _sep175_set_index(m)["x"].reindex(m.MultiIndex.from_tuples([(2, "r"), (5, "z")], names=["a", "b"])),
+    "frame reindex onto tuples": lambda m: _sep175_set_index(m).reindex(_sep175_tuples(m)),
+    "align": lambda m: _sep175_set_index(m)["x"].align(m.Series([7.0], index=m.MultiIndex.from_tuples([(1, "q")], names=["a", "b"])))[1],
+    "equals across builds": lambda m: m.Series([10.0, 20.0, 30.0], index=_sep175_tuples(m)).equals(_sep175_set_index(m)["x"].sort_index()),
+    "nlargest": lambda m: _sep175_set_index(m)["x"].nlargest(2),
+    "nsmallest": lambda m: _sep175_set_index(m)["x"].nsmallest(2),
+    "frame index names": lambda m: _sep175_names(m, True),
+    "series index names": lambda m: _sep175_names(m, False),
+    "standalone names": _sep175_standalone,
+    "flat union with tuples (NEGATIVE)": lambda m: m.Index(["z"]).union(_sep175_tuples(m)).tolist(),
+    "names of the wrong length (NEGATIVE)": _sep175_bad_names,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SEP175_CASES))
+def test_multiindex_axes_align_by_tuple_upecu(case: str) -> None:
+    assert _sep175_rows(_SEP175_CASES[case](fpd)) == _sep175_rows(_SEP175_CASES[case](pd))

@@ -1156,6 +1156,41 @@ fn timedelta64_position_lookup_cached(
 /// being `bytes[offsets[i]..offsets[i+1]]` (br-frankenpandas-nbspq).
 type Utf8LabelBacking = (Arc<[u8]>, Arc<[usize]>);
 
+/// An index's labels held as one text buffer: the bytes, or a MultiIndex's
+/// flat labels made into them on first read (br-frankenpandas-e186m).
+#[derive(Clone)]
+enum Utf8Contiguous {
+    Bytes(Utf8LabelBacking),
+    Flat(Arc<LazyFlat>),
+}
+
+/// A MultiIndex's flat labels (`sep` between its levels' labels), made on
+/// first read: a frame indexed by a MultiIndex built them for every new
+/// MultiIndex it made (a sort, a take, a swap or drop of levels), though
+/// most ops never read them (br-frankenpandas-e186m).
+struct LazyFlat {
+    multi: MultiIndex,
+    sep: Box<str>,
+    bytes: OnceLock<Utf8LabelBacking>,
+}
+
+impl Utf8Contiguous {
+    /// The bytes and offsets, made now if not yet.
+    fn backing(&self) -> &Utf8LabelBacking {
+        match self {
+            Self::Bytes(backing) => backing,
+            Self::Flat(flat) => flat.bytes.get_or_init(|| flat.multi.flat_bytes(&flat.sep)),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Bytes((_, offsets)) => offsets.len() - 1,
+            Self::Flat(flat) => flat.multi.len(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Int64UnitRangeLabels {
     start: i64,
@@ -1508,14 +1543,19 @@ struct IndexLabels {
     /// (valid UTF-8 by construction). Pre-seeded by `new_utf8_contiguous` so a
     /// string-keyed result index (groupby keys, sort_values, set-ops) avoids the
     /// per-label `String` alloc + `from_utf8` re-validation until something
-    /// actually needs the `Vec<IndexLabel>` view.
-    utf8_contiguous: Option<Utf8LabelBacking>,
+    /// actually needs the `Vec<IndexLabel>` view. A MultiIndex's flat
+    /// labels are made into it on first read ([`Utf8Contiguous::Flat`]).
+    utf8_contiguous: Option<Utf8Contiguous>,
 }
 
 impl IndexLabels {
     fn new(labels: Vec<IndexLabel>) -> Self {
+        Self::from_shared(Arc::new(labels))
+    }
+
+    fn from_shared(labels: Arc<Vec<IndexLabel>>) -> Self {
         let materialized = OnceLock::new();
-        let _ = materialized.set(Arc::new(labels));
+        let _ = materialized.set(labels);
         Self {
             materialized: Arc::new(materialized),
             materialized_slice: None,
@@ -1669,7 +1709,22 @@ impl IndexLabels {
             datetime64_affine: None,
             temporal_strided: None,
             int64_typed: OnceLock::new(),
-            utf8_contiguous: Some((bytes, offsets)),
+            utf8_contiguous: Some(Utf8Contiguous::Bytes((bytes, offsets))),
+        }
+    }
+
+    fn new_lazy_flat(flat: LazyFlat) -> Self {
+        Self {
+            materialized: Arc::default(),
+            materialized_slice: None,
+            int64_unit_range: None,
+            int64_affine: None,
+            int64_two_affine: None,
+            int64_strided: None,
+            datetime64_affine: None,
+            temporal_strided: None,
+            int64_typed: OnceLock::new(),
+            utf8_contiguous: Some(Utf8Contiguous::Flat(Arc::new(flat))),
         }
     }
 
@@ -1689,7 +1744,8 @@ impl IndexLabels {
                     let runs = **runs;
                     return Arc::new(runs.materialize());
                 }
-                if let Some((bytes, offsets)) = &self.utf8_contiguous {
+                if let Some(contiguous) = &self.utf8_contiguous {
+                    let (bytes, offsets) = contiguous.backing();
                     return Arc::new(
                         offsets
                             .windows(2)
@@ -1744,7 +1800,8 @@ impl IndexLabels {
         if let Some(strided) = &self.temporal_strided {
             return strided.materialize();
         }
-        if let Some((bytes, offsets)) = &self.utf8_contiguous {
+        if let Some(contiguous) = &self.utf8_contiguous {
+            let (bytes, offsets) = contiguous.backing();
             return offsets
                 .windows(2)
                 .map(|w| {
@@ -1785,8 +1842,8 @@ impl IndexLabels {
         if let Some(strided) = &self.temporal_strided {
             return strided.view.len;
         }
-        if let Some((_, offsets)) = &self.utf8_contiguous {
-            return offsets.len() - 1;
+        if let Some(contiguous) = &self.utf8_contiguous {
+            return contiguous.len();
         }
         if let Some(labels) = self.materialized.get() {
             return labels.len();
@@ -2785,8 +2842,18 @@ fn saturating_usize_sum(values: impl IntoIterator<Item = usize>) -> usize {
 impl Index {
     #[must_use]
     pub fn new(labels: Vec<IndexLabel>) -> Self {
+        Self::from_labels(IndexLabels::new(labels))
+    }
+
+    /// An index over labels another holder shares (a MultiIndex level's
+    /// rows): no copy is made.
+    fn from_shared_labels(labels: Arc<Vec<IndexLabel>>) -> Self {
+        Self::from_labels(IndexLabels::from_shared(labels))
+    }
+
+    fn from_labels(labels: IndexLabels) -> Self {
         Self {
-            labels: IndexLabels::new(labels),
+            labels,
             name: None,
             label_identity: next_index_label_identity(),
             duplicate_cache: Arc::default(),
@@ -3028,7 +3095,15 @@ impl Index {
     #[must_use]
     #[doc(hidden)]
     pub fn take_utf8_contiguous(&self, positions: &[usize]) -> Option<Self> {
-        let (bytes, offsets) = self.labels.utf8_contiguous.as_ref()?;
+        let contiguous = self.labels.utf8_contiguous.as_ref()?;
+        // Flat labels not yet made stay unmade: the MultiIndex is taken.
+        if let Utf8Contiguous::Flat(flat) = contiguous
+            && flat.bytes.get().is_none()
+        {
+            let multi = flat.multi.take(positions).ok()?;
+            return Some(Self::lazy_flat(&multi, &flat.sep));
+        }
+        let (bytes, offsets) = contiguous.backing();
         let span = |position: usize| offsets[position]..offsets[position + 1];
         let total = positions.iter().map(|&position| span(position).len()).sum();
         let mut gathered = Vec::with_capacity(total);
@@ -3042,6 +3117,21 @@ impl Index {
             Arc::from(gathered),
             Arc::from(gathered_offsets),
         ))
+    }
+
+    /// The flat labels of `multi` - `sep` between its levels' labels - made
+    /// on first read (see [`LazyFlat`]). The MultiIndex is held without its
+    /// own kept flat index, which would hold this one back.
+    fn lazy_flat(multi: &MultiIndex, sep: &str) -> Self {
+        let multi = MultiIndex {
+            flat: Arc::default(),
+            ..multi.clone()
+        };
+        Self::from_labels(IndexLabels::new_lazy_flat(LazyFlat {
+            multi,
+            sep: sep.into(),
+            bytes: OnceLock::new(),
+        }))
     }
 
     /// Raw `i64` view of an all-Int64 label vector, computing and caching it
@@ -21621,6 +21711,10 @@ pub struct MultiIndex {
     /// (br-frankenpandas-e186m).
     #[serde(skip)]
     identity_codes: Arc<std::sync::OnceLock<Option<Vec<Vec<u32>>>>>,
+    /// The flat index [`Self::to_flat_index_shared`] made, with its
+    /// separator, kept for this index and its clones.
+    #[serde(skip)]
+    flat: Arc<OnceLock<(Box<str>, Index)>>,
     /// A missing label is a value of its level - pandas' groupby
     /// (dropna=False) keys, NaN inside `levels` - rather than pandas' code
     /// -1 (set_index, from_arrays): an unstack sorts it with the values
@@ -21820,6 +21914,11 @@ impl Level {
 
     /// The rows' labels, made from the codes now if not yet.
     fn rows(&self) -> &[IndexLabel] {
+        self.shared_rows()
+    }
+
+    /// [`Self::rows`] as the shared vector an index can hold.
+    fn shared_rows(&self) -> &Arc<Vec<IndexLabel>> {
         self.rows.get_or_init(|| match self.codes.get() {
             Some(Some(coded)) => Arc::new(
                 coded
@@ -21983,6 +22082,7 @@ impl MultiIndex {
             levels,
             names,
             identity_codes: Arc::default(),
+            flat: Arc::default(),
             missing_is_a_level: false,
         }
     }
@@ -23049,7 +23149,10 @@ impl MultiIndex {
                 length: self.levels.len(),
             });
         }
-        let mut idx = Index::new(self.levels[level].to_vec());
+        // The level's rows shared: they were copied, a String a text label
+        // (index.get_level_values(0) 2.0 ms at 200k rows, pandas 0.17;
+        // br-frankenpandas-e186m).
+        let mut idx = Index::from_shared_labels(Arc::clone(self.levels[level].shared_rows()));
         if let Some(name) = self.names.get(level).and_then(|n| n.as_ref()) {
             idx = idx.set_name(name);
         }
@@ -23074,6 +23177,16 @@ impl MultiIndex {
     #[must_use]
     pub fn level_codes(&self, level: usize) -> Option<(&[IndexLabel], &[u32])> {
         let coded = self.levels.get(level)?.codes()?;
+        Some((coded.uniques.as_slice(), coded.codes.as_slice()))
+    }
+
+    /// [`Self::level_codes`] when they are made (a taken or sorted index's),
+    /// without making them: a lookup reads them where it would otherwise
+    /// compare every row's label once.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn made_level_codes(&self, level: usize) -> Option<(&[IndexLabel], &[u32])> {
+        let coded = self.levels.get(level)?.made_codes()?;
         Some((coded.uniques.as_slice(), coded.codes.as_slice()))
     }
 
@@ -24610,6 +24723,7 @@ impl MultiIndex {
             levels,
             names: vec![None; 2],
             identity_codes: Arc::new(std::sync::OnceLock::from(identity_codes)),
+            flat: Arc::default(),
             missing_is_a_level: false,
         })
     }
@@ -24682,12 +24796,34 @@ impl MultiIndex {
         Ok(Self::from_levels_and_names(levels, vec![None; nlevels]))
     }
 
+    /// [`Self::to_flat_index`] kept for this index and its clones under the
+    /// first separator asked; another separator makes it afresh. A Python
+    /// MultiIndex axis made it on every read (df.index of a 200k-row frame
+    /// 1.2 ms; br-frankenpandas-e186m).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn to_flat_index_shared(&self, sep: &str) -> Index {
+        if let Some((kept, flat)) = self.flat.get()
+            && **kept == *sep
+        {
+            return flat.clone();
+        }
+        let flat = self.to_flat_index(sep);
+        let _ = self.flat.set((sep.into(), flat.clone()));
+        flat
+    }
+
     /// Flatten this MultiIndex into a single-level Index by joining
-    /// level labels with a separator.
+    /// level labels with a separator; the text is made when first read.
     ///
     /// Matches `pd.MultiIndex.to_flat_index()` (approximately).
     #[must_use]
     pub fn to_flat_index(&self, sep: &str) -> Index {
+        Index::lazy_flat(self, sep)
+    }
+
+    /// The flat labels' bytes and offsets (see [`Self::to_flat_index`]).
+    fn flat_bytes(&self, sep: &str) -> Utf8LabelBacking {
         use std::fmt::Write as _;
         let n = self.len();
         // Contiguous-Utf8 flat index (br-frankenpandas-flatidx-contig): the old form
@@ -24812,7 +24948,7 @@ impl MultiIndex {
             offsets.extend_from_slice(&offs);
             (b, offsets)
         };
-        Index::from_utf8_contiguous(Arc::from(bytes), Arc::from(offsets))
+        (Arc::from(bytes), Arc::from(offsets))
     }
 
     /// **Bench-only ORIG reference.** Byte-for-byte the `to_flat_index` body as it
@@ -26155,6 +26291,112 @@ mod tests {
         .unwrap();
         assert_eq!(rebuilt, held);
         assert_eq!(rebuilt.identity_codes(), held.identity_codes());
+    }
+
+    #[test]
+    fn flat_index_is_made_on_first_read_e186m() {
+        // A MultiIndex's flat index holds the MultiIndex and makes its text
+        // when first read: its length answers without it, its labels are
+        // the text the eager build writes, and a take of it unread takes the
+        // MultiIndex and stays unread (br-frankenpandas-e186m).
+        let utf8 = |s: &str| IndexLabel::Utf8(s.to_owned());
+        let multi = MultiIndex::from_arrays(vec![
+            [3, 1, 3, 7].map(IndexLabel::Int64).to_vec(),
+            vec![utf8("x"), utf8("y"), utf8("x"), utf8("z")],
+        ])
+        .unwrap();
+        let unread = |index: &Index| {
+            matches!(
+                &index.labels.utf8_contiguous,
+                Some(crate::Utf8Contiguous::Flat(flat)) if flat.bytes.get().is_none()
+            )
+        };
+        let flat = multi.to_flat_index("/");
+        assert!(unread(&flat));
+        assert_eq!(flat.len(), 4);
+        assert!(unread(&flat));
+        let taken = flat.take(&[3, 0]);
+        assert!(unread(&taken));
+        assert_eq!(taken.labels(), [utf8("7/z"), utf8("3/x")].as_slice());
+        assert_eq!(
+            flat.labels(),
+            multi.to_flat_index_ref_write_fmt("/").labels()
+        );
+        // NEGATIVE: read once, the text is made and a take gathers its bytes;
+        // positions past the end take nothing.
+        assert!(!unread(&flat));
+        let gathered = flat.take_utf8_contiguous(&[1, 1]).unwrap();
+        assert!(matches!(
+            gathered.labels.utf8_contiguous,
+            Some(crate::Utf8Contiguous::Bytes(_))
+        ));
+        assert_eq!(gathered.labels(), [utf8("1/y"), utf8("1/y")].as_slice());
+        assert!(
+            multi
+                .to_flat_index("/")
+                .take_utf8_contiguous(&[9])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn level_values_share_rows_and_flat_index_is_kept_e186m() {
+        // A level's values are an index over the level's own rows, no copy
+        // made; the flat index is made once a separator for an index and its
+        // clones (br-frankenpandas-e186m).
+        let utf8 = |s: &str| IndexLabel::Utf8(s.to_owned());
+        let multi = MultiIndex::from_arrays(vec![
+            [3, 1, 3].map(IndexLabel::Int64).to_vec(),
+            vec![utf8("x"), utf8("y"), utf8("x")],
+        ])
+        .unwrap()
+        .set_names(vec![Some("k".into()), None]);
+        let values = multi.get_level_values(1).unwrap();
+        assert_eq!(
+            values.labels(),
+            [utf8("x"), utf8("y"), utf8("x")].as_slice()
+        );
+        assert!(values.name().is_none());
+        assert!(std::ptr::eq(
+            values.labels().as_ptr(),
+            multi.level_labels(1).unwrap().as_ptr()
+        ));
+        assert_eq!(
+            multi.get_level_values(0).unwrap().name(),
+            Some(&crate::LabelName::from("k"))
+        );
+        // The same separator answers the kept index, for a clone too.
+        let flat = multi.to_flat_index_shared(", ");
+        assert_eq!(
+            flat.labels(),
+            [utf8("3, x"), utf8("1, y"), utf8("3, x")].as_slice()
+        );
+        assert!(std::ptr::eq(
+            multi.clone().to_flat_index_shared(", ").labels().as_ptr(),
+            flat.labels().as_ptr()
+        ));
+        // NEGATIVE: another separator is made afresh, and an index made from
+        // this one (a take, a swap) keeps no stale flat index.
+        assert_eq!(
+            multi.to_flat_index_shared("/").labels(),
+            [utf8("3/x"), utf8("1/y"), utf8("3/x")].as_slice()
+        );
+        assert_eq!(
+            multi
+                .take(&[1])
+                .unwrap()
+                .to_flat_index_shared(", ")
+                .labels(),
+            [utf8("1, y")].as_slice()
+        );
+        assert_eq!(
+            multi
+                .swaplevel(0, 1)
+                .unwrap()
+                .to_flat_index_shared(", ")
+                .labels(),
+            [utf8("x, 3"), utf8("y, 1"), utf8("x, 3")].as_slice()
+        );
     }
 
     #[test]
@@ -42878,6 +43120,7 @@ mod tests {
             levels: mi.levels.clone(),
             names: mi.names.clone(),
             identity_codes: Arc::new(std::sync::OnceLock::from(None)),
+            flat: Arc::default(),
             missing_is_a_level: false,
         };
         assert!(

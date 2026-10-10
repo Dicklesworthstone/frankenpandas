@@ -11623,7 +11623,11 @@ fn extract_index_labels(
         } else if let Ok(pi) = index.extract::<PyRef<'_, PyPeriodIndex>>() {
             Ok(pi.inner.to_index().labels().to_vec())
         } else if let Ok(mi) = index.extract::<PyRef<'_, PyMultiIndex>>() {
-            Ok(mi.inner.to_flat_index(", ").labels().to_vec())
+            Ok(mi
+                .inner
+                .to_flat_index(MULTIINDEX_FLAT_SEP)
+                .labels()
+                .to_vec())
         } else if let Ok(s) = index.extract::<PyRef<'_, PySeries>>() {
             // A Series given as an index is its VALUES, as pandas (its own
             // index was taken, so `index=pd.to_datetime(series)` lost the
@@ -11722,7 +11726,7 @@ fn index_from_axis_value(value: &Bound<'_, PyAny>) -> PyResult<Index> {
     if let Ok(multi) = value.extract::<PyRef<'_, PyMultiIndex>>() {
         return multi
             .inner
-            .to_flat_index(", ")
+            .to_flat_index(MULTIINDEX_FLAT_SEP)
             .with_row_multiindex(multi.inner.clone())
             .map_err(index_error_to_py);
     }
@@ -12927,6 +12931,23 @@ impl<'a, 'py> FromPyObject<'a, 'py> for IndexArg {
     }
 }
 
+/// A reindex target: a MultiIndex over a receiver with a row MultiIndex is
+/// its flat labels with the MultiIndex held, as the receiver's own axis -
+/// read as an Index of its tuples it matched no row (s.reindex(mi), an align
+/// of two MultiIndex Series; br-frankenpandas-upecu). Any other target as
+/// [`IndexArg`] reads it.
+fn reindex_target(obj: &Bound<'_, PyAny>, multi_receiver: bool) -> PyResult<IndexArg> {
+    if multi_receiver && let Ok(multi) = obj.extract::<PyRef<'_, PyMultiIndex>>() {
+        let inner = multi
+            .inner
+            .to_flat_index(MULTIINDEX_FLAT_SEP)
+            .with_row_multiindex(multi.inner.clone())
+            .map_err(index_error_to_py)?;
+        return Ok(IndexArg(PyIndex { inner }, true));
+    }
+    obj.extract::<IndexArg>()
+}
+
 impl std::ops::Deref for IndexArg {
     type Target = PyIndex;
 
@@ -13281,6 +13302,97 @@ fn rename_owner_index(
 /// A DataFrame's or Series' `.index` of instants: a DatetimeIndex whose
 /// `name` also renames its owner's index. `df.index.name = 'date'` renamed
 /// a copy, so the frame's index stayed unnamed (reset_index gave 'index').
+/// A DataFrame's or Series' `.index` holding a MultiIndex: one whose
+/// `names` also renames its owner's levels, as pandas' shared MultiIndex
+/// (`df.index.names = [...]` raised AttributeError;
+/// br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
+#[pyclass(extends = PyMultiIndex, name = "MultiIndex", module = "frankenpandas")]
+pub struct PyOwnedMultiIndex {
+    owner: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyOwnedMultiIndex {
+    #[getter]
+    fn names(slf: PyRef<'_, Self>) -> PyResult<Py<PyAny>> {
+        slf.as_super().names(slf.py())
+    }
+
+    #[setter(names)]
+    fn assign_names(mut slf: PyRefMut<'_, Self>, names: &Bound<'_, PyAny>) -> PyResult<()> {
+        let py = slf.py();
+        let owner = slf.owner.clone_ref(py);
+        let multi = slf.as_super();
+        let names = multiindex_names_arg(&multi.inner, names)?;
+        multi.inner = multi.inner.clone().set_names(names);
+        let renamed = multi.inner.clone();
+        let base = multi.as_super();
+        base.inner = base
+            .inner
+            .clone()
+            .with_row_multiindex(renamed.clone())
+            .map_err(index_error_to_py)?;
+        rename_owner_levels(owner.bind(py), renamed)
+    }
+}
+
+/// `multi`'s `.index` object for `owner` (see [`PyOwnedMultiIndex`]).
+fn owned_multiindex(
+    py: Python<'_>,
+    owner: &Bound<'_, PyAny>,
+    multi: &MultiIndex,
+) -> PyResult<Py<PyAny>> {
+    let multi = PyMultiIndex {
+        inner: multi.clone(),
+    };
+    let initializer = pyo3::PyClassInitializer::from(multi.as_py_index())
+        .add_subclass(multi)
+        .add_subclass(PyOwnedMultiIndex {
+            owner: owner.clone().unbind(),
+        });
+    Ok(Py::new(py, initializer)?.into_any())
+}
+
+/// Level names for `multi` from `mi.names = names`: one a level, else
+/// pandas' ValueError.
+fn multiindex_names_arg(
+    multi: &MultiIndex,
+    names: &Bound<'_, PyAny>,
+) -> PyResult<Vec<Option<LabelName>>> {
+    let names = names
+        .try_iter()?
+        .map(|name| py_axis_name(&name?))
+        .collect::<PyResult<Vec<_>>>()?;
+    if names.len() != multi.nlevels() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Length of names must match number of levels in MultiIndex.",
+        ));
+    }
+    Ok(names)
+}
+
+/// The row MultiIndex of `owner` (the DataFrame or Series an `.index` came
+/// from) replaced by `multi`, its levels renamed.
+fn rename_owner_levels(owner: &Bound<'_, PyAny>, multi: MultiIndex) -> PyResult<()> {
+    if let Ok(mut frame) = owner.extract::<PyRefMut<'_, PyDataFrame>>() {
+        frame.inner = frame
+            .inner
+            .clone()
+            .with_row_multiindex(multi)
+            .map_err(frame_error_to_py)?;
+    } else if let Ok(mut series) = owner.extract::<PyRefMut<'_, PySeries>>() {
+        let index = series
+            .inner
+            .index()
+            .clone()
+            .with_row_multiindex(multi)
+            .map_err(index_error_to_py)?;
+        series.inner = Series::new(series.inner.name(), index, series.inner.column().clone())
+            .map_err(frame_error_to_py)?;
+    }
+    Ok(())
+}
+
 #[pyclass(extends = PyDatetimeIndex, name = "DatetimeIndex", module = "frankenpandas")]
 pub struct PyOwnedDatetimeIndex {
     owner: Py<PyAny>,
@@ -13378,6 +13490,9 @@ fn owned_index(
     index: &Index,
     columns: bool,
 ) -> PyResult<Py<PyAny>> {
+    if !columns && let Some(multi) = index.row_multiindex() {
+        return owned_multiindex(py, owner, multi);
+    }
     let object = row_index_to_py(py, index)?;
     let bound = object.bind(py);
     if let Ok(instants) = bound.extract::<PyRef<'_, PyDatetimeIndex>>() {
@@ -18307,7 +18422,7 @@ fn extract_index_names_flexible(
 
 /// Python wrapper for FrankenPandas MultiIndex: a subclass of Index (see
 /// [`PyDatetimeIndex`]).
-#[pyclass(extends = PyIndex, name = "MultiIndex", from_py_object)]
+#[pyclass(extends = PyIndex, name = "MultiIndex", from_py_object, subclass)]
 #[derive(Clone)]
 pub struct PyMultiIndex {
     pub(crate) inner: MultiIndex,
@@ -18353,7 +18468,11 @@ impl PyMultiIndex {
     /// The base Index's labels: the tuples flattened with the levels
     /// attached, as an axis holding this MultiIndex keeps it.
     fn as_py_index(&self) -> PyIndex {
-        let flat = self.inner.to_flat_index(", ");
+        // '|' between levels, as every axis holding a MultiIndex joins its
+        // flat labels: they align by that text (', ' here and '/' from
+        // set_index never matched fp-frame's '|', every row of an op over
+        // two came back NaN; br-frankenpandas-upecu).
+        let flat = self.inner.to_flat_index_shared(MULTIINDEX_FLAT_SEP);
         PyIndex {
             inner: flat
                 .clone()
@@ -18663,6 +18782,22 @@ impl PyMultiIndex {
             .map(|name| axis_name_to_py(py, name.as_ref())?.into_py_any(py))
             .collect::<PyResult<Vec<_>>>()?;
         frozen_list(py, names)
+    }
+
+    /// `mi.names = [...]`: every level renamed in place, as pandas' setter
+    /// (it raised AttributeError; br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
+    #[setter(names)]
+    fn assign_names(mut slf: PyRefMut<'_, Self>, names: &Bound<'_, PyAny>) -> PyResult<()> {
+        let names = multiindex_names_arg(&slf.inner, names)?;
+        slf.inner = slf.inner.clone().set_names(names);
+        let renamed = slf.inner.clone();
+        let base = slf.as_super();
+        base.inner = base
+            .inner
+            .clone()
+            .with_row_multiindex(renamed)
+            .map_err(index_error_to_py)?;
+        Ok(())
     }
 
     #[getter]
@@ -19109,9 +19244,23 @@ impl PyMultiIndex {
         Ok(array)
     }
 
-    fn union(&self, other: &PyMultiIndex) -> PyResult<Self> {
-        self.inner
-            .union(&other.inner)
+    /// pandas' `MultiIndex.union(other, sort=None)`: the tuples of both,
+    /// sorted unless sort=False, either is empty or the two are equal (it
+    /// kept first-seen order always, so an outer align of two came back in
+    /// the left one's order; br-frankenpandas-upecu).
+    #[pyo3(signature = (other, sort=None))]
+    fn union(&self, other: &PyMultiIndex, sort: Option<bool>) -> PyResult<Self> {
+        let union = self.inner.union(&other.inner).map_err(index_error_to_py)?;
+        let unsorted = sort == Some(false)
+            || self.inner.is_empty()
+            || other.inner.is_empty()
+            || self.inner.equals(&other.inner);
+        if unsorted {
+            return Ok(Self { inner: union });
+        }
+        let order = union.argsort();
+        union
+            .take(&order)
             .map(|inner| Self { inner })
             .map_err(index_error_to_py)
     }
@@ -19496,7 +19645,7 @@ impl PyMultiIndex {
         mask: Option<Vec<bool>>,
     ) -> PyResult<Vec<Option<usize>>> {
         let where_idx = if let Ok(py_mi) = where_.extract::<PyRef<'_, PyMultiIndex>>() {
-            py_mi.inner.to_flat_index("/")
+            py_mi.inner.to_flat_index(MULTIINDEX_FLAT_SEP)
         } else if let Ok(py_idx) = plain_index_ref(where_) {
             py_idx.inner.clone()
         } else {
@@ -19504,7 +19653,7 @@ impl PyMultiIndex {
         };
         Ok(self
             .inner
-            .to_flat_index("/")
+            .to_flat_index(MULTIINDEX_FLAT_SEP)
             .asof_locs(&where_idx, mask.as_deref()))
     }
 
@@ -20166,7 +20315,7 @@ impl PyMultiIndex {
     #[getter]
     fn r#str(&self) -> PyIndexStringMethods {
         PyIndexStringMethods {
-            inner: self.inner.to_flat_index("/"),
+            inner: self.inner.to_flat_index(MULTIINDEX_FLAT_SEP),
         }
     }
 
@@ -30397,7 +30546,7 @@ fn row_multiindex_axis(multi: fp_index::MultiIndex) -> PyResult<Index> {
         .map(|name| name.as_ref().map(ToString::to_string).unwrap_or_default())
         .collect();
     multi
-        .to_flat_index("/")
+        .to_flat_index(MULTIINDEX_FLAT_SEP)
         .set_name(names.join("/"))
         .with_row_multiindex(multi)
         .map_err(index_error_to_py)
@@ -32503,6 +32652,13 @@ fn keep_object_frame(source: &DataFrame, result: DataFrame) -> DataFrame {
     }
     out
 }
+
+/// The text between a MultiIndex's levels in the flat labels of every axis
+/// holding one - fp-frame's own (its groupby results, level swaps, xs):
+/// such axes align by that text, so one MultiIndex built through set_index
+/// ('/' was used), a MultiIndex object (', ') or a groupby ('|') must write
+/// the same (br-frankenpandas-upecu).
+const MULTIINDEX_FLAT_SEP: &str = "|";
 
 /// `value` as the int64 it equals: a whole number within int64, else None.
 #[allow(clippy::cast_possible_truncation)] // whole and within int64, checked
@@ -39359,7 +39515,7 @@ impl PySeries {
         };
         check_reindex_method(method)?;
         // Any index-like target (a DatetimeIndex raised TypeError).
-        let target = idx_obj.extract::<IndexArg>()?;
+        let target = reindex_target(idx_obj, self.inner.index().row_multiindex().is_some())?;
         let flat = level.is_none_or(|level| level.is_none());
         // An empty target that is no Index is pandas' `index[:0]`: its
         // RangeIndex, zone, freq and name kept (it was an object Index).
@@ -47372,7 +47528,7 @@ impl PyDataFrame {
         if let Ok(multi) = value.extract::<PyRef<'_, PyMultiIndex>>() {
             self.inner = self
                 .inner
-                .with_index(multi.inner.to_flat_index(", "))
+                .with_index(multi.inner.to_flat_index(MULTIINDEX_FLAT_SEP))
                 .and_then(|frame| frame.with_row_multiindex(multi.inner.clone()))
                 .map_err(axis_length_error_to_py)?;
             return Ok(());
@@ -47398,8 +47554,8 @@ impl PyDataFrame {
     #[getter(index)]
     fn index_getter(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let frame = slf.borrow();
-        if frame.inner.row_multiindex().is_some() {
-            return frame.index_object(slf.py());
+        if let Some(multi) = frame.inner.row_multiindex() {
+            return owned_multiindex(slf.py(), slf.as_any(), multi);
         }
         // A DatetimeIndex/TimedeltaIndex where the labels are instants or
         // durations, as the Series getter (fvsao.18); a plain Index renames
@@ -51999,7 +52155,7 @@ impl PyDataFrame {
             };
             let refs: Vec<&str> = list.iter().map(String::as_str).collect();
             self.inner
-                .set_index_append(&refs, drop, "/")
+                .set_index_append(&refs, drop, MULTIINDEX_FLAT_SEP)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
         } else if let Ok(single) = keys.extract::<String>() {
             self.inner
@@ -52015,7 +52171,7 @@ impl PyDataFrame {
             } else {
                 let refs: Vec<&str> = list.iter().map(String::as_str).collect();
                 self.inner
-                    .set_index_multi(&refs, drop, "/")
+                    .set_index_multi(&refs, drop, MULTIINDEX_FLAT_SEP)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             }
         } else {
@@ -56102,7 +56258,7 @@ impl PyDataFrame {
         let target_index = index.or_else(|| labels.filter(|_| ax == 0));
         // Any index-like target (a DatetimeIndex raised TypeError).
         let row_target_arg = target_index
-            .map(|obj| obj.extract::<IndexArg>())
+            .map(|obj| reindex_target(obj, self.inner.row_multiindex().is_some()))
             .transpose()?;
         // An empty row target that is no Index is pandas' `index[:0]`, and
         // one equal to the index keeps the rows (see the Series').
@@ -56547,9 +56703,14 @@ impl PyDataFrame {
                 indicator: None,
                 validate,
             };
-            return Ok(PyDataFrame {
-                inner: merge_impl(&self.inner, &right_df, &args)?,
-            });
+            // Both frames' MultiIndex kept for the joined rows (their flat
+            // labels came back; br-frankenpandas-e186m).
+            let joined = merge_impl(&self.inner, &right_df, &args)?;
+            let inner = self
+                .inner
+                .keep_row_multiindex(&right_df, joined)
+                .map_err(frame_error_to_py)?;
+            return Ok(PyDataFrame { inner });
         };
         let [key] = keys.as_slice() else {
             return Err(not_implemented(
@@ -61594,10 +61755,42 @@ fn multiindex_prefix_positions(
     key: &[IndexLabel],
     instant: bool,
 ) -> PyResult<(Vec<usize>, Vec<usize>)> {
+    let leading: Vec<usize> = (0..key.len()).collect();
+    if let Some(rows) = coded_key_rows(multi, &leading, key) {
+        return Ok((rows, Vec::new()));
+    }
     let levels: Vec<&[IndexLabel]> = (0..key.len())
         .map(|level| level_labels(multi, level))
         .collect::<PyResult<_>>()?;
     Ok(level_key_rows(&levels, key, multi.len(), instant))
+}
+
+/// The rows whose labels at `levels` equal `labels`, read from levels with
+/// codes made (a sorted or taken index's): each label's code among its
+/// level's distinct labels, then the rows whose codes all match - every
+/// row's labels were compared (df.loc[k] of a sorted 200k-row MultiIndex
+/// 0.67 ms, pandas 0.11; br-frankenpandas-e186m). None when a level has no
+/// codes made or lacks its label (a missing key, a date string): the
+/// comparison answers those.
+fn coded_key_rows(
+    multi: &fp_index::MultiIndex,
+    levels: &[usize],
+    labels: &[IndexLabel],
+) -> Option<Vec<usize>> {
+    let coded: Vec<(&[u32], u32)> = levels
+        .iter()
+        .zip(labels)
+        .map(|(&level, label)| {
+            let (uniques, codes) = multi.made_level_codes(level)?;
+            let code = uniques.iter().position(|unique| unique == label)?;
+            Some((codes, u32::try_from(code).ok()?))
+        })
+        .collect::<Option<_>>()?;
+    Some(
+        (0..multi.len())
+            .filter(|&row| coded.iter().all(|(codes, code)| codes[row] == *code))
+            .collect(),
+    )
 }
 
 /// The rows (of `len`) whose `levels` values match `key` one level each,
@@ -62623,6 +62816,13 @@ fn multiindex_xs_rows(
         .iter()
         .map(py_to_index_label)
         .collect::<PyResult<Vec<_>>>()?;
+    let keep: Vec<usize> = (0..multi.nlevels())
+        .filter(|level| !levels.contains(level))
+        .collect();
+    if let Some(rows) = coded_key_rows(multi, &levels, &labels).filter(|rows| !rows.is_empty()) {
+        let dropped = drop_level && !keep.is_empty();
+        return Ok((rows, dropped.then_some(keep)));
+    }
     let values = levels
         .iter()
         .map(|&level| level_labels(multi, level))
@@ -62638,9 +62838,6 @@ fn multiindex_xs_rows(
             missing.unbind(),
         ));
     }
-    let keep: Vec<usize> = (0..multi.nlevels())
-        .filter(|level| !levels.contains(level))
-        .collect();
     let dropped = drop_level && periods.is_empty() && !keep.is_empty();
     Ok((rows, dropped.then_some(keep)))
 }
@@ -63421,7 +63618,7 @@ impl PySeriesStringAccessor {
                 self.series.index().name().cloned(),
                 Some("match".into()),
             ]);
-        let flat = levels.to_flat_index("/");
+        let flat = levels.to_flat_index(MULTIINDEX_FLAT_SEP);
         let columns: BTreeMap<String, Column> = names
             .iter()
             .cloned()
@@ -82158,7 +82355,7 @@ fn read_csv_impl(
             several => {
                 let refs: Vec<&str> = several.iter().map(String::as_str).collect();
                 frame = frame
-                    .set_index_multi(&refs, true, "/")
+                    .set_index_multi(&refs, true, MULTIINDEX_FLAT_SEP)
                     .map_err(frame_error_to_py)?;
             }
         }
@@ -96808,7 +97005,7 @@ fn wide_to_long(
     let indexed_df = if index_refs.len() == 1 {
         result_df.set_index(index_refs[0], true)
     } else {
-        result_df.set_index_multi(&index_refs, true, "/")
+        result_df.set_index_multi(&index_refs, true, MULTIINDEX_FLAT_SEP)
     }
     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 

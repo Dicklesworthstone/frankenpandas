@@ -12738,7 +12738,12 @@ pub fn radix_argsort_multi_u64(keys_by_col: &[Vec<u64>]) -> Vec<usize> {
     }
     let mut scratch: Vec<usize> = vec![0; n];
     for keys in keys_by_col.iter().rev() {
-        for shift in (0..64).step_by(8) {
+        // Only the bytes some key holds: a column of small ranks counted
+        // every one of its eight bytes (a two-level MultiIndex sort_index
+        // 16 histogram passes for two; br-frankenpandas-e186m).
+        let max = keys.iter().copied().max().unwrap_or(0);
+        let bytes = (u64::BITS - max.leading_zeros()).div_ceil(8);
+        for shift in (0..bytes * 8).step_by(8) {
             let mut count = [0usize; 256];
             for &k in keys {
                 count[((k >> shift) & 0xff) as usize] += 1;
@@ -51098,6 +51103,51 @@ mod tests {
             assert!(
                 crate::parallel_radix_argsort_multi_u64(&one_prefix, 8).is_none(),
                 "one primary prefix must retain the serial fallback"
+            );
+        }
+
+        #[test]
+        fn serial_radix_counts_only_the_bytes_its_keys_hold_e186m() {
+            // Columns of one-, two-, four- and eight-byte keys, all-zero keys
+            // and ties sort as a stable multi-key sort does: the serial
+            // lexsort counts only the bytes each column's largest key holds
+            // (br-frankenpandas-e186m). NEGATIVE: the wide column's keys
+            // differ only in their top byte, so counting too few bytes fails.
+            let n = 3_000usize;
+            let mut state = 0x2545_F491_4F6C_DD1D_u64;
+            let mut next = || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            };
+            let small: Vec<u64> = (0..n).map(|_| next() % 7).collect();
+            let two_bytes: Vec<u64> = (0..n).map(|_| next() % 600).collect();
+            let wide: Vec<u64> = (0..n).map(|_| next() % 5 * (u64::MAX / 4)).collect();
+            let four_bytes: Vec<u64> = (0..n).map(|_| next() % 70_000 + (1 << 24)).collect();
+            let zeros = vec![0_u64; n];
+            let stable = |keys: &[Vec<u64>]| {
+                let mut want: Vec<usize> = (0..n).collect();
+                want.sort_by(|&left, &right| {
+                    keys.iter()
+                        .map(|column| column[left].cmp(&column[right]))
+                        .find(|order| *order != std::cmp::Ordering::Equal)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                want
+            };
+            for keys in [
+                vec![small.clone(), two_bytes.clone()],
+                vec![wide.clone(), small.clone()],
+                vec![four_bytes.clone(), wide.clone(), two_bytes.clone()],
+                vec![zeros.clone(), small.clone()],
+            ] {
+                assert_eq!(crate::radix_argsort_multi_u64(&keys), stable(&keys));
+            }
+            // Keys equal everywhere keep the rows in order.
+            assert_eq!(
+                crate::radix_argsort_multi_u64(&[zeros.clone(), zeros]),
+                (0..n).collect::<Vec<_>>()
             );
         }
 

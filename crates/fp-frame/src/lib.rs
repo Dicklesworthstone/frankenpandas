@@ -5489,6 +5489,60 @@ fn inferred_object_column(column: &Column) -> Result<Option<Column>, FrameError>
     Ok((inferred.dtype() != DType::Utf8).then_some(inferred))
 }
 
+/// The row MultiIndex of a result aligned from two operands that each
+/// carry one of as many levels: each result label's tuple, read from the
+/// operand holding that label (the alignment matched rows by these labels);
+/// the result kept only its flat labels (df + df.iloc[::-1] over a
+/// MultiIndex; br-frankenpandas-e186m). A level keeps the name both give it.
+/// None unless every result label is one of theirs.
+fn realigned_row_multiindex(
+    out: &Index,
+    left: (&Index, &fp_index::MultiIndex),
+    right: (&Index, &fp_index::MultiIndex),
+) -> Option<fp_index::MultiIndex> {
+    let nlevels = left.1.nlevels();
+    if right.1.nlevels() != nlevels {
+        return None;
+    }
+    let mut at: rustc_hash::FxHashMap<&IndexLabel, (bool, usize)> =
+        rustc_hash::FxHashMap::default();
+    for (side, (flat, _)) in [(false, left), (true, right)] {
+        for (row, label) in flat.labels().iter().enumerate() {
+            at.entry(label).or_insert((side, row));
+        }
+    }
+    let rows = out
+        .labels()
+        .iter()
+        .map(|label| at.get(label).copied())
+        .collect::<Option<Vec<_>>>()?;
+    let arrays = (0..nlevels)
+        .map(|level| {
+            let (mine, theirs) = (left.1.level_labels(level)?, right.1.level_labels(level)?);
+            Some(
+                rows.iter()
+                    .map(|&(side, row)| {
+                        if side {
+                            theirs[row].clone()
+                        } else {
+                            mine[row].clone()
+                        }
+                    })
+                    .collect(),
+            )
+        })
+        .collect::<Option<Vec<Vec<IndexLabel>>>>()?;
+    let names = (0..nlevels)
+        .map(|level| {
+            let name = left.1.names()[level].clone();
+            (right.1.names()[level] == name).then_some(name).flatten()
+        })
+        .collect();
+    fp_index::MultiIndex::from_arrays(arrays)
+        .ok()
+        .map(|multi| multi.set_names(names))
+}
+
 /// Index labels as the values of a column (`reset_index`), each label its
 /// own value: a mix of ints and text is an object column holding both, as
 /// pandas' (the ints were stringified; br-frankenpandas-784vs).
@@ -13587,6 +13641,39 @@ impl Series {
         policy: &RuntimePolicy,
         ledger: &mut EvidenceLedger,
     ) -> Result<Self, FrameError> {
+        let out = self.binary_op_with_policy_rows(other, op, policy, ledger)?;
+        self.keep_row_multiindex(other, out)
+    }
+
+    /// `out` - an op over this Series and `other` aligning their rows - with
+    /// the row MultiIndex both indexes carry, rebuilt for its rows where the
+    /// alignment kept only their flat labels ([`realigned_row_multiindex`]).
+    fn keep_row_multiindex(&self, other: &Self, out: Self) -> Result<Self, FrameError> {
+        if out.index().row_multiindex().is_some() {
+            return Ok(out);
+        }
+        let (Some(left), Some(right)) = (
+            self.index().row_multiindex(),
+            other.index().row_multiindex(),
+        ) else {
+            return Ok(out);
+        };
+        match realigned_row_multiindex(out.index(), (self.index(), left), (other.index(), right)) {
+            Some(multi) => {
+                let index = out.index().clone().with_row_multiindex(multi)?;
+                Self::new(out.name().clone(), index, out.column().clone())
+            }
+            None => Ok(out),
+        }
+    }
+
+    fn binary_op_with_policy_rows(
+        &self,
+        other: &Self,
+        op: ArithmeticOp,
+        policy: &RuntimePolicy,
+        ledger: &mut EvidenceLedger,
+    ) -> Result<Self, FrameError> {
         if let Some(strings) = self.utf8_binary(other, op)? {
             return Ok(strings);
         }
@@ -15126,6 +15213,11 @@ impl Series {
     /// Matches `pd.Series.combine_first(other)`: uses outer alignment,
     /// then for each position takes self's value if non-null, else other's.
     pub fn combine_first(&self, other: &Self) -> Result<Self, FrameError> {
+        let out = self.combine_first_rows(other)?;
+        self.keep_row_multiindex(other, out)
+    }
+
+    fn combine_first_rows(&self, other: &Self) -> Result<Self, FrameError> {
         let mut combined = self.combine_first_storage(other)?;
         // pandas' common dtype keeps a nullable side nullable: an Int64 or
         // Float64 Series combined with numbers is Int64 / Float64 by the
@@ -28701,12 +28793,12 @@ impl Series {
                 indexed.sort_by(cmp);
                 indexed.truncate(n);
             }
-            let labels: Vec<IndexLabel> = indexed
-                .iter()
-                .map(|(i, _)| self.index_label_at(*i))
-                .collect();
+            // The index taken at the kept rows: its MultiIndex and typed
+            // backing kept (a label a row rebuilt it flat;
+            // br-frankenpandas-upecu).
+            let positions: Vec<usize> = indexed.iter().map(|(i, _)| *i).collect();
             let values: Vec<Scalar> = indexed.iter().map(|(_, v)| Scalar::Float64(*v)).collect();
-            let index = self.index.relabeled(labels);
+            let index = self.index.take(&positions);
             let column = Column::from_values(values)?;
             return Self::new(self.name.clone(), index, column);
         }
@@ -28725,12 +28817,12 @@ impl Series {
                 indexed.sort_by(cmp);
                 indexed.truncate(n);
             }
-            let labels: Vec<IndexLabel> = indexed
-                .iter()
-                .map(|(i, _)| self.index_label_at(*i))
-                .collect();
+            // The index taken at the kept rows: its MultiIndex and typed
+            // backing kept (a label a row rebuilt it flat;
+            // br-frankenpandas-upecu).
+            let positions: Vec<usize> = indexed.iter().map(|(i, _)| *i).collect();
             let values: Vec<Scalar> = indexed.iter().map(|(_, v)| Scalar::Int64(*v)).collect();
-            let index = self.index.relabeled(labels);
+            let index = self.index.take(&positions);
             let column = Column::from_values(values)?;
             return Self::new(self.name.clone(), index, column);
         }
@@ -28790,11 +28882,7 @@ impl Series {
                     .take(wanted),
             );
         }
-        let labels: Vec<IndexLabel> = positions
-            .iter()
-            .map(|&position| self.index_label_at(position))
-            .collect();
-        let index = self.index.relabeled(labels);
+        let index = self.index.take(&positions);
         let column = self.column.take_positions(&positions);
         Self::new(self.name.clone(), index, column)
     }
@@ -28833,12 +28921,12 @@ impl Series {
                 indexed.sort_by(cmp);
                 indexed.truncate(n);
             }
-            let labels: Vec<IndexLabel> = indexed
-                .iter()
-                .map(|(i, _)| self.index_label_at(*i))
-                .collect();
+            // The index taken at the kept rows: its MultiIndex and typed
+            // backing kept (a label a row rebuilt it flat;
+            // br-frankenpandas-upecu).
+            let positions: Vec<usize> = indexed.iter().map(|(i, _)| *i).collect();
             let values: Vec<Scalar> = indexed.iter().map(|(_, v)| Scalar::Float64(*v)).collect();
-            let index = self.index.relabeled(labels);
+            let index = self.index.take(&positions);
             let column = Column::from_values(values)?;
             return Self::new(self.name.clone(), index, column);
         }
@@ -28856,12 +28944,12 @@ impl Series {
                 indexed.sort_by(cmp);
                 indexed.truncate(n);
             }
-            let labels: Vec<IndexLabel> = indexed
-                .iter()
-                .map(|(i, _)| self.index_label_at(*i))
-                .collect();
+            // The index taken at the kept rows: its MultiIndex and typed
+            // backing kept (a label a row rebuilt it flat;
+            // br-frankenpandas-upecu).
+            let positions: Vec<usize> = indexed.iter().map(|(i, _)| *i).collect();
             let values: Vec<Scalar> = indexed.iter().map(|(_, v)| Scalar::Int64(*v)).collect();
-            let index = self.index.relabeled(labels);
+            let index = self.index.take(&positions);
             let column = Column::from_values(values)?;
             return Self::new(self.name.clone(), index, column);
         }
@@ -79594,6 +79682,24 @@ impl DataFrame {
     /// `actual=["cost","sales"] expected=["sales","cost"]` the day the oracle
     /// first ran (br-frankenpandas-wfkzm). Use this when the frame already
     /// exists.
+    /// `out` - an op over this frame and `other` aligning their rows - with
+    /// the row MultiIndex both carry, rebuilt for its rows where the
+    /// alignment kept only their flat labels (see `realigned_row_multiindex`):
+    /// a binary op, combine_first, and Python's join on the index.
+    #[doc(hidden)]
+    pub fn keep_row_multiindex(&self, other: &Self, out: Self) -> Result<Self, FrameError> {
+        if out.row_multiindex.is_some() {
+            return Ok(out);
+        }
+        let (Some(left), Some(right)) = (&self.row_multiindex, &other.row_multiindex) else {
+            return Ok(out);
+        };
+        match realigned_row_multiindex(&out.index, (&self.index, left), (&other.index, right)) {
+            Some(multi) => out.with_row_multiindex(multi),
+            None => Ok(out),
+        }
+    }
+
     pub fn with_row_multiindex(
         self,
         row_multiindex: fp_index::MultiIndex,
@@ -95632,6 +95738,11 @@ impl DataFrame {
     // without.
     #[allow(clippy::useless_conversion)]
     pub fn combine_first(&self, other: &Self) -> Result<Self, FrameError> {
+        let out = self.combine_first_rows(other)?;
+        self.keep_row_multiindex(other, out)
+    }
+
+    fn combine_first_rows(&self, other: &Self) -> Result<Self, FrameError> {
         // The output columns, each with its self and other column. Identical
         // column axes keep their order and pair by position, as pandas' align
         // of equal axes (it neither sorts them nor collapses a repeated key:
@@ -105127,6 +105238,14 @@ impl DataFrame {
     where
         F: Fn(f64, f64) -> f64 + Sync,
     {
+        let out = self.binary_df_op_rows(other, op, name)?;
+        self.keep_row_multiindex(other, out)
+    }
+
+    fn binary_df_op_rows<F>(&self, other: &Self, op: F, name: &str) -> Result<Self, FrameError>
+    where
+        F: Fn(f64, f64) -> f64 + Sync,
+    {
         // Two all-valid int64 columns stay int64 under everything but true
         // division, through the Series kernel (br-frankenpandas-c74wi: the f64
         // closure made them float64).
@@ -105489,6 +105608,20 @@ impl DataFrame {
     /// is replaced by `fill_value` before applying `op`. When both are missing,
     /// the result is NaN.
     fn binary_df_op_fill<F>(
+        &self,
+        other: &Self,
+        op: F,
+        fill_value: f64,
+        int_op: Option<ArithmeticOp>,
+    ) -> Result<Self, FrameError>
+    where
+        F: Fn(f64, f64) -> f64 + Sync,
+    {
+        let out = self.binary_df_op_fill_rows(other, op, fill_value, int_op)?;
+        self.keep_row_multiindex(other, out)
+    }
+
+    fn binary_df_op_fill_rows<F>(
         &self,
         other: &Self,
         op: F,
@@ -127174,6 +127307,158 @@ mod tests {
         assert_eq!(
             int_fill.column("x").unwrap().values()[0],
             Scalar::Float64(-1.0)
+        );
+    }
+
+    #[test]
+    fn nlargest_takes_the_index_and_keeps_its_multiindex_upecu() {
+        // nlargest / nsmallest take the index at the kept rows: a Series'
+        // MultiIndex comes along (each kept row's labels rebuilt a flat
+        // index; br-frankenpandas-upecu).
+        let multi = fp_index::MultiIndex::from_arrays(vec![
+            [0, 1, 2].map(fp_index::IndexLabel::Int64).to_vec(),
+            ["p", "q", "r"]
+                .map(|s| fp_index::IndexLabel::Utf8(s.to_owned()))
+                .to_vec(),
+        ])
+        .unwrap();
+        let index = multi
+            .to_flat_index("|")
+            .with_row_multiindex(multi.clone())
+            .unwrap();
+        let series = Series::new("x", index, Column::from_f64_values(vec![1.0, 3.0, 2.0])).unwrap();
+        let kept = |out: &Series| {
+            out.index()
+                .row_multiindex()
+                .map(|multi| multi.level_labels(1).unwrap().to_vec())
+        };
+        let utf8 = |s: &str| fp_index::IndexLabel::Utf8(s.to_owned());
+        assert_eq!(
+            kept(&series.nlargest(2).unwrap()),
+            Some(vec![utf8("q"), utf8("r")])
+        );
+        assert_eq!(kept(&series.nsmallest(1).unwrap()), Some(vec![utf8("p")]));
+        // NEGATIVE: a flat index stays flat, its labels the kept rows'.
+        let flat = Series::new(
+            "x",
+            Index::new(vec![utf8("a"), utf8("b"), utf8("c")]),
+            Column::from_f64_values(vec![1.0, 3.0, 2.0]),
+        )
+        .unwrap();
+        let top = flat.nlargest(2).unwrap();
+        assert!(top.index().row_multiindex().is_none());
+        assert_eq!(top.index().labels(), [utf8("b"), utf8("c")].as_slice());
+    }
+
+    #[test]
+    fn aligned_results_keep_the_operands_multiindex_e186m() {
+        // An op aligning two MultiIndex frames or Series keeps the
+        // MultiIndex for the result's rows (it kept only the flat labels):
+        // a frame add over reordered rows, add with a fill, combine_first,
+        // a Series add (br-frankenpandas-e186m).
+        let frame = DataFrame::new(
+            Index::from_range(0, 3, 1),
+            BTreeMap::from([
+                ("a".to_owned(), Column::from_i64_values(vec![0, 1, 2])),
+                (
+                    "b".to_owned(),
+                    Column::from_values(vec![
+                        Scalar::Utf8("p".to_owned()),
+                        Scalar::Utf8("q".to_owned()),
+                        Scalar::Utf8("r".to_owned()),
+                    ])
+                    .unwrap(),
+                ),
+                ("x".to_owned(), Column::from_f64_values(vec![1.0, 2.0, 4.0])),
+            ]),
+        )
+        .unwrap()
+        .set_index_multi(&["a", "b"], true, "/")
+        .unwrap();
+        let reversed = frame.take(&[2, 1, 0], 0).unwrap();
+        let tuples = |out: &DataFrame| {
+            let multi = out.row_multiindex().expect("a row MultiIndex");
+            (0..multi.len())
+                .map(|row| {
+                    multi
+                        .get_tuple(row)
+                        .unwrap()
+                        .into_iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let p0 = vec![
+            fp_index::IndexLabel::Int64(0),
+            fp_index::IndexLabel::Utf8("p".to_owned()),
+        ];
+        let sum = frame.add_df(&reversed).unwrap();
+        assert_eq!(tuples(&sum).len(), 3);
+        assert_eq!(tuples(&sum)[0], p0);
+        assert_eq!(
+            sum.row_multiindex().unwrap().names(),
+            frame.row_multiindex().unwrap().names()
+        );
+        let filled = frame
+            .take(&[0, 1], 0)
+            .unwrap()
+            .add_df_fill(&reversed, 0.0)
+            .unwrap();
+        assert_eq!(tuples(&filled).len(), 3);
+        let combined = frame
+            .take(&[1], 0)
+            .unwrap()
+            .combine_first(&reversed)
+            .unwrap();
+        assert_eq!(tuples(&combined).len(), 3);
+        let series = |frame: &DataFrame| {
+            let index = frame
+                .index()
+                .clone()
+                .with_row_multiindex(frame.row_multiindex().unwrap().clone())
+                .unwrap();
+            Series::new("x", index, frame.column("x").unwrap().clone()).unwrap()
+        };
+        let total = series(&frame).add(&series(&reversed)).unwrap();
+        assert_eq!(
+            total.index().row_multiindex().map(|multi| multi.len()),
+            Some(3)
+        );
+        // NEGATIVE: a left operand with a flat index leaves the result flat
+        // - equal indexes keep the left one, as pandas' do - and operands of
+        // other level counts keep no MultiIndex.
+        let flat = DataFrame::new(
+            Index::new(frame.index().labels().to_vec()),
+            BTreeMap::from([("x".to_owned(), Column::from_f64_values(vec![1.0, 1.0, 1.0]))]),
+        )
+        .unwrap();
+        assert!(flat.add_df(&frame).unwrap().row_multiindex().is_none());
+        assert_eq!(
+            frame.add_df(&flat).unwrap().row_multiindex(),
+            frame.row_multiindex()
+        );
+        let other_levels = reversed
+            .clone()
+            .with_row_multiindex(
+                fp_index::MultiIndex::from_arrays(vec![
+                    reversed
+                        .row_multiindex()
+                        .unwrap()
+                        .level_labels(0)
+                        .unwrap()
+                        .to_vec(),
+                ])
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(
+            super::realigned_row_multiindex(
+                frame.index(),
+                (frame.index(), frame.row_multiindex().unwrap()),
+                (other_levels.index(), other_levels.row_multiindex().unwrap()),
+            )
+            .is_none()
         );
     }
 
