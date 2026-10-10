@@ -1471,31 +1471,46 @@ impl Int64StridedLabels {
     }
 }
 
-/// The kind of instant a [`TemporalStridedLabels`] backing holds.
+/// The kind of value a [`TypedStridedLabels`] backing holds, each as an
+/// i64: an instant's or a duration's nanoseconds, a float64's bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TemporalKind {
+enum StridedKind {
     Datetime,
     Timedelta,
+    /// `f64::to_bits` of each value, NaN the missing label (br-frankenpandas-smlca).
+    Float64,
 }
 
-impl TemporalKind {
-    fn label(self, nanos: i64) -> IndexLabel {
+impl StridedKind {
+    fn label(self, value: i64) -> IndexLabel {
         match self {
-            Self::Datetime => IndexLabel::Datetime64(nanos),
-            Self::Timedelta => IndexLabel::Timedelta64(nanos),
+            Self::Datetime => IndexLabel::Datetime64(value),
+            Self::Timedelta => IndexLabel::Timedelta64(value),
+            Self::Float64 => float64_label(f64::from_bits(value.cast_unsigned())),
         }
     }
 }
 
-/// A typed DatetimeIndex / TimedeltaIndex backing: label `k` is
-/// `kind.label(view.value_at(k))`, NaT as i64::MIN.
+/// The label of a float64 value as a Python float's reads: NaN the missing
+/// label, any other value itself.
+fn float64_label(value: f64) -> IndexLabel {
+    if value.is_nan() {
+        IndexLabel::Null(fp_types::NullKind::NaN)
+    } else {
+        IndexLabel::Float64(OrderedF64(value))
+    }
+}
+
+/// A typed DatetimeIndex / TimedeltaIndex / float64 index backing: label
+/// `k` is `kind.label(view.value_at(k))`, NaT as i64::MIN, a float's NaN
+/// the missing label.
 #[derive(Debug, Clone)]
-struct TemporalStridedLabels {
-    kind: TemporalKind,
+struct TypedStridedLabels {
+    kind: StridedKind,
     view: Int64StridedLabels,
 }
 
-impl TemporalStridedLabels {
+impl TypedStridedLabels {
     fn materialize(&self) -> Vec<IndexLabel> {
         self.view
             .iter()
@@ -1543,7 +1558,7 @@ struct IndexLabels {
     /// of `values[start + k * step]`, NaT as i64::MIN - an index built from
     /// an array of instants or durations, and the slices and takes of one,
     /// without a 32 B enum per row until something reads the labels.
-    temporal_strided: Option<TemporalStridedLabels>,
+    typed_strided: Option<TypedStridedLabels>,
     /// Lazy typed Int64 backing (br-frankenpandas-dxqpm). `Some(values)` once
     /// computed means every label is `IndexLabel::Int64` and `values` is the
     /// raw `i64` view; `None` once computed means the labels are not all
@@ -1577,7 +1592,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
-            temporal_strided: None,
+            typed_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         }
@@ -1592,7 +1607,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
-            temporal_strided: None,
+            typed_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
@@ -1610,7 +1625,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
-            temporal_strided: None,
+            typed_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
@@ -1625,7 +1640,7 @@ impl IndexLabels {
             int64_two_affine: Some(Box::new(Int64TwoAffineLabels::new(first, second)?)),
             int64_strided: None,
             datetime64_affine: None,
-            temporal_strided: None,
+            typed_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
@@ -1640,7 +1655,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: Some(view),
             datetime64_affine: None,
-            temporal_strided: None,
+            typed_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         }
@@ -1657,7 +1672,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
-            temporal_strided: None,
+            typed_strided: None,
             int64_typed,
             utf8_contiguous: None,
         }
@@ -1672,13 +1687,13 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: Some(Int64AffineLabels::new(start, step, len)?),
-            temporal_strided: None,
+            typed_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         })
     }
 
-    fn new_temporal_strided(kind: TemporalKind, view: Int64StridedLabels) -> Self {
+    fn new_typed_strided(kind: StridedKind, view: Int64StridedLabels) -> Self {
         Self {
             materialized: Arc::default(),
             materialized_slice: None,
@@ -1687,7 +1702,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
-            temporal_strided: Some(TemporalStridedLabels { kind, view }),
+            typed_strided: Some(TypedStridedLabels { kind, view }),
             int64_typed: OnceLock::new(),
             utf8_contiguous: None,
         }
@@ -1695,18 +1710,40 @@ impl IndexLabels {
 
     /// The typed backing when it holds instants (a DatetimeIndex's).
     fn datetime64_strided(&self) -> Option<&Int64StridedLabels> {
-        self.temporal_strided
+        self.typed_strided
             .as_ref()
-            .filter(|strided| strided.kind == TemporalKind::Datetime)
+            .filter(|strided| strided.kind == StridedKind::Datetime)
             .map(|strided| &strided.view)
     }
 
     /// The typed backing when it holds durations (a TimedeltaIndex's).
     fn timedelta64_strided(&self) -> Option<&Int64StridedLabels> {
-        self.temporal_strided
+        self.typed_strided
             .as_ref()
-            .filter(|strided| strided.kind == TemporalKind::Timedelta)
+            .filter(|strided| strided.kind == StridedKind::Timedelta)
             .map(|strided| &strided.view)
+    }
+
+    /// The typed backing when it holds float64s (an index of a float
+    /// array's; br-frankenpandas-smlca).
+    fn float64_strided(&self) -> Option<&Int64StridedLabels> {
+        self.typed_strided
+            .as_ref()
+            .filter(|strided| strided.kind == StridedKind::Float64)
+            .map(|strided| &strided.view)
+    }
+
+    /// The values of a typed float64 backing in order (NaN its missing
+    /// labels), no label made.
+    fn float64_values(&self) -> Option<impl Iterator<Item = f64> + '_> {
+        self.float64_strided()
+            .map(|view| view.iter().map(|bits| f64::from_bits(bits.cast_unsigned())))
+    }
+
+    /// The bits of a typed float64 backing's values in order: the buffer's
+    /// own run when the backing is contiguous.
+    fn float64_bits(&self) -> Option<Cow<'_, [i64]>> {
+        self.float64_strided().map(Int64StridedLabels::values)
     }
 
     fn new_utf8_contiguous(bytes: Arc<[u8]>, offsets: Arc<[usize]>) -> Self {
@@ -1720,7 +1757,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
-            temporal_strided: None,
+            typed_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: Some(Utf8Contiguous::Bytes((bytes, offsets))),
         }
@@ -1735,7 +1772,7 @@ impl IndexLabels {
             int64_two_affine: None,
             int64_strided: None,
             datetime64_affine: None,
-            temporal_strided: None,
+            typed_strided: None,
             int64_typed: OnceLock::new(),
             utf8_contiguous: Some(Utf8Contiguous::Flat(Arc::new(flat))),
         }
@@ -1775,7 +1812,7 @@ impl IndexLabels {
                 if let Some(range) = self.datetime64_affine {
                     return Arc::new(range.materialize_datetime64());
                 }
-                if let Some(strided) = &self.temporal_strided {
+                if let Some(strided) = &self.typed_strided {
                     return Arc::new(strided.materialize());
                 }
                 if let Some(strided) = self.int64_strided.clone() {
@@ -1810,7 +1847,7 @@ impl IndexLabels {
         if let Some(range) = self.datetime64_affine {
             return range.materialize_datetime64();
         }
-        if let Some(strided) = &self.temporal_strided {
+        if let Some(strided) = &self.typed_strided {
             return strided.materialize();
         }
         if let Some(contiguous) = &self.utf8_contiguous {
@@ -1852,7 +1889,7 @@ impl IndexLabels {
         if let Some(range) = self.datetime64_affine {
             return range.len;
         }
-        if let Some(strided) = &self.temporal_strided {
+        if let Some(strided) = &self.typed_strided {
             return strided.view.len;
         }
         if let Some(contiguous) = &self.utf8_contiguous {
@@ -1948,10 +1985,10 @@ impl IndexLabels {
 
         // A typed DatetimeIndex's / TimedeltaIndex's slice is a view of the
         // same instants or durations.
-        if let Some(TemporalStridedLabels { kind, view }) = &self.temporal_strided
+        if let Some(TypedStridedLabels { kind, view }) = &self.typed_strided
             && let Some(view) = view.sub_view(start, 1, len)
         {
-            return Self::new_temporal_strided(*kind, view);
+            return Self::new_typed_strided(*kind, view);
         }
 
         if let Some(range) = self.datetime64_affine {
@@ -1977,7 +2014,7 @@ impl IndexLabels {
                 int64_two_affine: None,
                 int64_strided: None,
                 datetime64_affine: None,
-                temporal_strided: None,
+                typed_strided: None,
                 int64_typed: OnceLock::new(),
                 utf8_contiguous: None,
             };
@@ -1994,7 +2031,7 @@ impl IndexLabels {
                 int64_two_affine: None,
                 int64_strided: None,
                 datetime64_affine: None,
-                temporal_strided: None,
+                typed_strided: None,
                 int64_typed: OnceLock::new(),
                 utf8_contiguous: None,
             };
@@ -2067,7 +2104,7 @@ impl IndexLabels {
         if let Some(range) = self.datetime64_affine {
             return Some(IndexLabel::Datetime64(range.value_at(position)));
         }
-        if let Some(TemporalStridedLabels { kind, view }) = &self.temporal_strided {
+        if let Some(TypedStridedLabels { kind, view }) = &self.typed_strided {
             return Some(kind.label(view.value_at(position)));
         }
         if let Some(Some(values)) = self.int64_typed.get() {
@@ -2095,7 +2132,7 @@ impl IndexLabels {
     }
 
     /// The instants of a typed DatetimeIndex backing (see
-    /// `temporal_strided`; NaT as i64::MIN), its labels never made.
+    /// `typed_strided`; NaT as i64::MIN), its labels never made.
     fn datetime64_nanos(&self) -> Option<Cow<'_, [i64]>> {
         self.datetime64_strided().map(Int64StridedLabels::values)
     }
@@ -2349,7 +2386,7 @@ impl Clone for IndexLabels {
             int64_two_affine: self.int64_two_affine.clone(),
             int64_strided: self.int64_strided.clone(),
             datetime64_affine: self.datetime64_affine,
-            temporal_strided: self.temporal_strided.clone(),
+            typed_strided: self.typed_strided.clone(),
             int64_typed,
             utf8_contiguous: self.utf8_contiguous.clone(),
         }
@@ -2410,6 +2447,29 @@ fn held_datetimes_monotonic<const INCREASING: bool>(labels: &[IndexLabel]) -> Op
         previous = stamp;
     }
     Some(true)
+}
+
+/// [`nanos_monotonic`] over a typed float64 backing's values: NaN anywhere
+/// (alone too) answers false, as pandas' monotonic flags - a float index
+/// holding NaN said increasing, its missing label ordered last (br-frankenpandas-smlca).
+fn floats_monotonic<const INCREASING: bool>(values: impl Iterator<Item = f64>) -> bool {
+    let mut previous = if INCREASING {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
+    for value in values {
+        let reversed = if INCREASING {
+            value < previous
+        } else {
+            value > previous
+        };
+        if value.is_nan() || reversed {
+            return false;
+        }
+        previous = value;
+    }
+    true
 }
 
 /// [`held_datetimes_monotonic`] over a typed backing's instants (NaT as
@@ -3282,12 +3342,32 @@ impl Index {
         {
             return kinds;
         }
-        let kinds = self
-            .labels
-            .iter()
-            .fold(LabelKinds::default(), |kinds, label| {
-                kinds.union(LabelKinds::of(label))
-            });
+        // Floats held as floats: float64 labels, and NaN's missing ones
+        // where it occurs, read off the values (br-frankenpandas-smlca).
+        let kinds = match self.labels.float64_values() {
+            Some(values) => {
+                let (mut number, mut missing) = (false, false);
+                for value in values {
+                    let nan = value.is_nan();
+                    number |= !nan;
+                    missing |= nan;
+                }
+                let mut kinds = LabelKinds::default();
+                if number {
+                    kinds = kinds.union(LabelKinds::FLOAT64);
+                }
+                if missing {
+                    kinds = kinds.union(LabelKinds::OTHER_NULL);
+                }
+                kinds
+            }
+            None => self
+                .labels
+                .iter()
+                .fold(LabelKinds::default(), |kinds, label| {
+                    kinds.union(LabelKinds::of(label))
+                }),
+        };
         self.remember_label_kinds(kinds);
         kinds
     }
@@ -3355,7 +3435,7 @@ impl Index {
     #[must_use]
     #[doc(hidden)]
     pub fn from_datetime64_values(nanos: Vec<i64>) -> Self {
-        Self::from_temporal_values(TemporalKind::Datetime, nanos)
+        Self::from_typed_values(StridedKind::Datetime, nanos)
     }
 
     /// [`Self::from_timedelta64`] over a typed backing, as
@@ -3366,25 +3446,106 @@ impl Index {
     #[must_use]
     #[doc(hidden)]
     pub fn from_timedelta64_values(nanos: Vec<i64>) -> Self {
-        Self::from_temporal_values(TemporalKind::Timedelta, nanos)
+        Self::from_typed_values(StridedKind::Timedelta, nanos)
     }
 
-    fn from_temporal_values(kind: TemporalKind, nanos: Vec<i64>) -> Self {
+    /// An index of float64 `values` over a typed backing, as
+    /// [`Self::from_datetime64_values`] holds instants: each value held as
+    /// its bits, NaN the missing label (as a Python float's NaN reads),
+    /// labels made only when something reads them, slices views and takes
+    /// gathers of the bits. An index of a float array was a 32 B enum a
+    /// row, made again by every slice and take (Index(floats) 5.3 ms a
+    /// million, pandas 0.005; br-frankenpandas-smlca).
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_f64_values(values: Vec<f64>) -> Self {
+        Self::from_f64_bits(
+            values
+                .into_iter()
+                .map(|value| value.to_bits().cast_signed())
+                .collect(),
+        )
+    }
+
+    /// [`Self::from_f64_values`] of the values' bits (`f64::to_bits`). No
+    /// value but NaN - or none - is declared float64, as pandas' (the
+    /// labels cannot tell it).
+    fn from_f64_bits(bits: Vec<i64>) -> Self {
+        let all_missing = bits
+            .iter()
+            .all(|&bits| f64::from_bits(bits.cast_unsigned()).is_nan());
+        let index = Self::from_typed_values(StridedKind::Float64, bits);
+        if all_missing {
+            index.with_declared_dtype(Some(DeclaredDtype::Float64))
+        } else {
+            index
+        }
+    }
+
+    /// The values of an index held as float64s ([`Self::from_f64_values`];
+    /// NaN its missing labels), no label made; `None` for any other backing.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn float64_label_values(&self) -> Option<Vec<f64>> {
+        Some(
+            self.labels
+                .float64_bits()?
+                .iter()
+                .map(|&bits| f64::from_bits(bits.cast_unsigned()))
+                .collect(),
+        )
+    }
+
+    /// The bits (`f64::to_bits`) of an index's values held as float64s, the
+    /// held buffer itself when contiguous - a numpy int64 copy of them
+    /// viewed as float64 is the values' array in one copy; `None` for any
+    /// other backing.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn float64_label_bits(&self) -> Option<Cow<'_, [i64]>> {
+        self.labels.float64_bits()
+    }
+
+    /// Each value of an index held as float64s mapped by `apply`, held as
+    /// float64s in turn: the bits read once and written once (an index's
+    /// arithmetic with a number went out to numpy and back, a label a
+    /// value; br-frankenpandas-smlca). `None` for any other backing.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn map_float64(&self, apply: impl Fn(f64) -> f64) -> Option<Self> {
+        let bits = self.labels.float64_bits()?;
+        Some(Self::from_f64_bits(
+            bits.iter()
+                .map(|&bits| {
+                    apply(f64::from_bits(bits.cast_unsigned()))
+                        .to_bits()
+                        .cast_signed()
+                })
+                .collect(),
+        ))
+    }
+
+    fn from_typed_values(kind: StridedKind, nanos: Vec<i64>) -> Self {
         let declared = match kind {
-            TemporalKind::Datetime => DeclaredDtype::Datetime64,
-            TemporalKind::Timedelta => DeclaredDtype::Timedelta64,
+            StridedKind::Datetime => DeclaredDtype::Datetime64,
+            StridedKind::Timedelta => DeclaredDtype::Timedelta64,
+            StridedKind::Float64 => DeclaredDtype::Float64,
         };
         let len = nanos.len();
         let values = Arc::new(nanos);
         let Some(view) = Int64StridedLabels::new(Arc::clone(&values), 0, 1, len) else {
             let nanos = Arc::unwrap_or_clone(values);
             return match kind {
-                TemporalKind::Datetime => Self::from_datetime64(nanos),
-                TemporalKind::Timedelta => Self::from_timedelta64(nanos),
+                StridedKind::Datetime => Self::from_datetime64(nanos),
+                StridedKind::Timedelta => Self::from_timedelta64(nanos),
+                StridedKind::Float64 => {
+                    Self::new(nanos.into_iter().map(|bits| kind.label(bits)).collect())
+                        .declared_if_empty(declared)
+                }
             };
         };
         Self {
-            labels: IndexLabels::new_temporal_strided(kind, view),
+            labels: IndexLabels::new_typed_strided(kind, view),
             name: None,
             label_identity: next_index_label_identity(),
             duplicate_cache: Arc::default(),
@@ -5054,6 +5215,9 @@ impl Index {
         if let Some(nanos) = self.labels.datetime64_nanos() {
             return nanos_monotonic::<true>(&nanos);
         }
+        if let Some(values) = self.labels.float64_values() {
+            return floats_monotonic::<true>(values);
+        }
         if let Some(answer) = self
             .labels
             .held()
@@ -5118,6 +5282,9 @@ impl Index {
     fn labels_descend(&self) -> bool {
         if let Some(nanos) = self.labels.datetime64_nanos() {
             return nanos_monotonic::<false>(&nanos);
+        }
+        if let Some(values) = self.labels.float64_values() {
+            return floats_monotonic::<false>(values);
         }
         if let Some(answer) = self
             .labels
@@ -6016,10 +6183,13 @@ impl Index {
         if let Some(values) = self.labels.take_i64_values(indices) {
             return self.propagate_name(Self::from_i64_values(values));
         }
-        // A typed DatetimeIndex takes its instants (lsn8d).
-        if let Some(nanos) = self.labels.datetime64_nanos() {
-            let taken = indices.iter().map(|&position| nanos[position]).collect();
-            return self.propagate_name(Self::from_datetime64_values(taken));
+        // A typed DatetimeIndex takes its instants (lsn8d), a typed
+        // TimedeltaIndex its durations, a float64 index its values' bits
+        // (br-frankenpandas-smlca).
+        if let Some(TypedStridedLabels { kind, view }) = &self.labels.typed_strided {
+            let values = view.values();
+            let taken = indices.iter().map(|&position| values[position]).collect();
+            return self.propagate_name(Self::from_typed_values(*kind, taken));
         }
         // Text in one buffer takes its bytes (br-frankenpandas-e186m).
         if let Some(taken) = self.take_utf8_contiguous(indices) {
@@ -6120,18 +6290,17 @@ impl Index {
                 Self::new_known_unique_int64_affine_range(range.value_at(start), step, len)?;
             return Some(self.propagate_name(index));
         }
-        let labels = if let Some(TemporalStridedLabels { kind, view }) =
-            self.labels.temporal_strided.as_ref()
-        {
-            IndexLabels::new_temporal_strided(*kind, view.sub_view(start, step, len)?)
-        } else if let Some(view) = self.labels.int64_strided.as_ref() {
-            IndexLabels::new_int64_strided(view.sub_view(start, step, len)?)
-        } else if let Some(Some(values)) = self.labels.int64_typed.get() {
-            let whole = Int64StridedLabels::new(Arc::clone(values), 0, 1, values.len())?;
-            IndexLabels::new_int64_strided(whole.sub_view(start, step, len)?)
-        } else {
-            return None;
-        };
+        let labels =
+            if let Some(TypedStridedLabels { kind, view }) = self.labels.typed_strided.as_ref() {
+                IndexLabels::new_typed_strided(*kind, view.sub_view(start, step, len)?)
+            } else if let Some(view) = self.labels.int64_strided.as_ref() {
+                IndexLabels::new_int64_strided(view.sub_view(start, step, len)?)
+            } else if let Some(Some(values)) = self.labels.int64_typed.get() {
+                let whole = Int64StridedLabels::new(Arc::clone(values), 0, 1, values.len())?;
+                IndexLabels::new_int64_strided(whole.sub_view(start, step, len)?)
+            } else {
+                return None;
+            };
         Some(self.propagate_name(Self {
             labels,
             name: None,
@@ -6522,6 +6691,20 @@ impl Index {
         {
             return self.propagate_name(Self::from_i64_values(values.as_ref().clone()));
         }
+        // Finite floats held as floats: each toward zero, an int index held
+        // typed - a label was made of each float and of each int (f.astype(
+        // int) 3.4 ms a million, pandas 0.59; br-frankenpandas-smlca). NaN or inf among them
+        // take the labels' way below.
+        let float = |bits: i64| f64::from_bits(bits.cast_unsigned());
+        if let Some(bits) = self.labels.float64_bits()
+            && bits
+                .iter()
+                .fold(true, |finite, &bits| finite & float(bits).is_finite())
+        {
+            return self.propagate_name(Self::from_i64_values(
+                bits.iter().map(|&bits| float(bits) as i64).collect(),
+            ));
+        }
         self.propagate_name(Self::new(
             self.labels
                 .iter()
@@ -6553,6 +6736,18 @@ impl Index {
     /// datetimes, timedeltas and non-numeric strings are pandas' TypeError /
     /// ValueError, reported as `InvalidArgument`. (fvsao.4)
     pub fn astype_float(&self) -> Result<Self, IndexError> {
+        // Ints held as ints, floats as floats: the floats held typed - a
+        // label was made per int and per float (an int index's
+        // astype(float) 12 ms a million, pandas 0.28; br-frankenpandas-smlca).
+        if self.labels.has_lazy_int64_backing()
+            && let Some(ints) = self.int64_label_values()
+        {
+            let values = ints.iter().map(|&value| value as f64).collect();
+            return Ok(self.propagate_name(Self::from_f64_values(values)));
+        }
+        if self.labels.float64_strided().is_some() {
+            return Ok(self.clone());
+        }
         let labels = self
             .labels
             .iter()
@@ -7804,6 +7999,11 @@ impl Index {
         if self.labels.has_lazy_int64_backing() {
             return "integer";
         }
+        // Floats held as floats (NaN among them, or alone): "floating" by
+        // either branch below.
+        if self.labels.float64_strided().is_some() {
+            return "floating";
+        }
         // Instants held as instants are Datetime64 labels, NaT among them:
         // "datetime64" by either branch below, without reading a million of
         // them per call (an empty slice of a DatetimeIndex asked its dtype:
@@ -7908,6 +8108,9 @@ impl Index {
         }
         if let Some(nanos) = self.labels.datetime64_nanos() {
             return nanos.contains(&i64::MIN);
+        }
+        if let Some(mut values) = self.labels.float64_values() {
+            return values.any(f64::is_nan);
         }
         self.labels.iter().any(IndexLabel::is_missing)
     }
@@ -25998,8 +26201,8 @@ mod tests {
         assert!(DatetimeIndex::from_index(Index::from_i64_values(vec![1, 2])).is_err());
         // A strided view reads every other instant; an empty slice of it,
         // its start past the buffer, reads nothing.
-        let view = crate::IndexLabels::new_temporal_strided(
-            crate::TemporalKind::Datetime,
+        let view = crate::IndexLabels::new_typed_strided(
+            crate::StridedKind::Datetime,
             crate::Int64StridedLabels::new(Arc::new(vec![1, 2, 3, 4, 5]), 0, 2, 3).unwrap(),
         );
         assert_eq!(view.datetime64_nanos().unwrap().as_ref(), &[1, 3, 5]);
@@ -26048,9 +26251,8 @@ mod tests {
         let fresh = Index::from_datetime64_values(vec![1, 2, 3]);
         let back = fresh.stepped(2, -1, 3).unwrap();
         assert!(fresh.labels.materialized.get().is_none());
-        let buffer = |index: &Index| {
-            Arc::clone(&index.labels.temporal_strided.as_ref().unwrap().view.values)
-        };
+        let buffer =
+            |index: &Index| Arc::clone(&index.labels.typed_strided.as_ref().unwrap().view.values);
         assert!(
             Arc::ptr_eq(&buffer(&back), &buffer(&fresh)),
             "a view, nothing copied"
@@ -26972,6 +27174,88 @@ mod tests {
         );
         assert_eq!(carried.labels(), [utf8("1|y"), utf8("2|z")].as_slice());
         assert!(!Index::from_range(0, 3, 1).holds_text_buffer());
+    }
+
+    #[test]
+    fn float64_index_held_as_floats_smlca() {
+        // A float index held as its values' bits: NaN the missing label,
+        // -0.0 and inf kept; slices, steps and takes stay held as floats
+        // (br-frankenpandas-smlca).
+        let nan_label = IndexLabel::Null(fp_types::NullKind::NaN);
+        let float = |value: f64| IndexLabel::Float64(OrderedF64(value));
+        let index = Index::from_f64_values(vec![2.5, f64::NAN, -0.0, f64::INFINITY, 2.5]);
+        assert_eq!(
+            index.labels(),
+            &[
+                float(2.5),
+                nan_label.clone(),
+                float(-0.0),
+                float(f64::INFINITY),
+                float(2.5)
+            ]
+        );
+        assert_eq!(index.dtype(), "float64");
+        assert_eq!(index.inferred_type(), "floating");
+        assert!(index.hasnans());
+        assert_eq!(
+            index.label_kinds(),
+            LabelKinds::FLOAT64.union(LabelKinds::OTHER_NULL)
+        );
+        let sliced = index.slice(1, 3);
+        assert!(sliced.float64_label_values().is_some());
+        assert_eq!(
+            sliced.labels(),
+            &[nan_label.clone(), float(-0.0), float(f64::INFINITY)]
+        );
+        let taken = index.take(&[4, 1, 0]);
+        assert_eq!(taken.labels(), &[float(2.5), nan_label, float(2.5)]);
+        assert!(taken.float64_label_values().is_some());
+        let doubled = index.map_float64(|value| value * 2.0).unwrap();
+        assert_eq!(doubled.labels()[0], float(5.0));
+        assert!(doubled.labels()[1].is_missing());
+        // Monotonic flags: in order without NaN, never with it (a NaN alone
+        // too), as pandas'.
+        let ascending = Index::from_f64_values(vec![-1.0, 0.0, -0.0, 3.0]);
+        assert!(ascending.is_monotonic_increasing());
+        assert!(!ascending.is_monotonic_decreasing());
+        assert!(!Index::from_f64_values(vec![1.0, 2.0, f64::NAN]).is_monotonic_increasing());
+        assert!(!Index::from_f64_values(vec![f64::NAN]).is_monotonic_decreasing());
+        // Casts: ints widened and held as floats; finite floats toward zero.
+        let ints = Index::from_i64_values(vec![3, -4])
+            .astype("float64")
+            .unwrap();
+        assert_eq!(ints.float64_label_values(), Some(vec![3.0, -4.0]));
+        let truncated = Index::from_f64_values(vec![1.9, -2.7])
+            .astype("int64")
+            .unwrap();
+        assert_eq!(
+            truncated.labels(),
+            &[IndexLabel::Int64(1), IndexLabel::Int64(-2)]
+        );
+        // NaN alone (or nothing) is declared float64: the labels cannot tell.
+        let missing = Index::from_f64_values(vec![f64::NAN, f64::NAN]);
+        assert_eq!(missing.dtype(), "float64");
+        assert_eq!(Index::from_f64_values(Vec::new()).dtype(), "float64");
+        // NEGATIVE: other backings hold no floats; NaN cast to int keeps
+        // its missing label (the Python layer refuses it, as pandas).
+        assert!(
+            Index::from_i64_values(vec![1, 2])
+                .float64_label_values()
+                .is_none()
+        );
+        assert!(
+            Index::new(vec![float(1.5)])
+                .float64_label_values()
+                .is_none()
+        );
+        assert!(
+            Index::from_i64_values(vec![1])
+                .map_float64(|value| value)
+                .is_none()
+        );
+        let with_nan = Index::from_f64_values(vec![1.5, f64::NAN]).astype_int();
+        assert_eq!(with_nan.labels()[0], IndexLabel::Int64(1));
+        assert!(with_nan.labels()[1].is_missing());
     }
 
     #[test]

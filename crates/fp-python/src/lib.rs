@@ -9262,19 +9262,15 @@ fn typed_index_of(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
             data,
         )?)));
     }
-    // A float64 array: its labels read off the buffer - each went out to a
+    // A float64 array: its values read off the buffer - each went out to a
     // Python float through tolist and was read back (Index(floats) of a
-    // million 282 ms, pandas a view; br-frankenpandas-e186m). All NaN, the
-    // labels cannot tell the dtype: it is declared, pandas' float64.
+    // million 282 ms, pandas a view; br-frankenpandas-e186m) - and held as
+    // floats, where a label was made of each (5.3 ms; br-frankenpandas-smlca).
     if dtype_name == "float64" {
-        let labels = float_index_labels_of(ndarray_elements::<f64>(data.py(), data)?);
-        let all_missing = labels.iter().all(IndexLabel::is_missing);
-        let index = Index::new(labels);
-        return Ok(Some(if all_missing {
-            index.with_declared_dtype(Some(fp_index::DeclaredDtype::Float64))
-        } else {
-            index
-        }));
+        return Ok(Some(Index::from_f64_values(ndarray_elements::<f64>(
+            data.py(),
+            data,
+        )?)));
     }
     // A narrower numpy array (int8 ... uint64, float32) is an index of its
     // values under that width, as pandas' (it read the values one by one
@@ -9346,6 +9342,45 @@ fn object_ndarray_index(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
 /// not).
 fn each_i64<T>(values: &[i64], apply: impl Fn(i64) -> T) -> Vec<T> {
     values.iter().map(|&value| apply(value)).collect()
+}
+
+/// `apply` over an index's numbers as float64s, held as float64s: floats
+/// held as floats, or (`ints`) an int64 index's ints widened as numpy's
+/// float64 arithmetic widens them (br-frankenpandas-smlca). None for any other index.
+fn map_index_floats(index: &Index, ints: bool, apply: impl Fn(f64) -> f64) -> Option<Index> {
+    if let Some(mapped) = index.map_float64(&apply) {
+        return Some(mapped);
+    }
+    if !ints || !index.has_int64_backing() {
+        return None;
+    }
+    let values = index.int64_label_values()?;
+    Some(Index::from_f64_values(
+        values.iter().map(|&value| apply(value as f64)).collect(),
+    ))
+}
+
+/// pandas' IntCastingNaNError for an int cast of a float index holding NaN
+/// or inf (NaN stayed a missing label, inf became i64's ends; br-frankenpandas-smlca).
+fn refuse_non_finite_int_cast(index: &Index) -> PyResult<()> {
+    let non_finite = match index.float64_label_bits() {
+        Some(bits) => bits.iter().fold(false, |any, &bits| {
+            any | !f64::from_bits(bits.cast_unsigned()).is_finite()
+        }),
+        None => {
+            matches!(index.dtype(), "float64" | "float32")
+                && index.labels().iter().any(|label| match label {
+                    IndexLabel::Float64(value) => !value.0.is_finite(),
+                    _ => label.is_missing(),
+                })
+        }
+    };
+    if non_finite {
+        return Err(PyErr::new::<IntCastingNaNError, _>(
+            "Cannot convert non-finite values (NA or inf) to integer",
+        ));
+    }
+    Ok(())
 }
 
 /// Whether `data` is a one-dimensional native float64 numpy array (a
@@ -12569,6 +12604,27 @@ fn nargsort(index: &Index, ascending: bool, na_first: bool) -> Vec<usize> {
     if let Some(values) = index.cached_int64_label_values().flatten() {
         return fp_columnar::radix_argsort_i64(&values, ascending);
     }
+    // Floats held as floats: the stable radix argsort of the numbers, the
+    // NaN positions (the missing labels) in order before or after them -
+    // the labels were made and compared (f.sort_values() of a million 328
+    // ms, pandas 39; br-frankenpandas-smlca).
+    if let Some(values) = index.float64_label_values() {
+        if !values.iter().any(|value| value.is_nan()) {
+            return fp_columnar::radix_argsort_f64(&values, ascending);
+        }
+        let (present, missing): (Vec<usize>, Vec<usize>) =
+            (0..values.len()).partition(|&position| !values[position].is_nan());
+        let numbers: Vec<f64> = present.iter().map(|&position| values[position]).collect();
+        let order: Vec<usize> = fp_columnar::radix_argsort_f64(&numbers, ascending)
+            .into_iter()
+            .map(|rank| present[rank])
+            .collect();
+        return if na_first {
+            [missing, order].concat()
+        } else {
+            [order, missing].concat()
+        };
+    }
     let labels = index.labels();
     let order = if ascending {
         index.argsort()
@@ -13602,6 +13658,40 @@ impl PyIndex {
                 return Ok(Py::new(py, Self { inner })?.into_any());
             }
         }
+        // Floats held as floats and a Python number (an int in int64's
+        // range), or an int64 index and a float or a true division: numpy's
+        // float64 + - * / over the values as they are held, floats held
+        // typed - they went out to a numpy array and came back a label at a
+        // time (f + 1 of a million 7.4 ms, pandas 0.15; br-frankenpandas-smlca).
+        let float_operand = other.is_instance_of::<pyo3::types::PyFloat>();
+        let int_operand = other.is_instance_of::<pyo3::types::PyInt>()
+            && !other.is_instance_of::<pyo3::types::PyBool>()
+            && other.extract::<i64>().is_ok();
+        let division = matches!(op, "__truediv__" | "__rtruediv__");
+        if self.inner.declared_dtype().is_none()
+            && (float_operand || int_operand)
+            && (division
+                || matches!(
+                    op,
+                    "__add__" | "__radd__" | "__sub__" | "__rsub__" | "__mul__" | "__rmul__"
+                ))
+            && let Ok(number) = other.extract::<f64>()
+        {
+            let ints = float_operand || division;
+            let index = &self.inner;
+            let mapped = match op {
+                "__add__" | "__radd__" => map_index_floats(index, ints, |value| value + number),
+                "__sub__" => map_index_floats(index, ints, |value| value - number),
+                "__rsub__" => map_index_floats(index, ints, |value| number - value),
+                "__mul__" | "__rmul__" => map_index_floats(index, ints, |value| value * number),
+                "__truediv__" => map_index_floats(index, ints, |value| value / number),
+                _ => map_index_floats(index, ints, |value| number / value),
+            };
+            if let Some(mapped) = mapped {
+                let inner = mapped.rename_index(self.inner.name().cloned());
+                return Ok(Py::new(py, Self { inner })?.into_any());
+            }
+        }
         let labels = index_ndarray(py, &self.inner)?;
         let (other, name) = match plain_index_ref(other) {
             Ok(index) => (
@@ -13906,6 +13996,11 @@ impl PyIndex {
                 .call_method0("tolist")?
                 .cast_into::<PyList>()?
                 .unbind());
+        }
+        // Floats held as floats: a Python float each, no label made
+        // (br-frankenpandas-smlca).
+        if let Some(values) = self.inner.float64_label_values() {
+            return Ok(PyList::new(py, values)?.unbind());
         }
         // An instant of a zoned index - an object index of a tz-aware one's
         // Timestamps - is its Timestamp in the zone (the naive UTC clock;
@@ -14718,6 +14813,26 @@ impl PyIndex {
         let Some(value) = value.filter(|v| !v.is_none()) else {
             return Ok(self.clone());
         };
+        // Floats held as floats and a number: each NaN that number, the
+        // floats held typed - every label was made and cloned (br-frankenpandas-smlca).
+        if !downcast
+            .0
+            .as_ref()
+            .is_some_and(|downcast| !downcast.is_none())
+            && self.inner.declared_dtype().is_none()
+            && (value.is_instance_of::<pyo3::types::PyFloat>()
+                || (value.is_instance_of::<pyo3::types::PyInt>()
+                    && !value.is_instance_of::<pyo3::types::PyBool>()
+                    && value.extract::<i64>().is_ok()))
+            && let Ok(fill) = value.extract::<f64>()
+            && let Some(filled) = self
+                .inner
+                .map_float64(|value| if value.is_nan() { fill } else { value })
+        {
+            return Ok(PyIndex {
+                inner: filled.rename_index(self.inner.name().cloned()),
+            });
+        }
         let labels = self.inner.labels();
         // pandas fills, then refuses a downcast other than None when there
         // was something to fill.
@@ -14732,13 +14847,9 @@ impl PyIndex {
             ));
         }
         // An int fills a float index as a float (Index([1.0, nan]).fillna(0)
-        // is float64 [1.0, 0.0]; it made an object index).
-        let float_index = labels
-            .iter()
-            .any(|label| matches!(label, IndexLabel::Float64(_)))
-            && labels
-                .iter()
-                .all(|label| matches!(label, IndexLabel::Float64(_) | IndexLabel::Null(_)));
+        // is float64 [1.0, 0.0]; it made an object index) - one of NaN alone
+        // too (it filled ints; br-frankenpandas-smlca).
+        let float_index = matches!(self.inner.dtype(), "float64" | "float32");
         let fill_lbl = match py_to_index_label(value)? {
             IndexLabel::Int64(value) if float_index => {
                 IndexLabel::Float64(OrderedF64(value as f64))
@@ -15066,6 +15177,9 @@ impl PyIndex {
             return Ok(Py::new(py, self.astype_name(masked.name())?)?.into_any());
         }
         if let Some((width, false)) = NumericWidth::parse(&text) {
+            if !width.is_float() {
+                refuse_non_finite_int_cast(&self.inner)?;
+            }
             return Ok(Py::new(py, self.astype_name(width.name(false))?)?.into_any());
         }
         // astype(object) keeps the values - ints stay ints in an object
@@ -15122,6 +15236,9 @@ impl PyIndex {
                 .with_range_span(None)
                 .with_declared_dtype(Some(fp_index::DeclaredDtype::Object));
             return Ok(Py::new(py, Self { inner })?.into_any());
+        }
+        if name == "int64" {
+            refuse_non_finite_int_cast(&self.inner)?;
         }
         Ok(Py::new(py, self.astype_name(&name)?)?.into_any())
     }
@@ -41435,6 +41552,30 @@ fn index_values_column(index: &Index) -> PyResult<Column> {
         return column.map_err(column_error_to_py);
     }
     let object = index.declared_dtype() == Some(fp_index::DeclaredDtype::Object);
+    // Floats held as floats: their float64 column, NaN missing - as a
+    // Series of the float array is - where a Scalar was made of each label
+    // (f.to_series() 6.4 ms a million, pandas 0.17; an index of NaN alone,
+    // or none, was an object column; br-frankenpandas-smlca).
+    if !object
+        && index.width().is_none()
+        && let Some(values) = index.float64_label_values()
+    {
+        return Ok(Column::from_f64_values_owned(values));
+    }
+    // No label shows a type: an empty index's column is its dtype's
+    // (Index(np.array([], int)).to_series() was object, pandas int64;
+    // br-frankenpandas-smlca).
+    if !object && index.is_empty() {
+        match index.dtype() {
+            "int64" => return Ok(Column::from_i64_values(Vec::new())),
+            "float64" => return Ok(Column::from_f64_values(Vec::new())),
+            "bool" => return Column::new(DType::Bool, Vec::new()).map_err(column_error_to_py),
+            "timedelta64[ns]" => {
+                return Column::new(DType::Timedelta64, Vec::new()).map_err(column_error_to_py);
+            }
+            _ => {}
+        }
+    }
     if !object && let Some(values) = index.cached_int64_label_values().flatten() {
         let column = Column::from_i64_values_owned(values.as_ref().clone());
         return match index.width() {
@@ -41502,6 +41643,12 @@ fn index_ndarray<'py>(py: Python<'py>, index: &Index) -> PyResult<Bound<'py, PyA
         return array.call_method1("astype", (width.name(false),));
     }
     if !index.is_empty() {
+        // Floats held as floats: their bits copied out once, viewed as
+        // float64 (each label was read; f.values 2.3 ms a million, pandas a
+        // view; br-frankenpandas-smlca).
+        if let Some(bits) = index.float64_label_bits() {
+            return int_ndarray(py, &bits, "int64")?.call_method1("view", ("float64",));
+        }
         if let Some(values) = index.int64_label_values() {
             return int_ndarray(py, &values, "int64");
         }

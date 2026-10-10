@@ -37173,3 +37173,99 @@ def _nna8h_outcome(case: str, m: Any) -> Any:
 @pytest.mark.parametrize("case", list(_NNA8H_CASES))
 def test_stack_like_pandas_nna8h(case: str) -> None:
     assert _nna8h_outcome(case, fpd) == _nna8h_outcome(case, pd)
+
+
+# br-frankenpandas-smlca: a float64 Index held as floats (an array's) reads, slices,
+# takes, sorts, casts and computes as pandas' - NaN its missing label, -0.0
+# and inf kept, monotonic flags false where NaN occurs. NEGATIVE: an int
+# cast of NaN or inf raises IntCastingNaNError; an object or float32 index,
+# a bool or out-of-range int operand and an int index plus an int keep their
+# own paths' dtypes.
+_SMLCA_FLOATS = np.array([2.5, -1.0, np.nan, 0.0, -0.0, 7.25, 2.5, np.inf])
+_SMLCA_FINITE = np.array([3.75, -2.5, 0.0, 9.0, 1.5])
+_SMLCA_INTS = np.array([5, -3, 0, 12, 7])
+
+
+def _smlca_flags(index: Any) -> Any:
+    return (
+        str(index.dtype),
+        index.inferred_type,
+        index.hasnans,
+        index.is_monotonic_increasing,
+        index.is_monotonic_decreasing,
+        index.is_unique,
+    )
+
+
+_SMLCA_CASES = {
+    "values": lambda m: m.Index(_SMLCA_FLOATS).values,
+    "tolist": lambda m: m.Index(_SMLCA_FLOATS).tolist(),
+    "flags": lambda m: _smlca_flags(m.Index(_SMLCA_FLOATS)),
+    "sorted flags": lambda m: _smlca_flags(m.Index(np.array([-1.0, 0.0, 0.0, 2.5]))),
+    "step slice": lambda m: m.Index(_SMLCA_FLOATS)[::3],
+    "reversed step": lambda m: m.Index(_SMLCA_FLOATS)[::-2],
+    "take": lambda m: m.Index(_SMLCA_FLOATS).take([7, 2, 0, 2]),
+    "plus float": lambda m: m.Index(_SMLCA_FLOATS) + 1.5,
+    "radd int": lambda m: 3 + m.Index(_SMLCA_FLOATS),
+    "sub": lambda m: m.Index(_SMLCA_FLOATS) - 2,
+    "rsub": lambda m: 10.0 - m.Index(_SMLCA_FLOATS),
+    "mul named": lambda m: m.Index(_SMLCA_FLOATS, name="k") * -0.5,
+    "truediv": lambda m: m.Index(_SMLCA_FLOATS) / 4,
+    "rtruediv": lambda m: 1 / m.Index(_SMLCA_FLOATS),
+    "int index plus float": lambda m: m.Index(_SMLCA_INTS) + 0.5,
+    "int index truediv": lambda m: m.Index(_SMLCA_INTS) / 2,
+    "int index rtruediv": lambda m: 6 / m.Index(_SMLCA_INTS),
+    "sort_values": lambda m: m.Index(_SMLCA_FLOATS).sort_values(),
+    "sort descending": lambda m: m.Index(_SMLCA_FLOATS).sort_values(ascending=False),
+    "sort NaN first": lambda m: m.Index(_SMLCA_FLOATS).sort_values(na_position="first"),
+    "sort indexer": lambda m: m.Index(_SMLCA_FINITE).sort_values(return_indexer=True),
+    "argsort": lambda m: m.Index(_SMLCA_FINITE).argsort(),
+    "astype float of ints": lambda m: m.Index(_SMLCA_INTS, name="n").astype("float64"),
+    "astype float of floats": lambda m: m.Index(_SMLCA_FLOATS).astype(float),
+    "astype int finite": lambda m: m.Index(_SMLCA_FINITE).astype("int64"),
+    "to_series": lambda m: m.Index(_SMLCA_FLOATS, name="v").to_series(),
+    "to_frame": lambda m: m.Index(_SMLCA_FLOATS).to_frame().values,
+    "empty to_series": lambda m: m.Index(np.array([], dtype=float)).to_series(),
+    "empty int to_series": lambda m: m.Index(np.array([], dtype="int64")).to_series(),
+    "fillna": lambda m: m.Index(_SMLCA_FLOATS).fillna(0),
+    "fillna NaN alone": lambda m: m.Index(np.array([np.nan, np.nan])).fillna(1),
+    "isna": lambda m: m.Index(_SMLCA_FLOATS).isna(),
+    "dropna": lambda m: m.Index(_SMLCA_FLOATS).dropna(),
+    "unique": lambda m: m.Index(_SMLCA_FLOATS).unique(),
+    "get_loc NaN": lambda m: m.Index(_SMLCA_FINITE.tolist() + [np.nan]).get_loc(np.nan),
+    "series loc": lambda m: int(m.Series(range(5), index=m.Index(_SMLCA_FINITE)).loc[9.0]),
+    "series reindex": lambda m: m.Series(range(5), index=m.Index(_SMLCA_FINITE)).reindex([0.0, 1.5, 4.0]),
+    "astype int with NaN (NEGATIVE)": lambda m: m.Index(_SMLCA_FLOATS).astype("int64"),
+    "astype int32 with inf (NEGATIVE)": lambda m: m.Index(np.array([1.0, np.inf])).astype("int32"),
+    "object index plus one (NEGATIVE)": lambda m: m.Index(_SMLCA_FINITE).astype(object) + 1,
+    "float32 plus one (NEGATIVE)": lambda m: m.Index(_SMLCA_FINITE.astype("float32")) + 1,
+    "bool operand (NEGATIVE)": lambda m: m.Index(_SMLCA_FINITE) + True,
+    "huge int operand (NEGATIVE)": lambda m: m.Index(_SMLCA_FINITE) + 2**70,
+    "int index plus int (NEGATIVE)": lambda m: m.Index(_SMLCA_INTS) + 2,
+    "NaN last monotonic (NEGATIVE)": lambda m: _smlca_flags(m.Index(np.array([1.0, 2.0, np.nan]))),
+}
+
+
+def _smlca_outcome(case: str, m: Any) -> Any:
+    def describe(out: Any) -> Any:
+        if isinstance(out, tuple):
+            return tuple(describe(part) for part in out)
+        if not hasattr(out, "tolist"):
+            return repr(out)
+        shown = [type(out).__name__ if not isinstance(out, np.ndarray) else "ndarray", str(out.dtype)]
+        if hasattr(out, "name") and not isinstance(out, np.ndarray):
+            shown.append(repr(out.name))
+        if hasattr(out, "index") and not isinstance(out, np.ndarray):
+            shown.append([repr(label) for label in out.index.tolist()])
+        return [repr(value) for value in out.tolist()], shown
+
+    try:
+        return describe(_SMLCA_CASES[case](m))
+    except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+        return type(error).__name__
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SMLCA_CASES))
+def test_float_index_like_pandas_smlca(case: str) -> None:
+    assert _smlca_outcome(case, fpd) == _smlca_outcome(case, pd)
