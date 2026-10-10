@@ -35779,3 +35779,197 @@ def test_multiindex_sort_index_like_pandas_e186m(case: str) -> None:
         return ([repr(label) for label in out.index.tolist()], values)
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a MultiIndex shares its levels among the frames
+# and indexes made from it (swaplevel / droplevel / rename / take read them
+# borrowed), a level's int labels group typed for groupby(level=), and
+# loc / xs on an outer key read the level in place - pandas' rows, labels,
+# names and errors for each. NEGATIVE: a missing outer key and an xs key
+# raise KeyError, a level past the last raises, and an edit of one frame's
+# index names leaves its source alone.
+def _e186mlv_frame(m: Any) -> Any:
+    n = 60
+    return m.DataFrame(
+        {
+            "a": [(i * 7) % 5 for i in range(n)],
+            "b": [f"b{(i * 3) % 4}" for i in range(n)],
+            "x": [float(i) for i in range(n)],
+        }
+    ).set_index(["a", "b"])
+
+
+def _e186mlv_renamed(df: Any) -> Any:
+    out = df.copy()
+    out.index = out.index.rename(["p", "q"])
+    return [df.index.names, out.index.names]
+
+
+_E186MLV_CASES = {
+    "swaplevel": lambda df: df.swaplevel(),
+    "swaplevel twice": lambda df: df.swaplevel().swaplevel(),
+    "reorder_levels": lambda df: df.reorder_levels(["b", "a"]),
+    "droplevel a": lambda df: df.droplevel("a"),
+    "droplevel b": lambda df: df["x"].droplevel(1),
+    "loc outer": lambda df: df.loc[3],
+    "loc outer list": lambda df: df.loc[[4, 1]],
+    "loc pair": lambda df: df.loc[(2, "b1")],
+    "xs inner": lambda df: df.xs("b2", level="b"),
+    "xs outer": lambda df: df["x"].xs(0),
+    "groupby level 0": lambda df: df.groupby(level=0).sum(),
+    "groupby level b": lambda df: df.groupby(level="b")["x"].mean(),
+    "series groupby level": lambda df: df["x"].groupby(level="a").max(),
+    "level values": lambda df: df.index.get_level_values(1).tolist(),
+    "levels": lambda df: [list(level) for level in df.index.levels],
+    "unique": lambda df: df.index.unique().tolist(),
+    "take": lambda df: df.iloc[[5, 0, 33]],
+    "head then swap": lambda df: df.head(9).swaplevel().sort_index(),
+    "pickle": lambda df: pickle.loads(pickle.dumps(df)),
+    "rename leaves source (NEGATIVE)": _e186mlv_renamed,
+    "loc missing outer (NEGATIVE)": lambda df: df.loc[9],
+    "xs missing (NEGATIVE)": lambda df: df.xs("b9", level="b"),
+    "level past last (NEGATIVE)": lambda df: df.index.get_level_values(2),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MLV_CASES))
+def test_multiindex_shared_levels_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _E186MLV_CASES[case](_e186mlv_frame(m))
+        except (KeyError, IndexError) as error:
+            return type(error).__name__
+        if isinstance(out, list):
+            return out
+        values = out.tolist() if not hasattr(out, "columns") else out.iloc[:, 0].tolist()
+        return ([repr(label) for label in out.index.tolist()], list(out.index.names), values)
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a naive DatetimeIndex's .date makes each
+# datetime.date from its instant (NaT stays NaT, dates before 1970 and after
+# 2038 too), and a groupby on those dates sums like pandas. NEGATIVE: a
+# zoned index's dates are its wall clocks', not its UTC instants'.
+def _e186mdt_index(m: Any, tz: Any = None) -> Any:
+    stamps = ["1969-12-31 23:59", "2021-03-01 00:00", None, "2021-03-01 23:00", "2040-06-15 12:00", "1900-01-01 06:00"]
+    return m.DatetimeIndex(pd.to_datetime(stamps).values, tz=tz) if tz is None else m.DatetimeIndex(stamps).tz_localize(tz)
+
+
+def _e186mdt_groupby(m: Any) -> Any:
+    n = 3000
+    dates = pd.date_range("2021-01-01", periods=n, freq="37min").values
+    frame = m.DataFrame({"x": [float(i % 11) for i in range(n)]}, index=m.DatetimeIndex(dates))
+    out = frame.groupby(frame.index.date)["x"].sum()
+    return [str(label) for label in out.index.tolist()], out.tolist()
+
+
+_E186MDT_CASES = {
+    "naive": lambda m: [repr(d) for d in _e186mdt_index(m).date],
+    "naive dtype": lambda m: str(_e186mdt_index(m).date.dtype),
+    "groupby dates": _e186mdt_groupby,
+    "zoned wall dates (NEGATIVE)": lambda m: [repr(d) for d in _e186mdt_index(m, "Asia/Tokyo").date],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MDT_CASES))
+def test_datetimeindex_date_like_pandas_e186m(case: str) -> None:
+    assert _E186MDT_CASES[case](fpd) == _E186MDT_CASES[case](pd)
+
+
+# br-frankenpandas-e186m: a MultiIndex frame's reset_index makes an int or
+# text level its typed column (int64, object), and a take of its rows -
+# sort_index, iloc, head, a Series' sort_index - gathers the flat labels as
+# bytes and the level labels in row chunks: pandas' columns, dtypes, rows
+# and labels for each. NEGATIVE: a level holding a missing label (text or
+# int) and float / bool / datetime levels keep their own columns.
+def _e186mrs_frame(m: Any, a: Any = None, b: Any = None) -> Any:
+    n = 90
+    a = [(i * 7) % 5 for i in range(n)] if a is None else a
+    b = [f"b{(i * 3) % 4}" for i in range(n)] if b is None else b
+    return m.DataFrame({"a": a, "b": b, "x": [float(i) for i in range(n)]}).set_index(["a", "b"])
+
+
+def _e186mrs_reset(m: Any, **levels: Any) -> Any:
+    out = _e186mrs_frame(m, **levels).reset_index()
+    return [str(dtype) for dtype in out.dtypes], [[repr(v) for v in out[c].tolist()] for c in out.columns]
+
+
+_E186MRS_CASES = {
+    "reset int and text": lambda m: _e186mrs_reset(m),
+    "reset text ops": lambda m: _e186mrs_frame(m).reset_index()["b"].str.upper().tolist()[:7],
+    "reset unnamed": lambda m: list(_e186mrs_frame(m).rename_axis([None, None]).reset_index().columns),
+    "reset negative ints": lambda m: _e186mrs_reset(m, a=[-(i % 3) * 10**12 for i in range(90)]),
+    "reset empty text": lambda m: _e186mrs_reset(m, b=["" if i % 4 else "z" for i in range(90)]),
+    "reset sorted": lambda m: [repr(v) for v in _e186mrs_frame(m).sort_index().reset_index()["b"].tolist()],
+    "sort rows": lambda m: [repr(v) for v in _e186mrs_frame(m).sort_index(ascending=False).index.tolist()],
+    "series sort": lambda m: [repr(v) for v in _e186mrs_frame(m)["x"].sort_index().index.tolist()],
+    "series sort values": lambda m: _e186mrs_frame(m)["x"].sort_index(ascending=[False, True]).tolist(),
+    "iloc step": lambda m: [repr(v) for v in _e186mrs_frame(m).iloc[::3].index.tolist()],
+    "head names": lambda m: list(_e186mrs_frame(m).head(40).index.names),
+    "take then loc": lambda m: _e186mrs_frame(m).sort_index().loc[(3, "b2"), "x"].tolist(),
+    "missing text level (NEGATIVE)": lambda m: _e186mrs_reset(m, b=[None if i % 9 == 0 else f"b{i % 4}" for i in range(90)]),
+    "int level with a missing label (NEGATIVE)": lambda m: _e186mrs_reset(m, a=[None if i % 8 == 0 else i % 5 for i in range(90)]),
+    "float level (NEGATIVE)": lambda m: _e186mrs_reset(m, a=[i / 4 for i in range(90)]),
+    "bool level (NEGATIVE)": lambda m: _e186mrs_reset(m, a=[i % 3 == 0 for i in range(90)]),
+    "datetime level (NEGATIVE)": lambda m: _e186mrs_reset(m, a=list(pd.date_range("2024-01-01", periods=90, freq="D"))),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MRS_CASES))
+def test_multiindex_reset_and_take_like_pandas_e186m(case: str) -> None:
+    assert _E186MRS_CASES[case](fpd) == _E186MRS_CASES[case](pd)
+
+
+# br-frankenpandas-e186m: a float64 column's raw rolling / expanding apply
+# windows are views of one float64 array, each window's missing values
+# counted from a running count: pandas' answers for sums, means, lengths and
+# the array each window is (type, dtype, NaN kept), centred, with
+# min_periods, args / kwargs, an int column, an all-missing stretch.
+# NEGATIVE: raw=False still passes a Series with its labels.
+def _e186mra_series(m: Any, ints: bool = False) -> Any:
+    values = [float(i % 7) if i % 5 else float("nan") for i in range(40)]
+    if ints:
+        values = [i % 7 for i in range(40)]
+    return m.Series(values, index=[f"r{i}" for i in range(40)])
+
+
+def _e186mra_gap(m: Any) -> Any:
+    values = [float("nan") if 10 <= i < 25 else float(i) for i in range(40)]
+    return m.Series(values)
+
+
+_E186MRA_CASES = {
+    "sum": lambda m: _e186mra_series(m).rolling(5).apply(np.sum, raw=True).tolist(),
+    "nansum min_periods": lambda m: _e186mra_series(m).rolling(5, min_periods=2).apply(np.nansum, raw=True).tolist(),
+    "mean centred": lambda m: _e186mra_series(m).rolling(4, center=True, min_periods=1).apply(lambda x: x.mean(), raw=True).tolist(),
+    "length": lambda m: _e186mra_series(m).rolling(6, min_periods=0).apply(len, raw=True).tolist(),
+    "array kind": lambda m: _e186mra_series(m).rolling(3).apply(lambda x: float(isinstance(x, np.ndarray) and x.dtype == np.float64), raw=True).tolist(),
+    "args kwargs": lambda m: _e186mra_series(m).rolling(3).apply(lambda x, a, b=0: x.max() * a + b, raw=True, args=(2,), kwargs={"b": 1}).tolist(),
+    "int column": lambda m: _e186mra_series(m, ints=True).rolling(4).apply(np.prod, raw=True).tolist(),
+    "expanding": lambda m: _e186mra_series(m).expanding(min_periods=3).apply(np.nanmax, raw=True).tolist(),
+    "all-missing stretch": lambda m: _e186mra_gap(m).rolling(5, min_periods=0).apply(lambda x: float(np.isnan(x).sum()), raw=True).tolist(),
+    "gap nansum": lambda m: _e186mra_gap(m).rolling(5, min_periods=1).apply(np.nansum, raw=True).tolist(),
+    "frame": lambda m: _e186mra_series(m).to_frame("v").assign(w=lambda d: d["v"] * 2).rolling(3).apply(np.sum, raw=True).values.tolist(),
+    "expanding frame": lambda m: _e186mra_series(m).to_frame("v").assign(w=lambda d: d["v"] - 1).expanding(2).apply(np.nansum, raw=True).values.tolist(),
+    "series labels (NEGATIVE)": lambda m: _e186mra_series(m).rolling(3).apply(lambda x: float(x.index[0][1:]), raw=False).tolist(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MRA_CASES))
+def test_raw_window_apply_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        return [None if isinstance(v, float) and math.isnan(v) else v for v in _flatten_e186mra(_E186MRA_CASES[case](m))]
+
+    assert run(fpd) == run(pd)
+
+
+def _flatten_e186mra(values: Any) -> list:
+    out = []
+    for value in values:
+        out.extend(_flatten_e186mra(value) if isinstance(value, list) else [value])
+    return out

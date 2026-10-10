@@ -35976,6 +35976,33 @@ where
     (output, overflows)
 }
 
+/// A MultiIndex level's labels as a typed column when they are all ints
+/// (int64) or all text (object, held in one buffer); None for any other
+/// level, a missing label included.
+fn typed_level_column(labels: &[IndexLabel]) -> Option<Column> {
+    let ints: Option<Vec<i64>> = labels
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Int64(value) => Some(*value),
+            _ => None,
+        })
+        .collect();
+    if let Some(ints) = ints {
+        return Some(Column::from_i64_values_owned(ints));
+    }
+    let mut bytes = Vec::new();
+    let mut offsets = Vec::with_capacity(labels.len() + 1);
+    offsets.push(0);
+    for label in labels {
+        let IndexLabel::Utf8(text) = label else {
+            return None;
+        };
+        bytes.extend_from_slice(text.as_bytes());
+        offsets.push(bytes.len());
+    }
+    Some(Column::from_utf8_contiguous(bytes, offsets))
+}
+
 /// The column of an index holding its instants as instants (a typed
 /// DatetimeIndex backing, a date_range), NaT missing: reset_index built it
 /// a Scalar a row (br-frankenpandas-lsn8d).
@@ -78595,21 +78622,21 @@ impl DataFrame {
         row_multiindex: &fp_index::MultiIndex,
         positions: &[usize],
     ) -> Result<fp_index::MultiIndex, FrameError> {
+        if let Some(&position) = positions
+            .iter()
+            .find(|&&position| position >= row_multiindex.len())
+        {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "row position {position} out of bounds for MultiIndex height {}",
+                row_multiindex.len()
+            )));
+        }
         let mut arrays = Vec::with_capacity(row_multiindex.nlevels());
         for level in 0..row_multiindex.nlevels() {
-            let level_values = row_multiindex.get_level_values(level)?;
-            let labels = positions
-                .iter()
-                .map(|&position| {
-                    level_values.labels().get(position).cloned().ok_or_else(|| {
-                        FrameError::CompatibilityRejected(format!(
-                            "row position {position} out of bounds for MultiIndex height {}",
-                            row_multiindex.len()
-                        ))
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            arrays.push(labels);
+            // The level borrowed: it was copied whole (a String a text label)
+            // for the rows a take keeps (br-frankenpandas-e186m).
+            let level_values = row_multiindex.level_labels(level).unwrap_or_default();
+            arrays.push(fp_index::take_level_labels(level_values, positions));
         }
 
         Ok(fp_index::MultiIndex::from_arrays(arrays)?.set_names(row_multiindex.names().to_vec()))
@@ -78897,6 +78924,11 @@ impl DataFrame {
             // 1M; br-frankenpandas-lsn8d).
             Index::from_datetime64_values(positions.iter().map(|&pos| nanos[pos]).collect())
                 .with_tz(self.index.tz())?
+        } else if let Some(gathered) = self.index.take_utf8_contiguous(positions) {
+            // Text held in one buffer (a MultiIndex frame's flat labels)
+            // gathered as bytes: a String a row was cloned
+            // (br-frankenpandas-e186m).
+            gathered
         } else {
             let index_labels = self.index.labels();
 
@@ -85587,12 +85619,16 @@ impl DataFrame {
                 self.reset_index_multi_column_names(row_multiindex, allow_duplicates)?;
             let mut level_columns = Vec::with_capacity(column_order.len());
             for (level, column_name) in column_order.iter().enumerate() {
-                let level_index = row_multiindex.get_level_values(level)?;
-                // perf (br-frankenpandas-bp6k7): typed Int64 level -> column without
-                // the Scalar round-trip (all-Int64 level has no missing labels).
-                let level_column = match level_index.int64_label_values() {
-                    Some(view) => Column::from_i64_values_owned(view.as_ref().clone()),
+                // An int or text level borrowed into its typed column: it was
+                // copied, a Scalar made a label and its dtype inferred again
+                // (br-frankenpandas-e186m).
+                let typed = row_multiindex
+                    .level_labels(level)
+                    .and_then(typed_level_column);
+                let level_column = match typed {
+                    Some(column) => column,
                     None => {
+                        let level_index = row_multiindex.get_level_values(level)?;
                         Column::from_values(Self::index_labels_to_scalars(level_index.labels()))?
                     }
                 };
@@ -127179,6 +127215,67 @@ mod tests {
         assert_eq!(
             int_fill.column("x").unwrap().values()[0],
             Scalar::Float64(-1.0)
+        );
+    }
+
+    #[test]
+    fn typed_levels_reset_into_their_columns_e186m() {
+        // An all-int or all-text MultiIndex level resets into its typed
+        // column - int64, text in one buffer - holding the values the
+        // Scalar path made, and a take of the frame keeps its rows and flat
+        // labels (br-frankenpandas-e186m).
+        let utf8 = |s: &str| Scalar::Utf8(s.to_owned());
+        let frame = DataFrame::new(
+            Index::from_range(0, 4, 1),
+            BTreeMap::from([
+                ("a".to_owned(), Column::from_i64_values(vec![7, -2, 7, 0])),
+                (
+                    "b".to_owned(),
+                    Column::from_values(vec![utf8("p"), utf8(""), utf8("q"), utf8("p")]).unwrap(),
+                ),
+                (
+                    "x".to_owned(),
+                    Column::from_f64_values(vec![0.5, 1.5, 2.5, 3.5]),
+                ),
+            ]),
+        )
+        .unwrap();
+        let multi = frame.set_index_multi(&["a", "b"], true, "|").unwrap();
+        let reset = multi.reset_index(false).unwrap();
+        for name in ["a", "b", "x"] {
+            let (got, want) = (reset.column(name).unwrap(), frame.column(name).unwrap());
+            assert_eq!((got.dtype(), got.values()), (want.dtype(), want.values()));
+        }
+        let taken = multi.take(&[3, 0], 0).unwrap();
+        assert_eq!(
+            taken.index().labels(),
+            [
+                fp_index::IndexLabel::Utf8("0|p".to_owned()),
+                fp_index::IndexLabel::Utf8("7|p".to_owned())
+            ]
+            .as_slice()
+        );
+        let reset_taken = taken.reset_index(false).unwrap();
+        assert_eq!(
+            reset_taken.column("a").unwrap().values(),
+            [Scalar::Int64(0), Scalar::Int64(7)].as_slice()
+        );
+        // NEGATIVE: a level holding a missing label, mixing ints and text,
+        // or of floats is not made typed here.
+        let int = fp_index::IndexLabel::Int64;
+        let text = |s: &str| fp_index::IndexLabel::Utf8(s.to_owned());
+        assert!(super::typed_level_column(&[int(1), text("a")]).is_none());
+        assert!(
+            super::typed_level_column(&[text("a"), fp_index::IndexLabel::Null(NullKind::Null)])
+                .is_none()
+        );
+        assert!(
+            super::typed_level_column(&[fp_index::IndexLabel::Float64(fp_index::OrderedF64(1.0))])
+                .is_none()
+        );
+        assert_eq!(
+            super::typed_level_column(&[int(4), int(4)]).map(|column| column.dtype()),
+            Some(DType::Int64)
         );
     }
 

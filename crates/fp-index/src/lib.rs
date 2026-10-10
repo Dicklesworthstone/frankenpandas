@@ -3020,6 +3020,30 @@ impl Index {
         }
     }
 
+    /// The labels at `positions` (each below the length) of an index held as
+    /// one contiguous text buffer, gathered as bytes into another: a
+    /// MultiIndex frame's flat labels were cloned a String a row on every
+    /// take, a tenth of a 200k-row sort_index (br-frankenpandas-e186m).
+    /// `None` for any other backing.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn take_utf8_contiguous(&self, positions: &[usize]) -> Option<Self> {
+        let (bytes, offsets) = self.labels.utf8_contiguous.as_ref()?;
+        let span = |position: usize| offsets[position]..offsets[position + 1];
+        let total = positions.iter().map(|&position| span(position).len()).sum();
+        let mut gathered = Vec::with_capacity(total);
+        let mut gathered_offsets = Vec::with_capacity(positions.len() + 1);
+        gathered_offsets.push(0);
+        for &position in positions {
+            gathered.extend_from_slice(&bytes[span(position)]);
+            gathered_offsets.push(gathered.len());
+        }
+        Some(Self::from_utf8_contiguous(
+            Arc::from(gathered),
+            Arc::from(gathered_offsets),
+        ))
+    }
+
     /// Raw `i64` view of an all-Int64 label vector, computing and caching it
     /// on first request. `None` means at least one label is not Int64.
     #[must_use]
@@ -5818,6 +5842,10 @@ impl Index {
         if let Some(nanos) = self.labels.datetime64_nanos() {
             let taken = indices.iter().map(|&position| nanos[position]).collect();
             return self.propagate_name(Self::from_datetime64_values(taken));
+        }
+        // Text in one buffer takes its bytes (br-frankenpandas-e186m).
+        if let Some(taken) = self.take_utf8_contiguous(indices) {
+            return self.propagate_name(taken);
         }
         self.propagate_name(Self::new(
             indices.iter().map(|&i| self.labels[i].clone()).collect(),
@@ -21578,8 +21606,12 @@ impl<T> IndexSlice<T> {
 /// Full DataFrame integration is a future step.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiIndex {
-    /// One `Vec<IndexLabel>` per level, all the same length (= nrows).
-    levels: Vec<Vec<IndexLabel>>,
+    /// One `Vec<IndexLabel>` per level, all the same length (= nrows), each
+    /// shared: a MultiIndex is cloned with every frame that holds one, and
+    /// its levels were copied label by label - a String a text label - on
+    /// each clone (br-frankenpandas-e186m). Serialized as plain vectors.
+    #[serde(with = "shared_levels")]
+    levels: Vec<Arc<Vec<IndexLabel>>>,
     /// Optional name for each level, typed: set_index([0, 1]) names them the
     /// integers 0 and 1 (fvsao.64).
     names: Vec<Option<LabelName>>,
@@ -21588,7 +21620,7 @@ pub struct MultiIndex {
     /// result) hashed every label of two levels for them
     /// (br-frankenpandas-e186m).
     #[serde(skip)]
-    identity_codes: std::sync::OnceLock<Option<Vec<Vec<u32>>>>,
+    identity_codes: Arc<std::sync::OnceLock<Option<Vec<Vec<u32>>>>>,
     /// A missing label is a value of its level - pandas' groupby
     /// (dropna=False) keys, NaN inside `levels` - rather than pandas' code
     /// -1 (set_index, from_arrays): an unstack sorts it with the values
@@ -21629,6 +21661,45 @@ fn multi_index_codes_memory_usage(nlevels: usize, len: usize) -> usize {
     nlevels
         .saturating_mul(len)
         .saturating_mul(std::mem::size_of::<isize>())
+}
+
+/// `labels` at `positions` (each below their length), cloned in row chunks
+/// across threads once there are 65,536: a MultiIndex take cloned a String
+/// a text label a row on one thread, two fifths of a 200k-row sort_index
+/// (br-frankenpandas-e186m). In row order, as the serial take.
+#[doc(hidden)]
+#[must_use]
+pub fn take_level_labels(labels: &[IndexLabel], positions: &[usize]) -> Vec<IndexLabel> {
+    const PAR_MIN: usize = 65_536;
+    let take = |part: &[usize]| -> Vec<IndexLabel> {
+        part.iter()
+            .map(|&position| labels[position].clone())
+            .collect()
+    };
+    let workers = cached_available_parallelism().min(8);
+    if workers <= 1 || positions.len() < PAR_MIN {
+        return take(positions);
+    }
+    let chunk = positions.len().div_ceil(workers);
+    let parts: Vec<Vec<IndexLabel>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = positions
+            .chunks(chunk)
+            .map(|part| scope.spawn(move || take(part)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+            })
+            .collect()
+    });
+    let mut taken = Vec::with_capacity(positions.len());
+    for part in parts {
+        taken.extend(part);
+    }
+    taken
 }
 
 /// Each label's first-seen code, as a MultiIndex numbers a level (see
@@ -21679,11 +21750,11 @@ fn capped_identity_codes(codes: Vec<Vec<u32>>, len: usize) -> Option<Vec<Vec<u32
     Some(codes)
 }
 
-fn build_multi_index_identity_codes(levels: &[Vec<IndexLabel>]) -> Option<Vec<Vec<u32>>> {
+fn build_multi_index_identity_codes(levels: &[Arc<Vec<IndexLabel>>]) -> Option<Vec<Vec<u32>>> {
     if levels.len() != 2 {
         return None;
     }
-    let len = levels.first().map_or(0, Vec::len);
+    let len = levels.first().map_or(0, |level| level.len());
     if len == 0 || levels[1].len() != len {
         return None;
     }
@@ -21692,7 +21763,7 @@ fn build_multi_index_identity_codes(levels: &[Vec<IndexLabel>]) -> Option<Vec<Ve
     let mut level0_positions =
         FxHashMap::<&IndexLabel, u32>::with_capacity_and_hasher(len, Default::default());
     let mut level0_codes = Vec::with_capacity(len);
-    for label in &levels[0] {
+    for label in levels[0].iter() {
         if let Some(&code) = level0_positions.get(label) {
             level0_codes.push(code);
         } else {
@@ -21709,7 +21780,7 @@ fn build_multi_index_identity_codes(levels: &[Vec<IndexLabel>]) -> Option<Vec<Ve
     let mut level1_positions =
         FxHashMap::<&IndexLabel, u32>::with_capacity_and_hasher(len, Default::default());
     let mut level1_codes = Vec::with_capacity(len);
-    for label in &levels[1] {
+    for label in levels[1].iter() {
         if let Some(&code) = level1_positions.get(label) {
             level1_codes.push(code);
         } else {
@@ -21726,6 +21797,31 @@ fn build_multi_index_identity_codes(levels: &[Vec<IndexLabel>]) -> Option<Vec<Ve
     Some(vec![level0_codes, level1_codes])
 }
 
+/// (De)serializes [`MultiIndex`]' shared levels as plain nested vectors, the
+/// format they had before they were shared.
+mod shared_levels {
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::IndexLabel;
+
+    pub(super) fn serialize<S: Serializer>(
+        levels: &[Arc<Vec<IndexLabel>>],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let plain: Vec<&Vec<IndexLabel>> = levels.iter().map(AsRef::as_ref).collect();
+        plain.serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<Arc<Vec<IndexLabel>>>, D::Error> {
+        Vec::<Vec<IndexLabel>>::deserialize(deserializer)
+            .map(|levels| levels.into_iter().map(Arc::new).collect())
+    }
+}
+
 impl PartialEq for MultiIndex {
     fn eq(&self, other: &Self) -> bool {
         self.levels == other.levels && self.names == other.names
@@ -21734,10 +21830,19 @@ impl PartialEq for MultiIndex {
 
 impl MultiIndex {
     fn from_levels_and_names(levels: Vec<Vec<IndexLabel>>, names: Vec<Option<LabelName>>) -> Self {
+        Self::from_shared_levels_and_names(levels.into_iter().map(Arc::new).collect(), names)
+    }
+
+    /// [`Self::from_levels_and_names`] over levels already shared: a
+    /// rename, a swap or a drop of levels reuses them as they are.
+    fn from_shared_levels_and_names(
+        levels: Vec<Arc<Vec<IndexLabel>>>,
+        names: Vec<Option<LabelName>>,
+    ) -> Self {
         Self {
             levels,
             names,
-            identity_codes: std::sync::OnceLock::new(),
+            identity_codes: Arc::default(),
             missing_is_a_level: false,
         }
     }
@@ -21803,7 +21908,7 @@ impl MultiIndex {
     /// Number of rows (entries) in this MultiIndex.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.levels.first().map_or(0, Vec::len)
+        self.levels.first().map_or(0, |level| level.len())
     }
 
     /// Whether this MultiIndex has zero entries.
@@ -22092,7 +22197,10 @@ impl MultiIndex {
                 context: "MultiIndex.rename names length".to_owned(),
             });
         }
-        Ok(Self::from_levels_and_names(self.levels.clone(), names))
+        Ok(Self::from_shared_levels_and_names(
+            self.levels.clone(),
+            names,
+        ))
     }
 
     /// Rename one MultiIndex level, matching `pd.MultiIndex.rename(name, level=...)`.
@@ -22105,7 +22213,10 @@ impl MultiIndex {
         }
         let mut names = self.names.clone();
         names[level] = name;
-        Ok(Self::from_levels_and_names(self.levels.clone(), names))
+        Ok(Self::from_shared_levels_and_names(
+            self.levels.clone(),
+            names,
+        ))
     }
 
     fn shared_names(&self, other: &Self) -> Vec<Option<LabelName>> {
@@ -22398,26 +22509,30 @@ impl MultiIndex {
     /// additionally counts string bytes, mirroring `Index::memory_usage`.
     #[must_use]
     pub fn memory_usage(&self, deep: bool) -> usize {
-        let level_bytes = self.levels.iter().flatten().fold(0usize, |total, label| {
-            total.saturating_add(match label {
-                IndexLabel::Int64(_)
-                | IndexLabel::Float64(_)
-                | IndexLabel::Timedelta64(_)
-                | IndexLabel::Datetime64(_)
-                | IndexLabel::Object(_)
-                | IndexLabel::Period(_)
-                | IndexLabel::Interval(_)
-                | IndexLabel::Null(_) => 8,
-                IndexLabel::Bool(_) => 1,
-                IndexLabel::Utf8(value) => {
-                    if deep {
-                        std::mem::size_of::<String>().saturating_add(value.len())
-                    } else {
-                        std::mem::size_of::<String>()
-                    }
-                }
-            })
-        });
+        let level_bytes =
+            self.levels
+                .iter()
+                .flat_map(|level| level.iter())
+                .fold(0usize, |total, label| {
+                    total.saturating_add(match label {
+                        IndexLabel::Int64(_)
+                        | IndexLabel::Float64(_)
+                        | IndexLabel::Timedelta64(_)
+                        | IndexLabel::Datetime64(_)
+                        | IndexLabel::Object(_)
+                        | IndexLabel::Period(_)
+                        | IndexLabel::Interval(_)
+                        | IndexLabel::Null(_) => 8,
+                        IndexLabel::Bool(_) => 1,
+                        IndexLabel::Utf8(value) => {
+                            if deep {
+                                std::mem::size_of::<String>().saturating_add(value.len())
+                            } else {
+                                std::mem::size_of::<String>()
+                            }
+                        }
+                    })
+                });
         level_bytes.saturating_add(multi_index_codes_memory_usage(self.nlevels(), self.len()))
     }
 
@@ -22438,7 +22553,7 @@ impl MultiIndex {
     pub fn dtypes(&self) -> Vec<&'static str> {
         self.levels
             .iter()
-            .map(|level| Index::new(level.clone()).dtype())
+            .map(|level| Index::new(level.to_vec()).dtype())
             .collect()
     }
 
@@ -22794,7 +22909,7 @@ impl MultiIndex {
                 length: self.levels.len(),
             });
         }
-        let mut idx = Index::new(self.levels[level].clone());
+        let mut idx = Index::new(self.levels[level].to_vec());
         if let Some(name) = self.names.get(level).and_then(|n| n.as_ref()) {
             idx = idx.set_name(name);
         }
@@ -22807,7 +22922,7 @@ impl MultiIndex {
     #[doc(hidden)]
     #[must_use]
     pub fn level_labels(&self, level: usize) -> Option<&[IndexLabel]> {
-        self.levels.get(level).map(Vec::as_slice)
+        self.levels.get(level).map(|level| level.as_slice())
     }
 
     /// Get the tuple of labels at a specific position.
@@ -22829,14 +22944,11 @@ impl MultiIndex {
             }
         }
 
-        let mut levels = Vec::with_capacity(self.nlevels());
-        for level in &self.levels {
-            let selected = positions
-                .iter()
-                .map(|&position| level[position].clone())
-                .collect();
-            levels.push(selected);
-        }
+        let levels = self
+            .levels
+            .iter()
+            .map(|level| take_level_labels(level, positions))
+            .collect();
 
         // Rows of the same levels: a missing label stays what it was.
         Ok(Self::from_levels_and_names(levels, self.names.clone())
@@ -22887,9 +22999,12 @@ impl MultiIndex {
 
         let mut levels = self.levels.clone();
         for (level_idx, label) in item.into_iter().enumerate() {
-            levels[level_idx].insert(loc, label);
+            Arc::make_mut(&mut levels[level_idx]).insert(loc, label);
         }
-        Ok(Self::from_levels_and_names(levels, self.names.clone()))
+        Ok(Self::from_shared_levels_and_names(
+            levels,
+            self.names.clone(),
+        ))
     }
 
     /// Drop every occurrence of the provided tuples.
@@ -23906,7 +24021,7 @@ impl MultiIndex {
         self.ensure_same_nlevels(other)?;
         let mut levels = Vec::with_capacity(self.nlevels());
         for level_idx in 0..self.nlevels() {
-            let mut level = self.levels[level_idx].clone();
+            let mut level = self.levels[level_idx].to_vec();
             level.extend(other.levels[level_idx].iter().cloned());
             levels.push(level);
         }
@@ -23925,7 +24040,7 @@ impl MultiIndex {
         let mut levels = Vec::with_capacity(self.nlevels());
         for level in &self.levels {
             let mut repeated = Vec::with_capacity(repeat_output_capacity(level.len(), repeats));
-            for label in level {
+            for label in level.iter() {
                 for _ in 0..repeats {
                     repeated.push(label.clone());
                 }
@@ -24328,13 +24443,14 @@ impl MultiIndex {
                 context: "two-level array or identity code length mismatch".to_owned(),
             });
         }
-        let levels = Vec::from(arrays);
+        let levels: Vec<Arc<Vec<IndexLabel>>> =
+            Vec::from(arrays).into_iter().map(Arc::new).collect();
         let identity_codes = capped_identity_codes(Vec::from(codes), len);
         debug_assert_eq!(identity_codes, build_multi_index_identity_codes(&levels));
         Ok(Self {
             levels,
             names: vec![None; 2],
-            identity_codes: std::sync::OnceLock::from(identity_codes),
+            identity_codes: Arc::new(std::sync::OnceLock::from(identity_codes)),
             missing_is_a_level: false,
         })
     }
@@ -24620,15 +24736,15 @@ impl MultiIndex {
         new_names.remove(level);
 
         if new_levels.len() == 1 {
-            let mut idx = Index::new(new_levels.into_iter().next().unwrap());
+            let mut idx = Index::new(new_levels[0].to_vec());
             if let Some(ref name) = new_names[0] {
                 idx = idx.set_name(name);
             }
             Ok(MultiIndexOrIndex::Index(idx))
         } else {
-            Ok(MultiIndexOrIndex::Multi(Self::from_levels_and_names(
-                new_levels, new_names,
-            )))
+            Ok(MultiIndexOrIndex::Multi(
+                Self::from_shared_levels_and_names(new_levels, new_names),
+            ))
         }
     }
 
@@ -24646,7 +24762,7 @@ impl MultiIndex {
         let mut new_names = self.names.clone();
         new_levels.swap(i, j);
         new_names.swap(i, j);
-        Ok(Self::from_levels_and_names(new_levels, new_names))
+        Ok(Self::from_shared_levels_and_names(new_levels, new_names))
     }
 
     /// Reorder levels according to the given order.
@@ -24682,12 +24798,14 @@ impl MultiIndex {
             seen[idx] = true;
         }
 
-        let new_levels: Vec<Vec<IndexLabel>> =
-            order.iter().map(|&idx| self.levels[idx].clone()).collect();
+        let new_levels: Vec<Arc<Vec<IndexLabel>>> = order
+            .iter()
+            .map(|&idx| Arc::clone(&self.levels[idx]))
+            .collect();
         let new_names: Vec<Option<LabelName>> =
             order.iter().map(|&idx| self.names[idx].clone()).collect();
 
-        Ok(Self::from_levels_and_names(new_levels, new_names))
+        Ok(Self::from_shared_levels_and_names(new_levels, new_names))
     }
 }
 
@@ -25792,6 +25910,124 @@ mod tests {
             assert_eq!(crate::delete_freq(daily(), dropped, 5), None, "{dropped:?}");
         }
         assert_eq!(crate::delete_freq(None, &[0], 5), None);
+    }
+
+    #[test]
+    fn levels_are_shared_and_copied_on_write_e186m() {
+        // A clone, a rename, a swap and a drop share the source's level
+        // allocations; an insert copies the level it writes, the source
+        // keeping its labels (br-frankenpandas-e186m).
+        let text = |values: &[&str]| -> Vec<IndexLabel> {
+            values
+                .iter()
+                .map(|value| IndexLabel::Utf8((*value).to_owned()))
+                .collect()
+        };
+        let source = MultiIndex::from_arrays(vec![
+            [3, 1, 3].map(IndexLabel::Int64).to_vec(),
+            text(&["x", "y", "z"]),
+        ])
+        .unwrap();
+        let shares = |other: &MultiIndex, mine: usize, theirs: usize| {
+            Arc::ptr_eq(&source.levels[mine], &other.levels[theirs])
+        };
+        assert!(shares(&source.clone(), 0, 0) && shares(&source.clone(), 1, 1));
+        let renamed = source
+            .rename(vec![Some(crate::LabelName::from("p")), None])
+            .unwrap();
+        assert!(shares(&renamed, 0, 0) && shares(&renamed, 1, 1));
+        let swapped = source.swaplevel(0, 1).unwrap();
+        assert!(shares(&swapped, 0, 1) && shares(&swapped, 1, 0));
+        assert_eq!(swapped.level_labels(0), source.level_labels(1));
+        let three = MultiIndex::from_arrays(vec![
+            [3, 1, 3].map(IndexLabel::Int64).to_vec(),
+            text(&["x", "y", "z"]),
+            text(&["u", "u", "v"]),
+        ])
+        .unwrap();
+        let Ok(crate::MultiIndexOrIndex::Multi(dropped)) = three.droplevel(1) else {
+            unreachable!("three levels less one is a MultiIndex");
+        };
+        assert!(Arc::ptr_eq(&three.levels[2], &dropped.levels[1]));
+        // NEGATIVE: an insert writes its own copy - the source and its other
+        // clones keep three rows, and the inserted index answers its tuple.
+        let held = source.clone();
+        let grown = source
+            .insert(
+                1,
+                vec![IndexLabel::Int64(7), IndexLabel::Utf8("w".to_owned())],
+            )
+            .unwrap();
+        assert_eq!(grown.len(), 4);
+        assert_eq!(source.len(), 3);
+        assert_eq!(
+            held.level_labels(1),
+            Some(text(&["x", "y", "z"]).as_slice())
+        );
+        assert_eq!(
+            grown.level_labels(1),
+            Some(text(&["x", "w", "y", "z"]).as_slice())
+        );
+        assert!(!shares(&grown, 0, 0));
+        // The identity codes of an equal index made apart: shared levels
+        // compare by their labels.
+        let rebuilt = MultiIndex::from_arrays(vec![
+            [3, 1, 3].map(IndexLabel::Int64).to_vec(),
+            text(&["x", "y", "z"]),
+        ])
+        .unwrap();
+        assert_eq!(rebuilt, held);
+        assert_eq!(rebuilt.identity_codes(), held.identity_codes());
+    }
+
+    #[test]
+    fn level_and_contiguous_takes_match_the_label_take_e186m() {
+        // A level's labels taken in row chunks across threads (past 65,536
+        // rows) and a one-buffer text index's bytes give the labels a take
+        // one at a time gives, in row order (br-frankenpandas-e186m).
+        let level: Vec<IndexLabel> = (0..7)
+            .map(|k| {
+                if k % 2 == 0 {
+                    IndexLabel::Int64(k)
+                } else {
+                    IndexLabel::Utf8(format!("t{k}"))
+                }
+            })
+            .collect();
+        let positions: Vec<usize> = (0..70_001).map(|row| (row * 5 + 3) % 7).collect();
+        let serial: Vec<IndexLabel> = positions.iter().map(|&p| level[p].clone()).collect();
+        assert_eq!(crate::take_level_labels(&level, &positions), serial);
+        assert_eq!(
+            crate::take_level_labels(&level, &positions[..9]),
+            serial[..9].to_vec()
+        );
+        assert!(crate::take_level_labels(&level, &[]).is_empty());
+        let multi = MultiIndex::from_arrays(vec![level.clone(), level.clone()]).unwrap();
+        let taken = multi.take(&positions).unwrap();
+        assert_eq!(taken.level_labels(1), Some(serial.as_slice()));
+        // A text index in one buffer: "ab", "", "c", "dé".
+        let text = Index::from_utf8_contiguous(
+            Arc::from("abcdé".as_bytes()),
+            Arc::from(vec![0, 2, 2, 3, 6]),
+        );
+        let gathered = text.take_utf8_contiguous(&[3, 0, 1, 3]).unwrap();
+        let utf8 = |s: &str| IndexLabel::Utf8(s.to_owned());
+        assert_eq!(
+            gathered.labels(),
+            [utf8("dé"), utf8("ab"), utf8(""), utf8("dé")].as_slice()
+        );
+        assert_eq!(
+            text.take(&[2, 3]).labels(),
+            [utf8("c"), utf8("dé")].as_slice()
+        );
+        // NEGATIVE: an index of text labels held one by one has no buffer
+        // to gather - the caller takes its labels.
+        let held = Index::new(vec![utf8("ab"), utf8("c")]);
+        assert!(held.take_utf8_contiguous(&[1]).is_none());
+        assert_eq!(
+            held.take(&[1, 0]).labels(),
+            [utf8("c"), utf8("ab")].as_slice()
+        );
     }
 
     #[test]
@@ -42395,7 +42631,7 @@ mod tests {
         let without_sidecar = super::MultiIndex {
             levels: mi.levels.clone(),
             names: mi.names.clone(),
-            identity_codes: std::sync::OnceLock::from(None),
+            identity_codes: Arc::new(std::sync::OnceLock::from(None)),
             missing_is_a_level: false,
         };
         assert!(
