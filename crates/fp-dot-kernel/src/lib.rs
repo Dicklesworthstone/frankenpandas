@@ -371,7 +371,10 @@ pub fn div_f64_into(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
 /// br-frankenpandas-3tk83). IEEE division is correctly rounded lane by lane,
 /// so the quotients are the baseline loop's bits. The output is built with
 /// its capacity, not over a zeroed buffer: zeroing a recycled 8 MB block is
-/// a memset the size of the divide's own stores.
+/// a memset the size of the divide's own stores. Collected, not extended a
+/// 4-lane chunk at a time: each extend kept the Vec's length in memory and
+/// reloaded it and the divisor every chunk (x / 3 a million rows 0.35 ms,
+/// pandas 0.30; br-frankenpandas-rc0923-epic-zero-certified-losses-bss5q.3).
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`], so the `+avx2`
 /// codegen is this crate's; the CALLER MUST GUARD with
@@ -379,22 +382,11 @@ pub fn div_f64_into(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
 #[inline(never)]
 #[must_use]
 pub fn div_by_number_f64(a: &[f64], s: f64, number_first: bool) -> Vec<f64> {
-    const LANES: usize = 4;
-    let mut out = Vec::with_capacity(a.len());
-    let sv = Simd::<f64, LANES>::splat(s);
-    let (chunks, rest) = a.as_chunks::<LANES>();
     if number_first {
-        for chunk in chunks {
-            out.extend_from_slice(&(sv / Simd::<f64, LANES>::from_array(*chunk)).to_array());
-        }
-        out.extend(rest.iter().map(|&x| s / x));
+        a.iter().map(|&x| s / x).collect()
     } else {
-        for chunk in chunks {
-            out.extend_from_slice(&(Simd::<f64, LANES>::from_array(*chunk) / sv).to_array());
-        }
-        out.extend(rest.iter().map(|&x| x / s));
+        a.iter().map(|&x| x / s).collect()
     }
-    out
 }
 
 /// `k as f64` four lanes at a time without AVX-512's conversion: the

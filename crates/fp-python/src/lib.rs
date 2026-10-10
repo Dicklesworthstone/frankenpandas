@@ -31029,6 +31029,18 @@ fn libm_column_kernel(name: &str) -> Option<ColumnKernel> {
     })
 }
 
+/// The column kernel of a rounding ufunc (floor, ceil, trunc, rint):
+/// exact in IEEE arithmetic, so the same bits numpy's loop gives.
+fn rounding_column_kernel(name: &str) -> Option<ColumnKernel> {
+    Some(match name {
+        "floor" => Column::floor,
+        "ceil" => Column::ceil,
+        "trunc" => Column::trunc,
+        "rint" => Column::rint,
+        _ => return None,
+    })
+}
+
 const LIBM_UFUNCS: [&str; 11] = [
     "exp", "expm1", "log", "log2", "log10", "log1p", "sin", "cos", "tan", "sinh", "cosh",
 ];
@@ -31203,6 +31215,29 @@ fn array_ufunc<'py>(
         && series.inner.column().width().is_none()
     {
         let result = wrap_series(series.inner.sqrt())?;
+        return Ok(Py::new(py, result)?.into_bound(py).into_any());
+    }
+    // np.floor / ceil / trunc / rint of a plain float64 Series: the column's
+    // own rounding - exact, so numpy's bits, NaN and -0.0 kept, no
+    // floating-point flag raised - where the values went out to numpy and
+    // back (np.floor of a million rows 0.5-1.5 ms, pandas 0.16;
+    // br-frankenpandas-rc0923-epic-zero-certified-losses-bss5q.3). An int64
+    // one is numpy's (its answer is float64).
+    if method == "__call__"
+        && no_kwargs
+        && inputs.len() == 1
+        && inputs.get_item(0)?.is(this)
+        && let Some(kernel) = rounding_column_kernel(&name)
+        && let Ok(series) = this.extract::<PyRef<'_, PySeries>>()
+        && series.inner.dtype() == DType::Float64
+        && series.inner.column().width().is_none()
+        && let Ok(column) = kernel(series.inner.column())
+    {
+        let result = wrap_series(Series::new(
+            series.inner.name(),
+            series.inner.index().clone(),
+            column,
+        ))?;
         return Ok(Py::new(py, result)?.into_bound(py).into_any());
     }
     // np.exp / np.log / np.sin ... of a plain float64 / int64 Series: the

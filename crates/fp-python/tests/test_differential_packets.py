@@ -34893,6 +34893,43 @@ def test_index_drop_and_delete_like_pandas_n3ktr(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+# br-frankenpandas-rc0923-epic-zero-certified-losses-bss5q.3: np.floor /
+# ceil / trunc / rint of a plain float64 Series run on the column's own
+# rounding (they went out to numpy and back) - numpy's bits: NaN, -0.0 and
+# the infinities kept, halves to even under rint, values past 2**53 exact.
+# NEGATIVE: an int64, a float32 and a nullable Float64 Series and an out=
+# array take numpy's path (float64 / float32 / Float64 answers).
+_BSS5Q3ROUND_VALUES = [2.5, -2.5, 0.5, -0.5, 1.5, -0.0, 0.0, np.nan, np.inf, -np.inf, 2.0**53 + 2, 1e300, -1e-300, 7.75]
+_BSS5Q3ROUND_DATA = {
+    "float64": lambda m: m.Series(_BSS5Q3ROUND_VALUES, index=list("abcdefghijklmn"), name="v"),
+    "int64 (NEGATIVE)": lambda m: m.Series([3, -4, 0], name="v"),
+    "float32 (NEGATIVE)": lambda m: m.Series(np.array([2.5, -0.5, np.nan], dtype="float32")),
+    "Float64 (NEGATIVE)": lambda m: m.Series([2.5, None, -1.5], dtype="Float64"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("ufunc", ["floor", "ceil", "trunc", "rint"])
+@pytest.mark.parametrize("data", list(_BSS5Q3ROUND_DATA))
+def test_series_rounding_ufuncs_like_pandas_bss5q3(data: str, ufunc: str) -> None:
+    def run(m: Any) -> Any:
+        out = getattr(np, ufunc)(_BSS5Q3ROUND_DATA[data](m))
+        return (str(out.dtype), out.name, list(out.index), [repr(x) for x in out.tolist()])
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_series_floor_into_out_like_pandas_bss5q3() -> None:
+    # NEGATIVE: an out= array is numpy's path, written in place.
+    def run(m: Any) -> Any:
+        target = np.empty(3)
+        np.floor(m.Series([2.5, -0.5, np.nan]), out=target)
+        return [repr(x) for x in target.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
 # br-frankenpandas-e186m: an all-valid int64 Series' mean sums its ints as
 # numpy does - cast to float64 8192 at a time, each buffer pairwise - in
 # AVX2 lanes, the same bits as pandas' mean at every length (several cast
