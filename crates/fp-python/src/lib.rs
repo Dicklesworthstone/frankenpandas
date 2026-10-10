@@ -9292,6 +9292,20 @@ fn each_i64<T>(values: &[i64], apply: impl Fn(i64) -> T) -> Vec<T> {
     values.iter().map(|&value| apply(value)).collect()
 }
 
+/// Whether `data` is a one-dimensional native float64 numpy array (a
+/// big-endian one's dtype prints `>f8`).
+fn is_float64_ndarray(data: &Bound<'_, PyAny>) -> bool {
+    data.get_type().name().is_ok_and(|name| name == "ndarray")
+        && data
+            .getattr("ndim")
+            .and_then(|ndim| ndim.extract::<usize>())
+            .is_ok_and(|ndim| ndim == 1)
+        && data
+            .getattr("dtype")
+            .and_then(|dtype| dtype.str())
+            .is_ok_and(|text| text.to_str().is_ok_and(|text| text == "float64"))
+}
+
 /// The labels of float `values` as a Python float's are: NaN the missing
 /// label (as [`py_to_index_label`] reads it), any other value itself.
 fn float_index_labels_of(values: impl IntoIterator<Item = f64>) -> Vec<IndexLabel> {
@@ -13690,7 +13704,15 @@ impl PyIndex {
         if let Some(index) = data.map(object_ndarray_index).transpose()?.flatten() {
             return row_index_to_py(py, &index.set_names(name));
         }
-        let index = float_labelled(Self::new(data, name)?.inner);
+        let built = Self::new(data, name)?.inner;
+        // A float64 array's labels are its floats and NaN already: nothing
+        // for float_labelled to widen, and its two scans of a million labels
+        // were a third of Index(floats) (br-frankenpandas-e186m).
+        let index = if data.is_some_and(is_float64_ndarray) {
+            built
+        } else {
+            float_labelled(built)
+        };
         row_index_to_py(py, &index)
     }
 
@@ -16020,7 +16042,12 @@ impl PyDatetimeIndex {
     /// This index without the instants at `positions` (in bounds, in the
     /// order a delete gives them), its freq as pandas' delete keeps it.
     fn without_positions(&self, positions: &[usize]) -> Self {
-        let nanos = values_without(&self.inner.asi8(), positions);
+        // The instants as held when a typed backing holds them (asi8 copied
+        // them first: two copies of a million).
+        let nanos = match self.inner.as_index().datetime64_label_values() {
+            Some(held) => values_without(&held, positions),
+            None => values_without(&self.inner.asi8(), positions),
+        };
         let freq = fp_index::delete_freq(self.inner.freq(), positions, self.inner.len());
         let mut out = self.with_nanos(nanos);
         out.inner = out.inner.with_freq(freq);
@@ -20187,7 +20214,12 @@ impl PyTimedeltaIndex {
     /// This index without the durations at `positions` (in bounds, in the
     /// order a delete gives them), its freq as pandas' delete keeps it.
     fn without_positions(&self, positions: &[usize]) -> Self {
-        let nanos = values_without(&self.inner.asi8(), positions);
+        // The durations as held when a typed backing holds them (asi8
+        // copied them first).
+        let nanos = match self.inner.as_index().timedelta64_label_values() {
+            Some(held) => values_without(&held, positions),
+            None => values_without(&self.inner.asi8(), positions),
+        };
         let freq = fp_index::delete_freq(self.inner.freq(), positions, self.inner.len());
         let mut out = self.with_nanos(nanos);
         out.inner = out.inner.with_freq(freq);
@@ -72098,9 +72130,11 @@ impl PyGroupBy {
     /// aggregation goes through it.
     fn grouped(&self) -> Result<fp_frame::DataFrameGroupBy<'_>, FrameError> {
         let by_refs: Vec<&str> = self.by.iter().map(String::as_str).collect();
-        self.df
+        Ok(self
+            .df
             .groupby_full_options(&by_refs, self.as_index, self.sort, self.dropna)?
-            .with_key_names(self.key_names.clone())
+            .with_key_names(self.key_names.clone())?
+            .sharing(&self.layout))
     }
 
     /// Every group's label and row positions in pandas' group order (by key,

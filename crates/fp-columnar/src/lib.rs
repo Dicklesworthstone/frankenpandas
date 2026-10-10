@@ -8486,6 +8486,21 @@ fn first_extreme_f64(values: &[f64], beats: impl Fn(f64, f64) -> bool) -> Option
     best
 }
 
+/// numpy's float64 variance of int64 `values` with `ddof` - pandas' int64
+/// nanvar, fp-types' `PandasReductions::var` bit for bit
+/// ([`fp_dot_kernel::numpy_var_i64`]) - where the CPU has AVX2 and there
+/// are more values than `ddof`; `None` otherwise, the caller's reduction
+/// answering (br-frankenpandas-e186m).
+#[must_use]
+pub fn numpy_var_i64(values: &[i64], ddof: usize) -> Option<f64> {
+    #[cfg(target_arch = "x86_64")]
+    if values.len() > ddof && std::arch::is_x86_feature_detected!("avx2") {
+        return Some(fp_dot_kernel::numpy_var_i64(values, ddof));
+    }
+    let _ = (values, ddof);
+    None
+}
+
 /// numpy's float64 total of int64 `values` - the cast-buffered pairwise
 /// sum pandas' int64 mean divides ([`fp_dot_kernel::numpy_cast_sum_i64`]) -
 /// where the CPU has AVX2; `None` otherwise, the caller's own reduction
@@ -8620,6 +8635,7 @@ mod int_extremes_e186m {
     }
 
     #[test]
+    #[allow(clippy::cast_precision_loss)] // the reference's casts and counts
     fn cast_sum_matches_the_reference_past_a_buffer_e186m() {
         // Two cast buffers and a tail, values past 2^51 in one buffer only
         // (NEGATIVE: the magic-constant cast would round them), a buffer of
@@ -8632,6 +8648,29 @@ mod int_extremes_e186m {
         if let Some(total) = numpy_cast_sum_i64(&values) {
             assert_eq!(total.to_bits(), numpy_cast_reference(&values).to_bits());
         }
+        // The variance: fp-types' whole-array pairwise total, then its
+        // squared deviations, bit for bit, ddof 0 and 1 (past 2^51 too).
+        let reference = |ddof: usize| {
+            let cast: Vec<f64> = values.iter().map(|&v| v as f64).collect();
+            let mean = fp_types::numpy_pairwise_sum(&cast) / cast.len() as f64;
+            let squares: Vec<f64> = cast.iter().map(|&v| (mean - v) * (mean - v)).collect();
+            fp_types::numpy_pairwise_sum(&squares) / (cast.len() - ddof) as f64
+        };
+        for ddof in [0, 1] {
+            if let Some(variance) = numpy_var_i64(&values, ddof) {
+                assert_eq!(variance.to_bits(), reference(ddof).to_bits(), "ddof {ddof}");
+            }
+            if let Some(variance) = numpy_var_i64(&values[..9_000], ddof) {
+                let small = &values[..9_000];
+                let cast: Vec<f64> = small.iter().map(|&v| v as f64).collect();
+                let mean = fp_types::numpy_pairwise_sum(&cast) / cast.len() as f64;
+                let squares: Vec<f64> = cast.iter().map(|&v| (mean - v) * (mean - v)).collect();
+                let want = fp_types::numpy_pairwise_sum(&squares) / (cast.len() - ddof) as f64;
+                assert_eq!(variance.to_bits(), want.to_bits(), "small, ddof {ddof}");
+            }
+        }
+        // NEGATIVE: no more values than ddof is no variance here.
+        assert_eq!(numpy_var_i64(&[7], 1), None);
         if let Some(total) = numpy_cast_sum_i64(&[]) {
             assert_eq!(total.to_bits(), 0.0_f64.to_bits());
         }
@@ -15252,6 +15291,20 @@ impl Column {
             dtype,
             DType::Datetime64 { .. } | DType::Timedelta64
         ));
+        // No NaT, the common case: every slot valid, read in one pass that
+        // vectorizes - each word was built a bit at a time (d.to_series() of
+        // a million 0.68 ms, pandas 0.23; br-frankenpandas-e186m).
+        let holds_nat = data
+            .iter()
+            .fold(false, |found, &ns| found | (ns == i64::MIN));
+        if !holds_nat {
+            let len = data.len();
+            return Self::from_temporal_nanos_holding_nat(
+                dtype,
+                data,
+                ValidityMask::all_valid(len),
+            );
+        }
         let words = data
             .chunks(64)
             .map(|chunk| {
@@ -26468,6 +26521,14 @@ impl Column {
     /// numpy var), its sums in numpy's order (br-frankenpandas-9iim6).
     #[must_use]
     pub fn var(&self, ddof: usize) -> Scalar {
+        // An all-valid int64 column's variance in AVX2 lanes: the reduction
+        // below, bit for bit (Series.std of half a million ints 0.6 ms,
+        // pandas 0.47; br-frankenpandas-e186m).
+        if let Some(data) = self.as_i64_slice()
+            && let Some(variance) = numpy_var_i64(data, ddof)
+        {
+            return Scalar::Float64(variance);
+        }
         if let Some((count, var)) = self.pandas_reductions(|r| (r.count(), r.var(ddof))) {
             return if count <= ddof {
                 Scalar::Null(NullKind::NaN)
@@ -26486,6 +26547,12 @@ impl Column {
         // pandas' nanstd: sqrt of its nanvar, the sums in numpy's order, for
         // every dtype the pandas reductions read (br-frankenpandas-9iim6);
         // Timedelta and the other dtypes keep nanstd's dtype-preserving path.
+        // An all-valid int64 column's variance in AVX2 lanes ([`Self::var`]).
+        if let Some(data) = self.as_i64_slice()
+            && let Some(variance) = numpy_var_i64(data, ddof)
+        {
+            return Scalar::Float64(variance.sqrt());
+        }
         if let Some((count, std)) = self.pandas_reductions(|r| (r.count(), r.std(ddof))) {
             return if count <= ddof {
                 Scalar::Null(NullKind::NaN)

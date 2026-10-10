@@ -1446,6 +1446,7 @@ dependencies = [
  "sas7bdat",
  "sas_xport",
  "scraper",
+ "serde",
  "serde-pickle",
  "serde_json",
  "thiserror",

@@ -35052,3 +35052,118 @@ def test_fresh_frame_idx_extremes_like_pandas_e186m(op: str) -> None:
         return (repr(out.tolist()), str(out.dtype), repr(missing.tolist()))
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: an all-valid int64 Series' var / std run on AVX2
+# lanes - pandas' nanvar (the whole array cast, its pairwise total, then the
+# pairwise squared deviations) bit for bit at every length and ddof, values
+# past 2**51 too. NEGATIVE: a nullable Int64 Series with NA, one value with
+# ddof=1 (NaN) and a float Series take their own paths.
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("n", [2, 7, 129, 1000, 20_000, 50_001])
+@pytest.mark.parametrize("big", [False, True])
+@pytest.mark.parametrize("ddof", [0, 1])
+def test_int64_series_var_std_like_pandas_e186m(n: int, big: bool, ddof: int) -> None:
+    values = _e186mmean_ints(n, big)
+    if big and n <= 9001:
+        values[-1] = 2**60 + 3
+    for op in ("var", "std"):
+        assert repr(getattr(fpd.Series(values), op)(ddof=ddof)) == repr(getattr(pd.Series(values), op)(ddof=ddof))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_int64_series_var_other_paths_like_pandas_e186m() -> None:
+    def run(m: Any) -> Any:
+        return (
+            repr(m.Series([3, None, 8, 1], dtype="Int64").var()),
+            repr(m.Series([7]).std()),
+            repr(m.Series([1.5, 2.25, -3.0]).std()),
+        )
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a groupby object keeps its single key's grouping
+# for all its calls and column selections, as pandas' keeps its grouper -
+# the same answers as pandas call after call, a text key and an int key,
+# sort=False too. NEGATIVE: a groupby of a changed frame groups afresh, and
+# two keys take their own path.
+def _e186mgb_shown(result: Any) -> Any:
+    if hasattr(result, "columns"):
+        return [(str(label), [repr(v) for v in row]) for label, row in zip(result.index, result.values.tolist())]
+    return [(str(label), repr(value)) for label, value in zip(result.index, result.tolist())]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("key", ["s", "k", ["s", "k"]])
+@pytest.mark.parametrize("sort", [True, False])
+def test_reused_groupby_answers_like_pandas_e186m(key: Any, sort: bool) -> None:
+    def run(m: Any) -> Any:
+        df = m.DataFrame(
+            {
+                "s": ["b", "a", "c", "a", "b", "a", "d"],
+                "k": [3, 1, 2, 1, 3, 1, 7],
+                "x": [1.5, 2.0, -1.0, 4.0, 0.5, 3.0, 9.0],
+                "y": [1, 2, 3, 4, 5, 6, 7],
+            }
+        )
+        g = df.groupby(key, sort=sort)
+        out = []
+        for _ in range(2):
+            out.append(_e186mgb_shown(g.size()))
+            out.append(_e186mgb_shown(g[["x", "y"]].sum()))
+            out.append(_e186mgb_shown(g[["x"]].mean()))
+            out.append(_e186mgb_shown(g["x"].max()))
+            out.append(_e186mgb_shown(g[["y"]].count()))
+        changed = df[df["y"] > 2]
+        out.append(_e186mgb_shown(changed.groupby(key, sort=sort).size()))
+        out.append(_e186mgb_shown(changed.groupby(key, sort=sort)[["x"]].sum()))
+        return out
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: read_json(lines=True) parses each line's values
+# straight into their columns - the columns the union of every line's keys,
+# first seen first, a key a line lacks null there, a repeated key's last
+# value, a nested object or array its JSON text, pandas' bare NaN tokens
+# read - with pandas' answers; a key a line lacks is NaN there (it was None
+# in a text column), a JSON null None. NEGATIVE: a line that is no JSON
+# object is an error. (Not here, open: a uint64 past int64 is float64 -
+# pandas uint64 - and an Infinity token is refused.)
+_E186MJSONL_CASES = {
+    "uniform": '{"a": 1, "b": 2.5, "c": "x", "d": true}\n{"a": 2, "b": -1.0, "c": "y", "d": false}\n',
+    "missing and late keys": '{"a": 1, "b": "p"}\n{"b": "q"}\n{"a": 3, "c": 9.5}\n',
+    "keys reordered": '{"a": 1, "b": 2}\n{"b": 3, "a": 4}\n{"a": 5, "b": 6}\n',
+    "nulls and blank lines": '{"a": null, "b": 1}\n\n{"a": 2, "b": null}\n   \n',
+    "int64 max": '{"a": 9223372036854775807}\n{"a": -9223372036854775808}\n',
+    "escaped key and text": '{"k\\u00e9y": "caf\\u00e9", "q": "a\\"b"}\n{"k\\u00e9y": "x", "q": "y"}\n',
+    "bare NaN tokens": '{"a": NaN, "b": 1}\n{"a": 2.5, "b": NaN}\n',
+    "null beside text": '{"a": "x", "b": 1}\n{"a": null, "b": 2}\n{"b": 3}\n',
+    "mixed int and float": '{"a": 1}\n{"a": 2.5}\n',
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MJSONL_CASES))
+def test_read_json_lines_like_pandas_e186m(case: str) -> None:
+    text = _E186MJSONL_CASES[case]
+
+    def run(m: Any) -> Any:
+        try:
+            out = m.read_json(io.StringIO(text), lines=True)
+        except (ValueError, TypeError) as error:
+            return ("raise", type(error).__name__)
+        return ([str(c) for c in out.columns], [str(t) for t in out.dtypes], [[repr(v) for v in row] for row in out.values.tolist()])
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_read_json_lines_not_an_object_raises_e186m() -> None:
+    # NEGATIVE: a line that is no JSON object is refused - pandas' frame
+    # constructor fails on it (AttributeError), fp says why (ValueError).
+    with pytest.raises(AttributeError):
+        pd.read_json(io.StringIO('{"a": 1}\n[1, 2]\n'), lines=True)
+    with pytest.raises(ValueError, match="JSON object"):
+        fpd.read_json(io.StringIO('{"a": 1}\n[1, 2]\n'), lines=True)

@@ -1247,6 +1247,71 @@ pub fn numpy_cast_sum_i64(values: &[i64]) -> f64 {
     total
 }
 
+/// numpy's float64 variance of int64 `values` with `ddof` - pandas' nanvar
+/// of an int64 column: the values cast to float64 whole, their pairwise sum
+/// over the count the mean, the pairwise sum of each `(mean - value)^2` over
+/// `count - ddof` (fp-types' `PandasReductions::var`, bit for bit: the same
+/// additions in the same order), the casts four lanes at a time while every
+/// value is below 2^51 in magnitude ([`small_int_as_float`], exact).
+/// Series.std of a million ints 0.6 ms, pandas 0.43 (br-frankenpandas-e186m).
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")` and pass more values
+/// than `ddof`.
+#[inline(never)]
+#[must_use]
+#[allow(clippy::cast_precision_loss)] // numpy's casts and counts
+pub fn numpy_var_i64(values: &[i64], ddof: usize) -> f64 {
+    let small = values.iter().fold(true, |small, &value| {
+        small & (value.unsigned_abs() < 1 << 51)
+    });
+    if small {
+        variance_of(values, ddof, small_int_as_float)
+    } else {
+        variance_of(values, ddof, |value| value as f64)
+    }
+}
+
+/// [`numpy_var_i64`] with each value cast by `cast`: generic, so the cast is
+/// inlined into each pairwise loop (a function pointer a value was not).
+#[inline(always)]
+#[allow(clippy::cast_precision_loss)] // numpy's counts
+fn variance_of(values: &[i64], ddof: usize, cast: impl Fn(i64) -> f64 + Copy) -> f64 {
+    let mean = pairwise_sum_of(values, cast) / values.len() as f64;
+    let squares = pairwise_sum_of(values, |value| {
+        let deviation = mean - cast(value);
+        deviation * deviation
+    });
+    squares / (values.len() - ddof) as f64
+}
+
+/// [`pairwise_sum`] of `term(value)` over `values`, each term made where it
+/// is added (fp-types' `numpy_pairwise_sum_of`).
+#[inline(always)]
+fn pairwise_sum_of(values: &[i64], term: impl Fn(i64) -> f64 + Copy) -> f64 {
+    let n = values.len();
+    if n > 128 {
+        let mut half = n / 2;
+        half -= half % 8;
+        return pairwise_sum_of(&values[..half], term) + pairwise_sum_of(&values[half..], term);
+    }
+    if n < 8 {
+        return values.iter().fold(0.0, |sum, &value| sum + term(value));
+    }
+    let mut sums: [f64; 8] = std::array::from_fn(|lane| term(values[lane]));
+    let whole = n - n % 8;
+    for block in values[8..whole].as_chunks::<8>().0 {
+        for (sum, &value) in sums.iter_mut().zip(block) {
+            *sum += term(value);
+        }
+    }
+    let folded =
+        ((sums[0] + sums[1]) + (sums[2] + sums[3])) + ((sums[4] + sums[5]) + (sums[6] + sums[7]));
+    values[whole..]
+        .iter()
+        .fold(folded, |sum, &value| sum + term(value))
+}
+
 /// numpy's pairwise sum of `values` (fp-types' `numpy_pairwise_sum`, which
 /// pandas' sums are bit for bit): below 8 values a running sum from 0; up
 /// to 128, eight running sums seeded with the first eight values and

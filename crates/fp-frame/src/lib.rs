@@ -24182,6 +24182,14 @@ impl Series {
         // A numeric column's variance is pandas' nanvar (a masked one's,
         // numpy's var over its runs): the mean and the squared deviations
         // each added in numpy's order (br-frankenpandas-9iim6).
+        // An all-valid int64 column's variance in AVX2 lanes - the reduction
+        // below, bit for bit (Series.std of a million ints 0.6 ms, pandas
+        // 0.43; br-frankenpandas-e186m).
+        if let Some(data) = self.column.as_i64_slice()
+            && let Some(variance) = fp_columnar::numpy_var_i64(data, ddof)
+        {
+            return Ok(Scalar::Float64(variance));
+        }
         if let Some(variance) = self.with_pandas_reductions(|r| r.var(ddof)) {
             return Ok(Scalar::Float64(variance));
         }
@@ -46086,10 +46094,33 @@ pub struct SeriesGroupBy<'a> {
 /// keys once for all its column selections (`g['a'].sum(); g['b'].max()`),
 /// where each selection here refactorized them (br-frankenpandas-vug8g).
 /// The ids are an `Arc` so a hand-out is O(1) (n usizes, 16 MB at 2M rows).
+/// A frame groupby over one text key keeps its dense grouping here too
+/// ([`DataFrameGroupBy::sharing`]): `g.size(); g.sum()` factorized the key's
+/// million strings each call (12 ms; pandas 1.6 once its grouper is made;
+/// br-frankenpandas-e186m).
 #[derive(Debug, Default)]
 pub struct DenseGroupLayout {
     ids: OnceLock<Option<(Arc<[usize]>, usize)>>,
+    /// A single text key's grouping (each row's group, the group count, the
+    /// group order, the group labels), with the `sort` and key length it was
+    /// made for.
+    text: OnceLock<(bool, usize, Utf8KeyGrouping)>,
+    /// A single contiguous-text key's dense aggregation grouping (each row's
+    /// group, a representative row per group, the group order), with the
+    /// `sort` and key length it was made for.
+    text_dense: OnceLock<(bool, usize, StrDenseGrouping)>,
+    /// A single int key's dense grouping, with the `sort`, key length, least
+    /// key and key range it was made for.
+    int_dense: OnceLock<((bool, usize, i64, usize), Utf8KeyGrouping)>,
 }
+
+/// A contiguous-text key's dense aggregation grouping: each row's group id,
+/// a representative row per group, and the group order.
+type StrDenseGrouping = (Vec<usize>, Vec<usize>, Vec<usize>);
+
+/// A single text (or int) key's dense grouping: each row's group id, the
+/// group count, the groups in result order, and their labels.
+type Utf8KeyGrouping = (Vec<usize>, usize, Vec<usize>, Index);
 
 #[cfg(test)]
 std::thread_local! {
@@ -96492,6 +96523,7 @@ impl DataFrame {
             }
         }
         Ok(DataFrameGroupBy {
+            layout: None,
             df: self,
             by: by.iter().map(|s| (*s).to_string()).collect(),
             // Each key column's typed label: groupby(0)'s index is named the
@@ -109254,6 +109286,9 @@ impl DataFrame {
 pub struct DataFrameGroupBy<'a> {
     df: &'a DataFrame,
     by: Vec<String>,
+    /// The groupby object's shared grouping cache ([`Self::sharing`]); None
+    /// computes each call's grouping afresh.
+    layout: Option<Arc<DenseGroupLayout>>,
     /// The name each key gives the result's index level: its column name by
     /// default, or the name of the array/Series/Index/callable key that a
     /// caller grouped by through a key column of its own (None for an
@@ -109513,6 +109548,15 @@ impl DataFrameGroupBy<'_> {
     /// Name the result's key levels `names` (one per key; None for an
     /// unnamed key) instead of the key column names - for keys a caller
     /// grouped by through key columns of its own (fvsao.19).
+    /// This groupby reading and keeping its single text key's grouping in
+    /// `layout` - the cache the groupby object holds for all its calls and
+    /// selections, as pandas' keeps its grouper (br-frankenpandas-e186m).
+    #[must_use]
+    pub fn sharing(mut self, layout: &Arc<DenseGroupLayout>) -> Self {
+        self.layout = Some(Arc::clone(layout));
+        self
+    }
+
     pub fn with_key_names<N: Into<LabelName>>(
         mut self,
         names: Vec<Option<N>>,
@@ -111848,6 +111892,57 @@ impl DataFrameGroupBy<'_> {
         offsets: &[usize],
         func_name: &str,
     ) -> Result<DataFrame, FrameError> {
+        let (gid_per_row, first_row, order) = self.str_dense_grouping(bytes, offsets);
+        let ng = first_row.len();
+
+        // Build the output index directly as a contiguous-Utf8 backing
+        // (br-frankenpandas-nbspq): gather the sorted group-key spans into one
+        // byte buffer + offsets, skipping the n per-label `String` alloc +
+        // `from_utf8` re-validation of a `Vec<IndexLabel::Utf8>`. Materialization
+        // to `IndexLabel::Utf8` is deferred until a consumer asks for labels.
+        let mut out_key_bytes: Vec<u8> = Vec::new();
+        let mut out_key_offsets: Vec<usize> = Vec::with_capacity(ng + 1);
+        out_key_offsets.push(0);
+        for &g in &order {
+            let r = first_row[g];
+            out_key_bytes.extend_from_slice(&bytes[offsets[r]..offsets[r + 1]]);
+            out_key_offsets.push(out_key_bytes.len());
+        }
+        let out_index = Index::from_utf8_contiguous(
+            std::sync::Arc::from(out_key_bytes),
+            std::sync::Arc::from(out_key_offsets),
+        )
+        .rename_index(self.single_key_name());
+
+        self.dense_aggregate_emit(value_cols, &gid_per_row, ng, &order, func_name, out_index)
+    }
+
+    /// The groups of a single contiguous-text key for [`Self::aggregate_str_dense`]:
+    /// each row's group id (first seen), a representative row per group, and
+    /// the group order - made once for the groupby object that shares a
+    /// layout ([`Self::sharing`]) and handed out to each later call
+    /// (`g.sum(); g.mean()` hashed the key's million strings each call;
+    /// br-frankenpandas-e186m).
+    fn str_dense_grouping(&self, bytes: &[u8], offsets: &[usize]) -> StrDenseGrouping {
+        if self.by.len() == 1
+            && let Some(layout) = &self.layout
+        {
+            let (sort, len, grouping) = layout.text_dense.get_or_init(|| {
+                (
+                    self.sort,
+                    offsets.len() - 1,
+                    self.str_dense_grouping_fresh(bytes, offsets),
+                )
+            });
+            if *sort == self.sort && *len == offsets.len() - 1 {
+                return grouping.clone();
+            }
+        }
+        self.str_dense_grouping_fresh(bytes, offsets)
+    }
+
+    /// [`Self::str_dense_grouping`], computed.
+    fn str_dense_grouping_fresh(&self, bytes: &[u8], offsets: &[usize]) -> StrDenseGrouping {
         let nrows = offsets.len() - 1;
         let mut gid_per_row = vec![0usize; nrows];
         // `first_row[g]` = a representative row of group `g` (its key span);
@@ -111989,28 +112084,7 @@ impl DataFrameGroupBy<'_> {
             first_row = reps;
             order = (0..first_row.len()).collect();
         }
-        let ng = first_row.len();
-
-        // Build the output index directly as a contiguous-Utf8 backing
-        // (br-frankenpandas-nbspq): gather the sorted group-key spans into one
-        // byte buffer + offsets, skipping the n per-label `String` alloc +
-        // `from_utf8` re-validation of a `Vec<IndexLabel::Utf8>`. Materialization
-        // to `IndexLabel::Utf8` is deferred until a consumer asks for labels.
-        let mut out_key_bytes: Vec<u8> = Vec::new();
-        let mut out_key_offsets: Vec<usize> = Vec::with_capacity(ng + 1);
-        out_key_offsets.push(0);
-        for &g in &order {
-            let r = first_row[g];
-            out_key_bytes.extend_from_slice(&bytes[offsets[r]..offsets[r + 1]]);
-            out_key_offsets.push(out_key_bytes.len());
-        }
-        let out_index = Index::from_utf8_contiguous(
-            std::sync::Arc::from(out_key_bytes),
-            std::sync::Arc::from(out_key_offsets),
-        )
-        .rename_index(self.single_key_name());
-
-        self.dense_aggregate_emit(value_cols, &gid_per_row, ng, &order, func_name, out_index)
+        (gid_per_row, first_row, order)
     }
 
     /// Shared dense per-column aggregation + output assembly for the int64- and
@@ -112998,10 +113072,35 @@ impl DataFrameGroupBy<'_> {
     /// named after the key column. Lets the i64-key-only dense bypasses
     /// (all/any, first/last, idxmax/idxmin) serve a Utf8 key without falling to
     /// the SipHash build_groups + scattered Scalar-gather path.
-    fn single_utf8_key_dense_grouping(
-        &self,
-        key_col: &Column,
-    ) -> (Vec<usize>, usize, Vec<usize>, Index) {
+    fn single_utf8_key_dense_grouping(&self, key_col: &Column) -> Utf8KeyGrouping {
+        // Made once for the groupby object that shares its layout, and handed
+        // out to each later call (renamed: a selection names its index the
+        // same way, but the cache keeps no name of its own to go stale).
+        if self.by.len() == 1
+            && let Some(layout) = &self.layout
+        {
+            let (sort, len, grouping) = layout.text.get_or_init(|| {
+                (
+                    self.sort,
+                    key_col.len(),
+                    self.utf8_key_dense_grouping_fresh(key_col),
+                )
+            });
+            if *sort == self.sort && *len == key_col.len() {
+                let (gid_per_row, ng, order, index) = grouping.clone();
+                return (
+                    gid_per_row,
+                    ng,
+                    order,
+                    index.rename_index(self.single_key_name()),
+                );
+            }
+        }
+        self.utf8_key_dense_grouping_fresh(key_col)
+    }
+
+    /// [`Self::single_utf8_key_dense_grouping`], computed.
+    fn utf8_key_dense_grouping_fresh(&self, key_col: &Column) -> Utf8KeyGrouping {
         let strs = pivot_utf8_key_strs(key_col, key_col.len());
         let mut gid_of: FxHashMap<&str, u32> = FxHashMap::default();
         let mut inverse: Vec<&str> = Vec::new();
@@ -113031,12 +113130,35 @@ impl DataFrameGroupBy<'_> {
         (gid_per_row, ng, order, out_index)
     }
 
-    fn int64_dense_grouping(
-        &self,
-        keys: &[i64],
-        min: i64,
-        range: usize,
-    ) -> (Vec<usize>, usize, Vec<usize>, Index) {
+    fn int64_dense_grouping(&self, keys: &[i64], min: i64, range: usize) -> Utf8KeyGrouping {
+        // Made once for the groupby object that shares its layout, as the text
+        // key's ([`Self::single_utf8_key_dense_grouping`]): g.size() of a
+        // reused int-key groupby factorized its million keys each call
+        // (br-frankenpandas-e186m).
+        if self.by.len() == 1
+            && let Some(layout) = &self.layout
+        {
+            let (made_for, grouping) = layout.int_dense.get_or_init(|| {
+                (
+                    (self.sort, keys.len(), min, range),
+                    self.int64_dense_grouping_fresh(keys, min, range),
+                )
+            });
+            if *made_for == (self.sort, keys.len(), min, range) {
+                let (gid_per_row, ng, order, index) = grouping.clone();
+                return (
+                    gid_per_row,
+                    ng,
+                    order,
+                    index.rename_index(self.single_key_name()),
+                );
+            }
+        }
+        self.int64_dense_grouping_fresh(keys, min, range)
+    }
+
+    /// [`Self::int64_dense_grouping`], computed.
+    fn int64_dense_grouping_fresh(&self, keys: &[i64], min: i64, range: usize) -> Utf8KeyGrouping {
         let nrows = keys.len();
         let mut gid_table = vec![usize::MAX; range];
         let mut gid_per_row = vec![0usize; nrows];
@@ -115935,6 +116057,7 @@ impl DataFrameGroupBy<'_> {
                     .collect();
                 let frame = self.df.select_columns(&columns)?;
                 let grouped = DataFrameGroupBy {
+                    layout: self.layout.clone(),
                     df: &frame,
                     by: self.by.clone(),
                     key_names: self.key_names.clone(),
