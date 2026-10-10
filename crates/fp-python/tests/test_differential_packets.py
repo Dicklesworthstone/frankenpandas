@@ -34606,6 +34606,48 @@ def test_uint64_index_past_int64_is_refused_vqjvd() -> None:
     assert (str(fpd.Index(held).dtype), fpd.Index(held).tolist()) == (str(pd.Index(held).dtype), pd.Index(held).tolist())
 
 
+# br-frankenpandas-76kq0: clip as pandas' where: a cell past a bound becomes
+# the bound as given - a bool Series stays bool while every such bound is a
+# bool (numpy's too) and is object of the cells otherwise, and a bool bound
+# landing in an int / float Series makes it object; a side no cell crosses
+# replaces nothing; scalar bounds the wrong way round swap; ints past 2**53
+# compare with int bounds as the ints they are (as floats 2**60 + 1 and
+# 2**60 tied - the review of the first version). NEGATIVE: the int / float
+# Series' number bounds ((0, 1), (0.5, 1), (None, 0), NaN as no bound) clip
+# as before.
+_76KQ0CLIP_FLAGS = [True, False, True, False, True]
+_76KQ0CLIP_CASES = {
+    "(0, 1)": lambda s: s.clip(0, 1),
+    "(0.5, 1)": lambda s: s.clip(0.5, 1),
+    "(None, 0)": lambda s: s.clip(None, 0),
+    "(False, True)": lambda s: s.clip(False, True),
+    "(np.True_, np.False_) swapped": lambda s: s.clip(np.True_, np.False_),
+    "(True, None)": lambda s: s.clip(True, None),
+    "(np.float64(0.5), None)": lambda s: s.clip(np.float64(0.5), None),
+    "(nan, 0.5)": lambda s: s.clip(np.nan, 0.5),
+    "(False, 2**60 + 1)": lambda s: s.clip(False, 2**60 + 1),
+    "(-(2**60) - 2, True)": lambda s: s.clip(-(2**60) - 2, True),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("data", ["bool", "int", "float", "big int"])
+@pytest.mark.parametrize("case", list(_76KQ0CLIP_CASES))
+def test_bool_series_clip_like_pandas_76kq0(case: str, data: str) -> None:
+    values = {
+        "bool": _76KQ0CLIP_FLAGS,
+        "int": [3, -1, 0, 1, 2],
+        "float": [0.25, 0.75, 1.5, -0.5, 0.5],
+        "big int": [2**60, 2**60 + 1, 2**60 + 2, -(2**60) - 3, 0],
+    }[data]
+
+    def run(m: Any) -> Any:
+        out = _76KQ0CLIP_CASES[case](m.Series(values, name="s"))
+        return (str(out.dtype), [repr(x) for x in out.tolist()], out.name)
+
+    assert run(fpd) == run(pd)
+
+
 # br-frankenpandas-e186m: a plain int64 Index against a Python int - + - *
 # either way round and the six comparisons - works on the ints as held, with
 # numpy's wrapping int64 answers (an Index named as the left / a bool

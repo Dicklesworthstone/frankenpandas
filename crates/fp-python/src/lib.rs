@@ -8824,6 +8824,22 @@ fn drop_missing_error(py: Python<'_>, missing: &[Bound<'_, PyAny>], errors: &str
     )))
 }
 
+/// How numpy orders two of clip's cells / bounds: ints and bools as the ints
+/// they are - exactly, past 2^53 too (read as floats, 2**53 + 1 and 2**53
+/// tied; br-frankenpandas-76kq0) - anything beside a float as float64; None
+/// for any other value or a NaN.
+fn clip_order(a: &Scalar, b: &Scalar) -> Option<std::cmp::Ordering> {
+    let int = |cell: &Scalar| match cell {
+        Scalar::Bool(flag) => Some(i64::from(*flag)),
+        Scalar::Int64(value) => Some(*value),
+        _ => None,
+    };
+    if let (Some(a), Some(b)) = (int(a), int(b)) {
+        return Some(a.cmp(&b));
+    }
+    a.to_f64().ok()?.partial_cmp(&b.to_f64().ok()?)
+}
+
 /// `values` but those at `positions` (in bounds, any order, repeats
 /// allowed): the positions sorted, the values between them copied in runs.
 /// A hash set of the positions was asked about every value (a delete of a
@@ -35614,6 +35630,98 @@ impl PySeries {
                 return Ok(PySeries { inner });
             }
 
+            // A bool column - or a number column a bool bound reaches - clips
+            // as pandas' where does: a cell past a bound becomes the bound as
+            // given; a bool column stays bool while every such bound is a
+            // bool (numpy's too) - a side no cell crosses replaces nothing -
+            // and a bool landing in a number column makes it object, of the
+            // cells (both became float64 / int64 of 0 / 1;
+            // br-frankenpandas-76kq0).
+            if matches!(dtype, DType::Bool | DType::Int64 | DType::Float64)
+                && self.inner.column().categorical().is_none()
+            {
+                // Some(None): no bound; Some(Some(cell)): a number or bool;
+                // None: anything else, for the paths below.
+                let flag_bound =
+                    |bound: Option<&Bound<'_, PyAny>>| -> PyResult<Option<Option<Scalar>>> {
+                        let Some(bound) = bound.filter(|bound| !bound.is_none()) else {
+                            return Ok(Some(None));
+                        };
+                        if bound.extract::<PyRef<'_, PySeries>>().is_ok() {
+                            return Ok(None);
+                        }
+                        let cell = py_to_scalar(py, bound)?;
+                        Ok(match cell {
+                            // NaN (or another missing value) is no bound, as pandas.
+                            _ if cell.is_missing() => Some(None),
+                            Scalar::Float64(value) if value.is_nan() => Some(None),
+                            Scalar::Bool(_) | Scalar::Int64(_) | Scalar::Float64(_) => {
+                                Some(Some(cell))
+                            }
+                            _ => None,
+                        })
+                    };
+                let is_bool = |bound: &Option<Scalar>| matches!(bound, Some(Scalar::Bool(_)));
+                // A number column takes this path only for a bool bound; its
+                // number bounds keep the typed kernel below.
+                if let (Some(low), Some(high)) = (flag_bound(lower)?, flag_bound(upper)?)
+                    && (dtype == DType::Bool || is_bool(&low) || is_bool(&high))
+                {
+                    let (low, high) = match (low, high) {
+                        (Some(low), Some(high))
+                            if clip_order(&low, &high) == Some(std::cmp::Ordering::Greater) =>
+                        {
+                            (Some(high), Some(low))
+                        }
+                        bounds => bounds,
+                    };
+                    let mut bool_landed = false;
+                    let cells: Vec<Scalar> = self
+                        .inner
+                        .values()
+                        .iter()
+                        .map(|cell| {
+                            if cell.is_missing() {
+                                return cell.clone();
+                            }
+                            let replaced = match (&low, &high) {
+                                (Some(bound), _)
+                                    if clip_order(cell, bound)
+                                        == Some(std::cmp::Ordering::Less) =>
+                                {
+                                    bound
+                                }
+                                (_, Some(bound))
+                                    if clip_order(cell, bound)
+                                        == Some(std::cmp::Ordering::Greater) =>
+                                {
+                                    bound
+                                }
+                                _ => return cell.clone(),
+                            };
+                            bool_landed |= matches!(replaced, Scalar::Bool(_));
+                            replaced.clone()
+                        })
+                        .collect();
+                    let column = if dtype == DType::Bool {
+                        if cells.iter().all(|cell| matches!(cell, Scalar::Bool(_))) {
+                            Some(Column::new(DType::Bool, cells).map_err(column_error_to_py)?)
+                        } else {
+                            Some(Column::from_object_values(cells))
+                        }
+                    } else if bool_landed {
+                        Some(Column::from_object_values(cells))
+                    } else {
+                        None
+                    };
+                    if let Some(column) = column {
+                        let inner =
+                            Series::new(self.inner.name(), self.inner.index().clone(), column)
+                                .map_err(frame_error_to_py)?;
+                        return Ok(PySeries { inner });
+                    }
+                }
+            }
             // An object column of numbers clips cell by cell, as pandas'
             // where does: a cell past a number bound becomes that bound as
             // given, every other cell stays itself, the column object - it
