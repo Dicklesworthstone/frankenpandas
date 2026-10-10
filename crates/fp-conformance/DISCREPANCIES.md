@@ -46,20 +46,6 @@
 - **Tests affected:** `csv_none_is_default_na`
 - **Review date:** 2026-04-15
 
-### DISC-006: Row MultiIndex is scaffolded, not full pandas parity
-- **Reference:** pandas `MultiIndex` supports arbitrary-level hierarchical row labels with full slicing, `xs`, `droplevel`, `swaplevel`, `reindex`, `sort_index`, etc.
-- **Our impl:** Row-MultiIndex first slice ships struct + constructor + level access. Full slicing / xs / droplevel / swaplevel coverage lands in subsequent slices (umbrella tracked by br-frankenpandas-1zzp).
-- **Impact:** DataFrames built with a row MultiIndex may reject operations that pandas accepts, or return partial results. Error messages identify which operation is pending.
-- **Resolution:** INVESTIGATING - slices land under br-1zzp child beads until coverage parity is reached.
-- **Tests affected:** `live_oracle_dataframe_row_multiindex_*` suite (scoped to shipped operations).
-- **Update 2026-09-06 (br-frankenpandas-wfkzm):** the last open symptom in this file is closed —
-  multi-key `groupby(...).sum()` / `agg_multi` / `size` flat index labels now use the oracle's
-  `tuple_label_to_flat_string` pipe-joined spelling (`"north|apple"`) instead of `", "`-joined,
-  matching the `row_multiindex` levels the aggregation already attached. All 9
-  `live_oracle_dataframe_row_multiindex` tests pass against live pandas 2.2.3. Broader
-  slicing/xs/droplevel coverage remains under br-frankenpandas-1zzp.
-- **Review date:** 2026-04-23
-
 ### DISC-007: SQL IO is SQLite-only; pandas supports multiple backends
 - **Reference:** pandas `read_sql` / `to_sql` accept any SQLAlchemy-compatible backend (SQLite, PostgreSQL, MySQL, Oracle, MSSQL, etc.).
 - **Our impl:** fp-io's `read_sql` / `write_sql` only accept a `rusqlite::Connection`. PostgreSQL / MySQL / Oracle connectors not shipped.
@@ -193,6 +179,21 @@
 - **Review date:** 2026-10-05
 
 ## Resolved Divergences
+
+### DISC-006: Row MultiIndex is scaffolded, not full pandas parity
+- **⚠️ RESOLVED 2026-10-10 (`br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9`).** Every operation family this entry named answers as live pandas 2.2.3 does in `crates/fp-python/tests/test_differential_packets.py`: `test_multiindex_disc006_matrix_4qg5w9` (34 cases: `.loc` with tuples / slices / `pd.IndexSlice` / lists of tuples, `xs` with `level=` / `drop_level=`, multi-level `stack` / `unstack`, multi-key `groupby` + `transform` / `rank` / `cumcount`, `sort_index(level=)`, `reindex(level=)`, a join on a level, `reset_index(level=)` / `set_index(append=)`, `swaplevel` / `reorder_levels`, CSV / dict / JSON round trips) and `test_multiindex_unsorted_slices_raise_like_pandas_4qg5w9` (a slice of a level at or past the lexsort depth raises pandas' `UnsortedIndexError`, where the rows of an unsorted index were read as if sorted; lists give their rows in the lists' order; a listed label the level lacks is a `KeyError`; a missing label sorts first, as its code -1). Every Python MultiIndex axis writes one flat separator, so axes built different ways align by tuple (`br-frankenpandas-upecu`). MultiIndex bugs found since are beads, not this divergence: concat of a MultiIndex piece beside a flat one (`br-frankenpandas-ljr0a`). The historical entry below is kept as written.
+- **Reference:** pandas `MultiIndex` supports arbitrary-level hierarchical row labels with full slicing, `xs`, `droplevel`, `swaplevel`, `reindex`, `sort_index`, etc.
+- **Our impl:** Row-MultiIndex first slice ships struct + constructor + level access. Full slicing / xs / droplevel / swaplevel coverage lands in subsequent slices (umbrella tracked by br-frankenpandas-1zzp).
+- **Impact:** DataFrames built with a row MultiIndex may reject operations that pandas accepts, or return partial results. Error messages identify which operation is pending.
+- **Resolution:** INVESTIGATING - slices land under br-1zzp child beads until coverage parity is reached.
+- **Tests affected:** `live_oracle_dataframe_row_multiindex_*` suite (scoped to shipped operations).
+- **Update 2026-09-06 (br-frankenpandas-wfkzm):** the last open symptom in this file is closed —
+  multi-key `groupby(...).sum()` / `agg_multi` / `size` flat index labels now use the oracle's
+  `tuple_label_to_flat_string` pipe-joined spelling (`"north|apple"`) instead of `", "`-joined,
+  matching the `row_multiindex` levels the aggregation already attached. All 9
+  `live_oracle_dataframe_row_multiindex` tests pass against live pandas 2.2.3. Broader
+  slicing/xs/droplevel coverage remains under br-frankenpandas-1zzp.
+- **Review date:** 2026-04-23
 
 ### DISC-025: `str.encode` returns byte LENGTHS, where pandas returns bytes objects
 - **⚠️ RESOLVED 2026-09-27 (`br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.8`).** `str.encode` returns real bytes: fp-types has a bytes object cell, `ObjectValue::Bytes`, which the Python binding reads and writes as Python `bytes` (they were host objects). `StringAccessor::encode` gives each str as its bytes, keeps a missing value as it is and the name, NaN for any other value; `decode` reads bytes cells and gives NaN for anything else, a str included (measured, live pandas 2.2.3: `Series(['ab']).str.decode('utf-8')` is float64 `[nan]` - the AttributeError quoted below is not what 2.2.3 raises for an object Series). The core encodes UTF-8, ASCII and Latin-1 strictly with Python's error texts; the binding uses Python's own codecs (any encoding, `errors=`). The oracle had been answering FrankenPandas' question (`.str.encode('utf-8').str.len()`, decode as identity); it now asks pandas', and the four encode / decode fixtures were regenerated per fixture under `artifacts/audits/qg5w8_disc025_str_encode_decode_attribution_2026-09-27.json` (0 WIN / 4 LOSE against the pre-change code, 4 WIN after). The historical entry below is kept as written.

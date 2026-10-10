@@ -84,7 +84,7 @@ AACE is a core identity constraint, not a best-effort optimization. pandas' alig
 | **Fail closed** | Unknown features, incompatible dtypes, and ambiguous coercions produce errors, not silent corruption. Strict mode rejects; hardened mode logs and recovers under a Bayesian expected-loss decision rule. |
 | **Zero unsafe** | Every crate uses `#![forbid(unsafe_code)]`. Memory safety comes from the type system, not audits. |
 | **Test everything differentially** | Conformance packets run FrankenPandas operations and compare against the pandas oracle. 1,387 packet JSON files, replayed against the live pandas oracle in CI (daily batch and every pull request). |
-| **Document every divergence** | 32 numbered divergence entries (19 active, the rest resolved) are written up in `crates/fp-conformance/DISCREPANCIES.md` with root-cause analysis, resolution status (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED), and reproducible test packets. No silent disagreement. |
+| **Document every divergence** | 32 numbered divergence entries (18 active, the rest resolved) are written up in `crates/fp-conformance/DISCREPANCIES.md` with root-cause analysis, resolution status (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED), and reproducible test packets. No silent disagreement. |
 
 ## What's In The Box
 
@@ -2852,7 +2852,7 @@ A rough heat map of how compatible we are with pandas, by API family, as of 2026
 | Sorting / NA position | 🟢 | Validated `na_position` strings; stable sort. |
 | Reshape (`melt`, `pivot_table`, `stack`, `unstack`, `crosstab`, `get_dummies`, `explode`) | 🟢 | Multi-value pivot, custom margins names, with-fill variants. |
 | Joins (Inner / Left / Right / Outer / Cross / Asof) | 🟢 | All directions + `tolerance` / `by` / `allow_exact_matches` on asof; `validate=` + `indicator=` + custom `suffixes=` on merge. |
-| MultiIndex (row + column) | 🟡 | DISC-006 notes scaffolded-not-full parity for advanced ops. Full parity for set / get / xs / IO round-trip. |
+| MultiIndex (row + column) | 🟡 | `.loc` (tuples, slices, `IndexSlice`, unsorted-slice errors), xs, stack / unstack, groupby by level, sort / reindex by level, joins on a level, set / reset_index and IO round trips answer as pandas' in a live differential matrix (DISC-006 resolved). Known gap: concat beside a flat-index piece (br-frankenpandas-ljr0a). |
 | IO: CSV / JSON / JSONL / Parquet / Excel / Feather / IPC | 🟢 | All seven, including the full pandas option matrices. |
 | IO: HTML / XML / LaTeX / Markdown / Pickle / Stata | 🟢 | All six, with the caveat that Pickle carries a FrankenPandas envelope inside a real pickle stream, so it is not interchangeable with pandas pickle files. |
 | IO: ORC | 🔴 | Public API retained, but fail-closed under the no-Tokio policy until a native Tokio-free backend lands. |

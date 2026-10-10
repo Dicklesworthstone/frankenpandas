@@ -36398,3 +36398,251 @@ _SEP175_CASES = {
 @pytest.mark.parametrize("case", list(_SEP175_CASES))
 def test_multiindex_axes_align_by_tuple_upecu(case: str) -> None:
     assert _sep175_rows(_SEP175_CASES[case](fpd)) == _sep175_rows(_SEP175_CASES[case](pd))
+
+
+# br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9: a frame made from
+# a MultiIndex Series (to_frame) holds the MultiIndex its index carries -
+# reset_index, to_csv and a CSV round trip, a join on a level name answer as
+# pandas'; a full key on a non-unique MultiIndex is a frame of its rows;
+# Series.reset_index(level=) resets those levels. NEGATIVE: a full key on a
+# unique MultiIndex is a Series row, a flat Series' reset_index(level=0) is
+# its whole index, and inplace without drop is pandas' TypeError.
+def _mi176_series(m: Any) -> Any:
+    return m.DataFrame(
+        {"a": ["x", "y", "x", "z"], "b": [1, 2, 3, 1], "c": ["p", "q", "p", "q"], "v": [1.0, 2.0, 3.0, 4.0]}
+    ).set_index(["a", "b", "c"])["v"]
+
+
+def _mi176_rows(out: Any) -> Any:
+    if isinstance(out, (str, list, bool, tuple)) or not hasattr(out, "index"):
+        return repr(out)
+    values = out.tolist() if not hasattr(out, "columns") else [[repr(v) for v in out[c].tolist()] for c in out.columns]
+    columns = [] if not hasattr(out, "columns") else [repr(c) for c in out.columns]
+    return type(out.index).__name__, [repr(label) for label in out.index.tolist()], list(out.index.names), columns, repr(values), getattr(out, "name", None)
+
+
+def _mi176_inplace_error(m: Any) -> Any:
+    try:
+        _mi176_series(m).reset_index(level="c", inplace=True)
+    except TypeError:
+        return "TypeError"
+    return "no error"
+
+
+def _mi176_inplace_drop(m: Any) -> Any:
+    s = _mi176_series(m)
+    s.reset_index(level="c", drop=True, inplace=True)
+    return s
+
+
+def _mi176_csv(m: Any) -> Any:
+    import io
+
+    return m.read_csv(io.StringIO(_mi176_series(m).to_frame().to_csv()), index_col=[0, 1, 2])
+
+
+_MI176_CASES = {
+    "to_frame reset_index": lambda m: _mi176_series(m).to_frame().reset_index(),
+    "to_frame named reset": lambda m: _mi176_series(m).to_frame("w").reset_index(),
+    "to_frame to_csv": lambda m: _mi176_series(m).to_frame().to_csv(),
+    "csv round trip": lambda m: _mi176_csv(m),
+    "join on level": lambda m: _mi176_series(m).to_frame().join(m.DataFrame({"w": [10, 20, 30]}, index=m.Index(["x", "y", "z"], name="a"))),
+    "full key non-unique": lambda m: m.DataFrame({"a": ["x", "x", "y"], "b": [1, 1, 2], "v": [1.0, 2.0, 3.0]}).set_index(["a", "b"]).loc[("y", 2)],
+    "reset level c": lambda m: _mi176_series(m).reset_index(level="c"),
+    "reset levels a c": lambda m: _mi176_series(m).reset_index(level=["a", "c"]),
+    "reset level drop": lambda m: _mi176_series(m).reset_index(level="b", drop=True),
+    "reset level name": lambda m: _mi176_series(m).reset_index(level=0, name="w"),
+    "reset level inplace drop": _mi176_inplace_drop,
+    "full key unique (NEGATIVE)": lambda m: _mi176_series(m).to_frame().loc[("y", 2, "q")],
+    "flat reset level 0 (NEGATIVE)": lambda m: m.Series([1.0, 2.0], index=m.Index(["p", "q"], name="k")).reset_index(level=0),
+    "inplace without drop (NEGATIVE)": _mi176_inplace_error,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MI176_CASES))
+def test_multiindex_frames_from_series_like_pandas_4qg5w9(case: str) -> None:
+    assert _mi176_rows(_MI176_CASES[case](fpd)) == _mi176_rows(_MI176_CASES[case](pd))
+
+
+# br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9 (DISC-006): every
+# MultiIndex family the divergence named answers as pandas' - loc with tuples
+# / slices / IndexSlice, xs with level= / drop_level=, multi-level stack /
+# unstack, multi-key groupby + transform, sort_index / reindex with level=,
+# a join on a level, reset_index / set_index(append=), swaplevel /
+# reorder_levels, CSV / dict / JSON round trips. NEGATIVE: a slice bounding
+# a level of an unsorted MultiIndex raises pandas' UnsortedIndexError (a
+# null slice of one does not). One draw of the data, shared by both arms.
+_DISC006_RNG = np.random.default_rng(9)
+_DISC006_A = [f"a{i}" for i in _DISC006_RNG.integers(0, 3, 36)]
+_DISC006_B = [int(b) for b in _DISC006_RNG.integers(0, 4, 36)]
+_DISC006_C = [f"c{i}" for i in _DISC006_RNG.integers(0, 2, 36)]
+_DISC006_X = [float(x) for x in np.round(_DISC006_RNG.random(36) * 10, 3)]
+
+
+def _disc006_base(m: Any) -> Any:
+    return m.DataFrame({"a": _DISC006_A, "b": _DISC006_B, "c": _DISC006_C, "x": _DISC006_X})
+
+
+def _disc006_tri(m: Any) -> Any:
+    return _disc006_base(m).groupby(["a", "b", "c"])["x"].sum()
+
+
+def _disc006_sorted(m: Any) -> Any:
+    return _disc006_base(m).set_index(["a", "b"]).sort_index()
+
+
+def _disc006_unsorted_slice(m: Any) -> Any:
+    try:
+        _disc006_base(m).set_index(["a", "b"]).loc[("a0", slice(1, 2)), :]
+    except Exception as e:
+        return type(e).__name__
+    return "no error"
+
+
+def _disc006_csv(m: Any) -> Any:
+    import io
+
+    return m.read_csv(io.StringIO(_disc006_tri(m).to_frame().to_csv()), index_col=[0, 1, 2])
+
+
+def _disc006_rows(out: Any) -> Any:
+    if isinstance(out, (dict, list, tuple, str, bool)):
+        return repr(out)
+    if hasattr(out, "columns") and hasattr(out, "index"):
+        return (
+            type(out.index).__name__,
+            [repr(v) for v in out.index.tolist()],
+            list(out.index.names),
+            [repr(c) for c in out.columns.tolist()],
+            repr(out.round(6).values.tolist()),
+        )
+    if hasattr(out, "index") and hasattr(out, "tolist"):
+        return (
+            type(out.index).__name__,
+            [repr(v) for v in out.index.tolist()],
+            list(out.index.names),
+            repr([round(v, 6) if isinstance(v, float) else v for v in out.tolist()]),
+        )
+    return repr(out)
+
+
+_DISC006_CASES = {
+    "loc tuple full": lambda m: _disc006_sorted(m).loc[("a1", 2)],
+    "loc tuple partial": lambda m: _disc006_sorted(m).loc[("a1",)],
+    "loc outer slice": lambda m: _disc006_sorted(m).loc["a0":"a1"],
+    "loc tuple slice": lambda m: _disc006_sorted(m).loc[("a0", 1):("a1", 2)],
+    "loc IndexSlice both": lambda m: _disc006_sorted(m).loc[m.IndexSlice["a1", 1:2], :],
+    "loc IndexSlice inner list": lambda m: _disc006_sorted(m).loc[m.IndexSlice[:, [0, 3]], "x"],
+    "loc list of tuples": lambda m: _disc006_sorted(m).loc[[("a0", 1), ("a2", 3)]],
+    "xs level drop": lambda m: _disc006_tri(m).xs(1, level="b"),
+    "xs level keep": lambda m: _disc006_tri(m).xs(1, level="b", drop_level=False),
+    "xs two levels": lambda m: _disc006_tri(m).xs(("a2", "c1"), level=["a", "c"]),
+    "unstack last": lambda m: _disc006_tri(m).unstack(),
+    "unstack two": lambda m: _disc006_tri(m).unstack(["b", "c"]),
+    "unstack then stack": lambda m: _disc006_tri(m).unstack("c").stack(),
+    "unstack fill": lambda m: _disc006_tri(m).unstack("b", fill_value=0),
+    "gb transform sum": lambda m: _disc006_base(m).groupby(["a", "c"])["x"].transform("sum"),
+    "gb transform rank": lambda m: _disc006_base(m).groupby(["a", "c"])["x"].rank(),
+    "gb level transform": lambda m: _disc006_tri(m).groupby(level=["a", "c"]).transform("max"),
+    "gb level cumcount": lambda m: _disc006_tri(m).groupby(level="a").cumcount(),
+    "sort_index level list": lambda m: _disc006_tri(m).sort_index(level=["c", "b"]),
+    "sort_index desc level": lambda m: _disc006_tri(m).sort_index(level="b", ascending=False),
+    "reindex level": lambda m: _disc006_tri(m).reindex(["a2", "a0"], level="a"),
+    "join on level": lambda m: _disc006_tri(m)
+    .to_frame()
+    .join(m.DataFrame({"w": [1.0, 2.0, 3.0]}, index=m.Index(["a0", "a1", "a2"], name="a"))),
+    "merge on reset levels": lambda m: _disc006_tri(m)
+    .to_frame()
+    .reset_index()
+    .merge(m.DataFrame({"a": ["a0", "a1"], "w": [5, 6]}), on="a"),
+    "reset one level": lambda m: _disc006_tri(m).reset_index(level="c"),
+    "set_index append": lambda m: _disc006_base(m).set_index("a").set_index("c", append=True),
+    "set_index drop False": lambda m: _disc006_base(m).set_index(["a", "c"], drop=False).head(5),
+    "swaplevel ij": lambda m: _disc006_tri(m).swaplevel(0, 2),
+    "reorder_levels names": lambda m: _disc006_tri(m).reorder_levels(["c", "a", "b"]),
+    "reorder then sort": lambda m: _disc006_tri(m).reorder_levels([2, 0, 1]).sort_index(),
+    "csv round trip": _disc006_csv,
+    "to_dict keys": lambda m: sorted(_disc006_tri(m).to_dict().items())[:4],
+    "to_json split": lambda m: _disc006_tri(m).head(3).to_json(orient="split"),
+    "records": lambda m: _disc006_tri(m).reset_index().head(3).to_dict("records"),
+    "unsorted slice UnsortedIndexError (NEGATIVE)": _disc006_unsorted_slice,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_DISC006_CASES))
+def test_multiindex_disc006_matrix_4qg5w9(case: str) -> None:
+    if "NEGATIVE" in case:
+        assert _DISC006_CASES[case](pd) == "UnsortedIndexError"
+    assert _disc006_rows(_DISC006_CASES[case](fpd)) == _disc006_rows(_DISC006_CASES[case](pd))
+
+
+# br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9: a .loc slice of a
+# MultiIndex level at or past its lexsort depth is pandas' UnsortedIndexError
+# (get_locs' "slicing on levels [..]", slice_locs' "Key length (..)") - fp
+# read the unsorted rows as if sorted and answered some of them. A missing
+# label sorts first, as its code -1: a tuple bound skips it, a level slice
+# never holds it (a null slice does), and the index is neither monotonic
+# increasing nor decreasing. Lists give their rows in the lists' order
+# (pandas' _reorder_indexer), and a Series keyed by a list or a bounded slice
+# keeps every level; a listed label the level lacks is pandas' KeyError.
+# NEGATIVE: a sorted index, an outer slice of an index sorted only on its
+# outer level, a null slice and a list slice answer rows.
+_LEX4QG_FRAMES = {
+    "unsorted": {"a": ["a1", "a0", "a1", "a0", "a2"], "b": [2, 1, 0, 3, 1], "x": [1.0, 2.0, 3.0, 4.0, 5.0]},
+    "outer sorted": {"a": ["a0", "a0", "a1", "a1", "a2"], "b": [3, 1, 2, 0, 1], "x": [1.0, 2.0, 3.0, 4.0, 5.0]},
+    "sorted": {"a": ["a0", "a0", "a1", "a1", "a2"], "b": [1, 3, 0, 2, 1], "x": [1.0, 2.0, 3.0, 4.0, 5.0]},
+    "missing first": {"a": [None, "a0", "a0", "a1"], "b": [5, 1, 2, 0], "x": [1.0, 2.0, 3.0, 4.0]},
+}
+
+
+def _lex4qg_set(frame: Any) -> Any:
+    out = frame.copy()
+    out.loc[("a0", slice(1, 2)), "x"] = 0.0
+    return out
+
+
+_LEX4QG_OPS = {
+    "outer slice": lambda d: d.loc["a0":"a1"],
+    "slice to": lambda d: d.loc[:"a1"],
+    "slice from": lambda d: d.loc["a1":],
+    "tuple bounds": lambda d: d.loc[("a0", 1):("a1", 2)],
+    "level slice": lambda d: d.loc[("a0", slice(1, 2)), :],
+    "IndexSlice inner": lambda d: d.loc[pd.IndexSlice[:, 1:2], :],
+    "both slices": lambda d: d.loc[(slice("a0", "a1"), slice(1, 2)), :],
+    "outer slice, null inner": lambda d: d.loc[(slice("a0", None), slice(None)), :],
+    "null outer, inner past a missing label": lambda d: d.loc[pd.IndexSlice[:, 4:6], :],
+    "lists against the order": lambda d: d.loc[(["a1", "a0"], [2, 1, 0, 3]), :],
+    "Series list against the order": lambda d: d["x"].loc[("a1", [2, 0])],
+    "list with a label the level lacks": lambda d: d.loc[(["a0", "a9"], slice(None)), :],
+    "null slice (NEGATIVE)": lambda d: d.loc[("a0", slice(None)), :],
+    "list outer (NEGATIVE)": lambda d: d.loc[(["a0", "a1"], slice(None)), :],
+    "Series level slice": lambda d: d["x"].loc[("a0", slice(1, 2))],
+    "set by level slice": _lex4qg_set,
+    "monotonic": lambda d: (d.index.is_monotonic_increasing, d.index.is_monotonic_decreasing),
+}
+
+
+def _lex4qg_outcome(frame: str, op: str, m: Any) -> Any:
+    try:
+        out = _LEX4QG_OPS[op](m.DataFrame(_LEX4QG_FRAMES[frame]).set_index(["a", "b"]))
+    except Exception as e:
+        return ("raise", type(e).__name__, str(e))
+    if isinstance(out, tuple):
+        return out
+    values = out.tolist() if not hasattr(out, "columns") else out["x"].tolist()
+    return ("ok", [repr(label) for label in out.index.tolist()], values)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("frame", list(_LEX4QG_FRAMES))
+@pytest.mark.parametrize("op", list(_LEX4QG_OPS))
+def test_multiindex_unsorted_slices_raise_like_pandas_4qg5w9(frame: str, op: str) -> None:
+    expected = _lex4qg_outcome(frame, op, pd)
+    answers_rows = op not in ("monotonic", "list with a label the level lacks")
+    if "NEGATIVE" in op or (frame == "sorted" and answers_rows):
+        assert expected[0] == "ok"
+    if op == "list with a label the level lacks":
+        assert expected[:2] == ("raise", "KeyError")
+    assert _lex4qg_outcome(frame, op, fpd) == expected

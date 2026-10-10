@@ -19205,10 +19205,21 @@ impl Column {
         };
         if let Some(values) = base.as_i64_slice() {
             let wrapped = if let Some((mask, sign)) = int_wrap_masks(width) {
-                values
-                    .iter()
-                    .map(|&value| ((value & mask) ^ sign).wrapping_sub(sign))
-                    .collect()
+                let wrap = |value: i64| ((value & mask) ^ sign).wrapping_sub(sign);
+                // Ints the width already holds are their own wrap: the cast
+                // shares their buffer, where it wrote a second one (a fold,
+                // so it vectorizes; s.astype('int8') and every cat.codes,
+                // br-frankenpandas-yazrg).
+                if base.categorical.is_none()
+                    && values
+                        .iter()
+                        .fold(true, |fits, &value| fits & (wrap(value) == value))
+                {
+                    return Ok(base
+                        .keeping_nullable_dtype(&storage)
+                        .with_width_unchecked(width));
+                }
+                values.iter().map(|&value| wrap(value)).collect()
             } else {
                 values
                     .iter()
@@ -72581,6 +72592,50 @@ mod numeric_width_columns_fvsao23 {
 
     fn ints(values: &[i64]) -> Column {
         Column::from_i64_values(values.to_vec())
+    }
+
+    #[test]
+    fn cast_of_ints_the_width_holds_shares_their_buffer_yazrg() {
+        // pd.Series([0, -1, 126, -128]).astype('int8') keeps the values;
+        // the cast shares the int64 buffer rather than writing another
+        // (br-frankenpandas-yazrg).
+        let source = Column::from_i64_values_owned(vec![0, -1, 126, -128]);
+        let int8 = source.cast_to_width(NumericWidth::Int8, false).unwrap();
+        assert_eq!(int8.width(), Some(NumericWidth::Int8));
+        assert_eq!(int8.dtype(), DType::Int64);
+        assert_eq!(int8.as_i64_slice().unwrap(), &[0, -1, 126, -128]);
+        assert_eq!(
+            int8.as_i64_slice().unwrap().as_ptr(),
+            source.as_i64_slice().unwrap().as_ptr()
+        );
+        // A uint16 cast of ints in 0..65536 shares too.
+        let small = ints(&[0, 65_535, 7]);
+        let uint16 = small.cast_to_width(NumericWidth::UInt16, false).unwrap();
+        assert_eq!(uint16.width(), Some(NumericWidth::UInt16));
+        assert_eq!(
+            uint16.as_i64_slice().unwrap().as_ptr(),
+            small.as_i64_slice().unwrap().as_ptr()
+        );
+        // NEGATIVE: one int past the width wraps every value into a new
+        // buffer (128 -> -128 as int8, -1 -> 255 as uint8), and an int16
+        // column cast to int8 is narrowed, not reported as int16.
+        let past = ints(&[5, 128]);
+        let wrapped = past.cast_to_width(NumericWidth::Int8, false).unwrap();
+        assert_eq!(wrapped.as_i64_slice().unwrap(), &[5, -128]);
+        assert_ne!(
+            wrapped.as_i64_slice().unwrap().as_ptr(),
+            past.as_i64_slice().unwrap().as_ptr()
+        );
+        let unsigned = ints(&[-1])
+            .cast_to_width(NumericWidth::UInt8, false)
+            .unwrap();
+        assert_eq!(unsigned.as_i64_slice().unwrap(), &[255]);
+        let int16 = ints(&[300, 2])
+            .cast_to_width(NumericWidth::Int16, false)
+            .unwrap();
+        let narrowed = int16.cast_to_width(NumericWidth::Int8, false).unwrap();
+        assert_eq!(narrowed.width(), Some(NumericWidth::Int8));
+        assert_eq!(narrowed.as_i64_slice().unwrap(), &[44, 2]);
     }
 
     #[test]

@@ -56584,7 +56584,7 @@ impl CategoricalAccessor<'_> {
     /// "{name}_codes"), of pandas' width for the category count - int8 up
     /// to 126 categories, then int16, int32 (they were int64; fvsao.23).
     pub fn codes(&self) -> Result<Series, FrameError> {
-        let codes = Column::from_i64_values(self.row_codes());
+        let codes = Column::from_i64_values_owned(self.row_codes());
         let codes = match NumericWidth::for_category_codes(self.meta.categories.len()) {
             Some(width) => codes.cast_to_width(width, false)?,
             None => codes,
@@ -79454,6 +79454,11 @@ impl DataFrame {
         let (name, tz) = (axis.name.clone(), axis.tz.clone());
         let column_order: Vec<String> = axis.into();
         Self::validate_column_lengths(&index, &columns)?;
+        // A row MultiIndex the index carries is the frame's: a Series'
+        // to_frame kept it only on its index, and reset_index / to_csv /
+        // join wrote its flat labels
+        // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
+        let row_multiindex = row_multiindex.or_else(|| index.row_multiindex().cloned());
         if let Some(multiindex) = row_multiindex.as_ref()
             && multiindex.len() != index.len()
         {
@@ -79510,6 +79515,8 @@ impl DataFrame {
         let (name, tz) = (axis.name.clone(), axis.tz.clone());
         let column_order: Vec<String> = axis.into();
         columns.reorder(&column_order);
+        // As new_with_axes: the index's row MultiIndex is the frame's.
+        let row_multiindex = row_multiindex.or_else(|| index.row_multiindex().cloned());
         Self {
             index,
             row_multiindex,
@@ -127308,6 +127315,50 @@ mod tests {
             int_fill.column("x").unwrap().values()[0],
             Scalar::Float64(-1.0)
         );
+    }
+
+    #[test]
+    fn frames_adopt_the_multiindex_their_index_carries_4qg5w9() {
+        // A frame built over an index carrying a row MultiIndex holds it
+        // as its own: a Series' to_frame, DataFrame::new - reset_index then
+        // makes the levels columns (it wrote one flat column;
+        // br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
+        let utf8 = |s: &str| fp_index::IndexLabel::Utf8(s.to_owned());
+        let multi = fp_index::MultiIndex::from_arrays(vec![
+            vec![utf8("x"), utf8("y")],
+            [1, 2].map(fp_index::IndexLabel::Int64).to_vec(),
+        ])
+        .unwrap()
+        .set_names(vec![Some("a".into()), Some("b".into())]);
+        let index = multi
+            .to_flat_index("|")
+            .with_row_multiindex(multi.clone())
+            .unwrap();
+        let series =
+            Series::new("v", index.clone(), Column::from_f64_values(vec![1.0, 2.0])).unwrap();
+        let framed = series.to_frame(None).unwrap();
+        assert_eq!(framed.row_multiindex(), Some(&multi));
+        let reset = framed.reset_index(false).unwrap();
+        assert_eq!(
+            reset.column_names(),
+            vec![&"a".to_owned(), &"b".to_owned(), &"v".to_owned()]
+        );
+        let built = DataFrame::new(
+            index,
+            BTreeMap::from([("v".to_owned(), Column::from_f64_values(vec![1.0, 2.0]))]),
+        )
+        .unwrap();
+        assert_eq!(built.row_multiindex(), Some(&multi));
+        // NEGATIVE: a flat index keeps the frame flat.
+        let flat = Series::new(
+            "v",
+            Index::new(vec![utf8("p"), utf8("q")]),
+            Column::from_f64_values(vec![1.0, 2.0]),
+        )
+        .unwrap()
+        .to_frame(None)
+        .unwrap();
+        assert!(flat.row_multiindex().is_none());
     }
 
     #[test]

@@ -646,7 +646,7 @@ fn readme_documented_numbers_match_the_tree() {
         "DISCREPANCIES entry count changed; update README + this gate"
     );
     assert_eq!(
-        tree.disc_active, 19,
+        tree.disc_active, 18,
         "DISCREPANCIES active-section count changed; update README + this gate"
     );
     let violations = readme_number_violations(&readme, &tree);

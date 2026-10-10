@@ -37285,9 +37285,6 @@ impl PySeries {
         inplace: bool,
         allow_duplicates: bool,
     ) -> PyResult<Py<PyAny>> {
-        // A Series index is single-level, so level 0 is the whole index.
-        let level_is_default = level.is_none_or(|l| matches!(l.extract::<i64>(), Ok(0)));
-        unsupported_params("Series.reset_index", &[("level", level_is_default)])?;
         // In place, the Series can only lose its index (pandas' rule).
         if inplace && !drop {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -37304,6 +37301,42 @@ impl PySeries {
             }
             _ => None,
         };
+        // A MultiIndex Series resets the levels named as its frame does:
+        // they become columns before the values, the others stay its index;
+        // with drop the values stay a Series under the levels left (level=
+        // was refused; br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
+        if let Some(level) = level.filter(|level| !level.is_none())
+            && self.inner.index().row_multiindex().is_some()
+        {
+            let frame = self
+                .inner
+                .to_frame(name_str.as_deref())
+                .map_err(frame_error_to_py)?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("level", level)?;
+            kwargs.set_item("drop", drop)?;
+            kwargs.set_item("allow_duplicates", allow_duplicates)?;
+            let reset = Py::new(py, PyDataFrame { inner: frame })?
+                .into_bound(py)
+                .call_method("reset_index", (), Some(&kwargs))?;
+            if !drop {
+                return Ok(reset.unbind());
+            }
+            let reset = reset.extract::<PyRef<'_, PyDataFrame>>()?;
+            let values = reset.inner.column_at(0).cloned().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("reset_index lost its values")
+            })?;
+            let series = Series::new(self.inner.name(), frame_row_index(&reset.inner)?, values)
+                .map_err(frame_error_to_py)?;
+            if inplace {
+                self.inner = series;
+                return Ok(py.None());
+            }
+            return Ok(Py::new(py, PySeries { inner: series })?.into_any());
+        }
+        // A Series index is single-level, so level 0 is the whole index.
+        let level_is_default = level.is_none_or(|l| matches!(l.extract::<i64>(), Ok(0)));
+        unsupported_params("Series.reset_index", &[("level", level_is_default)])?;
         match self
             .inner
             .reset_index_allow_duplicates(drop, name_str.as_deref(), allow_duplicates)
@@ -62289,16 +62322,26 @@ fn series_multiindex_loc(
         return Ok(Some(Py::new(py, PySeries { inner: out })?.into_any()));
     }
     // A per-level key (s.loc[pd.IndexSlice[:, 2]]): a Series drops the
-    // levels a label keyed, as pandas' get_loc_level (a frame's .loc keeps
-    // them).
+    // levels a label keyed, as pandas' get_loc_level, when every part is a
+    // label or a null slice; a list or a bounded slice keeps every level, as
+    // its get_locs (they were dropped; 4qg5w.9). A frame's .loc keeps them.
     if let Some(rows) = multiindex_level_key_rows(multi, key)?
         && let Ok(parts) = key.cast::<PyTuple>()
     {
+        let mut every_level = false;
+        for part in parts.iter() {
+            every_level |= part.cast::<PyList>().is_ok()
+                || match part.cast::<pyo3::types::PySlice>() {
+                    Ok(slice) => !slice_is_null(slice)?,
+                    Err(_) => false,
+                };
+        }
         let keep: Vec<usize> = (0..multi.nlevels())
             .filter(|&level| {
-                parts.get_item(level).map_or(true, |part| {
-                    part.cast::<pyo3::types::PySlice>().is_ok() || part.cast::<PyList>().is_ok()
-                })
+                every_level
+                    || parts
+                        .get_item(level)
+                        .map_or(true, |part| part.cast::<pyo3::types::PySlice>().is_ok())
             })
             .collect();
         let taken = series
@@ -62579,6 +62622,25 @@ fn multiindex_level_key_rows(
     {
         return Ok(None);
     }
+    // pandas' get_locs: a slice bounding a level at or past the lexsort
+    // depth is its UnsortedIndexError - the rows of an unsorted index were
+    // read as if sorted (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
+    let mut true_slices = Vec::new();
+    for (level, part) in parts.iter().enumerate() {
+        if let Ok(slice) = part.cast::<pyo3::types::PySlice>()
+            && !slice_is_null(slice)?
+        {
+            true_slices.push(level);
+        }
+    }
+    if let Some(&last) = true_slices.last() {
+        let depth = multi.lexsort_depth();
+        if last >= depth {
+            return Err(UnsortedIndexError::new_err(format!(
+                "MultiIndex slicing requires the index to be lexsorted: slicing on levels {true_slices:?}, lexsort depth {depth}"
+            )));
+        }
+    }
     let bound =
         |slice: &Bound<'_, pyo3::types::PySlice>, name: &str| -> PyResult<Option<IndexLabel>> {
             let value = slice.getattr(name)?;
@@ -62598,11 +62660,18 @@ fn multiindex_level_key_rows(
             }
             LevelKey::Range(bound(slice, "start")?, bound(slice, "stop")?)
         } else if let Ok(list) = part.cast::<PyList>() {
-            LevelKey::AnyOf(
-                list.iter()
-                    .map(|item| py_to_index_label(&item))
-                    .collect::<PyResult<_>>()?,
-            )
+            // A listed label the level lacks is pandas' KeyError naming it
+            // (enforced in 2.0; it was skipped; 4qg5w.9).
+            let held: rustc_hash::FxHashSet<&IndexLabel> = values.iter().collect();
+            let mut labels = Vec::with_capacity(list.len());
+            for item in list.iter() {
+                let label = py_to_index_label(&item)?;
+                if !held.contains(&label) {
+                    return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(item.unbind()));
+                }
+                labels.push(label);
+            }
+            LevelKey::AnyOf(labels)
         } else {
             let label = py_to_index_label(part)?;
             if !values.contains(&label) {
@@ -62616,23 +62685,87 @@ fn multiindex_level_key_rows(
         levels.push(values);
     }
     let rows = levels.first().map_or(0, |values| values.len());
-    Ok(Some(
-        (0..rows)
-            .filter(|&row| {
-                keys.iter().zip(&levels).all(|(key, values)| {
-                    let value = &values[row];
-                    match key {
-                        LevelKey::Label(label) => value == label,
-                        LevelKey::Range(low, high) => {
-                            low.as_ref().is_none_or(|low| value >= low)
-                                && high.as_ref().is_none_or(|high| value <= high)
-                        }
-                        LevelKey::AnyOf(labels) => labels.contains(value),
+    let mut selected: Vec<usize> = (0..rows)
+        .filter(|&row| {
+            keys.iter().zip(&levels).all(|(key, values)| {
+                let value = &values[row];
+                match key {
+                    LevelKey::Label(label) => value == label,
+                    LevelKey::Range(None, None) => true,
+                    LevelKey::Range(low, high) => {
+                        !value.is_missing()
+                            && low.as_ref().is_none_or(|low| value >= low)
+                            && high.as_ref().is_none_or(|high| value <= high)
                     }
-                })
+                    LevelKey::AnyOf(labels) => labels.contains(value),
+                }
             })
-            .collect(),
-    ))
+        })
+        .collect();
+    reorder_level_key_rows(multi, &keys, &levels, &mut selected);
+    Ok(Some(selected))
+}
+
+/// pandas' `_reorder_indexer`: the rows a per-level key selects in the
+/// order its lists give - each list's labels as listed (the first time
+/// each), level by level, a bounded slice keeping the rows' order - when a
+/// list of two or more labels runs against the level's order or the index
+/// is not lexsorted; else in row order, as they were always returned
+/// (`df.loc[(['b', 'a'], slice(None)), :]` gave the 'a' rows first;
+/// br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
+fn reorder_level_key_rows(
+    multi: &fp_index::MultiIndex,
+    keys: &[LevelKey],
+    levels: &[&[IndexLabel]],
+    rows: &mut [usize],
+) {
+    let lexsorted = std::cell::OnceCell::new();
+    let is_lexsorted = || *lexsorted.get_or_init(|| multi.lexsort_depth() == multi.nlevels());
+    let need_sort = keys.iter().zip(levels).any(|(key, values)| match key {
+        LevelKey::Label(_) | LevelKey::Range(None, None) => false,
+        LevelKey::Range(..) => !is_lexsorted(),
+        LevelKey::AnyOf(labels) => {
+            labels.len() > 1
+                && (!is_lexsorted() || {
+                    let held: rustc_hash::FxHashSet<&IndexLabel> = values.iter().collect();
+                    let present: Vec<&IndexLabel> =
+                        labels.iter().filter(|label| held.contains(label)).collect();
+                    present
+                        .windows(2)
+                        .any(|pair| pair[0].cmp_missing_first(pair[1]).is_gt())
+                })
+        }
+    });
+    if !need_sort {
+        return;
+    }
+    let ranks: Vec<Option<FxHashMap<&IndexLabel, usize>>> = keys
+        .iter()
+        .map(|key| match key {
+            LevelKey::AnyOf(labels) => {
+                let mut rank = FxHashMap::default();
+                for label in labels {
+                    let next = rank.len();
+                    rank.entry(label).or_insert(next);
+                }
+                Some(rank)
+            }
+            _ => None,
+        })
+        .collect();
+    let order = |part: usize, row: usize| match (&keys[part], &ranks[part]) {
+        (LevelKey::AnyOf(_), Some(rank)) => {
+            rank.get(&levels[part][row]).copied().unwrap_or(usize::MAX)
+        }
+        (LevelKey::Label(_) | LevelKey::Range(None, None), _) => 0,
+        _ => row,
+    };
+    rows.sort_by(|&a, &b| {
+        (0..keys.len())
+            .map(|part| order(part, a).cmp(&order(part, b)))
+            .find(|ordering| ordering.is_ne())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 }
 
 /// pandas' KeyError for the keys of a `.loc` list (`listed` long) no row of
@@ -62679,6 +62812,16 @@ fn listed_keys_missing(
     )))
 }
 
+/// pandas' `com.is_null_slice`: `slice(None)`, no start, stop or step.
+fn slice_is_null(slice: &Bound<'_, pyo3::types::PySlice>) -> PyResult<bool> {
+    for name in ["start", "stop", "step"] {
+        if !slice.getattr(name)?.is_none() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// The rows a list of MultiIndex keys (`[('x', 1), ('y', 2)]`, `['x',
 /// 'y']`) or an outer-level label slice (`'x':'y'`, inclusive) selects, in
 /// order; None for any other key.
@@ -62708,16 +62851,39 @@ fn multiindex_rows_for(
         if !slice.getattr("step")?.is_none() {
             return Ok(None);
         }
+        // pandas' slice_locs: a bound longer than the lexsort depth - a
+        // label one level, a tuple its length - is its UnsortedIndexError
+        // (4qg5w.9).
+        let mut lexsort_depth = None;
+        for name in ["start", "stop"] {
+            let value = slice.getattr(name)?;
+            if value.is_none() {
+                continue;
+            }
+            let key_len = value.cast::<PyTuple>().map_or(1, |tuple| tuple.len());
+            let depth = *lexsort_depth.get_or_insert_with(|| multi.lexsort_depth());
+            if key_len > depth {
+                return Err(UnsortedIndexError::new_err(format!(
+                    "Key length ({key_len}) was greater than MultiIndex lexsort depth ({depth})"
+                )));
+            }
+        }
         let outer = level_labels(multi, 0)?;
         // A tuple bound is a key prefix: the first row whose leading labels
         // are at or past it, the last at or before it, compared level by
-        // level as pandas' slice_locs reads a sorted MultiIndex (a tuple
-        // bound matched no outer label: the slice was empty).
+        // level as pandas' slice_locs reads a sorted MultiIndex - a missing
+        // label first, as its code -1 (a tuple bound matched no outer label:
+        // the slice was empty).
         let levels: Vec<&[IndexLabel]> = (0..multi.nlevels())
             .map(|level| level_labels(multi, level))
             .collect::<PyResult<_>>()?;
-        let prefix_of = |row: usize, len: usize| -> Vec<&IndexLabel> {
-            levels.iter().take(len).map(|level| &level[row]).collect()
+        let prefix_cmp = |row: usize, key: &[IndexLabel]| {
+            levels
+                .iter()
+                .zip(key)
+                .map(|(level, label)| level[row].cmp_missing_first(label))
+                .find(|order| order.is_ne())
+                .unwrap_or(std::cmp::Ordering::Equal)
         };
         let tuple_bound = |name: &str| -> PyResult<Option<Vec<IndexLabel>>> {
             let value = slice.getattr(name)?;
@@ -62736,15 +62902,14 @@ fn multiindex_rows_for(
             }
         };
         let start = match (tuple_bound("start")?, bound("start")?) {
-            (Some(key), _) => (0..outer.len())
-                .find(|&row| prefix_of(row, key.len()) >= key.iter().collect::<Vec<_>>()),
+            (Some(key), _) => (0..outer.len()).find(|&row| prefix_cmp(row, &key).is_ge()),
             (None, Some(label)) => outer.iter().position(|value| *value == label),
             (None, None) => Some(0),
         };
         let stop = match (tuple_bound("stop")?, bound("stop")?) {
             (Some(key), _) => (0..outer.len())
                 .rev()
-                .find(|&row| prefix_of(row, key.len()) <= key.iter().collect::<Vec<_>>()),
+                .find(|&row| prefix_cmp(row, &key).is_le()),
             (None, Some(label)) => outer.iter().rposition(|value| *value == label),
             (None, None) => outer.len().checked_sub(1),
         };
@@ -62880,7 +63045,10 @@ fn frame_multiindex_loc(
     let rows: Vec<i64> = positions.iter().map(|&row| row as i64).collect();
     let taken = frame.take(&rows, 0).map_err(frame_error_to_py)?;
     if labels.len() == multi.nlevels() && periods.is_empty() {
-        if positions.len() == 1 {
+        // A full key names one row as a Series only on a unique MultiIndex:
+        // pandas' get_loc answers a non-unique one a slice, its matching rows
+        // a frame even when one matches (4qg5w.9).
+        if positions.len() == 1 && multi.is_unique() {
             let flat = frame.index().labels()[positions[0]].clone();
             let py = key.py();
             let row = zoned_row(py, frame, frame.loc_row(&flat).map_err(loc_key_error)?)?;

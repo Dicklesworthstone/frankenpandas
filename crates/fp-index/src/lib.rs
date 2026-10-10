@@ -356,6 +356,19 @@ impl From<String> for IndexLabel {
 }
 
 impl IndexLabel {
+    /// The order of a sorted MultiIndex level's codes, as pandas slices
+    /// one: a missing label (code -1) before every other, two missing labels
+    /// alike, then [`Ord`]'s (which puts missing labels last).
+    #[must_use]
+    pub fn cmp_missing_first(&self, other: &Self) -> std::cmp::Ordering {
+        match (self.is_missing(), other.is_missing()) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (false, false) => self.cmp(other),
+        }
+    }
+
     #[must_use]
     pub fn is_missing(&self) -> bool {
         match self {
@@ -22181,24 +22194,67 @@ impl MultiIndex {
     /// raises `KeyError: MultiIndex slicing requires the index to be
     /// lexsorted` when this predicate is false. fp-frame's range-slice
     /// callers should gate on this before delegating to `slice_locs`.
+    /// A missing label makes it false, as pandas' (any code -1; it read
+    /// the label as the last; 4qg5w.9).
     #[must_use]
     pub fn is_monotonic_increasing(&self) -> bool {
+        if self.holds_missing() {
+            return false;
+        }
         if self.len() <= 1 {
             return true;
         }
         (0..self.len() - 1).all(|i| self.row_cmp(i, i + 1) != std::cmp::Ordering::Greater)
     }
 
+    /// Whether any level holds a missing label (pandas' code -1).
+    fn holds_missing(&self) -> bool {
+        self.levels
+            .iter()
+            .any(|level| level.iter().any(IndexLabel::is_missing))
+    }
+
     /// Whether this MultiIndex is sorted in strictly descending order.
     ///
     /// Matches `pd.MultiIndex.is_monotonic_decreasing`. Row `i` must be
     /// greater than or equal to row `i+1`. Empty / single-row: `true`.
+    /// A missing label makes it false, as pandas'.
     #[must_use]
     pub fn is_monotonic_decreasing(&self) -> bool {
+        if self.holds_missing() {
+            return false;
+        }
         if self.len() <= 1 {
             return true;
         }
         (0..self.len() - 1).all(|i| self.row_cmp(i, i + 1) != std::cmp::Ordering::Less)
+    }
+
+    /// pandas' lexsort depth (`MultiIndex._lexsort_depth`): how many leading
+    /// levels run in order down the rows - each row's labels on them at or
+    /// past the row before's, read as [`IndexLabel::cmp_missing_first`]. A
+    /// `.loc` slice of a level at or past it is pandas' UnsortedIndexError
+    /// (it read the rows of an unsorted index as if sorted; 4qg5w.9).
+    #[must_use]
+    pub fn lexsort_depth(&self) -> usize {
+        let levels: Vec<&[IndexLabel]> = self.levels.iter().map(|level| &**level).collect();
+        let mut depth = self.nlevels();
+        for row in 1..self.len() {
+            for (level, labels) in levels.iter().enumerate().take(depth) {
+                match labels[row - 1].cmp_missing_first(&labels[row]) {
+                    std::cmp::Ordering::Less => break,
+                    std::cmp::Ordering::Equal => {}
+                    std::cmp::Ordering::Greater => {
+                        depth = level;
+                        break;
+                    }
+                }
+            }
+            if depth == 0 {
+                break;
+            }
+        }
+        depth
     }
 
     /// Alias for `is_monotonic_increasing`.
@@ -26337,6 +26393,52 @@ mod tests {
                 .take_utf8_contiguous(&[9])
                 .is_none()
         );
+    }
+
+    #[test]
+    fn lexsort_depth_counts_the_leading_levels_in_order_4qg5w9() {
+        // pandas' _lexsort_depth: 2 for a sorted index, 1 when only the
+        // outer level is in order, 0 when it steps back; a missing label
+        // sorts first, as its code -1 (br-frankenpandas-rc0923-epic-rust-
+        // parity-bugs-4qg5w.9).
+        let utf8 = |s: &str| IndexLabel::Utf8(s.to_owned());
+        let none = || IndexLabel::Null(fp_types::NullKind::Null);
+        let depth = |outer: Vec<IndexLabel>, inner: &[i64]| {
+            MultiIndex::from_arrays(vec![
+                outer,
+                inner.iter().copied().map(IndexLabel::Int64).collect(),
+            ])
+            .unwrap()
+            .lexsort_depth()
+        };
+        assert_eq!(depth(vec![utf8("a"), utf8("a"), utf8("b")], &[1, 2, 0]), 2);
+        assert_eq!(depth(vec![utf8("a"), utf8("a"), utf8("b")], &[2, 1, 0]), 1);
+        assert_eq!(depth(vec![utf8("b"), utf8("a"), utf8("b")], &[0, 1, 2]), 0);
+        assert_eq!(depth(vec![none(), utf8("a"), utf8("a")], &[5, 1, 2]), 2);
+        assert_eq!(depth(Vec::new(), &[]), 2);
+        assert_eq!(depth(vec![utf8("z")], &[9]), 2);
+        assert_eq!(
+            none().cmp_missing_first(&utf8("a")),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            none().cmp_missing_first(&IndexLabel::Float64(OrderedF64(f64::NAN))),
+            std::cmp::Ordering::Equal
+        );
+        // NEGATIVE: a missing label after a present one steps back, though
+        // Ord (missing last) reads the rows as sorted.
+        assert_eq!(depth(vec![utf8("a"), none()], &[1, 0]), 0);
+        // A missing label makes the index neither increasing nor
+        // decreasing, as pandas' (fp read it as the last label).
+        for outer in [
+            vec![utf8("a"), none()],
+            vec![none(), utf8("a")],
+            vec![none()],
+        ] {
+            let multi = MultiIndex::from_arrays(vec![outer]).unwrap();
+            assert!(!multi.is_monotonic_increasing());
+            assert!(!multi.is_monotonic_decreasing());
+        }
     }
 
     #[test]
