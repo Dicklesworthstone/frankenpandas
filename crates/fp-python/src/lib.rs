@@ -12333,6 +12333,13 @@ const SINGLE_ORDERABLE_KINDS: [fp_index::LabelKinds; 5] = [
 /// labels ascending, or descending with tied labels in index order, and the
 /// missing ones after (or before) them in index order.
 fn nargsort(index: &Index, ascending: bool, na_first: bool) -> Vec<usize> {
+    // A typed int64 index (no missing label) orders by the stable radix
+    // argsort of its ints either way, ties in index order - its labels were
+    // made and compared (idx.sort_values() of a million shuffled ints 44 ms,
+    // pandas 41; br-frankenpandas-e186m).
+    if let Some(values) = index.cached_int64_label_values().flatten() {
+        return fp_columnar::radix_argsort_i64(&values, ascending);
+    }
     let labels = index.labels();
     let order = if ascending {
         index.argsort()
@@ -12710,6 +12717,14 @@ impl std::ops::Deref for IndexArg {
 /// `df.columns.union(['c'])` came back unsorted.
 #[allow(clippy::cast_precision_loss)] // an order, as Python compares them
 fn setop_sorted(result: Index, left: &Index, right: &Index, sort: Option<bool>) -> Index {
+    // A typed int64 result is of one kind with nothing missing: the same
+    // decision without the label reads below (the union of two int indexes
+    // made a label a value to learn that; br-frankenpandas-e186m).
+    if result.cached_int64_label_values().flatten().is_some() {
+        let sorts =
+            sort.unwrap_or_else(|| !(left.is_empty() || right.is_empty() || left.equals(right)));
+        return if sorts { result.sort_values() } else { result };
+    }
     // Bools beside numbers compare as numbers (Python's False < 1), so
     // pandas sorts them; other mixes stay as they came.
     let number = |label: &IndexLabel| match label {
@@ -13179,29 +13194,14 @@ impl PyIndex {
     /// The positions ordering the labels (the period and categorical
     /// classes' argsort, and a typed index's).
     fn label_order(&self) -> IndexerArray {
-        // A typed int64 index sorts (value, position) pairs - the stable
-        // order, ties by position - where every label was made and the
-        // positions sorted through them (idx.argsort() of a million
+        // The stable order: a typed int64 index's by the radix argsort of
+        // its ints, any other the index's own argsort - every label was made
+        // and the positions sorted through them (idx.argsort() of a million
         // shuffled ints 144 ms, pandas 31; br-frankenpandas-e186m).
         if let Some(values) = self.inner.cached_int64_label_values().flatten() {
-            let mut pairs: Vec<(i64, usize)> = values
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(position, value)| (value, position))
-                .collect();
-            pairs.sort_unstable();
-            return IndexerArray(
-                pairs
-                    .into_iter()
-                    .map(|(_, position)| i64::try_from(position).unwrap_or(i64::MAX))
-                    .collect(),
-            );
+            return fp_columnar::radix_argsort_i64(&values, true).into();
         }
-        let labels = self.inner.labels();
-        let mut indices: Vec<usize> = (0..labels.len()).collect();
-        indices.sort_by(|&a, &b| labels[a].cmp(&labels[b]));
-        indices.into()
+        self.inner.argsort().into()
     }
 
     /// `item`'s label at `loc` among this index's labels, as given (the
@@ -14423,7 +14423,11 @@ impl PyIndex {
             let target = match &label {
                 _ if label.is_missing() => {
                     label = IndexLabel::Float64(OrderedF64(f64::NAN));
-                    Some(if width.is_float() { "float32" } else { "float64" })
+                    Some(if width.is_float() {
+                        "float32"
+                    } else {
+                        "float64"
+                    })
                 }
                 IndexLabel::Int64(_) | IndexLabel::Float64(_) if width.is_float() => {
                     Some("float32")

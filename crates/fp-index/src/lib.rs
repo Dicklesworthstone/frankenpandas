@@ -4305,10 +4305,19 @@ impl Index {
     /// materialization/comparison for indexes that already carry typed Int64
     /// backing. `sort_by_key` is stable, so duplicate labels keep their
     /// original order just like the generic `IndexLabel` comparator path.
+    /// Positions ordering `vals` ascending, ties in position order (the
+    /// stable order): (value, position) pairs sorted together, where the
+    /// positions were sorted reading each value through a gather per
+    /// compare (br-frankenpandas-e186m).
     fn argsort_i64(vals: &[i64]) -> Vec<usize> {
-        let mut indices: Vec<usize> = (0..vals.len()).collect();
-        indices.sort_by_key(|&idx| vals[idx]);
-        indices
+        let mut pairs: Vec<(i64, usize)> = vals
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(position, value)| (value, position))
+            .collect();
+        pairs.sort_unstable();
+        pairs.into_iter().map(|(_, position)| position).collect()
     }
 
     fn argsort_int64_affine(range: Int64AffineLabels) -> Vec<usize> {
@@ -4592,6 +4601,12 @@ impl Index {
             // map so repeated reindex/align/join don't rebuild it every call
             // (pandas caches its int64 engine). Bit-identical first-occurrence;
             // a duplicate self returns None and keeps the per-call builder.
+            // The target's ints are looked up as they are held - its labels
+            // were made only to be read back as ints (idx.get_indexer(other)
+            // of a million 23.7 ms, pandas 15.9; br-frankenpandas-e186m).
+            if let Some(resolved) = self.unique_int64_positions_of(&target_i64) {
+                return resolved;
+            }
             if let Some(resolved) = self.unsorted_unique_int64_positions(target.labels()) {
                 return resolved;
             }
@@ -5294,7 +5309,27 @@ impl Index {
         // of enum-keyed maps. It retains pandas' first-seen label ordering while
         // preserving each label's maximum count across the two inputs.
         if let (Some(a_i64), Some(b_i64)) = (self.labels.int64_view(), other.labels.int64_view()) {
-            let mut result = Self::from_i64_values(Self::union_i64(&a_i64, &b_i64));
+            // A unique right side adds what the left lacks, found through the
+            // left's cached lookup (pandas keeps its engine likewise), its
+            // uniqueness the cached check - both were hashed again each call
+            // (a.union(b, sort=False) of a million 47 ms, pandas 32;
+            // br-frankenpandas-e186m). The same values as union_i64's.
+            let values = if other.has_duplicates() {
+                Self::union_i64(&a_i64, &b_i64)
+            } else {
+                let lookup = int64_position_lookup_cached(self.label_identity, &a_i64);
+                let mut out =
+                    Vec::with_capacity(combined_output_capacity(a_i64.len(), b_i64.len()));
+                out.extend_from_slice(&a_i64);
+                out.extend(
+                    b_i64
+                        .iter()
+                        .copied()
+                        .filter(|value| !lookup.contains_key(value)),
+                );
+                out
+            };
+            let mut result = Self::from_i64_values(values);
             result.name = self.shared_name(other);
             result.tz = joined_tz(self, other);
             return result;
@@ -5634,8 +5669,10 @@ impl Index {
             }
         }
         if let Some(vals) = self.labels.int64_view() {
-            let order = Self::argsort_i64(&vals);
-            let sorted = order.iter().map(|&idx| vals[idx]).collect();
+            // The values sorted themselves: equal ints are indistinguishable,
+            // so no order of positions is needed (an argsort and a gather).
+            let mut sorted = vals.as_ref().clone();
+            sorted.sort_unstable();
             return self.propagate_name(Self::from_i64_values(sorted));
         }
         // Datetime64 / Timedelta64: stable i64 argsort + gather, rebuilt with the

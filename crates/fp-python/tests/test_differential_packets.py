@@ -34555,3 +34555,39 @@ def test_datetime_index_to_series_like_pandas_e186m() -> None:
         return [(str(s.dtype), s.name, [str(x) for x in s.tolist()]) for s in (naive, zoned)]
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a typed int64 Index sorts by the radix argsort of
+# its ints (ascending and descending), its union adds what the left lacks
+# through the left's cached lookup and sorts without reading labels, and
+# get_indexer looks the target's ints up as held - with pandas' answers.
+# NEGATIVE: a text index, an int index beside floats, two equal indexes
+# (left unsorted), targets the index lacks (-1) take the paths they took.
+_E186MSORT_LEFT = [7, -2, 15, 0, 9, 3, -11, 4, 12, 5]
+_E186MSORT_CASES = {
+    "sort_values": lambda m: m.Index(_E186MSORT_LEFT).sort_values(),
+    "sort_values desc": lambda m: m.Index(_E186MSORT_LEFT).sort_values(ascending=False),
+    "sort_values repeats desc": lambda m: m.Index([3, 1, 3, 2, 1]).sort_values(ascending=False),
+    "sort_values return_indexer": lambda m: list(m.Index(_E186MSORT_LEFT).sort_values(return_indexer=True)[1]),
+    "argsort": lambda m: [int(x) for x in m.Index(_E186MSORT_LEFT).argsort()],
+    "union": lambda m: m.Index(_E186MSORT_LEFT).union(m.Index([5, 100, -50, 7])),
+    "union sort=False": lambda m: m.Index(_E186MSORT_LEFT).union(m.Index([5, 100, -50, 7]), sort=False),
+    "union repeats": lambda m: m.Index([3, 1, 3]).union(m.Index([3, 3, 3, 2])),
+    "union equal (NEGATIVE: unsorted)": lambda m: m.Index([3, 1, 2]).union(m.Index([3, 1, 2])),
+    "union with floats (NEGATIVE)": lambda m: m.Index([3, 1, 2]).union(m.Index([2.5, 1.0])),
+    "union text (NEGATIVE)": lambda m: m.Index(["b", "a"]).union(m.Index(["c", "a"])),
+    "get_indexer": lambda m: list(m.Index(_E186MSORT_LEFT).get_indexer(m.Index([9, 77, -11, 7]))),
+    "sort_values text (NEGATIVE)": lambda m: m.Index(["b", "c", "a"]).sort_values(ascending=False),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MSORT_CASES))
+def test_int64_index_sorts_and_set_ops_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MSORT_CASES[case](m)
+        if hasattr(out, "dtype") and hasattr(out, "tolist"):
+            return (str(out.dtype), repr(out.tolist()))
+        return [int(x) for x in out]
+
+    assert run(fpd) == run(pd)
