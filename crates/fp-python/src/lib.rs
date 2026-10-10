@@ -41259,6 +41259,20 @@ fn column_ndarray<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<'py, 
         array.set_item(pyo3::types::PySlice::full(py), PyList::new(py, items)?)?;
         return Ok(array);
     }
+    // Text in one buffer: a str made once a value (text_list) - every cell
+    // was made a Scalar, then a str (s.to_numpy() of 20k strings over 50
+    // values 1.05 ms, pandas 0.001; to_records 0.73x; br-frankenpandas-hpnj0).
+    if column.dtype() == DType::Utf8
+        && column.categorical().is_none()
+        && let Some((bytes, offsets)) = column.as_utf8_window()
+    {
+        let strs = text_list(py, bytes, offsets)?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "object")?;
+        let array = np.call_method("empty", (strs.len(),), Some(&kwargs))?;
+        array.set_item(pyo3::types::PySlice::full(py), strs)?;
+        return Ok(array);
+    }
     object_ndarray(py, &np, &materialized_values(column))
 }
 
@@ -53838,20 +53852,31 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         let ax = parse_axis_param(axis)?;
         let names: Vec<String> = self.inner.column_names().into_iter().cloned().collect();
-        let labels: Vec<IndexLabel> = if ax == 1 {
-            names
-                .iter()
-                .map(|name| IndexLabel::Utf8(name.clone()))
-                .collect()
-        } else {
-            self.inner.index().labels().to_vec()
+        // The rows' labels only for weights to align by: every label was
+        // made and copied for each draw (a RangeIndex's 200k; df.sample
+        // 0.8x pandas; br-frankenpandas-5pyh3).
+        let weights = match weights.filter(|weights| !weights.is_none()) {
+            Some(weights) if ax == 1 => {
+                let labels: Vec<IndexLabel> = names
+                    .iter()
+                    .map(|name| IndexLabel::Utf8(name.clone()))
+                    .collect();
+                Some(sample_weights(py, weights, &labels, None)?)
+            }
+            Some(weights) => Some(sample_weights(
+                py,
+                weights,
+                self.inner.index().labels(),
+                Some(&self.inner),
+            )?),
+            None => None,
         };
-        let weights = weights
-            .filter(|weights| !weights.is_none())
-            .map(|weights| sample_weights(py, weights, &labels, (ax == 0).then_some(&self.inner)))
-            .transpose()?;
-        let positions =
-            pandas_sample_positions(py, labels.len(), n, frac, replace, weights, random_state)?;
+        let len = if ax == 1 {
+            names.len()
+        } else {
+            self.inner.len()
+        };
+        let positions = pandas_sample_positions(py, len, n, frac, replace, weights, random_state)?;
         let mut res = if ax == 1 {
             let picked: Vec<&str> = positions
                 .iter()
@@ -62827,14 +62852,25 @@ fn multiindex_level_key_rows(
     let read: Vec<usize> = (0..keys.len())
         .filter(|&part| !matches!(keys[part], LevelKey::Range(None, None)))
         .collect();
-    let mut selected: Vec<usize> = (first..end.max(first))
-        .filter(|&row| {
-            read.iter().all(|&part| match &hits[part] {
-                Some((codes, hit)) => hit[codes[row] as usize],
-                None => level_key_holds(&keys[part], &levels[part][row]),
+    // One level read through its codes (IndexSlice[:, 'b1':'b2']): a lookup
+    // a row, without the parts' loop.
+    let single = match read.as_slice() {
+        [part] => hits[*part].as_ref(),
+        _ => None,
+    };
+    let mut selected: Vec<usize> = match single {
+        Some((codes, hit)) => (first..end.max(first))
+            .filter(|&row| hit[codes[row] as usize])
+            .collect(),
+        None => (first..end.max(first))
+            .filter(|&row| {
+                read.iter().all(|&part| match &hits[part] {
+                    Some((codes, hit)) => hit[codes[row] as usize],
+                    None => level_key_holds(&keys[part], &levels[part][row]),
+                })
             })
-        })
-        .collect();
+            .collect(),
+    };
     reorder_level_key_rows(multi, &keys, &levels, &mut selected);
     Ok(Some(selected))
 }

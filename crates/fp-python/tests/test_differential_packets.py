@@ -37013,3 +37013,60 @@ def _k3evq_outcome(case: str, m: Any) -> Any:
 @pytest.mark.parametrize("case", list(_K3EVQ_CASES))
 def test_reindex_onto_a_range_like_pandas_k3evq(case: str) -> None:
     assert _k3evq_outcome(case, fpd) == _k3evq_outcome(case, pd)
+
+
+# br-frankenpandas-5pyh3: DataFrame.sample sizes its draw without making the rows'
+# labels - the same rows as pandas' for a seed, weights aligned by label.
+# NEGATIVE: a weights Series of other labels aligns (NaN weights are 0),
+# axis=1 weights by column names, an unseeded draw only its size.
+def _sample_5pyh3_frame(m: Any) -> Any:
+    return m.DataFrame({"a": list(range(50)), "w": [float(i % 7) for i in range(50)], "b": [f"t{i}" for i in range(50)]}, index=[f"r{i}" for i in range(50)])
+
+
+_SAMPLE_5PYH3_CASES = {
+    "n seeded": lambda m: _sample_5pyh3_frame(m).sample(7, random_state=3),
+    "frac seeded": lambda m: _sample_5pyh3_frame(m).sample(frac=0.2, random_state=4),
+    "replace": lambda m: _sample_5pyh3_frame(m).sample(12, replace=True, random_state=5),
+    "weights column": lambda m: _sample_5pyh3_frame(m).sample(5, weights="w", random_state=6),
+    "weights list": lambda m: _sample_5pyh3_frame(m).sample(5, weights=[float(i) for i in range(50)], random_state=7),
+    "range index": lambda m: m.DataFrame({"a": list(range(30))}).sample(4, random_state=8),
+    "ignore_index": lambda m: _sample_5pyh3_frame(m).sample(3, random_state=9, ignore_index=True),
+    "weights other labels (NEGATIVE)": lambda m: _sample_5pyh3_frame(m).sample(2, weights=m.Series([1.0, 2.0], index=["r3", "r40"]), random_state=1),
+    "axis=1 weights (NEGATIVE)": lambda m: _sample_5pyh3_frame(m).sample(2, axis=1, weights=[0.0, 1.0, 1.0], random_state=2),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SAMPLE_5PYH3_CASES))
+def test_sample_like_pandas_5pyh3(case: str) -> None:
+    def outcome(m: Any) -> Any:
+        out = _SAMPLE_5PYH3_CASES[case](m)
+        return [repr(v) for v in out.index.tolist()], [repr(c) for c in out.columns], repr(out.values.tolist())
+
+    assert outcome(fpd) == outcome(pd)
+
+
+# br-frankenpandas-hpnj0: a text column's to_numpy / .values / to_records read its byte
+# buffer, a str made once a value - the same objects' values and dtype as
+# pandas'. NEGATIVE: a text column with a missing value, the string dtype
+# (pd.NA) and a categorical text column answer through their own paths.
+_TEXTNP_HPNJ0_CASES = {
+    "to_numpy": lambda m: m.Series([f"g{i % 5}" for i in range(40)]).to_numpy(),
+    "values": lambda m: m.Series(["a", "bb", "a", "ccc"]).values,
+    "unicode and empty": lambda m: m.Series(["é", "", "日本", "é", ""]).to_numpy(),
+    "frame column": lambda m: m.DataFrame({"t": ["x", "y", "x"], "v": [1, 2, 3]})["t"].to_numpy(),
+    "to_records": lambda m: m.DataFrame({"t": ["x", "y", "x"], "v": [1.5, 2.5, 3.5]}).to_records(),
+    "missing (NEGATIVE)": lambda m: m.Series(["a", None, "b"]).to_numpy(),
+    "string dtype (NEGATIVE)": lambda m: m.Series(["a", None, "b"], dtype="string").to_numpy(),
+    "categorical (NEGATIVE)": lambda m: m.Series(["a", "b", "a"]).astype("category").to_numpy(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_TEXTNP_HPNJ0_CASES))
+def test_text_to_numpy_like_pandas_hpnj0(case: str) -> None:
+    def outcome(m: Any) -> Any:
+        out = _TEXTNP_HPNJ0_CASES[case](m)
+        return str(out.dtype), [repr(v) for v in out.tolist()]
+
+    assert outcome(fpd) == outcome(pd)
