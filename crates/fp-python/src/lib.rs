@@ -9136,8 +9136,9 @@ fn typed_index_of(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
     }
     // A narrower numpy array (int8 ... uint64, float32) is an index of its
     // values under that width, as pandas' (it read the values one by one
-    // and came back int64 / float64; br-frankenpandas-vqjvd). A uint64
-    // past the int64 storage takes the generic path.
+    // and came back int64 / float64; br-frankenpandas-vqjvd). A uint64 value
+    // past the int64 storage is refused, as a uint64 column's is (it became
+    // a float64 index, the value rounded).
     let Some((width, false)) = NumericWidth::parse(&dtype_name) else {
         return Ok(None);
     };
@@ -9150,11 +9151,9 @@ fn typed_index_of(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
                 .collect(),
         )
     } else {
-        match narrow_ndarray_column(data.py(), data, width)
-            .ok()
-            .and_then(|column| column.as_i64_slice().map(<[i64]>::to_vec))
-        {
-            Some(ints) => Index::from_i64_values(ints),
+        let column = narrow_ndarray_column(data.py(), data, width)?;
+        match column.as_i64_slice() {
+            Some(ints) => Index::from_i64_values(ints.to_vec()),
             None => return Ok(None),
         }
     };

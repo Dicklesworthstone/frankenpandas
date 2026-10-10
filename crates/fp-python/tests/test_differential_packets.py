@@ -34591,3 +34591,16 @@ def test_int64_index_sorts_and_set_ops_like_pandas_e186m(case: str) -> None:
         return [int(x) for x in out]
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-vqjvd: an Index of a uint64 array holding a value at or
+# above 2**63 is REFUSED (a ValueError, as a uint64 Series is) - the int64
+# storage cannot hold it, and it came back a float64 index with the value
+# rounded. A refusal, not pandas' answer (pandas holds it as uint64).
+# NEGATIVE: uint64 values below 2**63 are an index of them, as pandas'.
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_uint64_index_past_int64_is_refused_vqjvd() -> None:
+    with pytest.raises(ValueError, match="2\\*\\*63"):
+        fpd.Index(np.array([2**63 + 5, 1], dtype="uint64"))
+    held = np.array([2**63 - 1, 1], dtype="uint64")
+    assert (str(fpd.Index(held).dtype), fpd.Index(held).tolist()) == (str(pd.Index(held).dtype), pd.Index(held).tolist())
