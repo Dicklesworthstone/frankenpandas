@@ -59881,6 +59881,39 @@ fn loc_list_labels(labels: &[IndexLabel], wanted: Vec<IndexLabel>) -> Vec<IndexL
         .collect()
 }
 
+/// The rows of `series` at `positions`, its row MultiIndex `multi` taken
+/// with them: a run of consecutive rows (a sorted index's slice) is a
+/// window of the column and the MultiIndex, where each was gathered a row
+/// at a time (s.loc[5:10] of a sorted 200k-row index; br-frankenpandas-e186m).
+fn series_multiindex_rows(
+    series: &Series,
+    multi: &fp_index::MultiIndex,
+    positions: &[usize],
+) -> PyResult<Series> {
+    let run = positions
+        .first()
+        .filter(|_| positions.windows(2).all(|pair| pair[1] == pair[0] + 1));
+    let (rows, column) = match run {
+        Some(&start) => (
+            multi
+                .slice_rows(start, positions.len())
+                .map_err(index_error_to_py)?,
+            series
+                .column()
+                .take_contiguous_range(start, positions.len()),
+        ),
+        None => (
+            multiindex_take(multi, positions)?,
+            series
+                .take(&iloc_positions(positions))
+                .map_err(frame_error_to_py)?
+                .column()
+                .clone(),
+        ),
+    };
+    Series::new(series.name(), row_multiindex_axis(rows)?, column).map_err(frame_error_to_py)
+}
+
 /// Row positions as `iloc` takes them.
 fn iloc_positions(rows: &[usize]) -> Vec<i64> {
     rows.iter()
@@ -61334,13 +61367,41 @@ fn resolve_loc_columns(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<Optio
     }
     if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
         let names: Vec<String> = df.column_names().iter().map(|s| s.to_string()).collect();
-        let find = |name: &str, last: bool| -> PyResult<usize> {
-            let pos = if last {
-                names.iter().rposition(|n| n == name)
+        // A bound is a column label of any kind - an int over int-labelled
+        // columns too (its text was extracted: TypeError;
+        // br-frankenpandas-184aa): the first column it labels (the last
+        // one's end, `last`); one no column holds is where it would sort
+        // among monotonic labels (increasing or decreasing), as pandas'
+        // _searchsorted_monotonic, else its KeyError naming it.
+        let labels: Vec<IndexLabel> = names.iter().map(|name| df.column_label(name)).collect();
+        let increasing = labels.windows(2).all(|pair| pair[0] <= pair[1]);
+        let decreasing = labels.windows(2).all(|pair| pair[0] >= pair[1]);
+        let find = |bound: &Bound<'_, PyAny>, last: bool| -> PyResult<usize> {
+            let label = py_to_index_label(bound)?;
+            let held = if last {
+                labels
+                    .iter()
+                    .rposition(|held| *held == label)
+                    .map(|at| at + 1)
             } else {
-                names.iter().position(|n| n == name)
+                labels.iter().position(|held| *held == label)
             };
-            pos.ok_or_else(|| loc_key_error(name))
+            match held {
+                Some(at) => Ok(at),
+                None if increasing => Ok(if last {
+                    labels.partition_point(|held| *held <= label)
+                } else {
+                    labels.partition_point(|held| *held < label)
+                }),
+                None if decreasing => Ok(if last {
+                    labels.partition_point(|held| *held >= label)
+                } else {
+                    labels.partition_point(|held| *held > label)
+                }),
+                None => Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                    bound.clone().unbind(),
+                )),
+            }
         };
         let step = slice.getattr("step")?;
         let step = if step.is_none() {
@@ -61360,15 +61421,11 @@ fn resolve_loc_columns(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<Optio
         } else {
             (slice.getattr("stop")?, slice.getattr("start")?)
         };
-        let lo = if low.is_none() {
-            0
-        } else {
-            find(&low.extract::<String>()?, false)?
-        };
+        let lo = if low.is_none() { 0 } else { find(&low, false)? };
         let hi = if high.is_none() {
             names.len()
         } else {
-            find(&high.extract::<String>()?, true)? + 1
+            find(&high, true)?
         };
         let window = if lo < hi {
             names[lo..hi].to_vec()
@@ -61400,7 +61457,45 @@ fn resolve_loc_columns(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<Optio
                 .collect(),
         ));
     }
-    key.extract::<Vec<String>>().map(Some)
+    if let Ok(names) = key.extract::<Vec<String>>() {
+        return Ok(Some(names));
+    }
+    // Labels of any kind, each a column's (an int list over int-labelled
+    // columns mixed with text ones); a label no column holds is pandas'
+    // KeyError - one naming it, a list's "None of [...] are in the
+    // [columns]" when it holds none, else the missing ones "not in index"
+    // (the text extraction raised TypeError; 184aa).
+    let Ok(items) = key.try_iter() else {
+        return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+            key.clone().unbind(),
+        ));
+    };
+    let names: Vec<String> = df.column_names().iter().map(|s| s.to_string()).collect();
+    let mut found = Vec::new();
+    let mut missing = Vec::new();
+    for item in items {
+        let item = item?;
+        let label = py_to_index_label(&item)?;
+        match names.iter().find(|name| df.column_label(name) == label) {
+            Some(name) => found.push(name.clone()),
+            None => missing.push(item),
+        }
+    }
+    if missing.is_empty() {
+        return Ok(Some(found));
+    }
+    let py = key.py();
+    let message = if found.is_empty() {
+        let shown = py
+            .import("frankenpandas")?
+            .getattr("Index")?
+            .call1((key,))?
+            .repr()?;
+        format!("None of [{shown}] are in the [columns]")
+    } else {
+        format!("{} not in index", PyList::new(py, missing)?.repr()?)
+    };
+    Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(message))
 }
 
 /// [`write_series_through`] for a frame's accessors.
@@ -61788,6 +61883,27 @@ fn multiindex_prefix_positions(
     key: &[IndexLabel],
     instant: bool,
 ) -> PyResult<(Vec<usize>, Vec<usize>)> {
+    // An index sorted as deep as the key holds its rows as one run, found
+    // by bisection - every row's codes were compared (df.loc[5] of a sorted
+    // 200k-row index 0.18 ms, pandas 0.10; 4qg5w.9) - the rows in it that
+    // hold the key exactly (an int key equals a float label in order only).
+    // No run: a missing key or a date string, which the scans answer.
+    if !key.iter().any(IndexLabel::is_missing)
+        && let Some(low) = multi.sorted_prefix_position(key, false)
+        && let Some(high) = multi.sorted_prefix_position(key, true)
+        && low < high
+    {
+        let rows: Vec<usize> = (low..high)
+            .filter(|&row| {
+                key.iter()
+                    .enumerate()
+                    .all(|(level, label)| multi.label_at(level, row) == label)
+            })
+            .collect();
+        if !rows.is_empty() {
+            return Ok((rows, Vec::new()));
+        }
+    }
     let leading: Vec<usize> = (0..key.len()).collect();
     if let Some(rows) = coded_key_rows(multi, &leading, key) {
         return Ok((rows, Vec::new()));
@@ -62221,42 +62337,36 @@ fn groupby_level_positions(
 
 /// The index `multi`'s levels `keep` make over the rows at `positions`: one
 /// level is a flat Index (with its name), several a MultiIndex over flat
-/// '|'-joined labels.
+/// '|'-joined labels. The levels are shared and their codes taken, the flat
+/// labels made on first read: each level's labels were copied, the flat
+/// text joined and the levels factorized again (s.droplevel(1) 1.49 ms at
+/// 200k rows, pandas 0.23; br-frankenpandas-e186m).
 fn multiindex_levels_index(
     multi: &fp_index::MultiIndex,
     positions: &[usize],
     keep: &[usize],
 ) -> PyResult<(Index, Option<fp_index::MultiIndex>)> {
-    let remaining: Vec<Vec<IndexLabel>> = keep
-        .iter()
-        .map(|&level| {
-            let labels = level_labels(multi, level)?;
-            Ok(fp_index::take_level_labels(labels, positions))
-        })
-        .collect::<PyResult<_>>()?;
-    let names: Vec<Option<LabelName>> = keep
-        .iter()
-        .map(|&level| multi.names().get(level).cloned().flatten())
-        .collect();
-    if remaining.len() == 1 {
-        let labels = remaining.into_iter().next().unwrap_or_default();
-        return Ok((Index::new(labels).rename_index(names[0].clone()), None));
+    if keep.is_empty() {
+        let rest = fp_index::MultiIndex::from_arrays(Vec::new()).map_err(index_error_to_py)?;
+        let flat = vec![IndexLabel::Utf8(String::new()); positions.len()];
+        return Ok((Index::new(flat), Some(rest)));
     }
-    let flat: Vec<IndexLabel> = (0..positions.len())
-        .map(|row| {
-            IndexLabel::Utf8(
-                remaining
-                    .iter()
-                    .map(|level| level[row].to_string())
-                    .collect::<Vec<_>>()
-                    .join("|"),
-            )
-        })
-        .collect();
-    let rest = fp_index::MultiIndex::from_arrays(remaining)
-        .map_err(index_error_to_py)?
-        .set_names(names);
-    Ok((Index::new(flat), Some(rest)))
+    let kept = multi.select_levels(keep).map_err(index_error_to_py)?;
+    let every_row = positions.len() == multi.len()
+        && positions
+            .iter()
+            .enumerate()
+            .all(|(row, &position)| row == position);
+    let kept = if every_row {
+        kept
+    } else {
+        kept.take(positions).map_err(index_error_to_py)?
+    };
+    if keep.len() == 1 {
+        let index = kept.get_level_values(0).map_err(index_error_to_py)?;
+        return Ok((index, None));
+    }
+    Ok((kept.to_flat_index(MULTIINDEX_FLAT_SEP), Some(kept)))
 }
 
 /// The index `multi` leaves at `positions` once its first `keyed` levels
@@ -62313,12 +62423,7 @@ fn series_multiindex_loc(
         }
     };
     if by_labels && let Some(rows) = multiindex_rows_for(multi, key)? {
-        let index = row_multiindex_axis(multiindex_take(multi, &rows)?)?;
-        let taken = series
-            .take(&iloc_positions(&rows))
-            .map_err(frame_error_to_py)?;
-        let out =
-            Series::new(series.name(), index, taken.column().clone()).map_err(frame_error_to_py)?;
+        let out = series_multiindex_rows(series, multi, &rows)?;
         return Ok(Some(Py::new(py, PySeries { inner: out })?.into_any()));
     }
     // A per-level key (s.loc[pd.IndexSlice[:, 2]]): a Series drops the
@@ -62685,25 +62790,69 @@ fn multiindex_level_key_rows(
         levels.push(values);
     }
     let rows = levels.first().map_or(0, |values| values.len());
-    let mut selected: Vec<usize> = (0..rows)
+    // A level with codes made matches each distinct label once and reads
+    // its rows' codes - every row's label was compared (a text level's
+    // range 2.6 ms at 200k rows, pandas 0.35; 4qg5w.9).
+    let hits: Vec<Option<(&[u32], Vec<bool>)>> = keys
+        .iter()
+        .enumerate()
+        .map(|(level, key)| {
+            let (uniques, codes) = multi.made_level_codes(level)?;
+            Some((
+                codes,
+                uniques
+                    .iter()
+                    .map(|unique| level_key_holds(key, unique))
+                    .collect(),
+            ))
+        })
+        .collect();
+    // A label or a range on the first level of an index sorted on it holds
+    // its rows as one run, found by bisection (pd.IndexSlice[5:10, :] read
+    // every row); a null slice holds every row and is not read.
+    let bisect = |label: Option<&IndexLabel>, after: bool, open: usize| match label {
+        Some(label) => multi.sorted_prefix_position(std::slice::from_ref(label), after),
+        None => Some(open),
+    };
+    let run = match keys.first() {
+        Some(LevelKey::Label(label)) if !label.is_missing() => {
+            bisect(Some(label), false, 0).zip(bisect(Some(label), true, rows))
+        }
+        Some(LevelKey::Range(low, high)) if low.is_some() || high.is_some() => {
+            bisect(low.as_ref(), false, 0).zip(bisect(high.as_ref(), true, rows))
+        }
+        _ => None,
+    };
+    let (first, end) = run.unwrap_or((0, rows));
+    let read: Vec<usize> = (0..keys.len())
+        .filter(|&part| !matches!(keys[part], LevelKey::Range(None, None)))
+        .collect();
+    let mut selected: Vec<usize> = (first..end.max(first))
         .filter(|&row| {
-            keys.iter().zip(&levels).all(|(key, values)| {
-                let value = &values[row];
-                match key {
-                    LevelKey::Label(label) => value == label,
-                    LevelKey::Range(None, None) => true,
-                    LevelKey::Range(low, high) => {
-                        !value.is_missing()
-                            && low.as_ref().is_none_or(|low| value >= low)
-                            && high.as_ref().is_none_or(|high| value <= high)
-                    }
-                    LevelKey::AnyOf(labels) => labels.contains(value),
-                }
+            read.iter().all(|&part| match &hits[part] {
+                Some((codes, hit)) => hit[codes[row] as usize],
+                None => level_key_holds(&keys[part], &levels[part][row]),
             })
         })
         .collect();
     reorder_level_key_rows(multi, &keys, &levels, &mut selected);
     Ok(Some(selected))
+}
+
+/// Whether a level's label `value` is one a per-level key part selects: its
+/// label, its range (an inclusive one never holding a missing label, a null
+/// slice every label) or one of its labels.
+fn level_key_holds(key: &LevelKey, value: &IndexLabel) -> bool {
+    match key {
+        LevelKey::Label(label) => value == label,
+        LevelKey::Range(None, None) => true,
+        LevelKey::Range(low, high) => {
+            !value.is_missing()
+                && low.as_ref().is_none_or(|low| value >= low)
+                && high.as_ref().is_none_or(|high| value <= high)
+        }
+        LevelKey::AnyOf(labels) => labels.contains(value),
+    }
 }
 
 /// pandas' `_reorder_indexer`: the rows a per-level key selects in the
@@ -62868,23 +63017,20 @@ fn multiindex_rows_for(
                 )));
             }
         }
-        let outer = level_labels(multi, 0)?;
         // A tuple bound is a key prefix: the first row whose leading labels
-        // are at or past it, the last at or before it, compared level by
-        // level as pandas' slice_locs reads a sorted MultiIndex - a missing
-        // label first, as its code -1 (a tuple bound matched no outer label:
-        // the slice was empty).
-        let levels: Vec<&[IndexLabel]> = (0..multi.nlevels())
-            .map(|level| level_labels(multi, level))
-            .collect::<PyResult<_>>()?;
-        let prefix_cmp = |row: usize, key: &[IndexLabel]| {
-            levels
-                .iter()
-                .zip(key)
-                .map(|(level, label)| level[row].cmp_missing_first(label))
-                .find(|order| order.is_ne())
-                .unwrap_or(std::cmp::Ordering::Equal)
+        // are at or past it, the last at or before it, as pandas' slice_locs
+        // reads a sorted MultiIndex - found by bisection, the index sorted as
+        // deep as the bound (else the check above raised); every row was
+        // compared (df.loc[(5, 'b1'):(10, 'b2')] 3.0 ms at 200k rows, pandas
+        // 0.08). A label bound is the first and last row holding it, as it
+        // was (an absent one: the slice was empty).
+        let len = multi.len();
+        let bisect = |key: &[IndexLabel], after: bool| {
+            multi
+                .sorted_prefix_position(key, after)
+                .unwrap_or(if after { len } else { 0 })
         };
+        let held = |row: usize, label: &IndexLabel| row < len && multi.label_at(0, row) == label;
         let tuple_bound = |name: &str| -> PyResult<Option<Vec<IndexLabel>>> {
             let value = slice.getattr(name)?;
             if value.is_instance_of::<PyTuple>() {
@@ -62902,16 +63048,18 @@ fn multiindex_rows_for(
             }
         };
         let start = match (tuple_bound("start")?, bound("start")?) {
-            (Some(key), _) => (0..outer.len()).find(|&row| prefix_cmp(row, &key).is_ge()),
-            (None, Some(label)) => outer.iter().position(|value| *value == label),
+            (Some(key), _) => Some(bisect(&key, false)).filter(|&row| row < len),
+            (None, Some(label)) => {
+                Some(bisect(std::slice::from_ref(&label), false)).filter(|&row| held(row, &label))
+            }
             (None, None) => Some(0),
         };
         let stop = match (tuple_bound("stop")?, bound("stop")?) {
-            (Some(key), _) => (0..outer.len())
-                .rev()
-                .find(|&row| prefix_cmp(row, &key).is_le()),
-            (None, Some(label)) => outer.iter().rposition(|value| *value == label),
-            (None, None) => outer.len().checked_sub(1),
+            (Some(key), _) => bisect(&key, true).checked_sub(1),
+            (None, Some(label)) => bisect(std::slice::from_ref(&label), true)
+                .checked_sub(1)
+                .filter(|&row| held(row, &label)),
+            (None, None) => len.checked_sub(1),
         };
         return Ok(match (start, stop) {
             (Some(start), Some(stop)) if start <= stop => Some((start..=stop).collect()),
@@ -63276,9 +63424,16 @@ impl PyDataFrameLoc {
                         .map_err(loc_key_error)?;
                     Ok(Py::new(py, PySeries { inner: sub })?.into_any())
                 }
-                // df.loc['r', 'c'] with a unique label -> scalar
+                // df.loc['r', 'c'] with a unique label -> scalar; a column no
+                // label names is pandas' KeyError naming it (it named fp's
+                // DataFrame.at; 184aa).
                 (LocRows::Label(label), None) => {
                     let col_name = col_key.extract::<String>()?;
+                    if self.inner.column(&col_name).is_none() {
+                        return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                            col_key.clone().unbind(),
+                        ));
+                    }
                     let scalar = self.inner.at(&label, &col_name).map_err(loc_key_error)?;
                     frame_element_named(py, &self.inner, &col_name, &scalar)
                 }

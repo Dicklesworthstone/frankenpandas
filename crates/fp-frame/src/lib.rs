@@ -78908,7 +78908,6 @@ impl DataFrame {
 
     fn take_contiguous_row_range_unchecked(&self, start: usize, len: usize) -> Self {
         debug_assert!(start.checked_add(len).is_some_and(|end| end <= self.len()));
-        debug_assert!(self.row_multiindex.is_none());
 
         // Each column sliced in place under the frame's own column axis, its
         // store's name lookup shared: a row slice keeps the columns as they
@@ -78921,9 +78920,15 @@ impl DataFrame {
                     .take_contiguous_range(start, len)
             })
             .collect();
+        // A row MultiIndex's window shares its codes (br-frankenpandas-e186m).
+        let row_multiindex = self.row_multiindex.as_ref().map(|multi| {
+            multi
+                .slice_rows(start, len)
+                .expect("a row range within the frame is within its MultiIndex")
+        });
         Self {
             index: self.index.slice(start, len),
-            row_multiindex: None,
+            row_multiindex,
             columns: self.own_column_store(columns).into(),
             column_order: self.column_order.clone(),
             column_multiindex: self.column_multiindex.clone(),
@@ -85241,13 +85246,12 @@ impl DataFrame {
                     .slice(start, take)
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // The MultiIndex's window, its codes shared (they were gathered a
+        // row at a time; br-frankenpandas-e186m).
         let row_multiindex = self
             .row_multiindex
             .as_ref()
-            .map(|multiindex| {
-                let positions: Vec<usize> = (start..start + take).collect();
-                Self::project_row_multiindex(multiindex, &positions)
-            })
+            .map(|multiindex| multiindex.slice_rows(start, take))
             .transpose()?;
         Ok(self.with_gathered_rows(
             self.index
@@ -87011,13 +87015,9 @@ impl DataFrame {
             return Ok(out);
         }
 
-        let len = end_pos - start_pos;
-        if self.row_multiindex.is_none() {
-            return Ok(self.take_contiguous_row_range_unchecked(start_pos, len));
-        }
-
-        let positions: Vec<usize> = (start_pos..end_pos).collect();
-        self.take_rows_by_positions(&positions)
+        // A MultiIndex frame's rows too: they were gathered
+        // (br-frankenpandas-e186m).
+        Ok(self.take_contiguous_row_range_unchecked(start_pos, end_pos - start_pos))
     }
 
     /// Return a single row as a Series by label.
@@ -94992,6 +94992,15 @@ impl DataFrame {
                     idx, n
                 )));
             }
+        }
+        // A run of consecutive rows - a sorted MultiIndex's key or slice -
+        // is a window of each column, the index and its MultiIndex, where
+        // every row was gathered (df.loc[5:10] of a sorted 200k-row index;
+        // br-frankenpandas-e186m).
+        if let Some(&first) = indices.first()
+            && indices.windows(2).all(|pair| pair[1] == pair[0] + 1)
+        {
+            return Ok(self.take_contiguous_row_range_unchecked(first, indices.len()));
         }
         self.take_rows_by_positions_unchecked(indices)
     }
@@ -127315,6 +127324,76 @@ mod tests {
             int_fill.column("x").unwrap().values()[0],
             Scalar::Float64(-1.0)
         );
+    }
+
+    #[test]
+    fn consecutive_row_takes_are_windows_e186m() {
+        // A take of consecutive rows - and iloc_slice - of a MultiIndex
+        // frame is a window of its columns and MultiIndex, the rows a
+        // gather gives (br-frankenpandas-e186m).
+        let frame = DataFrame::new(
+            Index::from_range(0, 4, 1),
+            BTreeMap::from([
+                ("a".to_owned(), Column::from_i64_values(vec![3, 1, 3, 2])),
+                (
+                    "b".to_owned(),
+                    Column::from_values(
+                        ["x", "y", "x", "z"]
+                            .map(|s| Scalar::Utf8(s.to_owned()))
+                            .to_vec(),
+                    )
+                    .unwrap(),
+                ),
+                (
+                    "v".to_owned(),
+                    Column::from_f64_values(vec![1.0, 2.0, 3.0, 4.0]),
+                ),
+            ]),
+        )
+        .unwrap()
+        .set_index_multi(&["a", "b"], true, "|")
+        .unwrap();
+        let tuple = |out: &DataFrame, row: usize| {
+            out.row_multiindex()
+                .unwrap()
+                .get_tuple(row)
+                .unwrap()
+                .into_iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let window = frame.take(&[1, 2], 0).unwrap();
+        assert_eq!(
+            window.column("v").unwrap().as_f64_slice().unwrap(),
+            &[2.0, 3.0]
+        );
+        assert_eq!(
+            tuple(&window, 1),
+            vec![
+                fp_index::IndexLabel::Int64(3),
+                fp_index::IndexLabel::Utf8("x".to_owned())
+            ]
+        );
+        assert_eq!(
+            window.index().labels(),
+            frame.index().labels()[1..3].to_vec()
+        );
+        let sliced = frame.iloc_slice(Some(2), None).unwrap();
+        assert_eq!(tuple(&sliced, 1)[0], fp_index::IndexLabel::Int64(2));
+        assert_eq!(sliced.len(), 2);
+        // NEGATIVE: rows out of order are gathered in that order, an empty
+        // take holds none, and a row past the end is refused.
+        let reversed = frame.take(&[2, 1], 0).unwrap();
+        assert_eq!(
+            reversed.column("v").unwrap().as_f64_slice().unwrap(),
+            &[3.0, 2.0]
+        );
+        assert_eq!(
+            tuple(&reversed, 1)[1],
+            fp_index::IndexLabel::Utf8("y".to_owned())
+        );
+        assert_eq!(frame.take(&[], 0).unwrap().len(), 0);
+        assert!(frame.take(&[3, 4], 0).is_err());
     }
 
     #[test]

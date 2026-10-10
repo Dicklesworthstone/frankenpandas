@@ -1873,6 +1873,20 @@ impl IndexLabels {
         let end = start.saturating_add(len).min(total_len);
         let len = end - start;
 
+        // A MultiIndex's flat labels not yet made stay unmade: the slice is
+        // the MultiIndex's window (every label was made, then copied;
+        // br-frankenpandas-e186m).
+        if let Some(Utf8Contiguous::Flat(flat)) = &self.utf8_contiguous
+            && flat.bytes.get().is_none()
+            && let Ok(multi) = flat.multi.slice_rows(start, len)
+        {
+            return Self::new_lazy_flat(LazyFlat {
+                multi,
+                sep: flat.sep.clone(),
+                bytes: OnceLock::new(),
+            });
+        }
+
         if let Some(range) = self.int64_unit_range {
             let offset = i64::try_from(start).expect("start within index length");
             if let Some(next_start) = range.start.checked_add(offset)
@@ -6103,8 +6117,7 @@ impl Index {
         let Some(levels) = self.row_multiindex.as_deref() else {
             return sliced;
         };
-        let positions: Vec<usize> = (start..start.saturating_add(sliced.len())).collect();
-        match levels.take(&positions) {
+        match levels.slice_rows(start.min(self.len()), sliced.len()) {
             Ok(levels) => sliced.attach_row_multiindex(levels),
             Err(_) => sliced,
         }
@@ -21728,6 +21741,12 @@ pub struct MultiIndex {
     /// separator, kept for this index and its clones.
     #[serde(skip)]
     flat: Arc<OnceLock<(Box<str>, Index)>>,
+    /// The lexsort depth [`Self::lexsort_depth`] measured, kept for this
+    /// index and its clones: every .loc slice measured it again, comparing
+    /// every row's labels (df.loc[5:10] of a sorted 200k-row index 2.5 ms,
+    /// pandas 0.05; 4qg5w.9).
+    #[serde(skip)]
+    lexsort_depth: Arc<OnceLock<usize>>,
     /// A missing label is a value of its level - pandas' groupby
     /// (dropna=False) keys, NaN inside `levels` - rather than pandas' code
     /// -1 (set_index, from_arrays): an unstack sorts it with the values
@@ -21870,7 +21889,7 @@ fn build_multi_index_identity_codes(levels: &[Level]) -> Option<Vec<Vec<u32>>> {
     }
     let codes = levels
         .iter()
-        .map(|level| level.codes().map(|coded| coded.codes.clone()))
+        .map(|level| level.codes().map(|coded| coded.codes.to_vec()))
         .collect::<Option<Vec<_>>>()?;
     capped_identity_codes(codes, len)
 }
@@ -21892,7 +21911,60 @@ struct Level {
 /// them.
 struct LevelCodes {
     uniques: Arc<Vec<IndexLabel>>,
-    codes: Vec<u32>,
+    codes: CodesWindow,
+}
+
+/// A level's row codes: a window of a shared buffer, so a run of rows (a
+/// head, a slice) shares its index's codes as numpy's slice does, where a
+/// take copied a code a row (br-frankenpandas-e186m).
+#[derive(Clone)]
+struct CodesWindow {
+    all: Arc<[u32]>,
+    start: usize,
+    len: usize,
+}
+
+impl CodesWindow {
+    /// Codes `start..start + len` of these (within their length), sharing
+    /// the buffer.
+    fn window(&self, start: usize, len: usize) -> Self {
+        Self {
+            all: Arc::clone(&self.all),
+            start: self.start + start,
+            len,
+        }
+    }
+
+    fn as_slice(&self) -> &[u32] {
+        &self.all[self.start..self.start + self.len]
+    }
+}
+
+impl From<Arc<[u32]>> for CodesWindow {
+    fn from(all: Arc<[u32]>) -> Self {
+        let len = all.len();
+        Self { all, start: 0, len }
+    }
+}
+
+impl From<Vec<u32>> for CodesWindow {
+    fn from(codes: Vec<u32>) -> Self {
+        Self::from(Arc::<[u32]>::from(codes))
+    }
+}
+
+impl std::ops::Deref for CodesWindow {
+    type Target = [u32];
+
+    fn deref(&self) -> &[u32] {
+        self.as_slice()
+    }
+}
+
+impl PartialEq for CodesWindow {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
 }
 
 impl Level {
@@ -21904,7 +21976,7 @@ impl Level {
         }
     }
 
-    fn from_codes(uniques: Arc<Vec<IndexLabel>>, codes: Vec<u32>) -> Self {
+    fn from_codes(uniques: Arc<Vec<IndexLabel>>, codes: CodesWindow) -> Self {
         Self {
             len: codes.len(),
             rows: Arc::default(),
@@ -21917,6 +21989,7 @@ impl Level {
     fn from_rows_and_codes(rows: Vec<IndexLabel>, codes: Vec<u32>) -> Self {
         let uniques = Arc::new(first_seen_uniques(&rows, &codes));
         let level = Self::from_rows(rows);
+        let codes = CodesWindow::from(codes);
         let _ = level.codes.set(Some(LevelCodes { uniques, codes }));
         level
     }
@@ -21962,6 +22035,7 @@ impl Level {
                 } else {
                     Arc::new(first_seen_uniques(rows, &codes))
                 };
+                let codes = CodesWindow::from(codes);
                 Some(LevelCodes { uniques, codes })
             })
             .as_ref()
@@ -21976,14 +22050,32 @@ impl Level {
     /// and the uniques shared, or the labels cloned past u32 codes.
     fn take(&self, positions: &[usize]) -> Self {
         match self.codes() {
-            Some(coded) => Self::from_codes(
-                Arc::clone(&coded.uniques),
-                positions
-                    .iter()
-                    .map(|&position| coded.codes[position])
-                    .collect(),
-            ),
+            Some(coded) => {
+                // The window read once: indexing it re-sliced it a row.
+                let codes = coded.codes.as_slice();
+                Self::from_codes(
+                    Arc::clone(&coded.uniques),
+                    CodesWindow::from(
+                        positions
+                            .iter()
+                            .map(|&position| codes[position])
+                            .collect::<Arc<[u32]>>(),
+                    ),
+                )
+            }
             None => Self::from_rows(take_level_labels(self.rows(), positions)),
+        }
+    }
+
+    /// Rows `start..start + len` (within the length): a window of the codes,
+    /// their buffer and the uniques shared, or the labels cloned past u32
+    /// codes.
+    fn window(&self, start: usize, len: usize) -> Self {
+        match self.codes() {
+            Some(coded) => {
+                Self::from_codes(Arc::clone(&coded.uniques), coded.codes.window(start, len))
+            }
+            None => Self::from_rows(self.rows()[start..start + len].to_vec()),
         }
     }
 }
@@ -22096,6 +22188,7 @@ impl MultiIndex {
             names,
             identity_codes: Arc::default(),
             flat: Arc::default(),
+            lexsort_depth: Arc::default(),
             missing_is_a_level: false,
         }
     }
@@ -22105,6 +22198,7 @@ impl MultiIndex {
     #[must_use]
     pub fn with_missing_as_level(mut self, missing_is_a_level: bool) -> Self {
         self.missing_is_a_level = missing_is_a_level;
+        self.lexsort_depth = Arc::default();
         self
     }
 
@@ -22201,17 +22295,20 @@ impl MultiIndex {
         if self.holds_missing() {
             return false;
         }
-        if self.len() <= 1 {
-            return true;
-        }
-        (0..self.len() - 1).all(|i| self.row_cmp(i, i + 1) != std::cmp::Ordering::Greater)
+        // Without a missing label the rows run in order exactly when every
+        // level is within the lexsort depth, kept for the index and its
+        // clones: each read compared every row (2.1 ms at 200k rows, pandas
+        // a cached flag; 4qg5w.9).
+        self.lexsort_depth() == self.nlevels()
     }
 
-    /// Whether any level holds a missing label (pandas' code -1).
+    /// Whether any level holds a missing label (pandas' code -1): read from
+    /// a level's distinct labels where its codes are made.
     fn holds_missing(&self) -> bool {
-        self.levels
-            .iter()
-            .any(|level| level.iter().any(IndexLabel::is_missing))
+        (0..self.nlevels()).any(|level| match self.made_level_codes(level) {
+            Some((uniques, _)) => uniques.iter().any(IndexLabel::is_missing),
+            None => self.levels[level].iter().any(IndexLabel::is_missing),
+        })
     }
 
     /// Whether this MultiIndex is sorted in strictly descending order.
@@ -22232,16 +22329,71 @@ impl MultiIndex {
 
     /// pandas' lexsort depth (`MultiIndex._lexsort_depth`): how many leading
     /// levels run in order down the rows - each row's labels on them at or
-    /// past the row before's, read as [`IndexLabel::cmp_missing_first`]. A
-    /// `.loc` slice of a level at or past it is pandas' UnsortedIndexError
-    /// (it read the rows of an unsorted index as if sorted; 4qg5w.9).
+    /// past the row before's, in [`Self::level_order`]. A `.loc` slice of a
+    /// level at or past it is pandas' UnsortedIndexError (it read the rows of
+    /// an unsorted index as if sorted; 4qg5w.9). Measured once for an index
+    /// and its clones.
     #[must_use]
     pub fn lexsort_depth(&self) -> usize {
-        let levels: Vec<&[IndexLabel]> = self.levels.iter().map(|level| &**level).collect();
+        *self
+            .lexsort_depth
+            .get_or_init(|| self.measured_lexsort_depth())
+    }
+
+    /// The order of two labels of one level as pandas' codes hold it: a
+    /// missing label first (code -1, [`IndexLabel::cmp_missing_first`]), or
+    /// last where it is a value of its level (a groupby's dropna=False
+    /// keys, see the field) - a slice of such an index read it first and
+    /// raised UnsortedIndexError.
+    #[must_use]
+    pub fn level_order(&self, a: &IndexLabel, b: &IndexLabel) -> std::cmp::Ordering {
+        if self.missing_is_a_level {
+            a.cmp(b)
+        } else {
+            a.cmp_missing_first(b)
+        }
+    }
+
+    /// [`Self::lexsort_depth`] measured: a level with codes made compares
+    /// each row's rank among its distinct labels, an integer, where every
+    /// row's label was compared (a String a text label).
+    fn measured_lexsort_depth(&self) -> usize {
+        let ranked: Vec<Option<(Vec<u32>, &[u32])>> = (0..self.nlevels())
+            .map(|level| {
+                let (uniques, codes) = self.made_level_codes(level)?;
+                let mut sorted: Vec<usize> = (0..uniques.len()).collect();
+                sorted.sort_by(|&a, &b| self.level_order(&uniques[a], &uniques[b]));
+                let mut rank = vec![0_u32; uniques.len()];
+                let mut current = 0_u32;
+                for (position, &unique) in sorted.iter().enumerate() {
+                    if position > 0
+                        && self
+                            .level_order(&uniques[sorted[position - 1]], &uniques[unique])
+                            .is_ne()
+                    {
+                        current += 1;
+                    }
+                    rank[unique] = current;
+                }
+                Some((rank, codes))
+            })
+            .collect();
+        let rows: Vec<Option<&[IndexLabel]>> = ranked
+            .iter()
+            .zip(&self.levels)
+            .map(|(ranks, level)| ranks.is_none().then(|| level.rows()))
+            .collect();
         let mut depth = self.nlevels();
         for row in 1..self.len() {
-            for (level, labels) in levels.iter().enumerate().take(depth) {
-                match labels[row - 1].cmp_missing_first(&labels[row]) {
+            for (level, ranks) in ranked.iter().enumerate().take(depth) {
+                let step = match (ranks, rows[level]) {
+                    (Some((rank, codes)), _) => {
+                        rank[codes[row - 1] as usize].cmp(&rank[codes[row] as usize])
+                    }
+                    (None, Some(labels)) => self.level_order(&labels[row - 1], &labels[row]),
+                    (None, None) => std::cmp::Ordering::Equal,
+                };
+                match step {
                     std::cmp::Ordering::Less => break,
                     std::cmp::Ordering::Equal => {}
                     std::cmp::Ordering::Greater => {
@@ -22255,6 +22407,45 @@ impl MultiIndex {
             }
         }
         depth
+    }
+
+    /// One level's label at `row`, read through the level's codes when they
+    /// are made (its rows may not be). Panics past the last level or row.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn label_at(&self, level: usize, row: usize) -> &IndexLabel {
+        match self.made_level_codes(level) {
+            Some((uniques, codes)) => &uniques[codes[row] as usize],
+            None => &self.levels[level][row],
+        }
+    }
+
+    /// pandas' searchsorted of a key prefix over an index sorted that deep:
+    /// the first row whose leading labels are at or past `key` (with
+    /// `after`, past it), found by bisection in [`Self::level_order`]. None
+    /// when the lexsort depth is shorter than the key - the rows are then in
+    /// no order to bisect.
+    #[must_use]
+    pub fn sorted_prefix_position(&self, key: &[IndexLabel], after: bool) -> Option<usize> {
+        if key.len() > self.lexsort_depth() {
+            return None;
+        }
+        let (mut low, mut high) = (0, self.len());
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let order = key
+                .iter()
+                .enumerate()
+                .map(|(level, label)| self.level_order(self.label_at(level, middle), label))
+                .find(|order| order.is_ne())
+                .unwrap_or(std::cmp::Ordering::Equal);
+            if order.is_lt() || (after && order.is_eq()) {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        Some(low)
     }
 
     /// Alias for `is_monotonic_increasing`.
@@ -23272,6 +23463,32 @@ impl MultiIndex {
             .collect();
 
         // Rows of the same levels: a missing label stays what it was.
+        Ok(
+            Self::from_shared_levels_and_names(levels, self.names.clone())
+                .with_missing_as_level(self.missing_is_a_level),
+        )
+    }
+
+    /// Rows `start..start + len`: each level a window of its codes, the
+    /// buffer shared - a head, a slice ([`Self::take`] gathers a code a row:
+    /// df.head(100000) of a 200k-row MultiIndex frame 0.2 ms, pandas 0.01;
+    /// br-frankenpandas-e186m).
+    ///
+    /// # Errors
+    /// A window reaching past the last row.
+    pub fn slice_rows(&self, start: usize, len: usize) -> Result<Self, IndexError> {
+        let end = start.saturating_add(len);
+        if end > self.len() {
+            return Err(IndexError::OutOfBounds {
+                position: end,
+                length: self.len(),
+            });
+        }
+        let levels = self
+            .levels
+            .iter()
+            .map(|level| level.window(start, len))
+            .collect();
         Ok(
             Self::from_shared_levels_and_names(levels, self.names.clone())
                 .with_missing_as_level(self.missing_is_a_level),
@@ -24780,6 +24997,7 @@ impl MultiIndex {
             names: vec![None; 2],
             identity_codes: Arc::new(std::sync::OnceLock::from(identity_codes)),
             flat: Arc::default(),
+            lexsort_depth: Arc::default(),
             missing_is_a_level: false,
         })
     }
@@ -25108,7 +25326,10 @@ impl MultiIndex {
         new_names.remove(level);
 
         if new_levels.len() == 1 {
-            let mut idx = Index::new(new_levels[0].to_vec());
+            // The last level's rows shared, as get_level_values' (they were
+            // copied, a String a text label: df.droplevel(0) 2.9 ms at 200k
+            // rows, pandas 1.2; br-frankenpandas-e186m).
+            let mut idx = Index::from_shared_labels(Arc::clone(new_levels[0].shared_rows()));
             if let Some(ref name) = new_names[0] {
                 idx = idx.set_name(name);
             }
@@ -25118,6 +25339,31 @@ impl MultiIndex {
                 Self::from_shared_levels_and_names(new_levels, new_names),
             ))
         }
+    }
+
+    /// The levels at the positions `keep`, in that order, shared with their
+    /// codes and names: the index a drop of the other levels leaves.
+    ///
+    /// # Errors
+    /// A position past the last level.
+    pub fn select_levels(&self, keep: &[usize]) -> Result<Self, IndexError> {
+        let levels = keep
+            .iter()
+            .map(|&level| {
+                self.levels
+                    .get(level)
+                    .cloned()
+                    .ok_or(IndexError::OutOfBounds {
+                        position: level,
+                        length: self.nlevels(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let names = keep
+            .iter()
+            .map(|&level| self.names.get(level).cloned().flatten())
+            .collect();
+        Ok(Self::from_shared_levels_and_names(levels, names))
     }
 
     /// Swap two levels.
@@ -26428,6 +26674,45 @@ mod tests {
         // NEGATIVE: a missing label after a present one steps back, though
         // Ord (missing last) reads the rows as sorted.
         assert_eq!(depth(vec![utf8("a"), none()], &[1, 0]), 0);
+        // A groupby's dropna=False keys hold a missing label as a value,
+        // last: in order there.
+        let keyed = MultiIndex::from_arrays(vec![vec![utf8("a"), none()]])
+            .unwrap()
+            .with_missing_as_level(true);
+        assert_eq!(keyed.lexsort_depth(), 1);
+        // Levels read through their codes (a take's) measure as their labels.
+        let sorted = MultiIndex::from_arrays(vec![
+            vec![utf8("b"), utf8("a"), utf8("a"), utf8("b")],
+            [4, 2, 1, 3].map(IndexLabel::Int64).to_vec(),
+        ])
+        .unwrap()
+        .take(&[2, 1, 3, 0])
+        .unwrap();
+        assert!(sorted.made_level_codes(0).is_some());
+        assert_eq!(sorted.lexsort_depth(), 2);
+        assert_eq!(sorted.clone().lexsort_depth.get(), Some(&2));
+        assert_eq!(sorted.take(&[0, 3, 1]).unwrap().lexsort_depth(), 0);
+        // Bisection: the rows of 'a', of ('b', 3), past ('a', 9).
+        let at = |key: &[IndexLabel], after| sorted.sorted_prefix_position(key, after);
+        assert_eq!(
+            (at(&[utf8("a")], false), at(&[utf8("a")], true)),
+            (Some(0), Some(2))
+        );
+        let b3 = [utf8("b"), IndexLabel::Int64(3)];
+        assert_eq!((at(&b3, false), at(&b3, true)), (Some(2), Some(3)));
+        let past = [utf8("a"), IndexLabel::Int64(9)];
+        assert_eq!(at(&past, false), Some(2));
+        // NEGATIVE: no bisection past the lexsort depth.
+        let outer_only = MultiIndex::from_arrays(vec![
+            vec![utf8("a"), utf8("a")],
+            [2, 1].map(IndexLabel::Int64).to_vec(),
+        ])
+        .unwrap();
+        assert_eq!(
+            outer_only.sorted_prefix_position(&[utf8("a")], false),
+            Some(0)
+        );
+        assert_eq!(outer_only.sorted_prefix_position(&b3, false), None);
         // A missing label makes the index neither increasing nor
         // decreasing, as pandas' (fp read it as the last label).
         for outer in [
@@ -26439,6 +26724,115 @@ mod tests {
             assert!(!multi.is_monotonic_increasing());
             assert!(!multi.is_monotonic_decreasing());
         }
+    }
+
+    #[test]
+    fn selected_and_dropped_levels_share_rows_e186m() {
+        // select_levels keeps the named levels' rows, codes and names as
+        // they are; droplevel down to one level shares its rows
+        // (br-frankenpandas-e186m).
+        let utf8 = |s: &str| IndexLabel::Utf8(s.to_owned());
+        let multi = MultiIndex::from_arrays(vec![
+            [3, 1, 3].map(IndexLabel::Int64).to_vec(),
+            vec![utf8("x"), utf8("y"), utf8("x")],
+            [7, 8, 9].map(IndexLabel::Int64).to_vec(),
+        ])
+        .unwrap()
+        .set_names(vec![Some("a".into()), None, Some("c".into())]);
+        let selected = multi.select_levels(&[2, 0]).unwrap();
+        assert_eq!(selected.nlevels(), 2);
+        assert_eq!(
+            selected.names(),
+            &[
+                Some(crate::LabelName::from("c")),
+                Some(crate::LabelName::from("a"))
+            ]
+        );
+        assert_eq!(
+            selected.get_tuple(1).unwrap(),
+            vec![&IndexLabel::Int64(8), &IndexLabel::Int64(1)]
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            selected.levels[0].shared_rows(),
+            multi.levels[2].shared_rows()
+        ));
+        let pair = multi.select_levels(&[0, 1]).unwrap();
+        let crate::MultiIndexOrIndex::Index(outer) = pair.droplevel(1).unwrap() else {
+            unreachable!("two levels less one is an Index");
+        };
+        assert_eq!(outer.labels(), multi.level_labels(0).unwrap());
+        assert_eq!(outer.name(), Some(&crate::LabelName::from("a")));
+        assert!(std::ptr::eq(
+            outer.labels().as_ptr(),
+            multi.level_labels(0).unwrap().as_ptr()
+        ));
+        // NEGATIVE: a position past the last level is an error, and a take
+        // of the selection reads the taken rows, not the first ones.
+        assert!(multi.select_levels(&[3]).is_err());
+        let taken = selected.take(&[2, 0]).unwrap();
+        assert_eq!(
+            taken.get_tuple(0).unwrap(),
+            vec![&IndexLabel::Int64(9), &IndexLabel::Int64(3)]
+        );
+    }
+
+    #[test]
+    fn row_windows_share_their_codes_e186m() {
+        // A run of rows is a window of each level's codes, the buffer
+        // shared, through an Index carrying the MultiIndex and an unread
+        // flat index too (br-frankenpandas-e186m).
+        let utf8 = |s: &str| IndexLabel::Utf8(s.to_owned());
+        let multi = MultiIndex::from_arrays(vec![
+            [3, 1, 3, 2].map(IndexLabel::Int64).to_vec(),
+            vec![utf8("x"), utf8("y"), utf8("x"), utf8("z")],
+        ])
+        .unwrap()
+        .set_names(vec![Some("k".into()), None]);
+        let window = multi.slice_rows(1, 2).unwrap();
+        assert_eq!(window.len(), 2);
+        assert_eq!(
+            window.get_tuple(1).unwrap(),
+            vec![&IndexLabel::Int64(3), &utf8("x")]
+        );
+        assert_eq!(window.names(), multi.names());
+        let codes =
+            |index: &MultiIndex| Arc::clone(&index.levels[0].made_codes().unwrap().codes.all);
+        assert!(Arc::ptr_eq(&codes(&window), &codes(&multi)));
+        let inner = window.slice_rows(1, 1).unwrap();
+        assert_eq!(
+            inner.get_tuple(0).unwrap(),
+            vec![&IndexLabel::Int64(3), &utf8("x")]
+        );
+        assert_eq!(inner.level_labels(1).unwrap(), [utf8("x")].as_slice());
+        // Through an Index carrying it, and its unread flat labels.
+        let carried = multi
+            .to_flat_index("|")
+            .with_row_multiindex(multi.clone())
+            .unwrap();
+        let sliced = carried.slice(2, 2);
+        assert_eq!(
+            sliced.row_multiindex().unwrap().get_tuple(1).unwrap(),
+            vec![&IndexLabel::Int64(2), &utf8("z")]
+        );
+        let flat = multi.to_flat_index("|").slice(1, 3);
+        assert!(matches!(
+            &flat.labels.utf8_contiguous,
+            Some(crate::Utf8Contiguous::Flat(lazy)) if lazy.bytes.get().is_none()
+        ));
+        assert_eq!(
+            flat.labels(),
+            [utf8("1|y"), utf8("3|x"), utf8("2|z")].as_slice()
+        );
+        // NEGATIVE: a window past the last row is an error, an empty one
+        // holds no row, and a take still gathers its own codes.
+        assert!(multi.slice_rows(3, 2).is_err());
+        assert_eq!(multi.slice_rows(4, 0).unwrap().len(), 0);
+        let taken = multi.take(&[3, 0]).unwrap();
+        assert!(!Arc::ptr_eq(&codes(&taken), &codes(&multi)));
+        assert_eq!(
+            taken.get_tuple(0).unwrap(),
+            vec![&IndexLabel::Int64(2), &utf8("z")]
+        );
     }
 
     #[test]
@@ -43223,6 +43617,7 @@ mod tests {
             names: mi.names.clone(),
             identity_codes: Arc::new(std::sync::OnceLock::from(None)),
             flat: Arc::default(),
+            lexsort_depth: Arc::default(),
             missing_is_a_level: false,
         };
         assert!(

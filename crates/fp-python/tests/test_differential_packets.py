@@ -36616,6 +36616,12 @@ _LEX4QG_OPS = {
     "lists against the order": lambda d: d.loc[(["a1", "a0"], [2, 1, 0, 3]), :],
     "Series list against the order": lambda d: d["x"].loc[("a1", [2, 0])],
     "list with a label the level lacks": lambda d: d.loc[(["a0", "a9"], slice(None)), :],
+    "tuple bounds between labels": lambda d: d.loc[("a0", 2):("a1", 1)],
+    "outer key": lambda d: d.loc["a1"],
+    "Series outer slice": lambda d: d["x"].loc["a0":"a1"],
+    "IndexSlice outer range": lambda d: d.loc[pd.IndexSlice["a0":"a1", :], :],
+    "IndexSlice outer label, inner range": lambda d: d.loc[pd.IndexSlice["a1", 0:2], :],
+    "pair key": lambda d: d.loc[("a1", 2)],
     "null slice (NEGATIVE)": lambda d: d.loc[("a0", slice(None)), :],
     "list outer (NEGATIVE)": lambda d: d.loc[(["a0", "a1"], slice(None)), :],
     "Series level slice": lambda d: d["x"].loc[("a0", slice(1, 2))],
@@ -36635,6 +36641,20 @@ def _lex4qg_outcome(frame: str, op: str, m: Any) -> Any:
     return ("ok", [repr(label) for label in out.index.tolist()], values)
 
 
+def _lex4qg_dropna_keys(m: Any) -> Any:
+    frame = m.DataFrame({"a": ["x", "x", None, "y"], "b": [1.0, float("nan"), 2.0, 1.0], "v": [1, 2, 3, 4]})
+    keyed = frame.groupby(["a", "b"], dropna=False)["v"].sum()
+    return keyed.loc["x":"y"].tolist(), keyed.loc["x"].tolist()
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_multiindex_dropna_keys_slice_like_pandas_4qg5w9() -> None:
+    # A groupby's dropna=False keys hold NaN as a value of its level, last:
+    # the index is sorted, and a slice answers (it raised UnsortedIndexError,
+    # NaN read first as pandas' code -1).
+    assert _lex4qg_dropna_keys(fpd) == _lex4qg_dropna_keys(pd) == ([1, 2, 4], [1, 2])
+
+
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 @pytest.mark.parametrize("frame", list(_LEX4QG_FRAMES))
 @pytest.mark.parametrize("op", list(_LEX4QG_OPS))
@@ -36646,3 +36666,57 @@ def test_multiindex_unsorted_slices_raise_like_pandas_4qg5w9(frame: str, op: str
     if op == "list with a label the level lacks":
         assert expected[:2] == ("raise", "KeyError")
     assert _lex4qg_outcome(frame, op, fpd) == expected
+
+
+# br-frankenpandas-184aa: a .loc column key no column holds is pandas'
+# KeyError - a label naming it, a list "None of [...] are in the [columns]"
+# or the missing ones - and a slice of int-labelled columns reads their
+# labels (fp raised TypeError; an absent text label's KeyError named fp's
+# DataFrame.at). NEGATIVE: held labels, int and text, select as pandas'.
+def _loc184_frames(m: Any) -> Any:
+    text = m.DataFrame({"x": [1.0, 2.0], "y": [3.0, 4.0]}, index=["p", "q"])
+    ints = m.DataFrame({0: [1.0, 2.0], 1: [3.0, 4.0], 2: [5.0, 6.0]}, index=["p", "q"])
+    multi = m.DataFrame({"a": ["p", "q"], "b": [1, 2], "x": [1.0, 2.0]}).set_index(["a", "b"])
+    return text, ints, multi
+
+
+_LOC184_CASES = {
+    "row, absent int": lambda t, i, mi: t.loc["p", 2],
+    "rows, absent int": lambda t, i, mi: t.loc[:, 5],
+    "rows, absent int list": lambda t, i, mi: t.loc[:, [5]],
+    "rows, list with one absent": lambda t, i, mi: t.loc[:, ["x", 5]],
+    "row, absent text": lambda t, i, mi: t.loc["p", "zz"],
+    "int columns, absent int": lambda t, i, mi: i.loc["p", 7],
+    "int column slice": lambda t, i, mi: i.loc[:, 0:1],
+    "int column slice from": lambda t, i, mi: i.loc["q", 1:],
+    "int slice, absent bound": lambda t, i, mi: i.loc[:, 0:9],
+    "text slice, absent bounds": lambda t, i, mi: t.loc[:, "a":"xx"],
+    "decreasing columns, absent bound": lambda t, i, mi: t[["y", "x"]].loc[:, "z":"w"],
+    "unsorted columns, absent bound": lambda t, i, mi: i[[1, 0, 2]].loc[:, 5:0],
+    "MultiIndex absent pair": lambda t, i, mi: mi.loc[("p", 9)],
+    "MultiIndex row, absent int": lambda t, i, mi: mi.loc["p", 9],
+    "held int (NEGATIVE)": lambda t, i, mi: i.loc["p", 1],
+    "held int list (NEGATIVE)": lambda t, i, mi: i.loc[:, [2, 0]],
+    "held text slice (NEGATIVE)": lambda t, i, mi: t.loc[:, "x":"y"],
+}
+
+
+def _loc184_outcome(case: str, m: Any) -> Any:
+    try:
+        out = _LOC184_CASES[case](*_loc184_frames(m))
+    except Exception as e:
+        return ("raise", type(e).__name__, str(e))
+    if hasattr(out, "columns"):
+        return ("frame", [repr(c) for c in out.columns], repr(out.values.tolist()))
+    if hasattr(out, "index") and hasattr(out, "tolist"):
+        return ("series", [repr(v) for v in out.index.tolist()], repr(out.tolist()))
+    return ("scalar", repr(out))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_LOC184_CASES))
+def test_loc_column_keys_like_pandas_184aa(case: str) -> None:
+    expected = _loc184_outcome(case, pd)
+    if "NEGATIVE" in case:
+        assert expected[0] != "raise"
+    assert _loc184_outcome(case, fpd) == expected
