@@ -9345,6 +9345,24 @@ pub fn take_freq(freq: Option<String>, positions: &[usize]) -> Option<String> {
     scale_freq(&freq, step)
 }
 
+/// The freq a `delete` of `positions` (in bounds, in the order given) out
+/// of `len` keeps - pandas' `_get_delete_freq`: the index's own when they
+/// are one run of step 1 that starts at the first position or ends at the
+/// last (one position at either end, none at all), else none. A delete
+/// kept no freq at all (br-frankenpandas-n3ktr).
+#[must_use]
+pub fn delete_freq(freq: Option<String>, positions: &[usize], len: usize) -> Option<String> {
+    let freq = freq?;
+    let run = positions
+        .windows(2)
+        .all(|pair| pair[0].checked_add(1) == Some(pair[1]));
+    let keeps = match (positions.first(), positions.last()) {
+        (Some(&first), Some(&last)) => run && (first == 0 || last + 1 == len),
+        _ => true,
+    };
+    keeps.then_some(freq)
+}
+
 /// [`take_freq`] of numpy's signed take positions as pandas reads them - as
 /// given (`maybe_indices_to_slice`), so a negative one keeps no freq: [-1, -3]
 /// of 'D' was '-2D' and [-1] 'D' from the wrapped positions
@@ -25630,6 +25648,28 @@ mod tests {
         );
         assert_eq!(crate::take_freq(daily(), &[0, 1, 3]), None);
         assert_eq!(crate::take_freq(None, &[]), None);
+    }
+
+    #[test]
+    fn delete_freq_keeps_it_for_a_run_at_either_end_n3ktr() {
+        // pandas' _get_delete_freq over 5 positions: none, one end, a run of
+        // step 1 from the start or to the end keep 'D'.
+        let daily = || Some("D".to_owned());
+        let keeping: [&[usize]; 6] = [&[], &[0], &[4], &[0, 1], &[3, 4], &[0, 1, 2, 3, 4]];
+        for kept in keeping {
+            assert_eq!(
+                crate::delete_freq(daily(), kept, 5).as_deref(),
+                Some("D"),
+                "{kept:?}"
+            );
+        }
+        // NEGATIVE: an inner position, a gap, a step of 2, the run given
+        // backwards, and no freq to keep.
+        let losing: [&[usize]; 5] = [&[2], &[0, 2], &[0, 1, 3], &[1, 0], &[3, 4, 2]];
+        for dropped in losing {
+            assert_eq!(crate::delete_freq(daily(), dropped, 5), None, "{dropped:?}");
+        }
+        assert_eq!(crate::delete_freq(None, &[0], 5), None);
     }
 
     #[test]

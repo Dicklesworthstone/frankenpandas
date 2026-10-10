@@ -34834,6 +34834,65 @@ def test_int64_index_extremes_like_pandas_e186m(op: str) -> None:
         return (type(out).__name__, repr(out))
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-n3ktr / e186m: Index.drop and delete as pandas'. A
+# DatetimeIndex / TimedeltaIndex drops labels read as instants / durations
+# (a string as get_loc reads one, a numpy datetime64, a Timestamp), keeps
+# its class and name, and keeps its freq where pandas' delete does (one run
+# at either end); a label it does not hold is pandas' KeyError unless
+# errors='ignore'. Strings were compared as text (nothing dropped), the
+# result a plain Index, and delete never kept the freq. An int index drops
+# the int an integral float equals. NEGATIVE: an inner position, a gap and
+# a run given backwards keep no freq; bools are not ints; repeated labels
+# all go.
+_N3KTRDROP_CASES = {
+    "dt drop str middle": lambda m: m.date_range("2020-01-01", periods=5, freq="D", name="t").drop(["2020-01-03"]),
+    "dt drop str first": lambda m: m.date_range("2020-01-01", periods=5, freq="D", name="t").drop(["2020-01-01"]),
+    "dt drop two at end": lambda m: m.date_range("2020-01-01", periods=5, freq="D").drop(["2020-01-04", "2020-01-05"]),
+    "dt drop backwards (NEGATIVE)": lambda m: m.date_range("2020-01-01", periods=5, freq="D").drop(["2020-01-02", "2020-01-01"]),
+    "dt drop Timestamp": lambda m: m.date_range("2020-01-01", periods=5, freq="D").drop([m.Timestamp("2020-01-05")]),
+    "dt drop one str": lambda m: m.date_range("2020-01-01", periods=5, freq="D").drop("2020-01-02"),
+    "dt drop datetime64": lambda m: m.date_range("2020-01-01", periods=5, freq="D").drop([np.datetime64("2020-01-02")]),
+    "dt drop missing": lambda m: m.date_range("2020-01-01", periods=5, freq="D").drop(["2021-01-01"]),
+    "dt drop missing ignore": lambda m: m.date_range("2020-01-01", periods=5, freq="D").drop(["2021-01-01"], errors="ignore"),
+    "dt tz drop str": lambda m: m.date_range("2020-01-01", periods=4, freq="h", tz="Asia/Tokyo").drop(["2020-01-01 01:00"]),
+    "dt repeated drop": lambda m: m.DatetimeIndex(["2020-01-01", "2020-01-02", "2020-01-01"]).drop(["2020-01-01"]),
+    "dt delete 0": lambda m: m.date_range("2020-01-01", periods=5, freq="D").delete(0),
+    "dt delete -1": lambda m: m.date_range("2020-01-01", periods=5, freq="D").delete(-1),
+    "dt delete inner (NEGATIVE)": lambda m: m.date_range("2020-01-01", periods=5, freq="D").delete(2),
+    "dt delete [0, 1]": lambda m: m.date_range("2020-01-01", periods=5, freq="D").delete([0, 1]),
+    "dt delete gap (NEGATIVE)": lambda m: m.date_range("2020-01-01", periods=5, freq="D").delete([0, 2]),
+    "dt delete none": lambda m: m.date_range("2020-01-01", periods=5, freq="D").delete([]),
+    "td drop str": lambda m: m.timedelta_range("1 day", periods=4, freq="D", name="d").drop(["2 days"]),
+    "td drop first": lambda m: m.timedelta_range("1 day", periods=4, freq="D").drop(["1 day"]),
+    "td delete -1": lambda m: m.timedelta_range("1 day", periods=4, freq="D").delete(-1),
+    "td delete inner (NEGATIVE)": lambda m: m.timedelta_range("1 day", periods=4, freq="D").delete(1),
+    "td drop missing": lambda m: m.timedelta_range("1 day", periods=4, freq="D").drop(["9 days"]),
+    "int drop float": lambda m: m.Index([1, 2, 3], name="k").drop([1.0]),
+    "int repeated drop float": lambda m: m.Index([1, 2, 1, 3]).drop([1.0]),
+    "int drop bool ignore (NEGATIVE)": lambda m: m.Index([1, 2, 3]).drop([True], errors="ignore"),
+    "int drop 2.5": lambda m: m.Index([1, 2, 3]).drop([2.5]),
+    "int32 drop": lambda m: m.Index(np.array([4, 5, 6], dtype="int32")).drop([5]),
+    "int delete list": lambda m: m.Index(np.arange(40) * 3).delete([5, 7, 9]),
+    "str delete": lambda m: m.Index(["a", "b", "c"], name="s").delete(1),
+    "period delete": lambda m: m.period_range("2000-01", periods=4, freq="M").delete([0, 3]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_N3KTRDROP_CASES))
+def test_index_drop_and_delete_like_pandas_n3ktr(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _N3KTRDROP_CASES[case](m)
+        except (KeyError, TypeError, ValueError) as error:
+            return ("raise", type(error).__name__)
+        return (type(out).__name__, str(out.dtype), getattr(out, "freqstr", None), out.name, [str(x) for x in out])
+
+    assert run(fpd) == run(pd)
+
+
 # br-frankenpandas-e186m: an all-valid int64 Series' mean sums its ints as
 # numpy does - cast to float64 8192 at a time, each buffer pairwise - in
 # AVX2 lanes, the same bits as pandas' mean at every length (several cast

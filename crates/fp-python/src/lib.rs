@@ -8800,15 +8800,73 @@ fn unduplicated_positions(duplicated: &[bool]) -> Vec<usize> {
         .collect()
 }
 
-/// The positions an Index `delete(loc)` drops: one position (negative
-/// counts from the end) or a list / array of them, with numpy's
-/// IndexError for one out of bounds (br-frankenpandas-b9lc7).
-fn delete_positions(loc: &Bound<'_, PyAny>, len: usize) -> PyResult<HashSet<usize>> {
+/// The labels a `drop(labels)` names: a list-like's items, a string or a
+/// tuple (one label) itself (a list was read as ONE label).
+fn drop_label_items<'py>(labels: &Bound<'py, PyAny>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    if !labels.is_instance_of::<pyo3::types::PyString>()
+        && !labels.is_instance_of::<pyo3::types::PyTuple>()
+        && let Ok(iter) = labels.try_iter()
+    {
+        return iter.collect();
+    }
+    Ok(vec![labels.clone()])
+}
+
+/// pandas' KeyError for the labels a `drop` did not find, unless
+/// errors='ignore'.
+fn drop_missing_error(py: Python<'_>, missing: &[Bound<'_, PyAny>], errors: &str) -> PyResult<()> {
+    if errors == "ignore" || missing.is_empty() {
+        return Ok(());
+    }
+    Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+        "{} not found in axis",
+        PyList::new(py, missing)?.repr()?
+    )))
+}
+
+/// `values` but those at `positions` (in bounds, any order, repeats
+/// allowed): the positions sorted, the values between them copied in runs.
+/// A hash set of the positions was asked about every value (a delete of a
+/// million instants 27 ms, pandas 0.16; br-frankenpandas-n3ktr).
+fn values_without<T: Clone>(values: &[T], positions: &[usize]) -> Vec<T> {
+    let mut at = positions.to_vec();
+    at.sort_unstable();
+    at.dedup();
+    let mut kept = Vec::with_capacity(values.len() - at.len());
+    let mut from = 0;
+    for position in at {
+        kept.extend_from_slice(&values[from..position]);
+        from = position + 1;
+    }
+    kept.extend_from_slice(&values[from..]);
+    kept
+}
+
+/// Every position of `label` in `index`, in order: the lookup's one when
+/// its labels are unique, a scan when they repeat.
+fn label_positions(index: &Index, label: &IndexLabel) -> Vec<usize> {
+    if !index.has_duplicates() {
+        return index.position(label).into_iter().collect();
+    }
+    index
+        .labels()
+        .iter()
+        .enumerate()
+        .filter(|(_, held)| *held == label)
+        .map(|(at, _)| at)
+        .collect()
+}
+
+/// The positions an Index `delete(loc)` drops, in the order given: one
+/// position (negative counts from the end) or a list / array of them, with
+/// numpy's IndexError for one out of bounds (br-frankenpandas-b9lc7). The
+/// order is what pandas' delete reads a kept freq from.
+fn delete_positions(loc: &Bound<'_, PyAny>, len: usize) -> PyResult<Vec<usize>> {
     let positions: Vec<i64> = match loc.extract::<i64>() {
         Ok(position) => vec![position],
         Err(_) => loc.extract::<Vec<i64>>()?,
     };
-    let mut dropped = HashSet::with_capacity(positions.len());
+    let mut dropped = Vec::with_capacity(positions.len());
     for position in positions {
         let resolved = if position < 0 {
             position + len as i64
@@ -8816,9 +8874,7 @@ fn delete_positions(loc: &Bound<'_, PyAny>, len: usize) -> PyResult<HashSet<usiz
             position
         };
         match usize::try_from(resolved) {
-            Ok(at) if at < len => {
-                dropped.insert(at);
-            }
+            Ok(at) if at < len => dropped.push(at),
             _ => {
                 return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
                     "index {position} is out of bounds for axis 0 with size {len}"
@@ -14499,19 +14555,20 @@ impl PyIndex {
     /// / array of them, as numpy's delete (a list was a TypeError;
     /// br-frankenpandas-b9lc7).
     fn delete(&self, loc: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let dropped = delete_positions(loc, self.inner.len())?;
-        let labels = self
-            .inner
-            .labels()
-            .iter()
-            .enumerate()
-            .filter(|(at, _)| !dropped.contains(at))
-            .map(|(_, label)| label.clone())
-            .collect();
+        let positions = delete_positions(loc, self.inner.len())?;
         // The name and the dtype ride along (a narrow index's was int64;
-        // br-frankenpandas-vqjvd).
+        // br-frankenpandas-vqjvd); a typed int64 index's ints are copied in
+        // runs, no label made ([`values_without`]).
+        if let Some(values) = self.inner.cached_int64_label_values().flatten() {
+            let inner = Index::from_i64_values(values_without(&values, &positions))
+                .with_dtype_of(&self.inner)
+                .rename_index(self.inner.name());
+            return Ok(PyIndex { inner });
+        }
         Ok(PyIndex {
-            inner: self.inner.relabeled(labels),
+            inner: self
+                .inner
+                .relabeled(values_without(self.inner.labels(), &positions)),
         })
     }
 
@@ -14726,14 +14783,7 @@ impl PyIndex {
     /// errors='ignore'.
     #[pyo3(signature = (labels, errors="raise"))]
     fn drop(&self, labels: &Bound<'_, PyAny>, errors: &str) -> PyResult<Self> {
-        let items: Vec<Bound<'_, PyAny>> = if !labels.is_instance_of::<pyo3::types::PyString>()
-            && !labels.is_instance_of::<pyo3::types::PyTuple>()
-            && let Ok(iter) = labels.try_iter()
-        {
-            iter.collect::<PyResult<_>>()?
-        } else {
-            vec![labels.clone()]
-        };
+        let items = drop_label_items(labels)?;
         // Each label found through the index's lookup and a typed int64
         // index filtered over its values: every label was made and scanned
         // per item (idx.drop([1, 2, 3]) 31 ms a million, pandas 0.5;
@@ -14747,20 +14797,29 @@ impl PyIndex {
             }
             to_drop.insert(label);
         }
-        if errors != "ignore" && !missing.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
-                "{} not found in axis",
-                PyList::new(labels.py(), missing)?.repr()?
-            )));
+        drop_missing_error(labels.py(), &missing, errors)?;
+        // Labels each held once: their positions through the lookup, and the
+        // values between them copied in runs - every value was hashed
+        // against the dropped set (idx.drop([1, 2, 3]) of a million 2.1 ms,
+        // pandas 0.48; br-frankenpandas-e186m). An integral float drops the
+        // int it equals, as pandas'.
+        if let Some(values) = self.inner.cached_int64_label_values().flatten()
+            && !self.inner.has_duplicates()
+        {
+            let at: Vec<usize> = to_drop
+                .iter()
+                .filter_map(|label| self.inner.position(label))
+                .collect();
+            let inner = Index::from_i64_values(values_without(&values, &at))
+                .with_dtype_of(&self.inner)
+                .rename_index(self.inner.name());
+            return Ok(PyIndex { inner });
         }
         if let Some(values) = self.inner.cached_int64_label_values().flatten() {
-            let dropped: rustc_hash::FxHashSet<i64> = to_drop
-                .iter()
-                .filter_map(|label| match label {
-                    IndexLabel::Int64(value) => Some(*value),
-                    _ => None,
-                })
-                .collect();
+            // An integral float is the int it equals (drop([1.0]) kept the
+            // 1s, pandas drops them).
+            let dropped: rustc_hash::FxHashSet<i64> =
+                to_drop.iter().filter_map(IndexLabel::exact_int).collect();
             let kept: Vec<i64> = values
                 .iter()
                 .copied()
@@ -15940,6 +15999,16 @@ impl PyDatetimeIndex {
         } else {
             built.rename_index(self.inner.name().cloned())
         })
+    }
+
+    /// This index without the instants at `positions` (in bounds, in the
+    /// order a delete gives them), its freq as pandas' delete keeps it.
+    fn without_positions(&self, positions: &[usize]) -> Self {
+        let nanos = values_without(&self.inner.asi8(), positions);
+        let freq = fp_index::delete_freq(self.inner.freq(), positions, self.inner.len());
+        let mut out = self.with_nanos(nanos);
+        out.inner = out.inner.with_freq(freq);
+        out
     }
 
     /// The same index (name and time zone kept) over new instants - taken,
@@ -17226,16 +17295,6 @@ impl PyDatetimeIndex {
         self.clone()
     }
 
-    fn drop(&self, labels: Vec<Bound<'_, PyAny>>) -> PyResult<PyIndex> {
-        let mut to_drop = Vec::with_capacity(labels.len());
-        for l in labels {
-            to_drop.push(py_to_index_label(&l)?);
-        }
-        Ok(PyIndex {
-            inner: self.inner.as_index().drop_labels(&to_drop),
-        })
-    }
-
     /// Drops NaT; a flat index drops the same labels for how='any' and 'all'.
     /// This returned the index with its NaT (fvsao.5).
     #[pyo3(signature = (how="any"))]
@@ -17452,16 +17511,49 @@ impl PyDatetimeIndex {
         self.calendar_field(|dt| dt.daysinmonth(), || self.inner.daysinmonth())
     }
 
+    /// pandas' `delete(loc)`: the instants but those at `loc` (a position,
+    /// negative from the end, or a list of them), zone and name kept, and
+    /// the freq pandas' delete keeps ([`fp_index::delete_freq`]: a run at
+    /// either end) - it was always dropped (br-frankenpandas-n3ktr).
     fn delete(&self, loc: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let new_idx = self.as_py_index().delete(loc)?;
-        let mut vals = Vec::with_capacity(new_idx.inner.len());
-        for l in new_idx.inner.labels() {
-            match l {
-                IndexLabel::Datetime64(ns) => vals.push(*ns),
-                _ => vals.push(i64::MIN),
+        let positions = delete_positions(loc, self.inner.len())?;
+        Ok(self.without_positions(&positions))
+    }
+
+    /// pandas' `drop(labels, errors='raise')`: each label - an instant, a
+    /// datetime, a numpy datetime64 or a string read as the instant it
+    /// names on this index's clock, as get_loc reads one - deleted where the
+    /// index holds it ([`Self::delete`]'s freq rule); one it does not hold
+    /// is pandas' KeyError unless errors='ignore'. Strings were compared as
+    /// text, so nothing was dropped, and the result was a plain Index with
+    /// no freq (br-frankenpandas-n3ktr).
+    #[pyo3(signature = (labels, errors="raise"))]
+    fn drop(&self, py: Python<'_>, labels: &Bound<'_, PyAny>, errors: &str) -> PyResult<Self> {
+        let items = drop_label_items(labels)?;
+        let index = self.inner.as_index();
+        let mut positions = Vec::with_capacity(items.len());
+        let mut missing = Vec::new();
+        for item in items {
+            let label = if item.is_instance_of::<pyo3::types::PyString>() {
+                self.slice_bound_label(Some(&item), false)?
+            } else if item.get_type().name()? == "datetime64" {
+                Some(py_to_index_label(
+                    &py.get_type::<PyTimestamp>().call1((&item,))?,
+                )?)
+            } else {
+                Some(py_to_index_label(&item)?)
+            };
+            let found = label
+                .as_ref()
+                .map(|label| label_positions(index, label))
+                .unwrap_or_default();
+            if found.is_empty() {
+                missing.push(item);
             }
+            positions.extend(found);
         }
-        Ok(self.with_nanos(vals))
+        drop_missing_error(py, &missing, errors)?;
+        Ok(self.without_positions(&positions))
     }
 
     /// pandas' `factorize`: its uniques of this index's class, in its zone (a
@@ -20076,6 +20168,16 @@ impl PyTimedeltaIndex {
         }
     }
 
+    /// This index without the durations at `positions` (in bounds, in the
+    /// order a delete gives them), its freq as pandas' delete keeps it.
+    fn without_positions(&self, positions: &[usize]) -> Self {
+        let nanos = values_without(&self.inner.asi8(), positions);
+        let freq = fp_index::delete_freq(self.inner.freq(), positions, self.inner.len());
+        let mut out = self.with_nanos(nanos);
+        out.inner = out.inner.with_freq(freq);
+        out
+    }
+
     /// This index as a plain Index, for the operations an Index answers.
     fn as_plain(&self) -> PyIndex {
         PyIndex {
@@ -21162,14 +21264,31 @@ impl PyTimedeltaIndex {
         self.clone()
     }
 
-    fn drop(&self, labels: Vec<Bound<'_, PyAny>>) -> PyResult<PyIndex> {
-        let mut to_drop = Vec::with_capacity(labels.len());
-        for l in labels {
-            to_drop.push(py_to_index_label(&l)?);
+    /// pandas' `drop(labels, errors='raise')`: each label - a duration, a
+    /// numpy timedelta64 or a string read as the duration it names, as
+    /// slicing reads one - deleted where the index holds it
+    /// ([`Self::delete`]'s freq rule); one it does not hold is pandas'
+    /// KeyError unless errors='ignore'. Strings were compared as text, so
+    /// nothing was dropped, and the result was a plain Index with no freq
+    /// (br-frankenpandas-n3ktr).
+    #[pyo3(signature = (labels, errors="raise"))]
+    fn drop(&self, py: Python<'_>, labels: &Bound<'_, PyAny>, errors: &str) -> PyResult<Self> {
+        let items = drop_label_items(labels)?;
+        let index = self.inner.as_index();
+        let mut positions = Vec::with_capacity(items.len());
+        let mut missing = Vec::new();
+        for item in items {
+            let found = self
+                .slice_bound_label(Some(&item), false)?
+                .map(|label| label_positions(index, &label))
+                .unwrap_or_default();
+            if found.is_empty() {
+                missing.push(item);
+            }
+            positions.extend(found);
         }
-        Ok(PyIndex {
-            inner: self.inner.as_index().drop_labels(&to_drop),
-        })
+        drop_missing_error(py, &missing, errors)?;
+        Ok(self.without_positions(&positions))
     }
 
     /// Drops NaT; a flat index drops the same labels for how='any' and 'all'.
@@ -21292,20 +21411,13 @@ impl PyTimedeltaIndex {
         })
     }
 
+    /// pandas' `delete(loc)`: the durations but those at `loc` (a position,
+    /// negative from the end, or a list of them), name kept, and the freq
+    /// pandas' delete keeps ([`fp_index::delete_freq`]: a run at either
+    /// end); it was always dropped (br-frankenpandas-n3ktr).
     fn delete(&self, loc: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let new_idx = self.as_py_index().delete(loc)?;
-        let mut vals = Vec::with_capacity(new_idx.inner.len());
-        for l in new_idx.inner.labels() {
-            match l {
-                IndexLabel::Timedelta64(ns) => vals.push(*ns),
-                _ => vals.push(Timedelta::NAT),
-            }
-        }
-        let mut out = TimedeltaIndex::new(vals);
-        if let Some(n) = new_idx.inner.name() {
-            out = out.set_name(n);
-        }
-        Ok(Self { inner: out })
+        let positions = delete_positions(loc, self.inner.len())?;
+        Ok(self.without_positions(&positions))
     }
 
     #[pyo3(signature = (periods=1))]
@@ -23027,16 +23139,8 @@ impl PyPeriodIndex {
     }
 
     fn delete(&self, loc: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let dropped = delete_positions(loc, self.inner.len())?;
-        let vals = self
-            .inner
-            .values()
-            .iter()
-            .enumerate()
-            .filter(|(at, _)| !dropped.contains(at))
-            .map(|(_, period)| *period)
-            .collect();
-        let mut out = PeriodIndex::new(vals);
+        let positions = delete_positions(loc, self.inner.len())?;
+        let mut out = PeriodIndex::new(values_without(self.inner.values(), &positions));
         if let Some(n) = self.inner.name() {
             out = out.set_name(n);
         }
