@@ -78840,6 +78840,27 @@ impl DataFrame {
         )
     }
 
+    /// The rows at `positions` of this frame's row MultiIndex and of its
+    /// flat index, while those flat labels are unread: the MultiIndex taken
+    /// once and the flat labels made over that take - the flat index's own
+    /// take took the MultiIndex again, every code gathered twice (a
+    /// MultiIndex frame's sort, take or filter; br-frankenpandas-e186m).
+    fn multiindex_rows_at(
+        &self,
+        positions: &[usize],
+    ) -> Option<Result<(Index, fp_index::MultiIndex), FrameError>> {
+        let multi = self.row_multiindex.as_ref()?;
+        if !self.index.holds_unread_flat_labels() {
+            return None;
+        }
+        let taken = match Self::project_row_multiindex(multi, positions) {
+            Ok(taken) => taken,
+            Err(error) => return Some(Err(error)),
+        };
+        let flat = self.index.lazy_flat_over(&taken)?;
+        Some(Ok((flat, taken)))
+    }
+
     fn project_row_multiindex(
         row_multiindex: &fp_index::MultiIndex,
         positions: &[usize],
@@ -79110,6 +79131,7 @@ impl DataFrame {
         present: &[bool],
     ) -> Result<Self, FrameError> {
         let n = positions.len();
+        let multi_rows = self.multiindex_rows_at(positions).transpose()?;
 
         // Typed Int64 index gather (br-frankenpandas-dxqpm): when the source
         // index is all-Int64, gather the labels as raw i64s and hand the
@@ -79123,7 +79145,9 @@ impl DataFrame {
             None if n.saturating_mul(4) >= self.len() => self.index.int64_label_values(),
             None => None,
         };
-        let out_index = if let Some((start, _, step)) = self.index.range_span() {
+        let out_index = if let Some((flat, _)) = &multi_rows {
+            flat.clone()
+        } else if let Some((start, _, step)) = self.index.range_span() {
             // A RangeIndex's row at `pos` is start + pos * step (see
             // take_rows_by_positions_with_affine_certificate_unchecked;
             // br-frankenpandas-sj5bn, br-frankenpandas-ffh9h).
@@ -79167,11 +79191,14 @@ impl DataFrame {
         // br-frankenpandas-dwyud / i20vm).
         let out_index = out_index.with_dtype_of(&self.index);
 
-        let row_multiindex = self
-            .row_multiindex
-            .as_ref()
-            .map(|multiindex| Self::project_row_multiindex(multiindex, positions))
-            .transpose()?;
+        let row_multiindex = match multi_rows {
+            Some((_, multi)) => Some(multi),
+            None => self
+                .row_multiindex
+                .as_ref()
+                .map(|multiindex| Self::project_row_multiindex(multiindex, positions))
+                .transpose()?,
+        };
 
         // Gather fast path (br-frankenpandas-2a6ln): every value originates from
         // `column`, so it already matches the dtype and is already
@@ -79214,13 +79241,30 @@ impl DataFrame {
         all_valid_f64_columns: Option<&[String]>,
     ) -> Result<Self, FrameError> {
         debug_assert_eq!(runs.iter().map(|&(_, len)| len).sum::<usize>(), n);
+        // A MultiIndex frame's rows: the MultiIndex taken once, its unread
+        // flat labels made over it - they were made, then cloned a row at a
+        // time (br-frankenpandas-e186m).
+        let run_positions = || {
+            let mut positions = Vec::with_capacity(n);
+            for &(start, len) in runs {
+                positions.extend(start..start + len);
+            }
+            positions
+        };
+        let multi_rows = if self.row_multiindex.is_some() && self.index.holds_unread_flat_labels() {
+            self.multiindex_rows_at(&run_positions()).transpose()?
+        } else {
+            None
+        };
 
         let typed_view = match self.index.cached_int64_label_values() {
             Some(view) => view,
             None if n.saturating_mul(4) >= self.len() => self.index.int64_label_values(),
             None => None,
         };
-        let out_index = if let Some(values) = typed_view {
+        let out_index = if let Some((flat, _)) = &multi_rows {
+            flat.clone()
+        } else if let Some(values) = typed_view {
             let mut gathered = Vec::with_capacity(n);
             for &(start, len) in runs {
                 gathered.extend_from_slice(&values[start..start + len]);
@@ -79240,14 +79284,12 @@ impl DataFrame {
         // ... and its dtype where the labels read another (dwyud / i20vm).
         let out_index = out_index.with_dtype_of(&self.index);
 
-        let row_multiindex = if let Some(multiindex) = &self.row_multiindex {
-            let mut positions = Vec::with_capacity(n);
-            for &(start, len) in runs {
-                positions.extend(start..start + len);
+        let row_multiindex = match (multi_rows, &self.row_multiindex) {
+            (Some((_, multi)), _) => Some(multi),
+            (None, Some(multiindex)) => {
+                Some(Self::project_row_multiindex(multiindex, &run_positions())?)
             }
-            Some(Self::project_row_multiindex(multiindex, &positions)?)
-        } else {
-            None
+            (None, None) => None,
         };
 
         // Threaded by column once the gather is 4M cells (a run gather is a
@@ -79278,6 +79320,7 @@ impl DataFrame {
         certificate: Option<AffineSelectionCertificate>,
     ) -> Result<Self, FrameError> {
         let n = positions.len();
+        let multi_rows = self.multiindex_rows_at(positions).transpose()?;
 
         // Keep index projection byte-for-byte equivalent to
         // `take_rows_by_positions_unchecked`; only column gathering consumes
@@ -79287,7 +79330,9 @@ impl DataFrame {
             None if n.saturating_mul(4) >= self.len() => self.index.int64_label_values(),
             None => None,
         };
-        let out_index = if let Some((start, _, step)) = self.index.range_span() {
+        let out_index = if let Some((flat, _)) = &multi_rows {
+            flat.clone()
+        } else if let Some((start, _, step)) = self.index.range_span() {
             // A RangeIndex's row at `pos` is start + pos * step, the int64
             // labels the typed view gathers: a small selection built all of
             // its labels first (br-frankenpandas-sj5bn), a large one read
@@ -79325,11 +79370,14 @@ impl DataFrame {
         // br-frankenpandas-dwyud / i20vm).
         let out_index = out_index.with_dtype_of(&self.index);
 
-        let row_multiindex = self
-            .row_multiindex
-            .as_ref()
-            .map(|multiindex| Self::project_row_multiindex(multiindex, positions))
-            .transpose()?;
+        let row_multiindex = match multi_rows {
+            Some((_, multi)) => Some(multi),
+            None => self
+                .row_multiindex
+                .as_ref()
+                .map(|multiindex| Self::project_row_multiindex(multiindex, positions))
+                .transpose()?,
+        };
 
         // Per-column position gather is independent across columns; fan it
         // across workers (br-frankenpandas-uza04.114). Each column's
@@ -79386,16 +79434,35 @@ impl DataFrame {
         n: usize,
         gather_rest: bool,
     ) -> Option<Result<Self, FrameError>> {
-        if n == 0
-            || step == 0
-            || self.row_multiindex.is_some()
-            || !fp_columnar::affine_positions_fit(start, step, n, self.len())
-        {
+        if n == 0 || step == 0 || !fp_columnar::affine_positions_fit(start, step, n, self.len()) {
             return None;
         }
+        // The rows' positions, made once for whatever gathers them.
+        let positions_of =
+            || -> Vec<usize> { fp_columnar::affine_positions(start, step, n).collect() };
+        let mut positions: Option<Vec<usize>> = None;
 
-        let out_index = if let Some((range_start, range_len)) = self.index.int64_unit_range_labels()
-        {
+        // A row MultiIndex takes its codes at the rows - a window of them
+        // stepping by one - and its flat index the same rows: stepped rows of
+        // a MultiIndex frame were refused here and every column gathered
+        // through the label take (df.iloc[::2] 0.5 ms at 200k rows, pandas
+        // 0.02; br-frankenpandas-e186m).
+        let row_multiindex = match &self.row_multiindex {
+            Some(multi) if step == 1 => Some(multi.slice_rows(start, n).ok()?),
+            Some(multi) => Some(
+                multi
+                    .take(positions.get_or_insert_with(positions_of))
+                    .ok()?,
+            ),
+            None => None,
+        };
+        let out_index = if let Some(taken) = &row_multiindex {
+            match self.index.lazy_flat_over(taken) {
+                Some(flat) => flat,
+                None if step == 1 => self.index.slice(start, n),
+                None => self.index.take(positions.get_or_insert_with(positions_of)),
+            }
+        } else if let Some((range_start, range_len)) = self.index.int64_unit_range_labels() {
             if !fp_columnar::affine_positions_fit(start, step, n, range_len) {
                 return None;
             }
@@ -79419,29 +79486,40 @@ impl DataFrame {
                         .map(|pos| values[pos])
                         .collect(),
                 ),
-                (None, _) => {
-                    let index_labels = self.index.labels();
-                    let labels = fp_columnar::affine_positions(start, step, n)
-                        .map(|pos| index_labels[pos].clone())
-                        .collect();
-                    // Rows of a tz-aware index keep its zone.
-                    Index::new(labels).with_tz(self.index.tz()).ok()?
-                }
+                // Text in one buffer takes its bytes; it cloned a String a
+                // row (df.iloc[::2] over a text index 0.86 ms at 200k rows,
+                // pandas 0.008; br-frankenpandas-e186m).
+                (None, _) => match self
+                    .index
+                    .holds_text_buffer()
+                    .then(|| {
+                        self.index
+                            .take_utf8_contiguous(positions.get_or_insert_with(positions_of))
+                    })
+                    .flatten()
+                {
+                    Some(taken) => taken,
+                    None => {
+                        let index_labels = self.index.labels();
+                        let labels = fp_columnar::affine_positions(start, step, n)
+                            .map(|pos| index_labels[pos].clone())
+                            .collect();
+                        // Rows of a tz-aware index keep its zone.
+                        Index::new(labels).with_tz(self.index.tz()).ok()?
+                    }
+                },
             }
         };
 
         let n_cols = self.num_columns();
         let mut columns = Vec::with_capacity(n_cols);
-        let mut positions: Option<Vec<usize>> = None;
         for i in 0..n_cols {
             let column = self.column_at(i).expect("column position in bounds");
             columns.push(
                 match column.take_affine_positions_without_materialized_positions(start, step, n) {
                     Some(view) => view,
                     None if gather_rest => {
-                        column.take_positions(positions.get_or_insert_with(|| {
-                            fp_columnar::affine_positions(start, step, n).collect()
-                        }))
+                        column.take_positions(positions.get_or_insert_with(positions_of))
                     }
                     None => return None,
                 },
@@ -79451,7 +79529,7 @@ impl DataFrame {
             out_index
                 .with_dtype_of(&self.index)
                 .rename_index(self.index.name()),
-            None,
+            row_multiindex,
             columns,
         )))
     }

@@ -145,6 +145,7 @@
 - **Impact:** Duplicate values in argsort produce deterministic original index order rather than reproducing arbitrary numpy quicksort artifacts.
 - **Resolution:** ACCEPTED (2026-09-08, `br-frankenpandas-dxkbb`). Option (a) (pinning numpy's undocumented quicksort artifact) is rejected as fragile tech debt. Conformance fixtures for argsort avoid ambiguous tie order across engines.
 - **Tests affected:** `series_argsort` conformance fixtures avoid ties.
+- **Update 2026-10-10 (`br-frankenpandas-kbnmj`):** `value_counts`' order among equal counts is this divergence too. pandas sorts the counts through `nargsort` (numpy `kind='quicksort'`, numpy 2's SIMD argsort on this host): `Series([...'t0'..'t4' counted 54/55/55/55/54]).astype('category').value_counts()` is `['t1', 't3', 't2', 't0', 't4']` in pandas 2.2.3, `['t1', 't2', 't3', 't0', 't4']` (equal counts in first-seen order) in FrankenPandas; plain int64 columns likewise. The counts and every distinct count's position agree.
 - **Review date:** 2026-09-08
 
 ### DISC-029: rank keeps a missing value missing where pandas 2.2.3 ranks what lies under it

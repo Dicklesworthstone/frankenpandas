@@ -3146,6 +3146,45 @@ impl Index {
         ))
     }
 
+    /// The flat labels this index's unread MultiIndex labels make over
+    /// `multi` (as many levels) - the MultiIndex they stand for, taken
+    /// elsewhere: a frame takes its row MultiIndex and its flat index at the
+    /// same rows, and the flat index's take took the MultiIndex again (a
+    /// MultiIndex frame's sort, iloc and take gathered every code twice;
+    /// br-frankenpandas-e186m). None unless this index is such labels, not
+    /// yet made.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn lazy_flat_over(&self, multi: &MultiIndex) -> Option<Self> {
+        match self.labels.utf8_contiguous.as_ref()? {
+            Utf8Contiguous::Flat(flat)
+                if flat.bytes.get().is_none() && flat.multi.nlevels() == multi.nlevels() =>
+            {
+                Some(Self::lazy_flat(multi, &flat.sep))
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether the labels are a MultiIndex's flat labels not yet made - the
+    /// index [`Self::lazy_flat_over`] retargets.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn holds_unread_flat_labels(&self) -> bool {
+        matches!(
+            self.labels.utf8_contiguous.as_ref(),
+            Some(Utf8Contiguous::Flat(flat)) if flat.bytes.get().is_none()
+        )
+    }
+
+    /// Whether the labels are text held in one buffer, made or not - the
+    /// index [`Self::take_utf8_contiguous`] takes.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn holds_text_buffer(&self) -> bool {
+        self.labels.utf8_contiguous.is_some()
+    }
+
     /// The flat labels of `multi` - `sep` between its levels' labels - made
     /// on first read (see [`LazyFlat`]). The MultiIndex is held without its
     /// own kept flat index, which would hold this one back.
@@ -5867,6 +5906,17 @@ impl Index {
     /// the same positions) when the index has them.
     #[must_use]
     pub fn take(&self, indices: &[usize]) -> Self {
+        // Unread flat labels of the MultiIndex this index carries: the
+        // MultiIndex taken once and the labels made over that take - the
+        // labels' own take took it a second time (a MultiIndex Series' take,
+        // iloc and sort; br-frankenpandas-e186m).
+        if let Some(levels) = self.row_multiindex.as_deref()
+            && self.holds_unread_flat_labels()
+            && let Ok(levels) = levels.take(indices)
+            && let Some(flat) = self.lazy_flat_over(&levels)
+        {
+            return self.propagate_name(flat).attach_row_multiindex(levels);
+        }
         let mut taken = self.take_labels(indices);
         // A run of consecutive positions is a slice: it keeps the freq, as
         // pandas' getitem keeps it for a slice or a mask selecting a run
@@ -26833,6 +26883,53 @@ mod tests {
             taken.get_tuple(0).unwrap(),
             vec![&IndexLabel::Int64(2), &utf8("z")]
         );
+    }
+
+    #[test]
+    fn unread_flat_labels_retarget_a_taken_multiindex_e186m() {
+        // A frame's unread flat index stands for its MultiIndex: over the
+        // MultiIndex's take it is the take's flat labels, made without a
+        // second take (br-frankenpandas-e186m).
+        let utf8 = |s: &str| IndexLabel::Utf8(s.to_owned());
+        let multi = MultiIndex::from_arrays(vec![
+            [3, 1, 2].map(IndexLabel::Int64).to_vec(),
+            vec![utf8("x"), utf8("y"), utf8("z")],
+        ])
+        .unwrap();
+        let flat = multi.to_flat_index("|");
+        assert!(flat.holds_text_buffer());
+        assert!(flat.holds_unread_flat_labels());
+        let taken = multi.take(&[2, 0]).unwrap();
+        let over = flat.lazy_flat_over(&taken).unwrap();
+        assert_eq!(over.labels(), [utf8("2|z"), utf8("3|x")].as_slice());
+        // NEGATIVE: labels already made, another depth or another backing
+        // answer None.
+        let _ = flat.labels();
+        assert!(!flat.holds_unread_flat_labels());
+        assert!(flat.lazy_flat_over(&taken).is_none());
+        let unread = multi.to_flat_index("|");
+        let deeper = MultiIndex::from_arrays(vec![
+            [1].map(IndexLabel::Int64).to_vec(),
+            vec![utf8("a")],
+            vec![utf8("b")],
+        ])
+        .unwrap();
+        assert!(unread.lazy_flat_over(&deeper).is_none());
+        let plain = Index::new(vec![utf8("p")]);
+        assert!(plain.lazy_flat_over(&taken).is_none());
+        // An index carrying the MultiIndex takes it once, as its flat labels.
+        let carried = multi
+            .to_flat_index("|")
+            .with_row_multiindex(multi.clone())
+            .unwrap()
+            .take(&[1, 2]);
+        assert!(carried.holds_unread_flat_labels());
+        assert_eq!(
+            carried.row_multiindex().unwrap().get_tuple(0).unwrap(),
+            vec![&IndexLabel::Int64(1), &utf8("y")]
+        );
+        assert_eq!(carried.labels(), [utf8("1|y"), utf8("2|z")].as_slice());
+        assert!(!Index::from_range(0, 3, 1).holds_text_buffer());
     }
 
     #[test]

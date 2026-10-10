@@ -36885,3 +36885,54 @@ def _kbnmj_outcome(case: str, m: Any) -> Any:
 @pytest.mark.parametrize("case", [*list(_KBNMJ_VALUES), "date beside int (NEGATIVE)", "bytes beside int (NEGATIVE)"])
 def test_mixed_categories_sort_like_pandas_kbnmj(case: str) -> None:
     assert _kbnmj_outcome(case, fpd) == _kbnmj_outcome(case, pd)
+
+
+# br-frankenpandas-e186m: stepped row selections of a MultiIndex frame take
+# the MultiIndex's codes (a window when stepping by one) and a text index's
+# bytes - the same rows, labels and levels as pandas'. NEGATIVE: a zoned
+# index keeps its zone, a range index stays one, and an object column
+# beside a float one is gathered.
+def _step_frames(m: Any) -> Any:
+    base = {"a": [3, 1, 3, 2, 5, 4], "b": ["x", "y", "x", "z", "w", "v"], "v": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "o": ["p", "q", "r", "s", "t", "u"]}
+    mi = m.DataFrame(base).set_index(["a", "b"])
+    text = m.DataFrame({"v": base["v"], "o": base["o"]}, index=[f"r{i}" for i in range(6)])
+    zoned = m.DataFrame({"v": base["v"]}, index=m.date_range("2024-01-01", periods=6, freq="h", tz="UTC"))
+    ranged = m.DataFrame({"v": base["v"]})
+    return mi, text, zoned, ranged
+
+
+_STEP_CASES = {
+    "mi ::2": lambda mi, t, z, r: mi.iloc[::2],
+    "mi 1::3": lambda mi, t, z, r: mi.iloc[1::3],
+    "mi ::-1": lambda mi, t, z, r: mi.iloc[::-1],
+    "mi 4:1:-2": lambda mi, t, z, r: mi.iloc[4:1:-2],
+    "mi 1:4": lambda mi, t, z, r: mi.iloc[1:4],
+    "mi ::2 then loc": lambda mi, t, z, r: mi.iloc[::2].loc[3],
+    "mi ::2 reset": lambda mi, t, z, r: mi.iloc[::2].reset_index(),
+    "mi Series ::2": lambda mi, t, z, r: mi["v"].iloc[::2],
+    "text ::2": lambda mi, t, z, r: t.iloc[::2],
+    "text ::-1": lambda mi, t, z, r: t.iloc[::-1],
+    "text ::2 loc": lambda mi, t, z, r: t.iloc[::2].loc[["r4", "r0"]],
+    "mi filter": lambda mi, t, z, r: mi[mi["v"] > 2.5],
+    "mi sort": lambda mi, t, z, r: mi.sort_index(),
+    "zoned ::2 (NEGATIVE)": lambda mi, t, z, r: z.iloc[::2],
+    "range ::2 (NEGATIVE)": lambda mi, t, z, r: r.iloc[::2],
+}
+
+
+def _step_outcome(case: str, m: Any) -> Any:
+    out = _STEP_CASES[case](*_step_frames(m))
+    if not hasattr(out, "index"):
+        return repr(out)
+    return (
+        type(out.index).__name__,
+        [repr(label) for label in out.index.tolist()],
+        list(out.index.names),
+        repr(out.values.tolist()),
+    )
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_STEP_CASES))
+def test_stepped_rows_like_pandas_e186m(case: str) -> None:
+    assert _step_outcome(case, fpd) == _step_outcome(case, pd)
