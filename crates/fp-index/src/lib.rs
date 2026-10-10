@@ -23530,6 +23530,37 @@ impl MultiIndex {
         )
     }
 
+    /// The MultiIndex of a frame's cells stacked row by row: each row level's
+    /// labels (`rows`, one slice a level) beside each column's label - a row
+    /// level's codes repeated a column at a time, the columns' codes cycled
+    /// a row at a time, no label cloned a cell (a stack cloned both labels of
+    /// every cell; df.stack() 0.39x pandas; br-frankenpandas-nna8h). Unnamed; None without
+    /// a row level or past u32 codes.
+    #[must_use]
+    pub fn stacked_cells(rows: &[&[IndexLabel]], columns: &[IndexLabel]) -> Option<Self> {
+        let row_count = rows.first()?.len();
+        if rows.iter().any(|labels| labels.len() != row_count) {
+            return None;
+        }
+        let column_count = columns.len();
+        let mut levels = Vec::with_capacity(rows.len() + 1);
+        for labels in rows {
+            let codes = first_seen_label_codes(labels)?;
+            let uniques = Arc::new(first_seen_uniques(labels, &codes));
+            let cells: Vec<u32> = codes
+                .iter()
+                .flat_map(|&code| std::iter::repeat_n(code, column_count))
+                .collect();
+            levels.push(Level::from_codes(uniques, CodesWindow::from(cells)));
+        }
+        let codes = first_seen_label_codes(columns)?;
+        let uniques = Arc::new(first_seen_uniques(columns, &codes));
+        let cells: Vec<u32> = (0..row_count).flat_map(|_| codes.iter().copied()).collect();
+        levels.push(Level::from_codes(uniques, CodesWindow::from(cells)));
+        let names = vec![None; levels.len()];
+        Some(Self::from_shared_levels_and_names(levels, names))
+    }
+
     /// Rows `start..start + len`: each level a window of its codes, the
     /// buffer shared - a head, a slice ([`Self::take`] gathers a code a row:
     /// df.head(100000) of a 200k-row MultiIndex frame 0.2 ms, pandas 0.01;
@@ -26941,6 +26972,49 @@ mod tests {
         );
         assert_eq!(carried.labels(), [utf8("1|y"), utf8("2|z")].as_slice());
         assert!(!Index::from_range(0, 3, 1).holds_text_buffer());
+    }
+
+    #[test]
+    fn stacked_cells_pair_each_row_with_each_column_nna8h() {
+        // The cells of a 3-row, 2-column frame stacked: rows repeated a
+        // column at a time, columns cycled (br-frankenpandas-nna8h).
+        let utf8 = |s: &str| IndexLabel::Utf8(s.to_owned());
+        let rows = [
+            IndexLabel::Int64(7),
+            IndexLabel::Int64(5),
+            IndexLabel::Int64(7),
+        ];
+        let columns = [utf8("a"), utf8("b")];
+        let multi = MultiIndex::stacked_cells(&[&rows], &columns).unwrap();
+        assert_eq!(multi.len(), 6);
+        assert_eq!(
+            (0..6)
+                .map(|row| multi.get_tuple(row).unwrap())
+                .map(|tuple| (tuple[0].clone(), tuple[1].clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (IndexLabel::Int64(7), utf8("a")),
+                (IndexLabel::Int64(7), utf8("b")),
+                (IndexLabel::Int64(5), utf8("a")),
+                (IndexLabel::Int64(5), utf8("b")),
+                (IndexLabel::Int64(7), utf8("a")),
+                (IndexLabel::Int64(7), utf8("b")),
+            ]
+        );
+        assert_eq!(multi.level_labels(0).unwrap()[3], IndexLabel::Int64(5));
+        // Two row levels.
+        let inner = [utf8("x"), utf8("y"), utf8("z")];
+        let deep = MultiIndex::stacked_cells(&[&rows, &inner], &columns).unwrap();
+        assert_eq!(deep.nlevels(), 3);
+        assert_eq!(
+            deep.get_tuple(5).unwrap(),
+            vec![&IndexLabel::Int64(7), &utf8("z"), &utf8("b")]
+        );
+        // NEGATIVE: no row level, or row levels of other lengths, is None;
+        // no column makes no cell.
+        assert!(MultiIndex::stacked_cells(&[], &columns).is_none());
+        assert!(MultiIndex::stacked_cells(&[&rows, &inner[..2]], &columns).is_none());
+        assert_eq!(MultiIndex::stacked_cells(&[&rows], &[]).unwrap().len(), 0);
     }
 
     #[test]

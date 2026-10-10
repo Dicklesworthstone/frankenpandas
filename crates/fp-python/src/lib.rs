@@ -42678,6 +42678,9 @@ impl PyDataFrame {
             at.entry((top.clone(), sub.clone())).or_insert(column);
         }
         subs.sort();
+        if let Some(out) = self.stack_last_column_level_typed(multi, &tops, &subs, &at)? {
+            return Ok(out);
+        }
         let row_labels = self.inner.index().labels();
         let mut kept: Vec<(usize, usize)> = Vec::new();
         let mut cells: Vec<Vec<Scalar>> = vec![Vec::new(); tops.len()];
@@ -42735,6 +42738,89 @@ impl PyDataFrame {
                     .with_columns_name(multi.names().first().cloned().flatten())
             })
             .and_then(|frame| frame.with_row_multiindex(levels))
+            .map_err(frame_error_to_py)
+    }
+
+    /// [`Self::stack_last_column_level`] when every (top, sub) pair is an
+    /// int64 or float64 column without a gap, one kind under each top: no
+    /// cell is missing and no row dropped, so each top's column is its subs'
+    /// columns interleaved row by row, typed, and the rows' MultiIndex the
+    /// product of the rows and the sorted subs, made from codes - every cell
+    /// went through a Scalar, a (label, label) key cloned and hashed for each,
+    /// and a flat label formatted (35 ms at 50k rows by 2 x 3 columns,
+    /// pandas 3.8; br-frankenpandas-nna8h). None for any other frame.
+    fn stack_last_column_level_typed(
+        &self,
+        multi: &fp_index::MultiIndex,
+        tops: &[IndexLabel],
+        subs: &[IndexLabel],
+        at: &HashMap<(IndexLabel, IndexLabel), usize>,
+    ) -> PyResult<Option<DataFrame>> {
+        enum Sources<'a> {
+            F64(Vec<&'a [f64]>),
+            I64(Vec<&'a [i64]>),
+        }
+        let mut sources = Vec::with_capacity(tops.len());
+        for top in tops {
+            let mut floats = Vec::new();
+            let mut ints = Vec::new();
+            for sub in subs {
+                let Some(column) = at
+                    .get(&(top.clone(), sub.clone()))
+                    .and_then(|&position| self.inner.column_at(position))
+                else {
+                    return Ok(None);
+                };
+                if let Some(values) = column.as_f64_slice() {
+                    floats.push(values);
+                } else if let Some(values) = column.as_i64_slice() {
+                    ints.push(values);
+                } else {
+                    return Ok(None);
+                }
+            }
+            sources.push(match (floats.is_empty(), ints.is_empty()) {
+                (false, true) => Sources::F64(floats),
+                (true, false) => Sources::I64(ints),
+                _ => return Ok(None),
+            });
+        }
+        let row_labels = self.inner.index().labels();
+        let Some(levels) = fp_index::MultiIndex::stacked_cells(&[row_labels], subs) else {
+            return Ok(None);
+        };
+        let rows = row_labels.len();
+        let mut columns = BTreeMap::new();
+        let mut order = Vec::with_capacity(tops.len());
+        for (top, source) in tops.iter().zip(sources) {
+            let column = match source {
+                Sources::F64(source) => Column::from_f64_values(
+                    (0..rows)
+                        .flat_map(|row| source.iter().map(move |values| values[row]))
+                        .collect(),
+                ),
+                Sources::I64(source) => Column::from_i64_values(
+                    (0..rows)
+                        .flat_map(|row| source.iter().map(move |values| values[row]))
+                        .collect(),
+                ),
+            };
+            let name = fp_frame::column_key(top);
+            columns.insert(name.clone(), column);
+            order.push(name);
+        }
+        let levels = levels.set_names(vec![
+            self.inner.index().name().cloned(),
+            multi.names().get(1).cloned().flatten(),
+        ]);
+        DataFrame::new_with_column_order(levels.to_flat_index(MULTIINDEX_FLAT_SEP), columns, order)
+            .map(|frame| {
+                frame
+                    .with_recorded_column_labels(tops.to_vec())
+                    .with_columns_name(multi.names().first().cloned().flatten())
+            })
+            .and_then(|frame| frame.with_row_multiindex(levels))
+            .map(Some)
             .map_err(frame_error_to_py)
     }
 
@@ -57006,24 +57092,17 @@ impl PyDataFrame {
             )?;
         }
         let drop_missing = !future_stack && dropna.unwrap_or(true);
-        let stacked = self.inner.stack().map_err(frame_error_to_py)?;
-        let values = stacked
-            .column_names()
-            .first()
-            .and_then(|name| stacked.column(name))
-            .ok_or_else(|| not_implemented("stack of a frame without columns"))?;
+        // The cells' values alone: the stack's composite labels were built,
+        // then set aside for a MultiIndex (br-frankenpandas-nna8h).
+        let values = self.inner.stacked_values().map_err(frame_error_to_py)?;
         let index = self.inner.index();
         let row_multi = self.inner.row_multiindex();
-        let row_levels: Vec<Vec<IndexLabel>> = match row_multi {
+        // Each row level's labels, borrowed (they were copied out).
+        let row_levels: Vec<&[IndexLabel]> = match row_multi {
             Some(multi) => (0..multi.nlevels())
-                .map(|lvl| {
-                    multi
-                        .get_level_values(lvl)
-                        .map(|level| level.labels().to_vec())
-                        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
-                })
-                .collect::<PyResult<_>>()?,
-            None => vec![index.labels().to_vec()],
+                .filter_map(|level| multi.level_labels(level))
+                .collect(),
+            None => vec![index.labels()],
         };
         let mut names: Vec<Option<LabelName>> = match row_multi {
             Some(multi) => multi.names().to_vec(),
@@ -57042,6 +57121,21 @@ impl PyDataFrame {
         // A cell is dropped only when missing: a column holding none keeps
         // every cell without a mask bit read for each.
         let all_kept = !drop_missing || values.validity().all();
+        // Every cell kept: the MultiIndex from codes - the rows' repeated a
+        // column at a time, the columns' cycled - and its flat labels made on
+        // first read; each cell's labels were cloned into its levels (df.stack()
+        // 13.0 ms at 50k x 6, pandas 5.1; br-frankenpandas-nna8h).
+        if all_kept
+            && let Some(levels) = fp_index::MultiIndex::stacked_cells(&row_levels, &column_labels)
+        {
+            let levels = levels.set_names(names);
+            let index = levels
+                .to_flat_index(MULTIINDEX_FLAT_SEP)
+                .with_row_multiindex(levels)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            let out = Series::new("", index, values).map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: out })?.into_any());
+        }
         let total = index.len() * columns.len();
         let mut arrays: Vec<Vec<IndexLabel>> = (0..=row_levels.len())
             .map(|_| Vec::with_capacity(total))
@@ -57085,15 +57179,14 @@ impl PyDataFrame {
         }
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
         .set_names(names);
-        // The flat labels are the stacked frame's own `row|column` composite
-        // ones (formatted again, a String a cell, they were the same text).
-        let (flat, values) = if all_kept {
-            (stacked.index().clone(), values.clone())
+        // The flat labels made from the MultiIndex on first read.
+        let values = if all_kept {
+            values
         } else {
-            (stacked.index().take(&keep), values.take_positions(&keep))
+            values.take_positions(&keep)
         };
-        let index = flat
-            .rename_index(None::<LabelName>)
+        let index = levels
+            .to_flat_index(MULTIINDEX_FLAT_SEP)
             .with_row_multiindex(levels)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let out = Series::new("", index, values).map_err(frame_error_to_py)?;
@@ -98547,16 +98640,6 @@ impl PyGroupedWindow {
                 inner.push(label.clone());
             }
         }
-        let flat: Vec<IndexLabel> = (0..inner.len())
-            .map(|row| {
-                let parts: Vec<String> = outer
-                    .iter()
-                    .map(|level| level[row].to_string())
-                    .chain(std::iter::once(inner[row].to_string()))
-                    .collect();
-                IndexLabel::Utf8(parts.join("|"))
-            })
-            .collect();
         let mut names = self.key_names.clone();
         names.push(inner_name.flatten());
         let mut arrays = outer;
@@ -98564,11 +98647,15 @@ impl PyGroupedWindow {
         let levels = fp_index::MultiIndex::from_arrays(arrays)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
             .set_names(names);
+        // The rows' flat labels made on first read: each was formatted and
+        // joined a row at a time (gb.rolling(5).mean() 0.81x pandas;
+        // br-frankenpandas-h6gpp).
+        let flat = levels.to_flat_index(MULTIINDEX_FLAT_SEP);
         if !frame_parts.is_empty() {
             let refs: Vec<&DataFrame> = frame_parts.iter().collect();
             let out =
                 fp_frame::concat_dataframes_with_axis_join(&refs, 0, fp_frame::ConcatJoin::Outer)
-                    .and_then(|out| out.set_axis(flat, 0))
+                    .and_then(|out| out.with_index(flat))
                     .and_then(|out| out.with_row_multiindex(levels))
                     .map_err(frame_error_to_py)?;
             let out = match &self.repeated {
@@ -98580,7 +98667,7 @@ impl PyGroupedWindow {
         let refs: Vec<&Series> = series_parts.iter().collect();
         let out =
             fp_frame::concat_series_with_ignore_index(&refs, false).map_err(frame_error_to_py)?;
-        let index = Index::new(flat)
+        let index = flat
             .with_row_multiindex(levels)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let out =

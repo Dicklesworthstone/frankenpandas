@@ -37070,3 +37070,106 @@ def test_text_to_numpy_like_pandas_hpnj0(case: str) -> None:
         return str(out.dtype), [repr(v) for v in out.tolist()]
 
     assert outcome(fpd) == outcome(pd)
+
+
+# br-frankenpandas-h6gpp: a grouped window's result index - the keys' levels beside the
+# rows' labels - has the same tuples, names and flat reads as pandas'.
+# NEGATIVE: a frame result, two keys and a text row index read alike.
+def _gbw_h6gpp_frame(m: Any) -> Any:
+    return m.DataFrame({"g": ["a", "b", "a", "b", "a", "c"], "h": [1, 1, 2, 1, 1, 2], "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], "y": [6.0, 5.0, 4.0, 3.0, 2.0, 1.0]})
+
+
+_GBW_H6GPP_CASES = {
+    "rolling mean": lambda m: _gbw_h6gpp_frame(m).groupby("g")["x"].rolling(2).mean(),
+    "expanding sum": lambda m: _gbw_h6gpp_frame(m).groupby("g")["x"].expanding().sum(),
+    "two keys": lambda m: _gbw_h6gpp_frame(m).groupby(["g", "h"])["x"].rolling(1).max(),
+    "frame result (NEGATIVE)": lambda m: _gbw_h6gpp_frame(m).groupby("g")[["x", "y"]].rolling(2).sum(),
+    "text rows (NEGATIVE)": lambda m: _gbw_h6gpp_frame(m).set_index(m.Index(list("uvwxyz"))).groupby("g")["x"].rolling(2).mean(),
+    "then loc (NEGATIVE)": lambda m: _gbw_h6gpp_frame(m).groupby("g")["x"].rolling(2).mean().loc["a"],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GBW_H6GPP_CASES))
+def test_grouped_window_index_like_pandas_h6gpp(case: str) -> None:
+    def outcome(m: Any) -> Any:
+        out = _GBW_H6GPP_CASES[case](m)
+        return type(out.index).__name__, [repr(v) for v in out.index.tolist()], list(out.index.names), repr(out.values.tolist())
+
+    assert outcome(fpd) == outcome(pd)
+
+
+# br-frankenpandas-nna8h: DataFrame.stack builds its MultiIndex from codes
+# (each row's repeated a column at a time, the columns' cycled) and reads
+# the cells' values alone - the same tuples, names, values and dtype as
+# pandas'. NEGATIVE: NaN cells dropped by the default dropna, dropna=False
+# and MultiIndex columns take their other paths.
+def _nna8h_frames(m: Any) -> Any:
+    floats = m.DataFrame({"a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}, index=[10, 20, 10])
+    ints = m.DataFrame({"x": [1, 2], "y": [3, 4], "z": [5, 6]}, index=m.Index(["p", "q"], name="row"))
+    ints.columns.name = "col"
+    mixed = m.DataFrame({"i": [1, 2], "f": [0.5, 1.5]})
+    deep = m.DataFrame({"k": ["u", "u", "v"], "j": [1, 2, 1], "a": [1.0, 2.0, 3.0], "b": [4.0, 5.0, 6.0]}).set_index(["k", "j"])
+    holes = m.DataFrame({"a": [1.0, float("nan"), 3.0], "b": [float("nan"), 5.0, 6.0]})
+    return floats, ints, mixed, deep, holes
+
+
+_NNA8H_CASES = {
+    "floats": lambda f, i, x, d, h: f.stack(),
+    "ints named axes": lambda f, i, x, d, h: i.stack(),
+    "mixed int float": lambda f, i, x, d, h: x.stack(),
+    "row MultiIndex": lambda f, i, x, d, h: d.stack(),
+    "future_stack": lambda f, i, x, d, h: f.stack(future_stack=True),
+    "one column": lambda f, i, x, d, h: f[["a"]].stack(),
+    "no rows": lambda f, i, x, d, h: f.iloc[:0].stack(),
+    "then loc": lambda f, i, x, d, h: i.stack().loc["q"],
+    "then unstack": lambda f, i, x, d, h: i.stack().unstack(),
+    "MultiIndex columns floats": lambda f, i, x, d, h: f.set_axis(_nna8h_columns(f), axis=1).stack(),
+    "MultiIndex columns 2 x 2": lambda f, i, x, d, h: _nna8h_wide(f).set_axis(_nna8h_columns(_nna8h_wide(f)), axis=1).stack(),
+    "MultiIndex columns int and float tops": lambda f, i, x, d, h: x.set_axis(_nna8h_columns(x), axis=1).stack(),
+    "MultiIndex columns unpaired (NEGATIVE)": lambda f, i, x, d, h: i.set_axis(_nna8h_columns(i), axis=1).stack(),
+    "MultiIndex columns NaN (NEGATIVE)": lambda f, i, x, d, h: h.set_axis(_nna8h_columns(h), axis=1).stack(),
+    "NaN dropped (NEGATIVE)": lambda f, i, x, d, h: h.stack(),
+    "dropna False (NEGATIVE)": lambda f, i, x, d, h: h.stack(dropna=False),
+}
+
+
+def _nna8h_wide(frame: Any) -> Any:
+    return frame.assign(c=frame["a"] * 2, d=frame["b"] * 3)
+
+
+def _nna8h_columns(frame: Any) -> Any:
+    # Two-level columns: with an even count, two tops each holding the same
+    # (unsorted) subs - every pair present; with an odd one, unpaired.
+    lib = __import__(type(frame).__module__.split(".")[0])
+    count = len(frame.columns)
+    half = count // 2
+    if count % 2 == 0:
+        tops = ["t0"] * half + ["t1"] * half
+        subs = ["z", "a", "m", "b"][:half] * 2
+    else:
+        tops = ["t" + str(k % 2) for k in range(count)]
+        subs = ["z", "a", "m", "b", "c"][:count]
+    return lib.MultiIndex.from_arrays([tops, subs])
+
+
+def _nna8h_outcome(case: str, m: Any) -> Any:
+    import warnings as _warnings
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore")
+        out = _NNA8H_CASES[case](*_nna8h_frames(m))
+    frame = out.to_frame() if not hasattr(out, "columns") else out
+    return (
+        type(out.index).__name__,
+        [repr(label) for label in out.index.tolist()],
+        list(out.index.names),
+        [str(frame[c].dtype) for c in frame.columns],
+        repr(frame.values.tolist()),
+    )
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_NNA8H_CASES))
+def test_stack_like_pandas_nna8h(case: str) -> None:
+    assert _nna8h_outcome(case, fpd) == _nna8h_outcome(case, pd)

@@ -99167,6 +99167,166 @@ impl DataFrame {
     /// Converts a DataFrame with columns [A, B, ...] into a two-column
     /// DataFrame with a multi-level index (original_index, column_name)
     /// and a single value column. Similar to pandas `DataFrame.stack()`.
+    /// The cells of [`Self::stack`] as one column, row by row (each row's
+    /// cells in column order), without the composite labels a stack builds
+    /// for them: the Python stack makes its MultiIndex from codes and read
+    /// the values alone (they were built with labels it discarded; br-frankenpandas-nna8h).
+    ///
+    /// # Errors
+    /// A column the cells cannot share a dtype with.
+    pub fn stacked_values(&self) -> Result<Column, FrameError> {
+        let n_rows = self.len();
+        let n_cols = self.column_order.len();
+        let total = n_rows * n_cols;
+        // By position: a repeated column key stacks its own values (i17d4).
+        let col_refs: Vec<&Column> = (0..n_cols)
+            .filter_map(|position| self.column_at(position))
+            .collect();
+        const STACK_VALUE_PAR_MIN_ROWS: usize = 50_000;
+        const STACK_VALUE_PAR_MIN_PER_WORKER: usize = 16_384;
+        let workers = if n_rows >= STACK_VALUE_PAR_MIN_ROWS {
+            fp_columnar::cached_available_parallelism()
+                .min(16)
+                .min(n_rows / STACK_VALUE_PAR_MIN_PER_WORKER)
+                .max(1)
+        } else {
+            1
+        };
+
+        // Value column, row-major (cell order = for each row, each col). Typed
+        // NUMERIC fast path: when every column is a dense all-valid numeric slice,
+        // gather row-major into a raw buffer (i64→f64 when any column is Float64,
+        // matching pandas' promotion; else all-i64) and MOVE out — no per-cell
+        // Scalar clone/cast. Previously only all-f64 was typed; MIXED numeric and
+        // all-i64 fell to the Vec<Scalar> path (mixed stack was 0.62× pandas).
+        // Bit-identical: `common_dtype`/`from_values` promotes numerics to Float64
+        // iff any is Float64 (else Int64), and `i as f64` == its Int64→Float64 cast.
+        enum NumSlice<'a> {
+            F64(&'a [f64]),
+            I64(&'a [i64]),
+        }
+        // A float column whose missing rows are its NaN ones gathers its
+        // data, NaN and all, which `from_f64_values` marks missing again (a
+        // column holding one went cell by cell through Scalars: stack 0.16x
+        // pandas; br-frankenpandas-e186m).
+        let numeric_cols: Option<Vec<NumSlice>> = col_refs
+            .iter()
+            .map(|c| {
+                if let Some(s) = c.as_f64_slice() {
+                    Some(NumSlice::F64(s))
+                } else if c.dtype() == DType::Float64
+                    && c.nan_missing_exact()
+                    && let Some((s, _)) = c.as_f64_slice_with_validity()
+                {
+                    Some(NumSlice::F64(s))
+                } else {
+                    c.as_i64_slice().map(NumSlice::I64)
+                }
+            })
+            .collect();
+        // Parallelize the row-major value gather the same way as the label build: the
+        // strided per-cell reads (`x[row]` across m columns) are memory-latency-bound,
+        // which more memory-level parallelism across workers hides; each worker gathers
+        // its row range into a LOCAL buffer, then concat in row order. Bit-identical
+        // (same cell order). Reuses the label build's worker count / gate.
+        let value_col = if let Some(slices) = numeric_cols {
+            if slices.iter().any(|s| matches!(s, NumSlice::F64(_))) {
+                let build_f64 = |lo: usize, hi: usize| -> Vec<f64> {
+                    let mut v: Vec<f64> = Vec::with_capacity((hi - lo) * n_cols);
+                    for row in lo..hi {
+                        for s in &slices {
+                            v.push(match s {
+                                NumSlice::F64(x) => x[row],
+                                NumSlice::I64(x) => x[row] as f64,
+                            });
+                        }
+                    }
+                    v
+                };
+                let vals: Vec<f64> = if workers >= 2 {
+                    let chunk = n_rows.div_ceil(workers);
+                    let build = &build_f64;
+                    let parts: Vec<Vec<f64>> = std::thread::scope(|scope| {
+                        let mut handles = Vec::with_capacity(workers);
+                        let mut start = 0;
+                        while start < n_rows {
+                            let end = (start + chunk).min(n_rows);
+                            handles.push(scope.spawn(move || build(start, end)));
+                            start = end;
+                        }
+                        handles
+                            .into_iter()
+                            .map(|h| h.join().expect("stack value thread"))
+                            .collect()
+                    });
+                    let mut vals = Vec::with_capacity(total);
+                    for p in &parts {
+                        vals.extend_from_slice(p);
+                    }
+                    vals
+                } else {
+                    build_f64(0, n_rows)
+                };
+                Column::from_f64_values_owned(vals)
+            } else {
+                let build_i64 = |lo: usize, hi: usize| -> Vec<i64> {
+                    let mut v: Vec<i64> = Vec::with_capacity((hi - lo) * n_cols);
+                    for row in lo..hi {
+                        for s in &slices {
+                            if let NumSlice::I64(x) = s {
+                                v.push(x[row]);
+                            }
+                        }
+                    }
+                    v
+                };
+                let vals: Vec<i64> = if workers >= 2 {
+                    let chunk = n_rows.div_ceil(workers);
+                    let build = &build_i64;
+                    let parts: Vec<Vec<i64>> = std::thread::scope(|scope| {
+                        let mut handles = Vec::with_capacity(workers);
+                        let mut start = 0;
+                        while start < n_rows {
+                            let end = (start + chunk).min(n_rows);
+                            handles.push(scope.spawn(move || build(start, end)));
+                            start = end;
+                        }
+                        handles
+                            .into_iter()
+                            .map(|h| h.join().expect("stack value thread"))
+                            .collect()
+                    });
+                    let mut vals = Vec::with_capacity(total);
+                    for p in &parts {
+                        vals.extend_from_slice(p);
+                    }
+                    vals
+                } else {
+                    build_i64(0, n_rows)
+                };
+                Column::from_i64_values_owned(vals)
+            }
+        } else {
+            let mut values = Vec::with_capacity(total);
+            for row in 0..n_rows {
+                for c in &col_refs {
+                    values.push(c.values()[row].clone());
+                }
+            }
+            // Columns sharing one dtype keep it, as pandas' stack does even
+            // when every cell is missing (inferring from the values stacked
+            // an all-NaN float64 frame to a Null column; fvsao.31).
+            let shared = col_refs.first().map(|c| c.dtype()).filter(|dtype| {
+                *dtype != DType::Categorical && col_refs.iter().all(|c| c.dtype() == *dtype)
+            });
+            match shared {
+                Some(dtype) => Column::new(dtype, values)?,
+                None => Column::from_values(values)?,
+            }
+        };
+        Ok(value_col)
+    }
+
     pub fn stack(&self) -> Result<Self, FrameError> {
         let n_rows = self.len();
         let n_cols = self.column_order.len();
@@ -99177,11 +99337,6 @@ impl DataFrame {
         // cell). Composite labels stay format!-per-cell (each is unique — pandas
         // dodges this with a MultiIndex; see the structural note below).
         let labels = self.index.labels();
-        // By position: a repeated column key stacks its own values (i17d4).
-        let col_refs: Vec<&Column> = (0..n_cols)
-            .filter_map(|position| self.column_at(position))
-            .collect();
-
         // Build the n*m composite labels into ONE contiguous Utf8 buffer +
         // offsets, instead of n*m separate `IndexLabel::Utf8(String)` allocations
         // (the structural composite-string cost noted above — n*m String allocs
@@ -99273,137 +99428,7 @@ impl DataFrame {
             (bytes, label_offsets)
         };
 
-        // Value column, row-major (cell order = for each row, each col). Typed
-        // NUMERIC fast path: when every column is a dense all-valid numeric slice,
-        // gather row-major into a raw buffer (i64→f64 when any column is Float64,
-        // matching pandas' promotion; else all-i64) and MOVE out — no per-cell
-        // Scalar clone/cast. Previously only all-f64 was typed; MIXED numeric and
-        // all-i64 fell to the Vec<Scalar> path (mixed stack was 0.62× pandas).
-        // Bit-identical: `common_dtype`/`from_values` promotes numerics to Float64
-        // iff any is Float64 (else Int64), and `i as f64` == its Int64→Float64 cast.
-        enum NumSlice<'a> {
-            F64(&'a [f64]),
-            I64(&'a [i64]),
-        }
-        // A float column whose missing rows are its NaN ones gathers its
-        // data, NaN and all, which `from_f64_values` marks missing again (a
-        // column holding one went cell by cell through Scalars: stack 0.16x
-        // pandas; br-frankenpandas-e186m).
-        let numeric_cols: Option<Vec<NumSlice>> = col_refs
-            .iter()
-            .map(|c| {
-                if let Some(s) = c.as_f64_slice() {
-                    Some(NumSlice::F64(s))
-                } else if c.dtype() == DType::Float64
-                    && c.nan_missing_exact()
-                    && let Some((s, _)) = c.as_f64_slice_with_validity()
-                {
-                    Some(NumSlice::F64(s))
-                } else {
-                    c.as_i64_slice().map(NumSlice::I64)
-                }
-            })
-            .collect();
-        // Parallelize the row-major value gather the same way as the label build: the
-        // strided per-cell reads (`x[row]` across m columns) are memory-latency-bound,
-        // which more memory-level parallelism across workers hides; each worker gathers
-        // its row range into a LOCAL buffer, then concat in row order. Bit-identical
-        // (same cell order). Reuses the label build's worker count / gate.
-        let value_col = if let Some(slices) = numeric_cols {
-            if slices.iter().any(|s| matches!(s, NumSlice::F64(_))) {
-                let build_f64 = |lo: usize, hi: usize| -> Vec<f64> {
-                    let mut v: Vec<f64> = Vec::with_capacity((hi - lo) * n_cols);
-                    for row in lo..hi {
-                        for s in &slices {
-                            v.push(match s {
-                                NumSlice::F64(x) => x[row],
-                                NumSlice::I64(x) => x[row] as f64,
-                            });
-                        }
-                    }
-                    v
-                };
-                let vals: Vec<f64> = if label_workers >= 2 {
-                    let chunk = n_rows.div_ceil(label_workers);
-                    let build = &build_f64;
-                    let parts: Vec<Vec<f64>> = std::thread::scope(|scope| {
-                        let mut handles = Vec::with_capacity(label_workers);
-                        let mut start = 0;
-                        while start < n_rows {
-                            let end = (start + chunk).min(n_rows);
-                            handles.push(scope.spawn(move || build(start, end)));
-                            start = end;
-                        }
-                        handles
-                            .into_iter()
-                            .map(|h| h.join().expect("stack value thread"))
-                            .collect()
-                    });
-                    let mut vals = Vec::with_capacity(total);
-                    for p in &parts {
-                        vals.extend_from_slice(p);
-                    }
-                    vals
-                } else {
-                    build_f64(0, n_rows)
-                };
-                Column::from_f64_values_owned(vals)
-            } else {
-                let build_i64 = |lo: usize, hi: usize| -> Vec<i64> {
-                    let mut v: Vec<i64> = Vec::with_capacity((hi - lo) * n_cols);
-                    for row in lo..hi {
-                        for s in &slices {
-                            if let NumSlice::I64(x) = s {
-                                v.push(x[row]);
-                            }
-                        }
-                    }
-                    v
-                };
-                let vals: Vec<i64> = if label_workers >= 2 {
-                    let chunk = n_rows.div_ceil(label_workers);
-                    let build = &build_i64;
-                    let parts: Vec<Vec<i64>> = std::thread::scope(|scope| {
-                        let mut handles = Vec::with_capacity(label_workers);
-                        let mut start = 0;
-                        while start < n_rows {
-                            let end = (start + chunk).min(n_rows);
-                            handles.push(scope.spawn(move || build(start, end)));
-                            start = end;
-                        }
-                        handles
-                            .into_iter()
-                            .map(|h| h.join().expect("stack value thread"))
-                            .collect()
-                    });
-                    let mut vals = Vec::with_capacity(total);
-                    for p in &parts {
-                        vals.extend_from_slice(p);
-                    }
-                    vals
-                } else {
-                    build_i64(0, n_rows)
-                };
-                Column::from_i64_values_owned(vals)
-            }
-        } else {
-            let mut values = Vec::with_capacity(total);
-            for row in 0..n_rows {
-                for c in &col_refs {
-                    values.push(c.values()[row].clone());
-                }
-            }
-            // Columns sharing one dtype keep it, as pandas' stack does even
-            // when every cell is missing (inferring from the values stacked
-            // an all-NaN float64 frame to a Null column; fvsao.31).
-            let shared = col_refs.first().map(|c| c.dtype()).filter(|dtype| {
-                *dtype != DType::Categorical && col_refs.iter().all(|c| c.dtype() == *dtype)
-            });
-            match shared {
-                Some(dtype) => Column::new(dtype, values)?,
-                None => Column::from_values(values)?,
-            }
-        };
+        let value_col = self.stacked_values()?;
         let mut cols = BTreeMap::new();
         cols.insert("value".to_string(), value_col);
 
