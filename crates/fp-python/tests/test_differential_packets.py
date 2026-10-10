@@ -34834,3 +34834,83 @@ def test_int64_index_extremes_like_pandas_e186m(op: str) -> None:
         return (type(out).__name__, repr(out))
 
     assert run(fpd) == run(pd)
+# br-frankenpandas-e186m: an all-valid int64 Series' mean sums its ints as
+# numpy does - cast to float64 8192 at a time, each buffer pairwise - in
+# AVX2 lanes, the same bits as pandas' mean at every length (several cast
+# buffers and a tail; the pairwise splits past 128); NEGATIVE: values past
+# 2**51 (cast with the conversion's own rounding, not the lane trick), a
+# nullable Int64 Series with NA and an empty one take their paths.
+def _e186mmean_ints(n: int, big: bool) -> list:
+    values = [((k * 7919) % 1_000_003) - 500_000 for k in range(n)]
+    if big and n > 9001:
+        values[9000] = 2**60 + 3
+        values[9001] = -(2**55) - 1
+    return values
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("n", [1, 7, 8, 129, 1000, 8192, 8193, 20_000, 50_001])
+@pytest.mark.parametrize("big", [False, True])
+def test_int64_series_mean_like_pandas_e186m(n: int, big: bool) -> None:
+    values = _e186mmean_ints(n, big)
+    assert repr(fpd.Series(values).mean()) == repr(pd.Series(values).mean())
+    assert repr(fpd.DataFrame({"a": values}).mean().iloc[0]) == repr(pd.DataFrame({"a": values}).mean().iloc[0])
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_int64_series_mean_other_paths_like_pandas_e186m() -> None:
+    # NEGATIVE: a nullable Int64 Series with NA and an empty int Series.
+    def run(m: Any) -> Any:
+        return (repr(m.Series([3, None, 8], dtype="Int64").mean()), repr(m.Series([], dtype="int64").mean()))
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a float Series' argmin / argmax / idxmin /
+# idxmax run on lane kernels - the first position of the least / greatest,
+# -0.0 and 0.0 equal (the first wins), the infinities, repeats in later
+# blocks - and a frame's idxmin / idxmax read each column's count, not its
+# values (a fresh column selection made every value a Scalar). NEGATIVE: a
+# float Series holding NaN (skipped, its own path) and a frame column of
+# NaN only (NaN, as pandas 2.2.3).
+def _e186mfext_floats() -> list:
+    values = [((k * 37) % 101) / 8.0 - 6.0 for k in range(300)]
+    values[12] = -0.0
+    values[250] = 0.0
+    values[100] = 9.5
+    values[260] = 9.5
+    values[30] = -np.inf
+    values[290] = -np.inf
+    return values
+
+
+_E186MFEXT_DATA = {
+    "floats across blocks": lambda m: m.Series(_e186mfext_floats(), index=[f"r{k}" for k in range(300)]),
+    "zeros signed": lambda m: m.Series([-0.0, 0.0, -0.0] * 20),
+    "with inf": lambda m: m.Series([1.0, np.inf, 3.0, np.inf, -np.inf]),
+    "with NaN (NEGATIVE)": lambda m: m.Series([2.0, np.nan, 7.5, np.nan, -1.0]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", ["argmin", "argmax", "idxmin", "idxmax"])
+@pytest.mark.parametrize("data", list(_E186MFEXT_DATA))
+def test_float_series_arg_extremes_like_pandas_e186m(data: str, op: str) -> None:
+    def run(m: Any) -> Any:
+        return repr(getattr(_E186MFEXT_DATA[data](m), op)())
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", ["idxmin", "idxmax"])
+def test_fresh_frame_idx_extremes_like_pandas_e186m(op: str) -> None:
+    def run(m: Any) -> Any:
+        df = m.DataFrame({"a": [3, 1, 4, 1, 5], "b": [2.5, -1.0, 9.0, 9.0, 0.0], "c": ["x", "y", "z", "w", "v"], "n": [np.nan] * 5})
+        out = getattr(df[["a", "b"]], op)()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            missing = getattr(df[["a", "n"]], op)()
+        return (repr(out.tolist()), str(out.dtype), repr(missing.tolist()))
+
+    assert run(fpd) == run(pd)

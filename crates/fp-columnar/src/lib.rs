@@ -8450,6 +8450,68 @@ pub fn argmax_i64(values: &[i64]) -> Option<usize> {
     values.iter().position(|&value| value == greatest)
 }
 
+/// The first position of the least of float `values` holding no NaN (an
+/// all-valid float column's buffer; numpy's argmin, ties - -0.0 and 0.0
+/// among them - to the first), `None` when empty: four lanes a vector
+/// where the CPU has AVX2 ([`fp_dot_kernel::argmin_f64`]), a scan otherwise
+/// (br-frankenpandas-e186m).
+#[must_use]
+pub fn argmin_f64(values: &[f64]) -> Option<usize> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        return fp_dot_kernel::argmin_f64(values);
+    }
+    first_extreme_f64(values, |value, best| value < best)
+}
+
+/// The first position of the greatest of float `values` holding no NaN;
+/// see [`argmin_f64`].
+#[must_use]
+pub fn argmax_f64(values: &[f64]) -> Option<usize> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        return fp_dot_kernel::argmax_f64(values);
+    }
+    first_extreme_f64(values, |value, best| value > best)
+}
+
+/// The first position a strict `beats` keeps over `values`.
+fn first_extreme_f64(values: &[f64], beats: impl Fn(f64, f64) -> bool) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    for (at, &value) in values.iter().enumerate() {
+        if best.is_none_or(|kept| beats(value, values[kept])) {
+            best = Some(at);
+        }
+    }
+    best
+}
+
+/// numpy's float64 total of int64 `values` - the cast-buffered pairwise
+/// sum pandas' int64 mean divides ([`fp_dot_kernel::numpy_cast_sum_i64`]) -
+/// where the CPU has AVX2; `None` otherwise, the caller's own reduction
+/// summing them the same way (br-frankenpandas-e186m).
+#[must_use]
+pub fn numpy_cast_sum_i64(values: &[i64]) -> Option<f64> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        return Some(fp_dot_kernel::numpy_cast_sum_i64(values));
+    }
+    let _ = values;
+    None
+}
+
+/// `values[i] * s`, wrapping as numpy's int64 product: four lanes a vector
+/// where the CPU has AVX2 ([`fp_dot_kernel::mul_i64_by_number`]), the
+/// baseline's two otherwise (br-frankenpandas-e186m).
+#[must_use]
+pub fn mul_i64_by_number(values: &[i64], s: i64) -> Vec<i64> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        return fp_dot_kernel::mul_i64_by_number(values, s);
+    }
+    values.iter().map(|&value| value.wrapping_mul(s)).collect()
+}
+
 /// The wrapping sum of `values` (numpy's int64 sum): four lanes a vector
 /// where the CPU has AVX2 ([`fp_dot_kernel::sum_i64`]), the baseline's two
 /// otherwise. Wrapping addition is associative: the serial fold's sum.
@@ -8532,6 +8594,46 @@ mod int_extremes_e186m {
             );
             let wrapped = part.iter().fold(0_i64, |sum, &v| sum.wrapping_add(v));
             assert_eq!(sum_i64(part), wrapped, "sum, len {len}");
+            // The products wrap as numpy's (2^60 + 1 times -3 overflows).
+            let products: Vec<i64> = part.iter().map(|&v| v.wrapping_mul(-3)).collect();
+            assert_eq!(mul_i64_by_number(part, -3), products, "mul, len {len}");
+            // numpy's float64 total: fp-types' cast-buffered pairwise sum,
+            // bit for bit (None only on a CPU without AVX2).
+            if let Some(total) = numpy_cast_sum_i64(part) {
+                assert_eq!(
+                    total.to_bits(),
+                    numpy_cast_reference(part).to_bits(),
+                    "cast sum, len {len}"
+                );
+            }
+        }
+    }
+
+    /// fp-types' cast-buffered pairwise total of `values` (its int64 mean's
+    /// numerator), the reference the AVX2 kernel must equal.
+    #[allow(clippy::cast_precision_loss)]
+    fn numpy_cast_reference(values: &[i64]) -> f64 {
+        values.chunks(8192).fold(0.0, |total, chunk| {
+            let cast: Vec<f64> = chunk.iter().map(|&v| v as f64).collect();
+            total + fp_types::numpy_pairwise_sum(&cast)
+        })
+    }
+
+    #[test]
+    fn cast_sum_matches_the_reference_past_a_buffer_e186m() {
+        // Two cast buffers and a tail, values past 2^51 in one buffer only
+        // (NEGATIVE: the magic-constant cast would round them), a buffer of
+        // small ints.
+        let mut values: Vec<i64> = (0..20_000_i64)
+            .map(|k| (k * 7919) % 100_003 - 50_000)
+            .collect();
+        values[9_000] = 2_i64.pow(60) + 3;
+        values[9_001] = -(2_i64.pow(55)) - 1;
+        if let Some(total) = numpy_cast_sum_i64(&values) {
+            assert_eq!(total.to_bits(), numpy_cast_reference(&values).to_bits());
+        }
+        if let Some(total) = numpy_cast_sum_i64(&[]) {
+            assert_eq!(total.to_bits(), 0.0_f64.to_bits());
         }
     }
 
@@ -20625,7 +20727,7 @@ impl Column {
                     (ArithmeticOp::Add, _) => data.iter().map(|&v| v.wrapping_add(s)).collect(),
                     (ArithmeticOp::Sub, false) => data.iter().map(|&v| v.wrapping_sub(s)).collect(),
                     (ArithmeticOp::Sub, true) => data.iter().map(|&v| s.wrapping_sub(v)).collect(),
-                    (ArithmeticOp::Mul, _) => data.iter().map(|&v| v.wrapping_mul(s)).collect(),
+                    (ArithmeticOp::Mul, _) => mul_i64_by_number(data, s),
                     // int / int is float64: both read as f64, as binary_numeric's
                     // int-promoted view divides them (br-frankenpandas-uf0mw).
                     (ArithmeticOp::Div, _) => {

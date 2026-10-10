@@ -13337,7 +13337,7 @@ impl PyIndex {
                 "__add__" | "__radd__" => Some(each_i64(&values, |v| v.wrapping_add(number))),
                 "__sub__" => Some(each_i64(&values, |v| v.wrapping_sub(number))),
                 "__rsub__" => Some(each_i64(&values, |v| number.wrapping_sub(v))),
-                "__mul__" | "__rmul__" => Some(each_i64(&values, |v| v.wrapping_mul(number))),
+                "__mul__" | "__rmul__" => Some(fp_columnar::mul_i64_by_number(&values, number)),
                 _ => None,
             };
             if let Some(out) = out {

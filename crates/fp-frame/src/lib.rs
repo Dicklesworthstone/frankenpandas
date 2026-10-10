@@ -2262,84 +2262,6 @@ fn label_at(index: &Index, pos: usize) -> IndexLabel {
     index.labels()[pos].clone()
 }
 
-fn f64_argmax_first_index(data: &[f64]) -> Option<usize> {
-    if data.is_empty() {
-        return None;
-    }
-
-    let mut lane_values = [f64::NEG_INFINITY; 8];
-    let mut lane_indices = [0_usize; 8];
-    let mut base = 0_usize;
-    let (chunks, remainder) = data.as_chunks::<8>();
-    for chunk in chunks {
-        for lane in 0..8 {
-            let value = chunk[lane];
-            if value > lane_values[lane] {
-                lane_values[lane] = value;
-                lane_indices[lane] = base + lane;
-            }
-        }
-        base += 8;
-    }
-    for (lane, &value) in remainder.iter().enumerate() {
-        if value > lane_values[lane] {
-            lane_values[lane] = value;
-            lane_indices[lane] = base + lane;
-        }
-    }
-
-    let mut best_value = lane_values[0];
-    let mut best_index = lane_indices[0];
-    for lane in 1..8 {
-        let value = lane_values[lane];
-        let index = lane_indices[lane];
-        if value > best_value || (value == best_value && index < best_index) {
-            best_value = value;
-            best_index = index;
-        }
-    }
-    Some(best_index)
-}
-
-fn f64_argmin_first_index(data: &[f64]) -> Option<usize> {
-    if data.is_empty() {
-        return None;
-    }
-
-    let mut lane_values = [f64::INFINITY; 8];
-    let mut lane_indices = [0_usize; 8];
-    let mut base = 0_usize;
-    let (chunks, remainder) = data.as_chunks::<8>();
-    for chunk in chunks {
-        for lane in 0..8 {
-            let value = chunk[lane];
-            if value < lane_values[lane] {
-                lane_values[lane] = value;
-                lane_indices[lane] = base + lane;
-            }
-        }
-        base += 8;
-    }
-    for (lane, &value) in remainder.iter().enumerate() {
-        if value < lane_values[lane] {
-            lane_values[lane] = value;
-            lane_indices[lane] = base + lane;
-        }
-    }
-
-    let mut best_value = lane_values[0];
-    let mut best_index = lane_indices[0];
-    for lane in 1..8 {
-        let value = lane_values[lane];
-        let index = lane_indices[lane];
-        if value < best_value || (value == best_value && index < best_index) {
-            best_value = value;
-            best_index = index;
-        }
-    }
-    Some(best_index)
-}
-
 /// Whether `index` is int labels strictly increasing (`Some(true)`) or
 /// strictly decreasing (`Some(false)`) - a RangeIndex by its step, any other
 /// int index in one pass; `None` for anything else. sort_index of such an
@@ -23597,6 +23519,17 @@ impl Series {
             let mean = fp_types::numpy_pairwise_sum(&values) / count;
             return Ok(Scalar::Float64(f64::from(mean)));
         }
+        // An all-valid int64 column's total in four lanes where the CPU has
+        // AVX2 - numpy's cast-buffered pairwise sum, the same bits as the
+        // reduction below (Series.mean of a million ints 0.52 ms, pandas
+        // 0.41; br-frankenpandas-e186m).
+        if let Some(data) = self.column.as_i64_slice()
+            && !data.is_empty()
+            && let Some(total) = fp_columnar::numpy_cast_sum_i64(data)
+        {
+            #[allow(clippy::cast_precision_loss)] // pandas' float count
+            return Ok(Scalar::Float64(total / data.len() as f64));
+        }
         // A numeric column's mean is pandas' nanmean: its total in numpy's
         // order (an int64 column's through numpy's cast buffer) over the
         // count (br-frankenpandas-9iim6).
@@ -28344,7 +28277,8 @@ impl Series {
         }
 
         // Concat chunk fast path (sister to idxmax): 8-lane argmin over the lazy
-        // chunks in place, bit-identical to f64_argmin_first_index materialized.
+        // chunks in place - the first position of the least, as
+        // fp_columnar::argmin_f64 over the materialized buffer.
         if let Some(i) = self.column.all_valid_f64_chunk_argextreme(false) {
             return Ok(self.index_label_at(i));
         }
@@ -28353,7 +28287,7 @@ impl Series {
         // general loop (same first-occurrence tie-break: `best_idx.is_none() || v < best_val`),
         // skipping the values() Vec<Scalar> materialization + per-element to_f64 dispatch.
         if let Some(data) = self.column.as_f64_slice() {
-            return f64_argmin_first_index(data)
+            return fp_columnar::argmin_f64(data)
                 .map(|i| self.index_label_at(i))
                 .ok_or_else(|| {
                     FrameError::CompatibilityRejected(
@@ -28491,15 +28425,16 @@ impl Series {
         let mut best_idx: Option<usize> = None;
         let mut best_val = f64::NEG_INFINITY;
         // Concat chunk fast path: run the 8-lane argmax over the lazy chunks in
-        // place (lane = pos%8, identical cross-lane reduction) — bit-identical to
-        // f64_argmax_first_index on the materialized buffer, no cold alloc.
+        // place (lane = pos%8, the first position of the greatest) - the
+        // position fp_columnar::argmax_f64 gives on the materialized buffer, no
+        // cold alloc.
         if let Some(i) = self.column.all_valid_f64_chunk_argextreme(true) {
             return Ok(self.index_label_at(i));
         }
         // perf (br-frankenpandas-idxf): typed Float64 fast path (mirror of idxmin).
         // Bit-identical for all-valid no-NaN Float64 (same first-occurrence tie-break).
         if let Some(data) = self.column.as_f64_slice() {
-            return f64_argmax_first_index(data)
+            return fp_columnar::argmax_f64(data)
                 .map(|i| self.index_label_at(i))
                 .ok_or_else(|| {
                     FrameError::CompatibilityRejected(
@@ -29193,13 +29128,7 @@ impl Series {
         // Float64 is `partial_cmp` — so `data[i] < data[best]` (IEEE) is exactly
         // the Scalar path's `.is_lt()` (first-occurrence tie-break preserved).
         if let Some(data) = self.column.as_f64_slice() {
-            let mut best = 0usize;
-            for i in 1..data.len() {
-                if data[i] < data[best] {
-                    best = i;
-                }
-            }
-            return Ok(best as i64);
+            return Ok(fp_columnar::argmin_f64(data).map_or(-1, |best| best as i64));
         }
         let mut best_idx: Option<usize> = None;
         let mut best_val: Option<&Scalar> = None;
@@ -29248,13 +29177,7 @@ impl Series {
         // Float64 is `partial_cmp` — so `data[i] > data[best]` (IEEE) is exactly
         // the Scalar path's `.is_gt()` (first-occurrence tie-break preserved).
         if let Some(data) = self.column.as_f64_slice() {
-            let mut best = 0usize;
-            for i in 1..data.len() {
-                if data[i] > data[best] {
-                    best = i;
-                }
-            }
-            return Ok(best as i64);
+            return Ok(fp_columnar::argmax_f64(data).map_or(-1, |best| best as i64));
         }
         let mut best_idx: Option<usize> = None;
         let mut best_val: Option<&Scalar> = None;
@@ -99892,7 +99815,18 @@ impl DataFrame {
     /// generator emits all-null columns, exactly as they did for the
     /// numeric_only flip. (br-frankenpandas-fixture-divergence-triage-9s0c4)
     fn idx_extreme_is_all_missing(column: &Column) -> bool {
-        column.values().iter().all(Scalar::is_missing)
+        // An all-valid typed buffer (no NaN in a float one) holds a value
+        // unless empty, and any other column's count reads its mask and
+        // buffer: its Scalar view was made to be read once (a fresh frame's
+        // idxmax of half a million rows a column 3.6 ms, pandas 0.65;
+        // br-frankenpandas-e186m).
+        if let Some(data) = column.as_f64_slice() {
+            return data.is_empty();
+        }
+        if let Some(data) = column.as_i64_slice() {
+            return data.is_empty();
+        }
+        column.count() == 0
     }
 
     fn idx_extreme_is_comparable(column: &Column) -> bool {
