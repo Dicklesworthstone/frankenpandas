@@ -72680,6 +72680,48 @@ fn same_cells(left: &Column, right: &Column) -> bool {
         .all(|(mine, theirs)| (mine.is_missing() && theirs.is_missing()) || mine == theirs)
 }
 
+/// An all-valid text column's keys for the radix lexsort: each row's dense
+/// rank among the column's distinct strings in byte order (code-point order:
+/// the comparator's `String::cmp`, Python's), reversed for a descending key;
+/// equal strings keep their rows' order through the stable radix. A text
+/// key sent the whole sort through the Scalar comparator (sort_values by a
+/// text and a float column 0.69x pandas; br-frankenpandas-e186m).
+fn utf8_rank_keys(column: &Column, ascending: bool) -> Option<Vec<u64>> {
+    if column.dtype() != DType::Utf8 || column.categorical().is_some() {
+        return None;
+    }
+    let (bytes, offsets) = column.as_utf8_window()?;
+    let spans: Vec<&[u8]> = offsets
+        .windows(2)
+        .map(|bounds| &bytes[bounds[0]..bounds[1]])
+        .collect();
+    let order = fp_columnar::utf8_msd_argsort_bytes(&spans, true);
+    let mut ranks = vec![0_u64; spans.len()];
+    let mut rank = 0_u64;
+    for (at, &row) in order.iter().enumerate() {
+        if at > 0 && spans[row] != spans[order[at - 1]] {
+            rank += 1;
+        }
+        ranks[row] = rank;
+    }
+    if !ascending {
+        for key in &mut ranks {
+            *key = rank - *key;
+        }
+    }
+    Some(ranks)
+}
+
+/// A float64 column's values and mask: a typed backing's, gaps and all, or
+/// an all-valid view's (a strided / gathered window [`Column::as_f64_slice`]
+/// reads) under its all-valid mask - `iloc[::2]` of a frame took
+/// combine_first's per-cell path (br-frankenpandas-e186m).
+fn float64_parts(column: &Column) -> Option<(&[f64], &ValidityMask)> {
+    column
+        .as_f64_slice_with_validity()
+        .or_else(|| column.as_f64_slice().map(|data| (data, column.validity())))
+}
+
 /// Two all-valid int64 columns' values, side by side.
 fn int64_pair<'a>(mine: &'a Column, theirs: &'a Column) -> Option<(&'a [i64], &'a [i64])> {
     if mine.dtype() != DType::Int64 || theirs.dtype() != DType::Int64 {
@@ -86024,12 +86066,16 @@ impl DataFrame {
         // bit-identically — per-column ascending/descending baked into the
         // monotonic keys, stable ties keeping original order, exactly the
         // `compare_scalars_with_na_position` (false,false) lexicographic result.
-        // Any Utf8/Bool/nullable/NaN-Float64 column → keys are `None` → fall to
-        // the typed-comparison path below.
+        // An all-valid text column joins as its strings' ranks
+        // ([`utf8_rank_keys`]); any other Utf8/Bool/nullable/NaN-Float64
+        // column → keys are `None` → fall to the typed-comparison path below.
         let radix_keys: Option<Vec<Vec<u64>>> = sort_cols
             .iter()
             .zip(asc.iter())
-            .map(|(col, &ascending)| col.typed_radix_keys(ascending))
+            .map(|(col, &ascending)| {
+                col.typed_radix_keys(ascending)
+                    .or_else(|| utf8_rank_keys(col, ascending))
+            })
             .collect();
         if let Some(keys) = radix_keys {
             let order = fp_columnar::radix_argsort_multi_u64(&keys);
@@ -95632,8 +95678,12 @@ impl DataFrame {
                 (Some(sc), Some(oc))
                     if matches!(sc.dtype(), DType::Float64)
                         && matches!(oc.dtype(), DType::Float64)
-                        && sc.as_f64_slice_with_validity().is_some()
-                        && oc.as_f64_slice_with_validity().is_some())
+                        && float64_parts(sc).is_some()
+                        && float64_parts(oc).is_some())
+        };
+        let two_sided_int64 = |slot: &(String, Option<&Column>, Option<&Column>)| {
+            matches!((slot.1, slot.2),
+                (Some(sc), Some(oc)) if int64_pair(sc, oc).is_some())
         };
 
         // Two equal indexes pair row for row - repeated labels too, as pandas'
@@ -95666,7 +95716,9 @@ impl DataFrame {
             && self.row_multiindex.is_none()
             && other.row_multiindex.is_none()
             && slots.len() == self.column_order.len()
-            && slots.iter().all(two_sided_f64)
+            && slots
+                .iter()
+                .all(|slot| two_sided_f64(slot) || two_sided_int64(slot))
         {
             let AlignmentPlan {
                 union_index,
@@ -95674,6 +95726,28 @@ impl DataFrame {
                 right_positions,
             } = align_union_sorted_plan(&self.index, &other.index);
             let computed = self.par_map_indices_min(slots.len(), 16_384, |i| {
+                // Two all-valid int64 columns fill every union row from one
+                // side, self's first, so the result is int64 throughout - as
+                // the per-cell path's (a frame holding one took that path for
+                // every column: 0.17x pandas; br-frankenpandas-e186m).
+                if let (_, Some(sc), Some(oc)) = &slots[i]
+                    && let Some((own, others)) = int64_pair(sc, oc)
+                {
+                    return left_positions
+                        .iter()
+                        .zip(&right_positions)
+                        .map(|(mine, theirs)| {
+                            mine.map(|row| own[row])
+                                .or_else(|| theirs.map(|row| others[row]))
+                        })
+                        .collect::<Option<Vec<i64>>>()
+                        .map(Column::from_i64_values_owned)
+                        .ok_or_else(|| {
+                            FrameError::CompatibilityRejected(
+                                "combine_first: a union row on neither side".to_owned(),
+                            )
+                        });
+                }
                 // Gather TYPED straight from the source f64+validity slices via the
                 // union position vectors (reindex_by_positions would go Scalar for a
                 // nullable source). A union row takes self's value iff its self
@@ -95681,10 +95755,10 @@ impl DataFrame {
                 // same first-non-null coalesce as the positional arm.
                 let (_, self_col, other_col) = &slots[i];
                 let (sx, sv) = self_col
-                    .and_then(Column::as_f64_slice_with_validity)
+                    .and_then(float64_parts)
                     .expect("gated to two-sided Float64 with f64+validity");
                 let (ox, ov) = other_col
-                    .and_then(Column::as_f64_slice_with_validity)
+                    .and_then(float64_parts)
                     .expect("gated to two-sided Float64 with f64+validity");
                 let len = left_positions.len();
                 let mut out = vec![0.0_f64; len];
@@ -95796,10 +95870,7 @@ impl DataFrame {
                 && let (Some(sc), Some(oc)) = (self_col, other_col)
                 && matches!(sc.dtype(), DType::Float64)
                 && matches!(oc.dtype(), DType::Float64)
-                && let (Some((sx, sv)), Some((ox, ov))) = (
-                    sc.as_f64_slice_with_validity(),
-                    oc.as_f64_slice_with_validity(),
-                )
+                && let (Some((sx, sv)), Some((ox, ov))) = (float64_parts(sc), float64_parts(oc))
                 && sx.len() == ox.len()
             {
                 let len = sx.len();
@@ -113284,6 +113355,50 @@ impl DataFrameGroupBy<'_> {
         (gid_per_row, ng, order, out_index)
     }
 
+    /// The rows' group ids and the group count of a single all-valid int or
+    /// text key, read in place from the layout the groupby object shares
+    /// when it holds them for this key (they were cloned whole - a million
+    /// ids and the key index - for a pass over them: g.head(2) of a reused
+    /// int-key groupby 0.57x pandas; br-frankenpandas-e186m), else made. The
+    /// ids [`Self::int64_dense_grouping`] / [`Self::single_utf8_key_dense_grouping`]
+    /// give.
+    fn single_key_gids(&self, key_col: &Column) -> Option<(std::borrow::Cow<'_, [usize]>, usize)> {
+        let layout = self.layout.as_ref().filter(|_| self.by.len() == 1);
+        if let Some(keys) = key_col.as_i64_slice() {
+            let (min, range) = i64_dense_histogram_range(keys)?;
+            if let Some(layout) = layout {
+                let (made_for, grouping) = layout.int_dense.get_or_init(|| {
+                    (
+                        (self.sort, keys.len(), min, range),
+                        self.int64_dense_grouping_fresh(keys, min, range),
+                    )
+                });
+                if *made_for == (self.sort, keys.len(), min, range) {
+                    return Some((std::borrow::Cow::Borrowed(&grouping.0), grouping.1));
+                }
+            }
+            let (gids, groups, _, _) = self.int64_dense_grouping_fresh(keys, min, range);
+            return Some((std::borrow::Cow::Owned(gids), groups));
+        }
+        if !is_text_key_column(key_col) {
+            return None;
+        }
+        if let Some(layout) = layout {
+            let (sort, len, grouping) = layout.text.get_or_init(|| {
+                (
+                    self.sort,
+                    key_col.len(),
+                    self.utf8_key_dense_grouping_fresh(key_col),
+                )
+            });
+            if *sort == self.sort && *len == key_col.len() {
+                return Some((std::borrow::Cow::Borrowed(&grouping.0), grouping.1));
+            }
+        }
+        let (gids, groups, _, _) = self.utf8_key_dense_grouping_fresh(key_col);
+        Some((std::borrow::Cow::Owned(gids), groups))
+    }
+
     fn int64_dense_grouping(&self, keys: &[i64], min: i64, range: usize) -> Utf8KeyGrouping {
         // Made once for the groupby object that shares its layout, as the text
         // key's ([`Self::single_utf8_key_dense_grouping`]): g.size() of a
@@ -119968,28 +120083,23 @@ impl DataFrameGroupBy<'_> {
     /// ascending index order so `keep_indices` comes out sorted, BIT-IDENTICAL to
     /// the `build_groups` + `sort_unstable` path. Returns `None` when the key is
     /// not a single dense Int64 column (caller falls back to `build_groups`).
-    fn dense_group_positions<F: Fn(usize, usize) -> bool>(&self, keep: F) -> Option<Vec<usize>> {
+    #[doc(hidden)]
+    pub fn dense_group_positions<F: Fn(usize, usize) -> bool>(
+        &self,
+        keep: F,
+    ) -> Option<Vec<usize>> {
         if self.by.len() != 1 {
             return None;
         }
         let key_col = &self.df.columns[&self.by[0]];
-        let (gid_per_row, ng) = if let Some(keys) = key_col.as_i64_slice() {
-            let (min, range) = i64_dense_histogram_range(keys)?;
-            let (g, n, _, _) = self.int64_dense_grouping(keys, min, range);
-            (g, n)
-        } else if is_text_key_column(key_col) {
-            // Single all-valid Utf8 key (contiguous OR Scalar-backed): head/tail/
-            // nth otherwise fell to build_groups. Position semantics are gid-
-            // relative in row order, so first-seen gids suffice (labels/order
-            // unused — the output gathers original rows by position). Bit-identical:
-            // same per-group row-order positions as the build_groups path.
-            let (g, n, _, _) = self.single_utf8_key_dense_grouping(key_col);
-            (g, n)
-        } else {
-            return None;
-        };
+        // A single all-valid int or Utf8 key (contiguous OR Scalar-backed):
+        // head/tail/nth otherwise fell to build_groups. Position semantics are
+        // gid-relative in row order, so first-seen gids suffice (labels/order
+        // unused — the output gathers original rows by position). Bit-identical:
+        // same per-group row-order positions as the build_groups path.
+        let (gid_per_row, ng) = self.single_key_gids(key_col)?;
         let mut size = vec![0usize; ng];
-        for &g in &gid_per_row {
+        for &g in gid_per_row.iter() {
             size[g] += 1;
         }
         let mut pos = vec![0usize; ng];

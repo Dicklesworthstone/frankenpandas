@@ -59337,6 +59337,21 @@ fn loc_label_list(key: &Bound<'_, PyAny>) -> Option<PyResult<Vec<IndexLabel>>> {
     } else {
         return None;
     };
+    // A list of plain ints (no bool: True is its own label) is read as
+    // ints in one pass; each was tried against the label kinds - a bool, a
+    // datetime, ... - on its way (df.loc[[...]] 0.61x pandas;
+    // br-frankenpandas-e186m).
+    let plain_ints: Option<Vec<IndexLabel>> = list
+        .iter()
+        .map(|item| {
+            item.is_exact_instance_of::<pyo3::types::PyInt>()
+                .then(|| item.extract::<i64>().ok().map(IndexLabel::Int64))
+                .flatten()
+        })
+        .collect();
+    if let Some(labels) = plain_ints {
+        return Some(Ok(labels));
+    }
     Some(list.iter().map(|item| py_to_index_label(&item)).collect())
 }
 
@@ -74796,18 +74811,39 @@ impl PyGroupBy {
             Ok(n) => vec![n],
             Err(_) => n.extract::<Vec<i64>>()?,
         };
-        let mut rows: Vec<usize> = Vec::new();
-        for (_, positions) in self.ordered_groups(false)? {
-            let len = positions.len() as i64;
-            for &at in &wanted {
-                let at = if at < 0 { len + at } else { at };
-                if (0..len).contains(&at) {
-                    rows.push(positions[at as usize]);
+        // One int or text key: each row's place in its group from the dense
+        // group ids (the groupby object's, kept), in row order - the groups'
+        // label map and row lists were built for it (gb.nth(0) of a million
+        // rows 40x pandas; br-frankenpandas-e186m).
+        let picks = |at: usize, size: usize| {
+            wanted.iter().any(|&wanted| {
+                let size = size as i64;
+                let wanted = if wanted < 0 { size + wanted } else { wanted };
+                wanted == at as i64
+            })
+        };
+        let rows = match self
+            .grouped()
+            .map_err(frame_error_to_py)?
+            .dense_group_positions(picks)
+        {
+            Some(rows) => rows,
+            None => {
+                let mut rows: Vec<usize> = Vec::new();
+                for (_, positions) in self.ordered_groups(false)? {
+                    let len = positions.len() as i64;
+                    for &at in &wanted {
+                        let at = if at < 0 { len + at } else { at };
+                        if (0..len).contains(&at) {
+                            rows.push(positions[at as usize]);
+                        }
+                    }
                 }
+                rows.sort_unstable();
+                rows.dedup();
+                rows
             }
-        }
-        rows.sort_unstable();
-        rows.dedup();
+        };
         // A key the caller passed as an array rides in the frame as a key
         // column of its own; it is not a column of the result.
         let own_keys: Vec<&str> = self
@@ -99176,12 +99212,23 @@ fn object_deep_bytes(py: Python<'_>, column: &Column) -> PyResult<Option<usize>>
     if column_pandas_dtype_name(column) != "object" {
         return Ok(None);
     }
-    let sys = py.import("sys")?;
+    let getsizeof = py.import("sys")?.getattr("getsizeof")?;
+    let strs = StrSizes::calibrated(&getsizeof)?;
     let mut bytes = column.len().saturating_mul(8);
+    if let Some((text, offsets)) = column.as_utf8_window() {
+        for bounds in offsets.windows(2) {
+            let cell = std::str::from_utf8(&text[bounds[0]..bounds[1]]).map_err(|error| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(error.to_string())
+            })?;
+            bytes = bytes.saturating_add(strs.of(&getsizeof, cell)?);
+        }
+        return Ok(Some(bytes));
+    }
     for value in column.values() {
-        let size: usize = sys
-            .call_method1("getsizeof", (scalar_to_py(py, value)?,))?
-            .extract()?;
+        let size = match value {
+            Scalar::Utf8(text) => strs.of(&getsizeof, text)?,
+            other => getsizeof.call1((scalar_to_py(py, other)?,))?.extract()?,
+        };
         bytes = bytes.saturating_add(size);
     }
     Ok(Some(bytes))
@@ -99193,15 +99240,65 @@ fn index_deep_bytes(py: Python<'_>, index: &Index) -> PyResult<Option<usize>> {
     if index.dtype() != "object" || index.row_multiindex().is_some() {
         return Ok(None);
     }
-    let sys = py.import("sys")?;
+    let getsizeof = py.import("sys")?.getattr("getsizeof")?;
+    let strs = StrSizes::calibrated(&getsizeof)?;
     let mut bytes = index.len().saturating_mul(8);
     for label in index.labels() {
-        let size: usize = sys
-            .call_method1("getsizeof", (index_label_to_py(py, label)?,))?
-            .extract()?;
+        let size = match label {
+            IndexLabel::Utf8(text) => strs.of(&getsizeof, text)?,
+            other => getsizeof
+                .call1((index_label_to_py(py, other)?,))?
+                .extract()?,
+        };
         bytes = bytes.saturating_add(size);
     }
     Ok(Some(bytes))
+}
+
+/// `sys.getsizeof` of a str fp makes from text: CPython's compact string,
+/// its header and (characters + 1) code units of its kind - ASCII,
+/// latin-1, UCS-2 or UCS-4 by the widest character. Each kind's base is
+/// asked of `sys.getsizeof` once, on two characters of it, so the sizes
+/// are this interpreter's; one latin-1 character past ASCII is asked
+/// itself (CPython shares that object, its size holding the UTF-8 copy
+/// once something read it). A str a value was made and sized through a
+/// Python call a row (df.memory_usage(deep=True) 0.63x pandas;
+/// br-frankenpandas-e186m).
+struct StrSizes {
+    ascii: usize,
+    latin1: usize,
+    ucs2: usize,
+    ucs4: usize,
+}
+
+impl StrSizes {
+    fn calibrated(getsizeof: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let base = |probe: &str, units: usize| -> PyResult<usize> {
+            let size: usize = getsizeof.call1((probe,))?.extract()?;
+            Ok(size.saturating_sub(units))
+        };
+        Ok(Self {
+            ascii: base("ab", 2)?,
+            latin1: base("\u{e9}\u{e8}", 2)?,
+            ucs2: base("\u{100}\u{101}", 4)?,
+            ucs4: base("\u{1F600}\u{1F601}", 8)?,
+        })
+    }
+
+    fn of(&self, getsizeof: &Bound<'_, PyAny>, text: &str) -> PyResult<usize> {
+        if text.is_ascii() {
+            return Ok(self.ascii + text.len());
+        }
+        let (chars, widest) = text.chars().fold((0_usize, 0_u32), |(chars, widest), c| {
+            (chars + 1, widest.max(u32::from(c)))
+        });
+        Ok(match widest {
+            0..=0xFF if chars == 1 => getsizeof.call1((text,))?.extract()?,
+            0..=0xFF => self.latin1 + chars,
+            0x100..=0xFFFF => self.ucs2 + 2 * chars,
+            _ => self.ucs4 + 4 * chars,
+        })
+    }
 }
 
 /// The path and compression method the writer `what` (to_csv, to_pickle)

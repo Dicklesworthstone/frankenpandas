@@ -4656,6 +4656,25 @@ impl Index {
         if !matches!(self.sort_order(), SortOrder::AscendingInt64) {
             return None;
         }
+        // A range answers by arithmetic: its labels were made into a buffer
+        // and searched (df.loc[[...]] on a RangeIndex; br-frankenpandas-e186m).
+        if let Some((start, _, step)) = self.range_span() {
+            let len = self.len();
+            return Some(
+                labels
+                    .iter()
+                    .map(|label| {
+                        let offset = label.exact_int()?.checked_sub(start)?;
+                        if offset.checked_rem(step)? != 0 {
+                            return None;
+                        }
+                        usize::try_from(offset.checked_div(step)?)
+                            .ok()
+                            .filter(|&at| at < len)
+                    })
+                    .collect(),
+            );
+        }
         let values = self.labels.int64_view()?;
         // An integral Float64 selector is the int it equals (l5sed).
         Some(

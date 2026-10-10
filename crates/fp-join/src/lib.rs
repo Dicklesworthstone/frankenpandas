@@ -3099,23 +3099,17 @@ fn dense_int64_outer_positions(
     if let Some(direct) = dense_int64_unique_outer_positions(left_key, right_key) {
         return Some(direct);
     }
-    let left_values = all_valid_int64_key_values(left_key)?;
-    let right_values = all_valid_int64_key_values(right_key)?;
+    let left_values = int64_key_values(left_key)?;
+    let right_values = int64_key_values(right_key)?;
 
-    let mut min_key = None::<i64>;
-    let mut max_key = None::<i64>;
-    for value in left_values.iter().chain(right_values.iter()) {
-        let Scalar::Int64(key) = value else {
-            return None;
-        };
-        min_key = Some(min_key.map_or(*key, |current| current.min(*key)));
-        max_key = Some(max_key.map_or(*key, |current| current.max(*key)));
-    }
-
-    let Some(min_key) = min_key else {
+    let fold_span = |(lo, hi): (i64, i64), &key: &i64| (lo.min(key), hi.max(key));
+    let (min_key, max_key) = left_values
+        .iter()
+        .chain(right_values.iter())
+        .fold((i64::MAX, i64::MIN), fold_span);
+    if min_key > max_key {
         return Some((Vec::new(), Vec::new()));
-    };
-    let max_key = max_key.expect("max key exists when min key exists");
+    }
     let span = i128::from(max_key)
         .checked_sub(i128::from(min_key))?
         .checked_add(1)?;
@@ -3125,56 +3119,70 @@ fn dense_int64_outer_positions(
         return None;
     }
     let span = usize::try_from(span).ok()?;
+    let bucket_of = |key: i64| (i128::from(key) - i128::from(min_key)) as usize;
 
-    let mut left_buckets = (0..span).map(|_| Vec::<usize>::new()).collect::<Vec<_>>();
-    let mut right_buckets = (0..span).map(|_| Vec::<usize>::new()).collect::<Vec<_>>();
-
-    for (pos, value) in left_values.iter().enumerate() {
-        let Scalar::Int64(key) = value else {
-            return None;
-        };
-        let bucket = usize::try_from(i128::from(*key) - i128::from(min_key)).ok()?;
-        left_buckets[bucket].push(pos);
-    }
-    for (pos, value) in right_values.iter().enumerate() {
-        let Scalar::Int64(key) = value else {
-            return None;
-        };
-        let bucket = usize::try_from(i128::from(*key) - i128::from(min_key)).ok()?;
-        right_buckets[bucket].push(pos);
-    }
+    // Each side's rows grouped by key in one counting pass - a bucket's
+    // start in `starts`, its rows in position order in `rows` - where a Vec
+    // a key was allocated, two per possible key, over the keys made Scalars
+    // (an outer merge of 50k rows 0.75x pandas; br-frankenpandas-e186m).
+    // The pairs come out exactly as before: keys ascending, a key's left
+    // rows in order, each with its right rows in order.
+    let grouped = |values: &[i64]| {
+        let mut starts = vec![0_usize; span + 1];
+        for &key in values {
+            starts[bucket_of(key) + 1] += 1;
+        }
+        for bucket in 0..span {
+            starts[bucket + 1] += starts[bucket];
+        }
+        let mut cursor = starts.clone();
+        let mut rows = vec![0_usize; values.len()];
+        for (pos, &key) in values.iter().enumerate() {
+            let slot = &mut cursor[bucket_of(key)];
+            rows[*slot] = pos;
+            *slot += 1;
+        }
+        (starts, rows)
+    };
+    let (left_starts, left_rows) = grouped(&left_values);
+    let (right_starts, right_rows) = grouped(&right_values);
 
     let mut output_len = 0usize;
-    for (left_bucket, right_bucket) in left_buckets.iter().zip(right_buckets.iter()) {
-        let bucket_rows = match (left_bucket.is_empty(), right_bucket.is_empty()) {
-            (false, false) => left_bucket.len().checked_mul(right_bucket.len())?,
-            (false, true) => left_bucket.len(),
-            (true, false) => right_bucket.len(),
-            (true, true) => 0,
+    for at in 0..span {
+        let (lefts, rights) = (
+            left_starts[at + 1] - left_starts[at],
+            right_starts[at + 1] - right_starts[at],
+        );
+        let bucket_rows = match (lefts, rights) {
+            (0, rights) => rights,
+            (lefts, 0) => lefts,
+            (lefts, rights) => lefts.checked_mul(rights)?,
         };
         output_len = output_len.checked_add(bucket_rows)?;
     }
 
     let mut left_positions = Vec::<Option<usize>>::with_capacity(output_len);
     let mut right_positions = Vec::<Option<usize>>::with_capacity(output_len);
-    for (left_bucket, right_bucket) in left_buckets.into_iter().zip(right_buckets) {
-        match (left_bucket.is_empty(), right_bucket.is_empty()) {
+    for at in 0..span {
+        let lefts = &left_rows[left_starts[at]..left_starts[at + 1]];
+        let rights = &right_rows[right_starts[at]..right_starts[at + 1]];
+        match (lefts.is_empty(), rights.is_empty()) {
             (false, false) => {
-                for left_pos in left_bucket {
-                    for &right_pos in &right_bucket {
+                for &left_pos in lefts {
+                    for &right_pos in rights {
                         left_positions.push(Some(left_pos));
                         right_positions.push(Some(right_pos));
                     }
                 }
             }
             (false, true) => {
-                for left_pos in left_bucket {
+                for &left_pos in lefts {
                     left_positions.push(Some(left_pos));
                     right_positions.push(None);
                 }
             }
             (true, false) => {
-                for right_pos in right_bucket {
+                for &right_pos in rights {
                     left_positions.push(None);
                     right_positions.push(Some(right_pos));
                 }
@@ -3184,6 +3192,26 @@ fn dense_int64_outer_positions(
     }
 
     Some((left_positions, right_positions))
+}
+
+/// An all-valid int64 key column's values: its typed buffer, or its Scalar
+/// view's ints ([`all_valid_int64_key_values`]).
+fn int64_key_values(column: &Column) -> Option<std::borrow::Cow<'_, [i64]>> {
+    if column.dtype() != DType::Int64 {
+        return None;
+    }
+    if let Some(values) = column.as_i64_slice() {
+        return Some(std::borrow::Cow::Borrowed(values));
+    }
+    let values = all_valid_int64_key_values(column)?;
+    values
+        .iter()
+        .map(|value| match value {
+            Scalar::Int64(key) => Some(*key),
+            _ => None,
+        })
+        .collect::<Option<Vec<i64>>>()
+        .map(std::borrow::Cow::Owned)
 }
 
 fn ordered_unique_int64_outer_positions(

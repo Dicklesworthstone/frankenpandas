@@ -35465,3 +35465,270 @@ def test_equals_on_typed_columns_like_pandas_e186m(case: str) -> None:
         return (left.equals(right), right.equals(left), left.equals(left))
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: df.loc[list] over a unique int index checks its
+# labels by search / the index's cached lookup, df.reindex makes the
+# target's labels only over an IntervalIndex, and combine_first of
+# unaligned frames selects two int64 columns typed beside the float64 ones
+# - pandas' answers, KeyErrors included. NEGATIVE: a repeated index, a
+# float label that is no int, a missing label, an interval index, a
+# nullable / one-sided int column.
+def _e186mlc_frame(m: Any, index: Any) -> Any:
+    return m.DataFrame({"x": [float(i) / 2 for i in range(6)], "z": list(range(10, 16))}, index=index)
+
+
+_E186MLC_CASES = {
+    "range index": lambda m: _e186mlc_frame(m, None).loc[[4, 0, 2]],
+    "ascending index": lambda m: _e186mlc_frame(m, [1, 3, 5, 7, 9, 11]).loc[[9, 1]],
+    "unsorted index": lambda m: _e186mlc_frame(m, [5, 1, 9, 3, 11, 7]).loc[[3, 5, 11]],
+    "integral float label": lambda m: _e186mlc_frame(m, [5, 1, 9, 3, 11, 7]).loc[[3.0, 9]],
+    "series loc": lambda m: _e186mlc_frame(m, None)["x"].loc[[5, 1]],
+    "one missing (NEGATIVE)": lambda m: _e186mlc_frame(m, None).loc[[1, 99]],
+    "all missing (NEGATIVE)": lambda m: _e186mlc_frame(m, [5, 1, 9, 3, 11, 7]).loc[[2, 4]],
+    "fractional float (NEGATIVE)": lambda m: _e186mlc_frame(m, None).loc[[1, 2.5]],
+    "repeated index (NEGATIVE)": lambda m: _e186mlc_frame(m, [1, 1, 2, 2, 3, 3]).loc[[2, 3]],
+    "reindex range": lambda m: _e186mlc_frame(m, None).reindex(range(0, 9, 2)),
+    "reindex list": lambda m: _e186mlc_frame(m, [5, 1, 9, 3, 11, 7]).reindex([9, 2, 5]),
+    "reindex interval points (NEGATIVE)": lambda m: m.DataFrame(
+        {"x": [1.0, 2.0, 3.0]}, index=m.IntervalIndex.from_breaks([0, 1, 2, 3])
+    ).reindex([0.5, 2.5, 7.0]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MLC_CASES))
+def test_loc_label_list_and_reindex_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _E186MLC_CASES[case](m)
+        except KeyError as error:
+            return ("KeyError", str(error))
+        frame = out.to_frame() if hasattr(out, "to_frame") and not hasattr(out, "columns") else out
+        return (
+            [repr(label) for label in frame.index.tolist()],
+            [(str(name), str(frame[name].dtype), [repr(v) for v in frame[name].tolist()]) for name in frame.columns],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+def _e186mcf_frames(m: Any) -> Any:
+    n = 70
+    df = m.DataFrame(
+        {"x": [float(i % 9) if i % 5 else np.nan for i in range(n)], "z": [(i * 7) % 23 for i in range(n)]},
+        index=list(range(0, 2 * n, 2)),
+    )
+    other = m.DataFrame(
+        {"x": [float(i) / 3 for i in range(n)], "z": [-i for i in range(n)]}, index=list(range(n))
+    )
+    return df, other
+
+
+_E186MCF_CASES = {
+    "unaligned float and int": lambda m, df, other: df.combine_first(other),
+    "other first": lambda m, df, other: other.combine_first(df),
+    "half of itself": lambda m, df, other: df.iloc[::2].combine_first(df),
+    "nullable int (NEGATIVE)": lambda m, df, other: df.astype({"z": "Int64"}).combine_first(other),
+    "int beside float (NEGATIVE)": lambda m, df, other: df.combine_first(other.astype({"z": "float64"})),
+    "column on one side (NEGATIVE)": lambda m, df, other: df.combine_first(other.rename(columns={"z": "w"})),
+}
+
+
+_E186MSV_TEXT = ["b", "a", "", "café", "B", "a", "b", "ab", "\U0001F600", "a"] * 7
+_E186MSV_CASES = {
+    "text then float": lambda df: df.sort_values(["s", "x"]),
+    "text desc then float": lambda df: df.sort_values(["s", "x"], ascending=[False, True]),
+    "int then text": lambda df: df.sort_values(["k", "s"]),
+    "text then int desc": lambda df: df.sort_values(["s", "k"], ascending=[True, False]),
+    "ties keep order": lambda df: df.sort_values(["s"], kind="stable"),
+    "None in text (NEGATIVE)": lambda df: df.assign(
+        s=[text if at % 4 else None for at, text in enumerate(_E186MSV_TEXT)]
+    ).sort_values(["s", "k"]),
+    "NaN in float (NEGATIVE)": lambda df: df.assign(x=df["x"].where(df["k"] > 1)).sort_values(["s", "x"]),
+    "category (NEGATIVE)": lambda df: df.astype({"s": "category"}).sort_values(["s", "k"]),
+}
+
+
+def _e186msv_frame(m: Any) -> Any:
+    n = len(_E186MSV_TEXT)
+    return m.DataFrame({"s": _E186MSV_TEXT, "x": [((i * 13) % 17) / 4 for i in range(n)], "k": [i % 3 for i in range(n)]})
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MSV_CASES))
+def test_sort_values_with_text_keys_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MSV_CASES[case](_e186msv_frame(m))
+        return (out.index.tolist(), [repr(v) for v in out["s"].tolist()])
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MCF_CASES))
+def test_combine_first_unaligned_int_columns_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        df, other = _e186mcf_frames(m)
+        out = _E186MCF_CASES[case](m, df, other)
+        return (
+            out.index.tolist(),
+            [(str(name), str(out[name].dtype), [repr(v) for v in out[name].tolist()]) for name in out.columns],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: memory_usage(deep=True) sizes an object column's
+# strs by CPython's compact-string layout, each kind's base asked of
+# sys.getsizeof once - pandas' bytes for ASCII, latin-1, UCS-2 and UCS-4
+# text, empty strings, None beside text and a text index. NEGATIVE: a
+# float / int column's deep bytes are its shallow ones.
+_E186MMU_CASES = {
+    "ascii": ["alpha", "b", "", "gamma delta"] * 5,
+    "latin-1": ["naïve", "café au lait", "ÿy", "éè"] * 5,
+    "ucs-2": ["Āb", "日本語", "xā"] * 5,
+    "ucs-4": ["\U0001F600!", "a\U0001F601b"] * 5,
+    "None beside text": ["a", None, "bc", None] * 5,
+    "numbers (NEGATIVE)": [1.5, 2.5, 3.5] * 5,
+}
+
+
+_E186MLI_CASES = {
+    "stepped range": lambda m: m.DataFrame({"x": list(range(8))}, index=m.RangeIndex(0, 40, 5)).loc[[35, 5, 10]],
+    "descending range": lambda m: m.DataFrame({"x": list(range(8))}, index=m.RangeIndex(40, 0, -5)).loc[[35, 5]],
+    "numpy int key": lambda m: m.DataFrame({"x": list(range(8))}).loc[np.array([7, 0, 3])],
+    "negative labels": lambda m: m.DataFrame({"x": list(range(4))}, index=[-3, -1, 2, 9]).loc[[-1, 9]],
+    "off the step (NEGATIVE)": lambda m: m.DataFrame({"x": list(range(8))}, index=m.RangeIndex(0, 40, 5)).loc[[5, 7]],
+    "bool beside text (NEGATIVE)": lambda m: m.DataFrame({"x": list(range(4))}, index=["a", True, 2, "b"]).loc[[True, "b"]],
+    "int past int64 (NEGATIVE)": lambda m: m.DataFrame({"x": list(range(4))}).loc[[1, 2**70]],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MLI_CASES))
+def test_loc_int_label_lists_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        try:
+            out = _E186MLI_CASES[case](m)
+        except (KeyError, TypeError, OverflowError) as error:
+            return type(error).__name__
+        return ([repr(label) for label in out.index.tolist()], out["x"].tolist())
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MMU_CASES))
+def test_memory_usage_deep_of_text_like_pandas_e186m(case: str) -> None:
+    # Each arm its own fresh strs: reading a str's UTF-8 makes CPython keep
+    # it in the object (sys.getsizeof grows), so a list shared by both arms
+    # would be sized after the other arm read it.
+    def fresh(value: Any) -> Any:
+        return value.encode("utf-8").decode("utf-8") if isinstance(value, str) else value
+
+    def run(m: Any) -> Any:
+        values = [fresh(value) for value in _E186MMU_CASES[case]]
+        df = m.DataFrame({"t": values, "k": list(range(len(values)))})
+        by_text = m.DataFrame(
+            {"k": list(range(len(values)))}, index=[fresh(f"r{i}é") for i in range(len(values))]
+        )
+        return (
+            df.memory_usage(deep=True).tolist(),
+            df["t"].memory_usage(deep=True),
+            by_text.memory_usage(deep=True).tolist(),
+        )
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: an outer merge on int keys repeated on either
+# side groups each side's rows by key in one counting pass - pandas' rows,
+# order and dtypes. NEGATIVE: keys too sparse for the dense table, a key
+# holding a missing value, text keys.
+def _e186mmo_frames(m: Any) -> Any:
+    left = m.DataFrame({"k": [(i * 7) % 13 - 3 for i in range(40)], "a": list(range(40))})
+    right = m.DataFrame({"k": [(i * 5) % 17 - 6 for i in range(30)], "b": [float(i) / 2 for i in range(30)]})
+    return left, right
+
+
+_E186MMO_CASES = {
+    "repeated both sides": lambda m, left, right: left.merge(right, on="k", how="outer"),
+    "right repeated only": lambda m, left, right: left.drop_duplicates("k").merge(right, on="k", how="outer"),
+    "disjoint keys": lambda m, left, right: left.merge(right.assign(k=right["k"] + 100), on="k", how="outer"),
+    "empty right": lambda m, left, right: left.merge(right.head(0), on="k", how="outer"),
+    "sparse keys (NEGATIVE)": lambda m, left, right: left.assign(k=left["k"] * 10**9).merge(right, on="k", how="outer"),
+    "missing key (NEGATIVE)": lambda m, left, right: left.assign(k=left["k"].where(left["a"] > 2)).merge(
+        right.astype({"k": "float64"}), on="k", how="outer"
+    ),
+    "text keys (NEGATIVE)": lambda m, left, right: left.astype({"k": str}).merge(right.astype({"k": str}), on="k", how="outer"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MMO_CASES))
+def test_outer_merge_on_repeated_int_keys_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        left, right = _e186mmo_frames(m)
+        out = _E186MMO_CASES[case](m, left, right)
+        return (
+            out.index.tolist(),
+            [(name, str(out[name].dtype), [repr(v) for v in out[name].tolist()]) for name in out.columns],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: groupby head / tail / nth over one int or text key
+# read the groupby object's kept group ids in place (nth through them too,
+# where it built every group's row list) - pandas' rows in row order,
+# called twice on one groupby object. NEGATIVE: two keys, a key holding a
+# missing value and a categorical key take the general path.
+def _e186mgh_frame(m: Any) -> Any:
+    n = 90
+    return m.DataFrame(
+        {
+            "k": [(i * 7) % 11 for i in range(n)],
+            "s": [f"g{(i * 5) % 7}" for i in range(n)],
+            "x": [float(i) for i in range(n)],
+        }
+    )
+
+
+_E186MGH_CASES = {
+    "int head": lambda g: g.head(2),
+    "int tail": lambda g: g.tail(1),
+    "int nth 0": lambda g: g.nth(0),
+    "int nth -1": lambda g: g.nth(-1),
+    "int nth list": lambda g: g.nth([0, 2, -1]),
+    "int nth past the group": lambda g: g.nth(20),
+    "int head negative": lambda g: g.head(-3),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MGH_CASES))
+@pytest.mark.parametrize(
+    "by",
+    ["k", "s", "k unsorted", "two keys (NEGATIVE)", "missing key (NEGATIVE)", "category (NEGATIVE)"],
+)
+def test_groupby_head_tail_nth_like_pandas_e186m(case: str, by: str) -> None:
+    def run(m: Any) -> Any:
+        df = _e186mgh_frame(m)
+        if by == "k unsorted":
+            g = df.groupby("k", sort=False)
+        elif by == "two keys (NEGATIVE)":
+            g = df.groupby(["k", "s"])
+        elif by == "missing key (NEGATIVE)":
+            g = df.assign(k=df["k"].where(df["x"] > 5)).groupby("k")
+        elif by == "category (NEGATIVE)":
+            g = df.astype({"s": "category"}).groupby("s", observed=True)
+        else:
+            g = df.groupby(by)
+        outs = [_E186MGH_CASES[case](g) for _ in range(2)]
+        return [
+            (out.index.tolist(), [(name, [repr(v) for v in out[name].tolist()]) for name in out.columns])
+            for out in outs
+        ]
+
+    assert run(fpd) == run(pd)
