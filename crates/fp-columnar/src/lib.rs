@@ -8374,8 +8374,11 @@ impl IntAgainstFloat {
     }
 }
 
-/// The `i64` sibling of [`compare_f64_scalar`].
-fn compare_i64_scalar(data: &[i64], s: i64, op: ComparisonOp) -> Vec<bool> {
+/// `data[i] <op> s` over ints, eight lanes a step where the CPU has AVX2:
+/// the `i64` sibling of `compare_f64_scalar` (an index's ints against a
+/// number read it too; br-frankenpandas-e186m).
+#[must_use]
+pub fn compare_i64_scalar(data: &[i64], s: i64, op: ComparisonOp) -> Vec<bool> {
     #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("avx2") {
         let mut out = vec![false; data.len()];
@@ -8396,6 +8399,160 @@ fn compare_i64_scalar(data: &[i64], s: i64, op: ComparisonOp) -> Vec<bool> {
         ComparisonOp::Ne => data.iter().map(|&v| v != s).collect(),
         ComparisonOp::Ge => data.iter().map(|&v| v >= s).collect(),
         ComparisonOp::Le => data.iter().map(|&v| v <= s).collect(),
+    }
+}
+
+/// The least of `values`, `None` when empty: four lanes a vector where the
+/// CPU has AVX2 ([`fp_dot_kernel::min_i64`] - an int64 compare has no
+/// earlier instruction, and the baseline's emulated one made Series.min of
+/// a million ints 0.17 ms, pandas 0.09; br-frankenpandas-e186m), sixteen
+/// independent lanes otherwise. Exact: an integer min in any order.
+#[must_use]
+pub fn min_i64(values: &[i64]) -> Option<i64> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        return fp_dot_kernel::min_i64(values);
+    }
+    fold_i64_lanes(values, i64::MAX, i64::min)
+}
+
+/// The greatest of `values`, `None` when empty; see [`min_i64`].
+#[must_use]
+pub fn max_i64(values: &[i64]) -> Option<i64> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        return fp_dot_kernel::max_i64(values);
+    }
+    fold_i64_lanes(values, i64::MIN, i64::max)
+}
+
+/// The first position of the least of `values` (numpy's argmin, ties to
+/// the first), `None` when empty: compared as the ints they are - a scan
+/// through `as f64` could not tell two ints past 2^53 apart.
+#[must_use]
+pub fn argmin_i64(values: &[i64]) -> Option<usize> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        return fp_dot_kernel::argmin_i64(values);
+    }
+    let least = fold_i64_lanes(values, i64::MAX, i64::min)?;
+    values.iter().position(|&value| value == least)
+}
+
+/// The first position of the greatest of `values`; see [`argmin_i64`].
+#[must_use]
+pub fn argmax_i64(values: &[i64]) -> Option<usize> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        return fp_dot_kernel::argmax_i64(values);
+    }
+    let greatest = fold_i64_lanes(values, i64::MIN, i64::max)?;
+    values.iter().position(|&value| value == greatest)
+}
+
+/// The wrapping sum of `values` (numpy's int64 sum): four lanes a vector
+/// where the CPU has AVX2 ([`fp_dot_kernel::sum_i64`]), the baseline's two
+/// otherwise. Wrapping addition is associative: the serial fold's sum.
+#[must_use]
+pub fn sum_i64(values: &[i64]) -> i64 {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        return fp_dot_kernel::sum_i64(values);
+    }
+    values.iter().fold(0, |sum, &value| sum.wrapping_add(value))
+}
+
+/// `values` folded by `pick` in sixteen independent lanes from `seed`
+/// (a serial chain does not vectorize), then the lanes and the tail; `None`
+/// when empty.
+fn fold_i64_lanes(values: &[i64], seed: i64, pick: impl Fn(i64, i64) -> i64 + Copy) -> Option<i64> {
+    if values.is_empty() {
+        return None;
+    }
+    let (chunks, tail) = values.as_chunks::<16>();
+    let mut lanes = [seed; 16];
+    for chunk in chunks {
+        for (lane, &value) in lanes.iter_mut().zip(chunk) {
+            *lane = pick(*lane, value);
+        }
+    }
+    Some(
+        lanes
+            .into_iter()
+            .chain(tail.iter().copied())
+            .fold(seed, pick),
+    )
+}
+
+#[cfg(test)]
+mod int_extremes_e186m {
+    use super::*;
+
+    /// The serial answers: the least, the greatest, and the first position
+    /// of each.
+    fn serial(values: &[i64]) -> (Option<i64>, Option<i64>, Option<usize>, Option<usize>) {
+        let least = values.iter().copied().min();
+        let greatest = values.iter().copied().max();
+        let first = |target: Option<i64>| target.and_then(|t| values.iter().position(|&v| v == t));
+        (least, greatest, first(least), first(greatest))
+    }
+
+    #[test]
+    fn extremes_answer_as_the_serial_scan_at_every_length() {
+        // Repeated extremes (the first wins), both int64 ends, ints past 2^53
+        // a double cannot tell apart, every tail length - through the
+        // dispatching wrappers and the sixteen-lane fold of a CPU without
+        // AVX2.
+        let mut values: Vec<i64> = (0..70_i64).map(|k| (k * 7919) % 53 - 26).collect();
+        values[9] = 2_i64.pow(60) + 1;
+        values[40] = 2_i64.pow(60) + 1;
+        values[41] = 2_i64.pow(60);
+        values[33] = i64::MIN;
+        values[65] = i64::MIN;
+        for len in 0..=values.len() {
+            let part = &values[..len];
+            let want = serial(part);
+            assert_eq!(
+                (
+                    min_i64(part),
+                    max_i64(part),
+                    argmin_i64(part),
+                    argmax_i64(part)
+                ),
+                want,
+                "len {len}"
+            );
+            assert_eq!(
+                (
+                    fold_i64_lanes(part, i64::MAX, i64::min),
+                    fold_i64_lanes(part, i64::MIN, i64::max)
+                ),
+                (want.0, want.1),
+                "lanes, len {len}"
+            );
+            let wrapped = part.iter().fold(0_i64, |sum, &v| sum.wrapping_add(v));
+            assert_eq!(sum_i64(part), wrapped, "sum, len {len}");
+        }
+    }
+
+    #[test]
+    fn a_column_of_instants_holding_nat_takes_nanmin() {
+        // NaT is the least i64: an all-valid column holding a NaT datum
+        // must not answer NaT as its least (NEGATIVE for a min without the
+        // NaT check), and its greatest is the instants'.
+        let stamps = Column::from_datetime64_values(vec![5, i64::MIN, 3]);
+        assert_eq!(stamps.min(), nanmin(stamps.values()));
+        assert_ne!(stamps.min(), Scalar::Datetime64(i64::MIN));
+        let plain = Column::from_datetime64_values(vec![5, 9, 3]);
+        assert_eq!(
+            (plain.min(), plain.max()),
+            (Scalar::Datetime64(3), Scalar::Datetime64(9))
+        );
+        let ints = Column::from_i64_values(vec![2_i64.pow(60), 2_i64.pow(60) + 1, -4]);
+        assert_eq!(
+            (ints.min(), ints.max()),
+            (Scalar::Int64(-4), Scalar::Int64(2_i64.pow(60) + 1))
+        );
     }
 }
 
@@ -24885,45 +25042,28 @@ impl Column {
             return Scalar::Float64(m);
         }
         if let Some(data) = self.as_i64_slice()
-            && let Some((&first, rest)) = data.split_first()
+            && let Some(least) = min_i64(data)
         {
-            let mut m = first;
-            for &x in rest {
-                if x < m {
-                    m = x;
-                }
-            }
-            return Scalar::Int64(m);
+            return Scalar::Int64(least);
         }
         // Datetime64 / Timedelta64 (i64-ns) reduce like Int64. Gate on all-valid +
         // no NAT (`i64::MIN`): `nanmin` SKIPS missing, so a NAT-bearing column must
-        // stay on the `nanmin` path. For all-valid, no-NAT input the strict-`<` fold
-        // (keeps the first on a tie, exactly like `nanmin`) returns the same min,
-        // dtype-preserved — bit-identical, without materializing the `Scalar` Vec.
+        // stay on the `nanmin` path - and NAT is the least i64, so the least is NAT
+        // exactly when one is there (one pass, not a NAT search and a fold). For
+        // all-valid, no-NAT input the least is nanmin's, dtype-preserved, without
+        // materializing the `Scalar` Vec (equal instants are the same value).
         if self.validity.all() {
             if let Some(data) = self.as_datetime64_slice()
-                && let Some((&first, rest)) = data.split_first()
-                && !data.contains(&i64::MIN)
+                && let Some(least) = min_i64(data)
+                && least != i64::MIN
             {
-                let mut m = first;
-                for &x in rest {
-                    if x < m {
-                        m = x;
-                    }
-                }
-                return Scalar::Datetime64(m);
+                return Scalar::Datetime64(least);
             }
             if let Some(data) = self.as_timedelta64_slice()
-                && let Some((&first, rest)) = data.split_first()
-                && !data.contains(&i64::MIN)
+                && let Some(least) = min_i64(data)
+                && least != i64::MIN
             {
-                let mut m = first;
-                for &x in rest {
-                    if x < m {
-                        m = x;
-                    }
-                }
-                return Scalar::Timedelta64(m);
+                return Scalar::Timedelta64(least);
             }
         }
         // Contiguous-Utf8 fast path (byte-span sibling of unique/value_counts):
@@ -25003,15 +25143,9 @@ impl Column {
             return Scalar::Float64(m);
         }
         if let Some(data) = self.as_i64_slice()
-            && let Some((&first, rest)) = data.split_first()
+            && let Some(greatest) = max_i64(data)
         {
-            let mut m = first;
-            for &x in rest {
-                if x > m {
-                    m = x;
-                }
-            }
-            return Scalar::Int64(m);
+            return Scalar::Int64(greatest);
         }
         // Datetime64 / Timedelta64 (i64-ns) reduce like Int64; see `min`. Gate on
         // all-valid + no NAT so `nanmax`'s skip-missing behavior is preserved;
@@ -25019,28 +25153,16 @@ impl Column {
         // dtype-preserved, no `Scalar` materialization.
         if self.validity.all() {
             if let Some(data) = self.as_datetime64_slice()
-                && let Some((&first, rest)) = data.split_first()
                 && !data.contains(&i64::MIN)
+                && let Some(greatest) = max_i64(data)
             {
-                let mut m = first;
-                for &x in rest {
-                    if x > m {
-                        m = x;
-                    }
-                }
-                return Scalar::Datetime64(m);
+                return Scalar::Datetime64(greatest);
             }
             if let Some(data) = self.as_timedelta64_slice()
-                && let Some((&first, rest)) = data.split_first()
                 && !data.contains(&i64::MIN)
+                && let Some(greatest) = max_i64(data)
             {
-                let mut m = first;
-                for &x in rest {
-                    if x > m {
-                        m = x;
-                    }
-                }
-                return Scalar::Timedelta64(m);
+                return Scalar::Timedelta64(greatest);
             }
         }
         // Contiguous-Utf8 fast path (symmetric to `min`): track the max byte span

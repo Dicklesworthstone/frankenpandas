@@ -23265,20 +23265,17 @@ impl Series {
             DType::Int64 | DType::Int64Nullable => {
                 // perf (br-frankenpandas-bwgyc): typed fast path (mirror of the
                 // Float64 lei31 path below) — an all-valid Int64 column sums its
-                // contiguous i64 buffer with wrapping_add, skipping the per-element
-                // Scalar match over a materialized Vec<Scalar>. Bit-identical:
-                // same values, same wrapping_add fold.
+                // contiguous i64 buffer with wrapping_add (four lanes a vector
+                // where the CPU has AVX2; e186m), skipping the per-element Scalar
+                // match over a materialized Vec<Scalar>. Bit-identical: wrapping
+                // addition is associative, so any order is the fold's sum.
                 // Concat chunk fast path: fold the lazy i64 chunks in place
                 // (wrapping_add, associative mod 2^64) instead of materializing.
                 if let Some(total) = self.column.all_valid_i64_chunk_sum() {
                     return Ok(Scalar::Int64(total));
                 }
                 if let Some(data) = self.column.as_i64_slice() {
-                    let mut total: i64 = 0;
-                    for &v in data {
-                        total = total.wrapping_add(v);
-                    }
-                    return Ok(Scalar::Int64(total));
+                    return Ok(Scalar::Int64(fp_columnar::sum_i64(data)));
                 }
                 // Typed nullable fast path (sister to the all-valid arm above and to
                 // the Float64 `as_f64_slice_with_validity` sum path): a nullable Int64
@@ -23441,7 +23438,7 @@ impl Series {
             .as_temporal_nanos_with_validity()
             .filter(|(nanos, _)| nanos.len() == self.len())?;
         let best = if max {
-            i64_slice_max_simd(nanos).unwrap_or(Timestamp::NAT)
+            fp_columnar::max_i64(nanos).unwrap_or(Timestamp::NAT)
         } else {
             nanos_min_skipping_nat(nanos)
         };
@@ -23678,7 +23675,7 @@ impl Series {
                 // Scalar best-fold below; empty -> Float64(NaN) preserved.
                 if let Some(data) = self.column.as_i64_slice() {
                     return Ok(
-                        i64_slice_min_simd(data).map_or(Scalar::Float64(f64::NAN), Scalar::Int64)
+                        fp_columnar::min_i64(data).map_or(Scalar::Float64(f64::NAN), Scalar::Int64)
                     );
                 }
                 // Typed nullable fast path (sister to the all-valid arm above and the
@@ -23865,7 +23862,7 @@ impl Series {
                 // Scalar best-fold below; empty -> Float64(NaN) preserved.
                 if let Some(data) = self.column.as_i64_slice() {
                     return Ok(
-                        i64_slice_max_simd(data).map_or(Scalar::Float64(f64::NAN), Scalar::Int64)
+                        fp_columnar::max_i64(data).map_or(Scalar::Float64(f64::NAN), Scalar::Int64)
                     );
                 }
                 // Typed nullable fast path (mirror of Series::min's nullable Int64 arm):
@@ -28404,27 +28401,19 @@ impl Series {
             });
         }
 
-        // Typed all-valid Int64 fast path (sister to the Float64 arm): scan the raw
-        // `&[i64]` for the argmin, comparing `iv as f64`. Bit-identical to the
-        // generic `.values()` loop below on an all-valid Int64 column: nothing is
-        // skipped (no missing), `to_f64(Int64(iv)) == iv as f64`, the same
-        // first-occurrence `best_idx.is_none() || v < best_val` tie-break (incl. the
-        // |v|>2^53 case where i64->f64 rounding groups equal-as-f64 values, exactly
-        // as the generic path does) — skipping the `.values()` Vec<Scalar>
-        // materialization + per-element to_f64 dispatch.
+        // Typed all-valid Int64 fast path (sister to the Float64 arm): the first
+        // position of the least of the raw `&[i64]`, compared as the ints they
+        // are, as pandas' (numpy's argmin) - through `iv as f64` two ints past 2^53
+        // tied and the first was the answer (br-frankenpandas-e186m) - in lane
+        // kernels, skipping the `.values()` Vec<Scalar> materialization.
         if let Some(data) = self.column.as_i64_slice() {
-            let mut best_idx: Option<usize> = None;
-            let mut best_val = f64::INFINITY;
-            for (i, &iv) in data.iter().enumerate() {
-                let v = iv as f64;
-                if best_idx.is_none() || v < best_val {
-                    best_val = v;
-                    best_idx = Some(i);
-                }
-            }
-            return best_idx.map(|i| self.index_label_at(i)).ok_or_else(|| {
-                FrameError::CompatibilityRejected("idxmin of empty or all-null series".to_owned())
-            });
+            return fp_columnar::argmin_i64(data)
+                .map(|i| self.index_label_at(i))
+                .ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "idxmin of empty or all-null series".to_owned(),
+                    )
+                });
         }
 
         let mut best_idx: Option<usize> = None;
@@ -28561,23 +28550,17 @@ impl Series {
             });
         }
 
-        // Typed all-valid Int64 fast path (mirror of idxmin): argmax over `iv as f64`
-        // off the raw `&[i64]`. Bit-identical to the generic loop below (strict `>`,
-        // init on first present, `to_f64(Int64) == iv as f64`), no `.values()`
+        // Typed all-valid Int64 fast path (mirror of idxmin): the first position of
+        // the greatest, compared as ints (see idxmin), no `.values()`
         // materialization.
         if let Some(data) = self.column.as_i64_slice() {
-            let mut best_idx: Option<usize> = None;
-            let mut best_val = f64::NEG_INFINITY;
-            for (i, &iv) in data.iter().enumerate() {
-                let v = iv as f64;
-                if best_idx.is_none() || v > best_val {
-                    best_val = v;
-                    best_idx = Some(i);
-                }
-            }
-            return best_idx.map(|i| self.index_label_at(i)).ok_or_else(|| {
-                FrameError::CompatibilityRejected("idxmax of empty or all-null series".to_owned())
-            });
+            return fp_columnar::argmax_i64(data)
+                .map(|i| self.index_label_at(i))
+                .ok_or_else(|| {
+                    FrameError::CompatibilityRejected(
+                        "idxmax of empty or all-null series".to_owned(),
+                    )
+                });
         }
 
         for (i, val) in self.column.values().iter().enumerate() {
@@ -29197,17 +29180,13 @@ impl Series {
         if !skipna && self.hasnans() {
             return Ok(-1);
         }
-        // All-valid Int64: scan the native &[i64] (no Scalar boxing). validity.all()
-        // means no missing, so skipna is irrelevant; keep the first strictly-smaller
-        // element, matching the Scalar path's is_lt tie-break (br-frankenpandas-feyjd).
+        // All-valid Int64: the native &[i64] (no Scalar boxing), four lanes a
+        // vector where the CPU has AVX2 (a million ints 0.47 ms, pandas 0.10;
+        // br-frankenpandas-e186m). validity.all() means no missing, so skipna is
+        // irrelevant; the first position of the least value, the Scalar
+        // path's is_lt tie-break (br-frankenpandas-feyjd).
         if let Some(data) = self.column.as_i64_slice() {
-            let mut best = 0usize;
-            for i in 1..data.len() {
-                if data[i] < data[best] {
-                    best = i;
-                }
-            }
-            return Ok(best as i64);
+            return Ok(fp_columnar::argmin_i64(data).map_or(-1, |best| best as i64));
         }
         // All-valid Float64: same scan over the native &[f64]. `as_f64_slice` is
         // all-valid AND no-NaN, and `compare_non_missing_scalars_for_sort` on two
@@ -29256,17 +29235,13 @@ impl Series {
         if !skipna && self.hasnans() {
             return Ok(-1);
         }
-        // All-valid Int64: scan the native &[i64] (no Scalar boxing). validity.all()
-        // means no missing, so skipna is irrelevant; keep the first strictly-greater
-        // element, matching the Scalar path's is_gt tie-break (br-frankenpandas-feyjd).
+        // All-valid Int64: the native &[i64] (no Scalar boxing), four lanes a
+        // vector where the CPU has AVX2 (a million ints 0.47 ms, pandas 0.10;
+        // br-frankenpandas-e186m). validity.all() means no missing, so skipna is
+        // irrelevant; the first position of the greatest value, the Scalar
+        // path's is_gt tie-break (br-frankenpandas-feyjd).
         if let Some(data) = self.column.as_i64_slice() {
-            let mut best = 0usize;
-            for i in 1..data.len() {
-                if data[i] > data[best] {
-                    best = i;
-                }
-            }
-            return Ok(best as i64);
+            return Ok(fp_columnar::argmax_i64(data).map_or(-1, |best| best as i64));
         }
         // All-valid Float64: same scan over the native &[f64]. `as_f64_slice` is
         // all-valid AND no-NaN, and `compare_non_missing_scalars_for_sort` on two
@@ -72019,74 +71994,11 @@ pub fn concat_series(series_list: &[&Series]) -> Result<Series, FrameError> {
     concat_series_with_ignore_index(series_list, false)
 }
 
-/// Concatenate Series with optional index reset.
-///
-/// Matches `pd.concat([s1, s2], ignore_index=True/False)`. When
-/// `ignore_index` is `True`, the resulting Series has a default integer
-/// index (0, 1, ..., n-1) instead of preserving the original labels.
-/// Build the concatenated column for `concat_series_*`. Typed buffer concat for the
-/// ubiquitous all-valid Int64/Float64 case (extend i64/f64 buffers directly), else a
-/// Scalar fallback. Bit-identical: `as_i64/f64_slice` are Some only when every column
-/// is all-valid of that dtype, so `from_i64/f64_values` equals the Scalar path.
-/// SIMD-friendly max of a contiguous all-valid i64 slice (br-frankenpandas-simdmx).
-/// A 16-lane chunked accumulator exposes independent `max` reductions per step, which
-/// LLVM lowers to vectorized i64 max — unlike the scalar `iter().max()` chain, which is a
-/// serial dependency LLVM will not auto-vectorize. BIT-IDENTICAL: integer max is
-/// associative + commutative, so lane reordering cannot change the result. Returns None
-/// for an empty slice (caller maps to NaN, as before). NOTE: a `#[target_feature(avx2)]`
-/// variant was tried to emit explicit AVX2 i64 max — REJECTED: it requires `unsafe`,
-/// which this clean-room safe-Rust port forbids (build lint denies unsafe fn/blocks).
-fn i64_slice_max_simd(data: &[i64]) -> Option<i64> {
-    if data.is_empty() {
-        return None;
-    }
-    const LANES: usize = 16;
-    let (chunks, remainder) = data.as_chunks::<LANES>();
-    let mut acc = [i64::MIN; LANES];
-    for c in chunks {
-        for i in 0..LANES {
-            acc[i] = acc[i].max(c[i]);
-        }
-    }
-    let mut best = acc[0];
-    for &v in &acc[1..] {
-        best = best.max(v);
-    }
-    for &v in remainder {
-        best = best.max(v);
-    }
-    Some(best)
-}
-
-/// SIMD-friendly min of a contiguous all-valid i64 slice (sister to
-/// `i64_slice_max_simd`). Same 16-lane chunked accumulator; bit-identical.
-fn i64_slice_min_simd(data: &[i64]) -> Option<i64> {
-    if data.is_empty() {
-        return None;
-    }
-    const LANES: usize = 16;
-    let (chunks, remainder) = data.as_chunks::<LANES>();
-    let mut acc = [i64::MAX; LANES];
-    for c in chunks {
-        for i in 0..LANES {
-            acc[i] = acc[i].min(c[i]);
-        }
-    }
-    let mut best = acc[0];
-    for &v in &acc[1..] {
-        best = best.min(v);
-    }
-    for &v in remainder {
-        best = best.min(v);
-    }
-    Some(best)
-}
-
 /// The least present instant / duration of a nanos buffer holding NaT
 /// (i64::MIN) at its missing slots, NaT when none is present: the min of
 /// `ns - 1` (wrapping, so NaT turns into the greatest key and every other
-/// value keeps its order) plus one, in `i64_slice_min_simd`'s 16-lane
-/// accumulator (br-frankenpandas-vk7y9).
+/// value keeps its order) plus one, in a 16-lane accumulator
+/// (br-frankenpandas-vk7y9).
 fn nanos_min_skipping_nat(data: &[i64]) -> i64 {
     const LANES: usize = 16;
     let (chunks, remainder) = data.as_chunks::<LANES>();
@@ -72136,6 +72048,10 @@ fn concat_series_columns(series_list: &[&Series], total_len: usize) -> Result<Co
     }
 }
 
+/// Build the concatenated column for `concat_series_*`. Typed buffer concat for the
+/// ubiquitous all-valid Int64/Float64 case (extend i64/f64 buffers directly), else a
+/// Scalar fallback. Bit-identical: `as_i64/f64_slice` are Some only when every column
+/// is all-valid of that dtype, so `from_i64/f64_values` equals the Scalar path.
 fn concat_series_columns_storage(
     series_list: &[&Series],
     total_len: usize,
@@ -72327,6 +72243,11 @@ fn concat_contiguous_text<'a>(
     Some(Column::from_utf8_contiguous(bytes, offsets))
 }
 
+/// Concatenate Series with optional index reset.
+///
+/// Matches `pd.concat([s1, s2], ignore_index=True/False)`. When
+/// `ignore_index` is `True`, the resulting Series has a default integer
+/// index (0, 1, ..., n-1) instead of preserving the original labels.
 pub fn concat_series_with_ignore_index(
     series_list: &[&Series],
     ignore_index: bool,
@@ -181085,6 +181006,44 @@ mod tests {
         assert_eq!(mk(vec![1, 2, 3]).argmax().unwrap(), 2);
         assert_eq!(mk(vec![3, 2, 1]).argmin().unwrap(), 2);
         assert_eq!(mk(vec![3, 2, 1]).argmax().unwrap(), 0);
+    }
+
+    #[test]
+    fn series_int64_extremes_across_lane_blocks_e186m() {
+        // The lane kernels (br-frankenpandas-e186m) over many sixteen-value
+        // blocks: the extreme in a late block, repeated in a later one (the
+        // first position wins), ints past 2^53 a double cannot tell apart.
+        let mk = |v: Vec<i64>| {
+            Series::from_values(
+                "x",
+                (0..v.len() as i64)
+                    .map(IndexLabel::Int64)
+                    .collect::<Vec<_>>(),
+                v.into_iter().map(Scalar::Int64).collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        let mut values: Vec<i64> = (0..200_i64).map(|k| (k * 37) % 101 - 50).collect();
+        values[130] = 2_i64.pow(60) + 1;
+        values[171] = 2_i64.pow(60) + 1;
+        values[20] = 2_i64.pow(60);
+        values[77] = -(2_i64.pow(60));
+        values[150] = -(2_i64.pow(60));
+        values[199] = -(2_i64.pow(60)) + 1;
+        let s = mk(values);
+        assert!(s.column.as_i64_slice().is_some());
+        assert_eq!((s.argmax().unwrap(), s.argmin().unwrap()), (130, 77));
+        assert_eq!(
+            (s.max().unwrap(), s.min().unwrap()),
+            (
+                Scalar::Int64(2_i64.pow(60) + 1),
+                Scalar::Int64(-(2_i64.pow(60)))
+            )
+        );
+        // NEGATIVE: compared as doubles, 2^60 + 1 and 2^60 tie, and the first
+        // of them (position 20) would be the argmax.
+        let close = mk(vec![2_i64.pow(60), 2_i64.pow(60) + 1, 0]);
+        assert_eq!(close.argmax().unwrap(), 1);
     }
 
     #[test]

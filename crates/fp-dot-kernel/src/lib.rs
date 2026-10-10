@@ -1203,6 +1203,147 @@ macro_rules! compare_scalar_kernel {
     };
 }
 
+/// The least / greatest of `values`, `None` when there is none, sixteen
+/// lanes at a time: an int64 compare has no instruction before SSE4.2 and
+/// the baseline emulates it in several (Series.min / max of a million ints
+/// 0.17 ms, pandas 0.09; br-frankenpandas-e186m). An integer min / max is
+/// exact in any order, so the lanes answer as the serial fold does.
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn min_i64(values: &[i64]) -> Option<i64> {
+    fold_i64_lanes(values, i64::MAX, i64::min)
+}
+
+/// The greatest of `values`; see [`min_i64`].
+///
+/// ⚠️ The CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn max_i64(values: &[i64]) -> Option<i64> {
+    fold_i64_lanes(values, i64::MIN, i64::max)
+}
+
+/// The first position of the least of `values` (numpy's argmin, ties to
+/// the first), `None` when empty: one pass of sixteen lanes, each keeping
+/// its least and the block it was first seen in - a position carried
+/// through a scalar compare made Series.argmax of a million ints 0.47 ms,
+/// pandas 0.10 (br-frankenpandas-e186m).
+///
+/// ⚠️ The CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn argmin_i64(values: &[i64]) -> Option<usize> {
+    arg_extreme_i64_lanes::<false>(values)
+}
+
+/// The first position of the greatest of `values`; see [`argmin_i64`].
+///
+/// ⚠️ The CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn argmax_i64(values: &[i64]) -> Option<usize> {
+    arg_extreme_i64_lanes::<true>(values)
+}
+
+/// The wrapping sum of `values` (numpy's int64 sum), four lanes a vector -
+/// the baseline adds two (Series.sum of a million ints 0.12 ms, pandas
+/// 0.09; br-frankenpandas-e186m). Wrapping addition is associative, so any
+/// order gives the serial fold's sum.
+///
+/// ⚠️ The CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn sum_i64(values: &[i64]) -> i64 {
+    let (chunks, tail) = values.as_chunks::<16>();
+    let mut lanes = [0_i64; 16];
+    for chunk in chunks {
+        for (lane, &value) in lanes.iter_mut().zip(chunk) {
+            *lane = lane.wrapping_add(value);
+        }
+    }
+    lanes
+        .into_iter()
+        .chain(tail.iter().copied())
+        .fold(0, i64::wrapping_add)
+}
+
+/// `values` folded by `pick` in sixteen independent lanes from `seed`, then
+/// the lanes and the tail; `None` when empty. Inlined into each kernel, so
+/// it is codegenned here with the kernel's `+avx2`.
+#[inline(always)]
+fn fold_i64_lanes(values: &[i64], seed: i64, pick: impl Fn(i64, i64) -> i64 + Copy) -> Option<i64> {
+    if values.is_empty() {
+        return None;
+    }
+    let (chunks, tail) = values.as_chunks::<16>();
+    let mut lanes = [seed; 16];
+    for chunk in chunks {
+        for (lane, &value) in lanes.iter_mut().zip(chunk) {
+            *lane = pick(*lane, value);
+        }
+    }
+    Some(
+        lanes
+            .into_iter()
+            .chain(tail.iter().copied())
+            .fold(seed, pick),
+    )
+}
+
+/// The first position of the greatest (`MAX`) or least of `values`:
+/// sixteen lanes each keep their extreme and the block it was first seen
+/// in (a strict compare, so a lane keeps its first); then the least
+/// position among the lanes holding the overall extreme - every block
+/// position precedes the tail's, which answers only when no lane holds it.
+#[inline(always)]
+#[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)] // block numbers of a slice
+fn arg_extreme_i64_lanes<const MAX: bool>(values: &[i64]) -> Option<usize> {
+    if values.is_empty() {
+        return None;
+    }
+    let seed = if MAX { i64::MIN } else { i64::MAX };
+    let beats = |value: i64, best: i64| if MAX { value > best } else { value < best };
+    let (chunks, tail) = values.as_chunks::<16>();
+    // A lane that never beats its seed holds the seed from block 0 on.
+    let mut best = [seed; 16];
+    let mut seen = [0_i64; 16];
+    for (block, chunk) in chunks.iter().enumerate() {
+        let block = block as i64;
+        for ((kept, first), &value) in best.iter_mut().zip(seen.iter_mut()).zip(chunk) {
+            let better = beats(value, *kept);
+            *kept = if better { value } else { *kept };
+            *first = if better { block } else { *first };
+        }
+    }
+    let lane_best = best
+        .iter()
+        .copied()
+        .reduce(|a, b| if beats(b, a) { b } else { a });
+    let tail_best = tail
+        .iter()
+        .copied()
+        .reduce(|a, b| if beats(b, a) { b } else { a });
+    let extreme = match (chunks.is_empty(), lane_best, tail_best) {
+        (false, Some(lanes), Some(rest)) if beats(rest, lanes) => rest,
+        (false, Some(lanes), _) => lanes,
+        (_, _, rest) => rest?,
+    };
+    if !chunks.is_empty()
+        && let Some(position) = (0..16)
+            .filter(|&lane| best[lane] == extreme)
+            .map(|lane| seen[lane] as usize * 16 + lane)
+            .min()
+    {
+        return Some(position);
+    }
+    tail.iter()
+        .position(|&value| value == extreme)
+        .map(|offset| chunks.len() * 16 + offset)
+}
+
 compare_scalar_kernel!(gt_f64_scalar_into, f64, simd_gt, >);
 compare_scalar_kernel!(ge_f64_scalar_into, f64, simd_ge, >=);
 compare_scalar_kernel!(lt_f64_scalar_into, f64, simd_lt, <);
@@ -2560,5 +2701,63 @@ mod div_f64_into_uza04 {
         a[n - 2] = 0.0;
         b[n - 2] = 0.0;
         assert_bit_identical(&a, &b);
+    }
+}
+
+#[cfg(test)]
+mod int_extremes_e186m {
+    use super::*;
+
+    /// The serial answers the lane kernels must give: the first position
+    /// of the least / greatest, ties to the first.
+    fn serial(values: &[i64]) -> (Option<i64>, Option<i64>, Option<usize>, Option<usize>) {
+        let least = values.iter().copied().min();
+        let greatest = values.iter().copied().max();
+        let first = |target: Option<i64>| target.and_then(|t| values.iter().position(|&v| v == t));
+        (least, greatest, first(least), first(greatest))
+    }
+
+    #[test]
+    fn lanes_answer_as_the_serial_fold_at_every_length() {
+        // Repeated extremes (the first one wins), both int64 ends, ints past
+        // 2^53 a double cannot tell apart, every tail length.
+        let mut values: Vec<i64> = (0..70_i64).map(|k| (k * 7919) % 53 - 26).collect();
+        values[9] = 2_i64.pow(60) + 1;
+        values[40] = 2_i64.pow(60) + 1;
+        values[41] = 2_i64.pow(60);
+        values[33] = i64::MIN;
+        values[65] = i64::MIN;
+        for len in 0..=values.len() {
+            let part = &values[..len];
+            assert_eq!(
+                (
+                    min_i64(part),
+                    max_i64(part),
+                    argmin_i64(part),
+                    argmax_i64(part)
+                ),
+                serial(part),
+                "len {len}"
+            );
+            // The sum wraps as numpy's int64 sum (2^60 + 1 twice and the
+            // least int64 twice overflow).
+            let wrapped = part.iter().fold(0_i64, |sum, &v| sum.wrapping_add(v));
+            assert_eq!(sum_i64(part), wrapped, "sum, len {len}");
+        }
+    }
+
+    #[test]
+    fn empty_has_no_extreme_and_a_lone_value_is_both() {
+        assert_eq!(
+            (min_i64(&[]), max_i64(&[]), argmin_i64(&[]), argmax_i64(&[])),
+            (None, None, None, None)
+        );
+        assert_eq!(
+            (min_i64(&[i64::MAX]), argmax_i64(&[i64::MAX])),
+            (Some(i64::MAX), Some(0))
+        );
+        // NEGATIVE: a later equal value is not the position (ties to the first).
+        let ties = [5_i64; 40];
+        assert_eq!((argmin_i64(&ties), argmax_i64(&ties)), (Some(0), Some(0)));
     }
 }
