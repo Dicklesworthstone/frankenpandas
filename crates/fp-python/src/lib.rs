@@ -62004,14 +62004,11 @@ fn multiindex_sort_rows(
             order.into_iter().map(|position| (position, asc)).collect()
         }
     };
-    let levels: Vec<Vec<IndexLabel>> = (0..multi.nlevels())
-        .map(|position| {
-            multi
-                .get_level_values(position)
-                .map(|values| values.labels().to_vec())
-        })
-        .collect::<Result<_, _>>()
-        .map_err(index_error_to_py)?;
+    // Each level borrowed: two copies of every level were made for the
+    // sort (br-frankenpandas-e186m).
+    let levels: Vec<&[IndexLabel]> = (0..multi.nlevels())
+        .map(|position| multi.level_labels(position).unwrap_or_default())
+        .collect();
     let na_first = match na_position {
         "first" => true,
         "last" => false,
@@ -62021,6 +62018,17 @@ fn multiindex_sort_rows(
             )));
         }
     };
+    // A stable radix lexsort over each sorted level's label ranks: the same
+    // order as the comparison sort below, which compared label tuples a
+    // pair at a time (sort_index of a 200k-row MultiIndex 0.03x pandas;
+    // br-frankenpandas-e186m).
+    let keys: Option<Vec<Vec<u64>>> = order
+        .iter()
+        .map(|&(position, asc)| label_rank_keys(levels[position], asc, na_first))
+        .collect();
+    if let Some(keys) = keys.filter(|keys| !keys.is_empty()) {
+        return Ok(fp_columnar::radix_argsort_multi_u64(&keys));
+    }
     let mut rows: Vec<usize> = (0..multi.len()).collect();
     rows.sort_by(|&a, &b| {
         for &(position, asc) in &order {
@@ -62041,6 +62049,52 @@ fn multiindex_sort_rows(
         std::cmp::Ordering::Equal
     });
     Ok(rows)
+}
+
+/// Each row's key for a stable radix lexsort over `labels` in the order
+/// [`multiindex_sort_rows`]' comparator gives: distinct labels ranked by
+/// `IndexLabel::cmp` (labels it calls equal share a rank), reversed when
+/// descending, a missing label first or last (`na_first`) whatever the
+/// direction. None past u32 distinct labels.
+fn label_rank_keys(labels: &[IndexLabel], ascending: bool, na_first: bool) -> Option<Vec<u64>> {
+    let codes = fp_index::first_seen_label_codes(labels)?;
+    let distinct = codes.iter().max().map_or(0, |&code| code as usize + 1);
+    let mut first_row = vec![usize::MAX; distinct];
+    for (row, &code) in codes.iter().enumerate() {
+        let first = &mut first_row[code as usize];
+        if *first == usize::MAX {
+            *first = row;
+        }
+    }
+    let label_of = |code: usize| &labels[first_row[code]];
+    let mut present: Vec<usize> = (0..distinct)
+        .filter(|&code| !label_of(code).is_missing())
+        .collect();
+    present.sort_by(|&a, &b| label_of(a).cmp(label_of(b)));
+    let mut rank_of = vec![0_u64; distinct];
+    let mut rank = 0_u64;
+    for (at, &code) in present.iter().enumerate() {
+        if at > 0 && label_of(present[at - 1]).cmp(label_of(code)) != std::cmp::Ordering::Equal {
+            rank += 1;
+        }
+        rank_of[code] = rank;
+    }
+    let missing_key = if na_first { 0 } else { rank + 2 };
+    Some(
+        codes
+            .iter()
+            .map(|&code| {
+                let code = code as usize;
+                if label_of(code).is_missing() {
+                    missing_key
+                } else if ascending {
+                    1 + rank_of[code]
+                } else {
+                    1 + rank - rank_of[code]
+                }
+            })
+            .collect(),
+    )
 }
 
 fn frame_rows_keeping_multiindex(

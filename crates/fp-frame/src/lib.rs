@@ -127183,6 +127183,68 @@ mod tests {
     }
 
     #[test]
+    fn text_keys_sort_by_their_ranks_e186m() {
+        // An all-valid text key joins the radix lexsort as its strings'
+        // ranks: the comparator's order, ties broken by the next key
+        // (br-frankenpandas-e186m).
+        let frame = DataFrame::new(
+            Index::from_range(0, 5, 1),
+            BTreeMap::from([
+                (
+                    "s".to_owned(),
+                    Column::from_utf8_contiguous(b"baba".to_vec(), vec![0, 1, 2, 2, 3, 4]),
+                ),
+                (
+                    "x".to_owned(),
+                    Column::from_f64_values(vec![1.0, 2.0, 3.0, 0.5, 1.0]),
+                ),
+            ]),
+        )
+        .unwrap();
+        let rows = |out: DataFrame| {
+            out.index()
+                .labels()
+                .iter()
+                .filter_map(IndexLabel::exact_int)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rows(
+                frame
+                    .sort_values_multi(&["s", "x"], &[true, true], "last")
+                    .unwrap()
+            ),
+            [2, 4, 1, 3, 0]
+        );
+        assert_eq!(
+            rows(
+                frame
+                    .sort_values_multi(&["s", "x"], &[false, true], "last")
+                    .unwrap()
+            ),
+            [3, 0, 4, 1, 2]
+        );
+        // NEGATIVE: a text key holding a missing value takes the comparator,
+        // the missing row last.
+        let gappy = DataFrame::new(
+            Index::from_range(0, 3, 1),
+            BTreeMap::from([(
+                "s".to_owned(),
+                Column::from_object_values(vec![
+                    Scalar::Utf8("b".to_owned()),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Utf8("a".to_owned()),
+                ]),
+            )]),
+        )
+        .unwrap();
+        assert_eq!(
+            rows(gappy.sort_values_multi(&["s"], &[true], "last").unwrap()),
+            [2, 0, 1]
+        );
+    }
+
+    #[test]
     fn replace_keeps_a_repeated_keys_last_pair_e186m() {
         // pandas writes the pairs in order over the original values: a key
         // given twice is its last pair's (br-frankenpandas-e186m).

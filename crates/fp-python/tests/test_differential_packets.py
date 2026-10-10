@@ -35732,3 +35732,50 @@ def test_groupby_head_tail_nth_like_pandas_e186m(case: str, by: str) -> None:
         ]
 
     assert run(fpd) == run(pd)
+
+
+# br-frankenpandas-e186m: a MultiIndex sort_index sorts by each level's
+# label ranks through a stable radix lexsort - pandas' row order for
+# ascending / descending / per-level ascending, level= with and without
+# sort_remaining, missing labels first or last, ties in input order.
+# NEGATIVE: a level of mixed ints and text, unordered category levels.
+def _e186mms_frame(m: Any) -> Any:
+    n = 80
+    return m.DataFrame(
+        {
+            "a": [(i * 7) % 5 for i in range(n)],
+            "b": [f"b{(i * 3) % 4}" for i in range(n)],
+            "x": list(range(n)),
+        }
+    ).set_index(["a", "b"])
+
+
+_E186MMS_CASES = {
+    "ascending": lambda df: df.sort_index(),
+    "descending": lambda df: df.sort_index(ascending=False),
+    "per level": lambda df: df.sort_index(ascending=[True, False]),
+    "level b": lambda df: df.sort_index(level="b"),
+    "level b alone": lambda df: df.sort_index(level="b", sort_remaining=False),
+    "missing last": lambda df: df.reset_index().assign(a=lambda d: d["a"].where(d["x"] % 6 > 0)).set_index(["a", "b"]).sort_index(),
+    "missing first": lambda df: df.reset_index()
+    .assign(b=lambda d: d["b"].where(d["x"] % 5 > 0))
+    .set_index(["a", "b"])
+    .sort_index(na_position="first"),
+    "series": lambda df: df["x"].sort_index(ascending=False),
+    "three levels": lambda df: df.reset_index()
+    .assign(y=lambda d: d["x"] * 2)
+    .set_index(["b", "a", "x"])
+    .sort_index(ascending=[False, True, False]),
+    "category levels (NEGATIVE)": lambda df: df.reset_index().astype({"b": "category"}).set_index(["b", "a"]).sort_index(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_E186MMS_CASES))
+def test_multiindex_sort_index_like_pandas_e186m(case: str) -> None:
+    def run(m: Any) -> Any:
+        out = _E186MMS_CASES[case](_e186mms_frame(m))
+        values = out.tolist() if not hasattr(out, "columns") else out.iloc[:, 0].tolist()
+        return ([repr(label) for label in out.index.tolist()], values)
+
+    assert run(fpd) == run(pd)

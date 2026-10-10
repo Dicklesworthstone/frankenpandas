@@ -21583,9 +21583,12 @@ pub struct MultiIndex {
     /// Optional name for each level, typed: set_index([0, 1]) names them the
     /// integers 0 and 1 (fvsao.64).
     names: Vec<Option<LabelName>>,
-    /// Per-level first-seen identity codes, used by duplicate/unique kernels.
+    /// Per-level first-seen identity codes, used by duplicate/unique kernels,
+    /// made on first use: every MultiIndex built (a take, a swap, a sort's
+    /// result) hashed every label of two levels for them
+    /// (br-frankenpandas-e186m).
     #[serde(skip)]
-    identity_codes: Option<Vec<Vec<u32>>>,
+    identity_codes: std::sync::OnceLock<Option<Vec<Vec<u32>>>>,
     /// A missing label is a value of its level - pandas' groupby
     /// (dropna=False) keys, NaN inside `levels` - rather than pandas' code
     /// -1 (set_index, from_arrays): an unstack sorts it with the values
@@ -21731,11 +21734,10 @@ impl PartialEq for MultiIndex {
 
 impl MultiIndex {
     fn from_levels_and_names(levels: Vec<Vec<IndexLabel>>, names: Vec<Option<LabelName>>) -> Self {
-        let identity_codes = build_multi_index_identity_codes(&levels);
         Self {
             levels,
             names,
-            identity_codes,
+            identity_codes: std::sync::OnceLock::new(),
             missing_is_a_level: false,
         }
     }
@@ -21754,8 +21756,16 @@ impl MultiIndex {
         self.missing_is_a_level
     }
 
+    /// The levels' first-seen identity codes (see the field), made now if
+    /// not yet.
+    fn identity_codes(&self) -> Option<&Vec<Vec<u32>>> {
+        self.identity_codes
+            .get_or_init(|| build_multi_index_identity_codes(&self.levels))
+            .as_ref()
+    }
+
     fn compact_two_level_identity_layout(&self) -> Option<CompactIdentityCodeLayout<'_>> {
-        let codes = self.identity_codes.as_ref()?;
+        let codes = self.identity_codes()?;
         if codes.len() != 2 || codes[0].len() != self.len() || codes[1].len() != self.len() {
             return None;
         }
@@ -22789,6 +22799,15 @@ impl MultiIndex {
             idx = idx.set_name(name);
         }
         Ok(idx)
+    }
+
+    /// One level's labels, row by row, borrowed - [`Self::get_level_values`]
+    /// copies them into an Index (a million labels, each text one a String,
+    /// for a read; br-frankenpandas-e186m). None past the last level.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn level_labels(&self, level: usize) -> Option<&[IndexLabel]> {
+        self.levels.get(level).map(Vec::as_slice)
     }
 
     /// Get the tuple of labels at a specific position.
@@ -24315,7 +24334,7 @@ impl MultiIndex {
         Ok(Self {
             levels,
             names: vec![None; 2],
-            identity_codes,
+            identity_codes: std::sync::OnceLock::from(identity_codes),
             missing_is_a_level: false,
         })
     }
@@ -25776,6 +25795,56 @@ mod tests {
     }
 
     #[test]
+    fn range_positions_by_arithmetic_and_borrowed_levels_e186m() {
+        // An ascending range answers its int labels by arithmetic, an
+        // integral float its int; off the step, past either end or not a
+        // number, none (br-frankenpandas-e186m).
+        let stepped = Index::from_range(0, 40, 5);
+        let wanted = [
+            IndexLabel::Int64(35),
+            IndexLabel::Int64(5),
+            IndexLabel::Int64(7),
+            IndexLabel::Float64(crate::OrderedF64(10.0)),
+            IndexLabel::Int64(40),
+            IndexLabel::Int64(-5),
+            IndexLabel::Utf8("5".to_owned()),
+        ];
+        assert_eq!(
+            stepped.sorted_unique_int64_positions(&wanted),
+            Some(vec![Some(7), Some(1), None, Some(2), None, None, None])
+        );
+        // NEGATIVE: a descending range is no ascending index - the caller
+        // takes the unsorted lookup.
+        assert_eq!(
+            Index::from_range(40, 0, -5).sorted_unique_int64_positions(&wanted),
+            None
+        );
+        // A level's labels borrowed as they are held; none past the last.
+        let multi = MultiIndex::from_arrays(vec![
+            vec![IndexLabel::Int64(1), IndexLabel::Int64(2)],
+            vec![
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("b".to_owned()),
+            ],
+        ])
+        .unwrap();
+        assert_eq!(
+            multi.level_labels(1),
+            Some(
+                [
+                    IndexLabel::Utf8("a".to_owned()),
+                    IndexLabel::Utf8("b".to_owned())
+                ]
+                .as_slice()
+            )
+        );
+        assert_eq!(multi.level_labels(2), None);
+        // The identity codes wait for their first reader, then answer.
+        assert!(multi.identity_codes.get().is_none());
+        assert_eq!(multi.identity_codes(), Some(&vec![vec![0, 1], vec![0, 1]]));
+    }
+
+    #[test]
     fn two_arrays_with_codes_match_hashed_ones_e186m() {
         // A caller's first-seen codes give the MultiIndex from_arrays builds
         // by hashing both levels (br-frankenpandas-e186m).
@@ -25790,8 +25859,8 @@ mod tests {
         .unwrap();
         let hashed = MultiIndex::from_arrays(vec![rows.clone(), columns.clone()]).unwrap();
         assert_eq!(given, hashed);
-        assert_eq!(given.identity_codes, hashed.identity_codes);
-        assert!(given.identity_codes.is_some());
+        assert_eq!(given.identity_codes(), hashed.identity_codes());
+        assert!(given.identity_codes().is_some());
         // NEGATIVE: levels or codes of another length are refused.
         assert!(
             MultiIndex::from_two_arrays_with_identity_codes(
@@ -25841,7 +25910,7 @@ mod tests {
             [vec![], vec![]],
         )
         .unwrap();
-        assert!(empty.identity_codes.is_none());
+        assert!(empty.identity_codes().is_none());
     }
 
     #[test]
@@ -42326,7 +42395,7 @@ mod tests {
         let without_sidecar = super::MultiIndex {
             levels: mi.levels.clone(),
             names: mi.names.clone(),
-            identity_codes: None,
+            identity_codes: std::sync::OnceLock::from(None),
             missing_is_a_level: false,
         };
         assert!(

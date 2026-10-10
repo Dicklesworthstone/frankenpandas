@@ -12041,12 +12041,13 @@ mod tests {
         build_single_key_dense_cycle_i64_left_merge_output,
         build_single_key_dense_i64_left_merge_output,
         build_single_key_dense_i64_right_merge_output,
-        build_single_key_inner_contiguous_no_overlap_output, join_series, join_series_with_options,
-        join_series_with_trace, lower_hex_overlap_plan_from_certificates,
-        ordered_unique_utf8_inner_position_plan, ordered_unique_utf8_inner_positions,
-        ordered_utf8_lower_hex_overlap_len, scalar_utf8_left_positions,
-        scalar_utf8_outer_positions, sorted_contiguous_utf8_inner_positions,
-        strictly_increasing_utf8_key_spans, utf8_span_lower_bound,
+        build_single_key_inner_contiguous_no_overlap_output, dense_int64_outer_positions,
+        join_series, join_series_with_options, join_series_with_trace,
+        lower_hex_overlap_plan_from_certificates, ordered_unique_utf8_inner_position_plan,
+        ordered_unique_utf8_inner_positions, ordered_utf8_lower_hex_overlap_len,
+        scalar_utf8_left_positions, scalar_utf8_outer_positions,
+        sorted_contiguous_utf8_inner_positions, strictly_increasing_utf8_key_spans,
+        utf8_span_lower_bound,
     };
 
     fn contiguous_utf8_column(values: &[&str]) -> Column {
@@ -12124,6 +12125,35 @@ mod tests {
             right_positions,
             vec![Some(0), Some(1), Some(2), Some(1), Some(2), None, Some(3),]
         );
+    }
+
+    #[test]
+    fn dense_outer_positions_group_repeated_keys_e186m() {
+        // Each side's rows grouped by key in one counting pass: keys
+        // ascending, a key's left rows in order, each with its right rows
+        // in order, a one-sided key with None opposite (br-frankenpandas-e186m).
+        let left = Column::from_i64_values(vec![3, 1, 3, 2]);
+        let right = Column::from_i64_values(vec![1, 3, 3, 5]);
+        let (left_positions, right_positions) =
+            dense_int64_outer_positions(&left, &right).expect("dense outer positions");
+        assert_eq!(
+            left_positions,
+            vec![Some(1), Some(3), Some(0), Some(0), Some(2), Some(2), None]
+        );
+        assert_eq!(
+            right_positions,
+            vec![Some(0), None, Some(1), Some(2), Some(1), Some(2), Some(3)]
+        );
+        // A key holding a missing value, or keys spread past the dense table,
+        // decline (NEGATIVE).
+        let gappy = Column::new(
+            DType::Int64,
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)],
+        )
+        .expect("int column with a gap");
+        assert!(dense_int64_outer_positions(&gappy, &right).is_none());
+        let sparse = Column::from_i64_values(vec![0, 1_000_000_000, 0]);
+        assert!(dense_int64_outer_positions(&sparse, &right).is_none());
     }
 
     #[test]
