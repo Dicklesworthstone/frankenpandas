@@ -4999,6 +4999,20 @@ fn fill_reindex_positions(
         .collect())
 }
 
+/// A datetime index held as instants one constant, nonzero step apart
+/// throughout (two or more, no NaT): its first instant, the step and the
+/// length, read in one pass over the instants.
+fn arithmetic_instants(index: &Index) -> Option<(i64, i64, usize)> {
+    let values = index.datetime64_label_values()?;
+    let (&first, &second) = (values.first()?, values.get(1)?);
+    let step = second.checked_sub(first).filter(|&step| step != 0)?;
+    // A fold, not a search: it vectorizes.
+    let even = values.windows(2).fold(true, |even, pair| {
+        even & (pair[1] != i64::MIN) & (pair[1].wrapping_sub(pair[0]) == step)
+    });
+    (first != i64::MIN && even).then_some((first, step, values.len()))
+}
+
 /// `target`'s positions in a unique `source` when both hold int labels in a
 /// typed backing (a range, an int64 buffer), without an `IndexLabel` made: an
 /// affine source (a RangeIndex) by arithmetic, any other by the map of its
@@ -5007,6 +5021,33 @@ fn fill_reindex_positions(
 /// a million rows to a range made both label sets first (15-27 ms where
 /// pandas takes 3-13; br-frankenpandas-mcq15).
 fn reindex_positions_typed(source: &Index, target: &Index) -> Option<Vec<Option<usize>>> {
+    // Instants in one zone on both sides, the source an arithmetic run of
+    // them (a date_range, or a buffer one step apart throughout): by
+    // arithmetic, as an int range's - each instant was resolved through a
+    // map (asfreq's reindex onto its grid; br-frankenpandas-rdcj4). A NaT
+    // target holds no row.
+    if source.tz() == target.tz()
+        && let Some((start, step, len)) = source
+            .datetime64_affine_labels()
+            .or_else(|| arithmetic_instants(source))
+        && step != 0
+        && let Some(targets) = target.datetime64_label_values()
+    {
+        return Some(
+            targets
+                .iter()
+                .map(|&value| {
+                    let offset = value.checked_sub(start)?;
+                    if offset.checked_rem(step)? != 0 {
+                        return None;
+                    }
+                    usize::try_from(offset.checked_div(step)?)
+                        .ok()
+                        .filter(|&at| at < len)
+                })
+                .collect(),
+        );
+    }
     if !(source.has_int64_backing() && target.has_int64_backing()) {
         return None;
     }
@@ -6552,10 +6593,54 @@ fn parse_offset_str(offset: &str) -> Result<(i32, char), FrameError> {
 /// none); the index must be sorted (a decreasing one keeps the same labels in
 /// its own order); and `before` may not come after `after`.
 fn truncate_range(
-    labels: &[IndexLabel],
+    index: &Index,
     before: Option<&IndexLabel>,
     after: Option<&IndexLabel>,
 ) -> Result<(usize, usize), FrameError> {
+    // A datetime index answers on its instants, no label made: every label
+    // was made and compared (ts.truncate 0.6 ms at 200k rows, pandas 0.45;
+    // br-frankenpandas-rdcj4). A bound of another kind reads the labels.
+    if index.tz().is_none()
+        && let Some(values) = index.datetime64_label_values()
+        && !values.is_empty()
+    {
+        let instant = |bound: Option<&IndexLabel>| match bound {
+            None => Some(None),
+            Some(IndexLabel::Datetime64(nanos)) => Some(Some(*nanos)),
+            Some(IndexLabel::Utf8(text)) => parse_datetime64_nanos(text).ok().map(Some),
+            Some(_) => None,
+        };
+        if let (Some(low), Some(high)) = (instant(before), instant(after)) {
+            if let (Some(low), Some(high)) = (low, high)
+                && low > high
+            {
+                return Err(FrameError::CompatibilityRejected(format!(
+                    "Truncate: {} must be after {}",
+                    IndexLabel::Datetime64(high),
+                    IndexLabel::Datetime64(low)
+                )));
+            }
+            let above_low = |value: i64| low.is_none_or(|low| value >= low);
+            let below_high = |value: i64| high.is_none_or(|high| value <= high);
+            let (start, end) = if values.windows(2).all(|pair| pair[0] <= pair[1]) {
+                (
+                    values.partition_point(|&value| !above_low(value)),
+                    values.partition_point(|&value| below_high(value)),
+                )
+            } else if values.windows(2).all(|pair| pair[0] >= pair[1]) {
+                (
+                    values.partition_point(|&value| !below_high(value)),
+                    values.partition_point(|&value| above_low(value)),
+                )
+            } else {
+                return Err(FrameError::CompatibilityRejected(
+                    "truncate requires a sorted index".to_owned(),
+                ));
+            };
+            return Ok((start, end.max(start)));
+        }
+    }
+    let labels = index.labels();
     let before = before.map(|bound| datetime_list_label(labels, bound));
     let after = after.map(|bound| datetime_list_label(labels, bound));
     if let (Some(low), Some(high)) = (&before, &after)
@@ -7543,6 +7628,48 @@ fn format_asfreq_label(
             Ok(IndexLabel::Datetime64(nanos))
         }
     }
+}
+
+/// pandas' asfreq grid - `date_range(index.min(), index.max(), freq)` - for
+/// a datetime index held as instants stepped by a fixed span (D, h, min, s,
+/// ms, us, ns): an arithmetic index of instants in the index's zone (a
+/// fixed span steps absolute time), with no label made. An unsorted index
+/// conforms too, as pandas' (the label path raised), and a zoned one keeps
+/// its zone (it was dropped). None for any other index or offset, and
+/// where the label path answers: a NaT, repeated labels, a step that does
+/// not advance, a grid past a million.
+fn asfreq_affine_target(index: &Index, freq: &str) -> Result<Option<Index>, FrameError> {
+    let Some(values) = index.datetime64_label_values() else {
+        return Ok(None);
+    };
+    if values.is_empty() || values.contains(&i64::MIN) || index.has_duplicates() {
+        return Ok(None);
+    }
+    let start = values.iter().copied().min().unwrap_or_default();
+    let end = values.iter().copied().max().unwrap_or_default();
+    let (step, unit) = parse_asfreq_step(freq)?;
+    let span: i64 = match unit {
+        AsFreqUnit::Days => 86_400_000_000_000,
+        AsFreqUnit::Hours => 3_600_000_000_000,
+        AsFreqUnit::Minutes => 60_000_000_000,
+        AsFreqUnit::Seconds => 1_000_000_000,
+        AsFreqUnit::Milliseconds => 1_000_000,
+        AsFreqUnit::Microseconds => 1_000,
+        AsFreqUnit::Nanoseconds => 1,
+        _ => return Ok(None),
+    };
+    let Some(step) = i64::from(step).checked_mul(span).filter(|&step| step > 0) else {
+        return Ok(None);
+    };
+    let count = end
+        .checked_sub(start)
+        .map(|span| span / step)
+        .and_then(|steps| usize::try_from(steps).ok())
+        .and_then(|steps| steps.checked_add(1))
+        .filter(|&count| count <= 1_000_000);
+    Ok(count
+        .and_then(|count| Index::from_datetime64_affine_range(start, step, count))
+        .and_then(|target| target.with_tz(index.tz()).ok()))
 }
 
 fn asfreq_target_labels(index: &Index, freq: &str) -> Result<Vec<IndexLabel>, FrameError> {
@@ -33521,7 +33648,7 @@ impl Series {
         before: Option<&IndexLabel>,
         after: Option<&IndexLabel>,
     ) -> Result<Self, FrameError> {
-        let (start, end) = truncate_range(self.index.labels(), before, after)?;
+        let (start, end) = truncate_range(&self.index, before, after)?;
         // perf (br-frankenpandas-8dmcl): zero-copy contiguous slice (typed/affine);
         // an empty window keeps the dtype and (br-frankenpandas-5cc2t) the
         // index name.
@@ -96498,10 +96625,17 @@ impl DataFrame {
             ));
         }
 
-        let labels = asfreq_target_labels(&self.index, freq)?;
-        let mut result = match method {
-            Some(method) => self.reindex_with_method(labels, method)?,
-            None => self.reindex(labels)?,
+        // A datetime index stepped by a fixed span conforms to a typed
+        // arithmetic run of instants: each label was parsed into a calendar
+        // datetime, the grid built and made into labels again, and the
+        // reindex read them (ts.asfreq('30s') 1.56 ms at 20k rows, pandas
+        // 0.57; br-frankenpandas-rdcj4).
+        let mut result = match (method, asfreq_affine_target(&self.index, freq)?) {
+            (None, Some(target)) => self.reindex_to_index(&target)?,
+            (Some(method), _) => {
+                self.reindex_with_method(asfreq_target_labels(&self.index, freq)?, method)?
+            }
+            (None, None) => self.reindex(asfreq_target_labels(&self.index, freq)?)?,
         };
         if let Some(fill_value) = fill_value {
             // ⚠️ The fill happens AFTER reindex, which invents NaN gaps and
@@ -107739,7 +107873,7 @@ impl DataFrame {
         before: Option<&IndexLabel>,
         after: Option<&IndexLabel>,
     ) -> Result<Self, FrameError> {
-        let (start, end) = truncate_range(self.index.labels(), before, after)?;
+        let (start, end) = truncate_range(&self.index, before, after)?;
         // perf (br-frankenpandas-5ww2v): zero-copy contiguous slice per column +
         // index (start..end is a contiguous range over natural index order); an
         // empty window keeps the dtypes and (br-frankenpandas-oygjj) the index

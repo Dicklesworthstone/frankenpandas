@@ -36720,3 +36720,76 @@ def test_loc_column_keys_like_pandas_184aa(case: str) -> None:
     if "NEGATIVE" in case:
         assert expected[0] != "raise"
     assert _loc184_outcome(case, fpd) == expected
+
+
+# br-frankenpandas-rdcj4: truncate and asfreq over a DatetimeIndex answer on
+# its instants (truncate made and compared every label; asfreq parsed each
+# into a calendar datetime and back) - the same rows, labels, freq and
+# errors as pandas'; asfreq keeps a zone and conforms an unsorted index, as
+# pandas' (fp dropped the zone and raised). NEGATIVE: an int index's
+# truncate and a method= or fill_value asfreq answer as pandas' through the
+# label paths; inverted bounds and an unsorted index are truncate's
+# ValueError.
+def _rdcj4_frame(m: Any, periods: int = 300, freq: str = "min", tz: Any = None) -> Any:
+    index = m.date_range("2021-01-01", periods=periods, freq=freq, tz=tz)
+    return m.DataFrame({"x": [float(i) for i in range(periods)], "k": list(range(periods))}, index=index)
+
+
+def _rdcj4_gapped(m: Any) -> Any:
+    index = m.DatetimeIndex(["2021-01-01 00:00", "2021-01-01 00:03", "2021-01-01 00:04", "2021-01-01 00:09"])
+    return m.DataFrame({"x": [1.0, 2.0, 3.0, 4.0], "k": [1, 2, 3, 4]}, index=index)
+
+
+_RDCJ4_CASES = {
+    "truncate text bounds": lambda m: _rdcj4_frame(m).truncate(before="2021-01-01 01:00", after="2021-01-01 02:30"),
+    "truncate Timestamp bounds": lambda m: _rdcj4_frame(m).truncate(before=m.Timestamp("2021-01-01 00:10"), after=m.Timestamp("2021-01-01 00:20:30")),
+    "truncate before only": lambda m: _rdcj4_frame(m).truncate(before="2021-01-01 04:50"),
+    "truncate after only": lambda m: _rdcj4_frame(m).truncate(after="2021-01-01 00:02"),
+    "truncate outside": lambda m: _rdcj4_frame(m).truncate(before="2020-12-01", after="2020-12-02"),
+    "truncate decreasing": lambda m: _rdcj4_frame(m).iloc[::-1].truncate(before="2021-01-01 00:05", after="2021-01-01 00:08"),
+    "truncate inverted (NEGATIVE)": lambda m: _rdcj4_frame(m).truncate(before="2021-01-01 02:00", after="2021-01-01 01:00"),
+    "truncate unsorted (NEGATIVE)": lambda m: _rdcj4_frame(m).iloc[[3, 1, 2]].truncate(before="2021-01-01 00:01"),
+    "Series truncate": lambda m: _rdcj4_frame(m)["x"].truncate(before="2021-01-01 00:30", after="2021-01-01 00:33"),
+    "int index truncate (NEGATIVE)": lambda m: m.DataFrame({"x": [1.0, 2.0, 3.0]}, index=[1, 5, 9]).truncate(before=2, after=9),
+    "asfreq 30s": lambda m: _rdcj4_frame(m, 60).asfreq("30s"),
+    "asfreq 2min": lambda m: _rdcj4_frame(m, 60).asfreq("2min"),
+    "asfreq h": lambda m: _rdcj4_frame(m, 300).asfreq("h"),
+    "asfreq 7min past the end": lambda m: _rdcj4_frame(m, 30).asfreq("7min"),
+    "asfreq D of hours": lambda m: _rdcj4_frame(m, 100, "h").asfreq("D"),
+    "asfreq gapped": lambda m: _rdcj4_gapped(m).asfreq("min"),
+    "Series asfreq 30s": lambda m: _rdcj4_frame(m, 20)["x"].asfreq("30s"),
+    "asfreq fill_value (NEGATIVE)": lambda m: _rdcj4_gapped(m).asfreq("min", fill_value=0),
+    "asfreq ffill (NEGATIVE)": lambda m: _rdcj4_gapped(m).asfreq("min", method="ffill"),
+    "asfreq tz": lambda m: _rdcj4_frame(m, 10, tz="UTC").asfreq("30s"),
+    "asfreq zone of its own": lambda m: _rdcj4_frame(m, 10, "h", tz="US/Eastern").asfreq("30min"),
+    "asfreq unsorted": lambda m: _rdcj4_gapped(m).iloc[[1, 0, 2]].asfreq("min"),
+    "asfreq bfill (NEGATIVE)": lambda m: _rdcj4_gapped(m).asfreq("2min", method="bfill"),
+    "reindex off the grid": lambda m: _rdcj4_frame(m, 10).reindex(
+        m.DatetimeIndex(["2021-01-01 00:00:30", "2021-01-01 00:02", "NaT", "2020-12-31 23:59", "2021-01-01 00:09"])
+    ),
+}
+
+
+def _rdcj4_outcome(case: str, m: Any) -> Any:
+    try:
+        out = _RDCJ4_CASES[case](m)
+    except Exception as e:
+        return ("raise", type(e).__name__)
+    frame = out.to_frame() if not hasattr(out, "columns") else out
+    return (
+        [repr(label) for label in out.index.tolist()],
+        str(out.index.dtype),
+        out.index.freqstr if hasattr(out.index, "freqstr") else None,
+        [repr(c) for c in frame.columns],
+        [str(frame[c].dtype) for c in frame.columns],
+        repr(frame.values.tolist()),
+    )
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_RDCJ4_CASES))
+def test_truncate_asfreq_like_pandas_rdcj4(case: str) -> None:
+    expected = _rdcj4_outcome(case, pd)
+    if case.startswith("truncate inverted") or case.startswith("truncate unsorted"):
+        assert expected == ("raise", "ValueError")
+    assert _rdcj4_outcome(case, fpd) == expected
