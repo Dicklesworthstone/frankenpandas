@@ -9370,6 +9370,13 @@ fn each_i64<T>(values: &[i64], apply: impl Fn(i64) -> T) -> Vec<T> {
     values.iter().map(|&value| apply(value)).collect()
 }
 
+/// Whether no two of `frame`'s columns share a name (br-frankenpandas-ew6ft).
+fn distinct_column_names(frame: &DataFrame) -> bool {
+    let names = frame.column_names();
+    let mut seen = std::collections::HashSet::with_capacity(names.len());
+    names.iter().all(|name| seen.insert(name.as_str()))
+}
+
 /// `apply` over an index's numbers as float64s, held as float64s: floats
 /// held as floats, or (`ints`) an int64 index's ints widened as numpy's
 /// float64 arithmetic widens them (br-frankenpandas-smlca). None for any other index.
@@ -13940,6 +13947,23 @@ impl PyIndex {
         tupleize_cols: bool,
     ) -> PyResult<Py<PyAny>> {
         let _ = copy; // pandas' copy= does not change the labels
+        // An Index of a datetime / timedelta / period / categorical index is
+        // that index - its class, name and freq - renamed by a name given,
+        // as pandas' (its labels were read out: the name and freq were lost
+        // and a CategoricalIndex came back a plain Index; br-frankenpandas-vvigx).
+        if dtype.is_none_or(|dtype| dtype.is_none())
+            && let Some(data) = data
+            && (data.is_instance_of::<PyDatetimeIndex>()
+                || data.is_instance_of::<PyTimedeltaIndex>()
+                || data.is_instance_of::<PyPeriodIndex>()
+                || data.is_instance_of::<PyCategoricalIndex>())
+        {
+            let copied = match name.filter(|name| !name.is_none()) {
+                Some(name) => data.call_method1("rename", (name,))?,
+                None => data.call_method0("copy")?,
+            };
+            return Ok(copied.unbind());
+        }
         // Any hashable names it, typed (`name=7` raised TypeError; fvsao.64).
         let name = name.map(py_axis_name).transpose()?.flatten();
         // Datetimes in more than one zone (or aware beside naive) are an
@@ -57005,6 +57029,36 @@ impl PyDataFrame {
         }
         let suffixes = PyTuple::new(py, [lsuffix, rsuffix])?;
         let Some(keys) = on_keys else {
+            // Equal unique indexes of one dtype: pandas' Index.join returns
+            // the caller's index (its equals shortcut), so the frames'
+            // columns are set side by side, shared - the merge built a row
+            // map of every row (df.join(df2) over 500k equal timestamps 2.8
+            // ms, pandas 1.7; br-frankenpandas-ew6ft). An outer join sorts
+            // (pandas merges how='outer' with sort), so only an ascending
+            // index is its own answer.
+            let index = self.inner.index();
+            if overlap.is_empty()
+                && !sort
+                && validate.is_none()
+                && (matches!(how, "left" | "inner")
+                    || (how == "outer" && index.is_monotonic_increasing()))
+                && self.inner.row_multiindex().is_none()
+                && right_df.row_multiindex().is_none()
+                && index.name() == right_df.index().name()
+                && index.dtype() == right_df.index().dtype()
+                && index == right_df.index()
+                && index.is_unique()
+                && distinct_column_names(&self.inner)
+                && distinct_column_names(&right_df)
+            {
+                let inner = fp_frame::concat_dataframes_with_axis_join(
+                    &[&self.inner, &right_df],
+                    1,
+                    fp_frame::ConcatJoin::Outer,
+                )
+                .map_err(frame_error_to_py)?;
+                return Ok(PyDataFrame { inner });
+            }
             // A MultiIndex frame and a flat one join on the level named as
             // the flat index (see [`join_on_level`]).
             if let Some(inner) = join_on_level(&self.inner, &right_df, how, lsuffix, rsuffix)? {
@@ -57382,17 +57436,47 @@ impl PyDataFrame {
         fill_value: Option<&Bound<'_, PyAny>>,
         sort: bool,
     ) -> PyResult<Py<PyAny>> {
+        // A flat index: pandas' frame transposed and stacked with
+        // future_stack - a Series under the (column, row) MultiIndex, every
+        // cell kept, level and fill_value unused - where it read composite
+        // 'row|column' labels as two levels and refused any other index
+        // (br-frankenpandas-35g3p).
         if self.inner.row_multiindex().is_none() {
-            unsupported_params(
-                "DataFrame.unstack",
-                &[
-                    ("level", level.is_none_or(|level| level.is_none())),
-                    ("fill_value", fill_value.is_none()),
-                    ("sort", sort),
-                ],
+            // A level named, not numbered, is the index's name or pandas'
+            // KeyError (a number is read as the only level).
+            if let Some(level) = level.filter(|level| !level.is_none()) {
+                let levels: Vec<Bound<'_, PyAny>> =
+                    if level.is_instance_of::<PyList>() || level.is_instance_of::<PyTuple>() {
+                        level.try_iter()?.collect::<PyResult<_>>()?
+                    } else {
+                        vec![level.clone()]
+                    };
+                let name = axis_name_to_py(py, self.inner.index().name())?
+                    .unwrap_or_else(|| py.None())
+                    .into_bound(py);
+                for level in levels {
+                    if level.is_instance_of::<pyo3::types::PyInt>() || level.eq(&name)? {
+                        continue;
+                    }
+                    return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                        "Requested level ({}) does not match index name ({})",
+                        level.str()?,
+                        name.str()?
+                    )));
+                }
+            }
+            let frame = Bound::new(
+                py,
+                PyDataFrame {
+                    inner: self.inner.clone(),
+                },
             )?;
-            let df = self.inner.unstack().map_err(frame_error_to_py)?;
-            return Ok(Py::new(py, PyDataFrame { inner: df })?.into_any());
+            let options = PyDict::new(py);
+            options.set_item("future_stack", true)?;
+            return Ok(frame
+                .getattr("T")?
+                .call_method("stack", (), Some(&options))?
+                .unbind());
         }
         if !sort {
             return Err(not_implemented("DataFrame.unstack(sort=False)"));
@@ -84958,6 +85042,21 @@ fn merge_impl(
             .with_tz(fp_index::joined_tz(left.index(), right.index()).as_deref())
             .map_err(index_error_to_py)?
             .with_freq(freq);
+        // An int index joined with a float64 one is their common float64, as
+        // pandas' (equal labels, or a left / inner join, kept the ints;
+        // br-frankenpandas-vvigx).
+        let int = |index: &Index| {
+            let dtype = index.dtype();
+            dtype.starts_with("int") || dtype.starts_with("uint")
+        };
+        let float = |index: &Index| index.dtype() == "float64";
+        let index = if (int(left.index()) && float(right.index()))
+            || (float(left.index()) && int(right.index()))
+        {
+            index.astype("float64").map_err(index_error_to_py)?
+        } else {
+            index
+        };
         return frame.with_index(index).map_err(frame_error_to_py);
     }
 

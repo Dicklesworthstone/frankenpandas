@@ -37332,3 +37332,136 @@ def test_period_diff_like_pandas_76kq0(case: str) -> None:
         return str(out.dtype), [repr(value) for value in out.tolist()]
 
     assert outcome(fpd) == outcome(pd)
+
+
+# br-frankenpandas-ew6ft: a join of frames on equal unique indexes of one dtype keeps
+# the caller's index (its freq too) and sets the columns side by side, as
+# pandas' Index.join shortcut does. NEGATIVE: an outer join of an unsorted
+# index sorts, how='right', sort=True, repeated labels (many-to-many),
+# overlapping columns with a suffix, unequal names and a Series other answer
+# as pandas through the merge.
+def _ew6ft_frames(m: Any, labels: Any, name: Any = None, name2: Any = None, cols2: tuple = ("c",)) -> Any:
+    left = m.DataFrame({"a": [1.0, 2.0, 3.0, 4.0], "b": [5, 6, 7, 8]}, index=m.Index(labels, name=name))
+    right = m.DataFrame({column: [10 + i for i in range(4)] for column in cols2}, index=m.Index(list(labels), name=name2))
+    return left, right
+
+
+def _ew6ft_join(m: Any, labels: Any, **kwargs: Any) -> Any:
+    left, right = _ew6ft_frames(m, labels, kwargs.pop("name", None), kwargs.pop("name2", None), kwargs.pop("cols2", ("c",)))
+    return left.join(right, **kwargs)
+
+
+def _ew6ft_shared(m: Any) -> Any:
+    index = m.date_range("2020-01-01", periods=4, freq="D")
+    return m.DataFrame({"a": range(4)}, index=index).join(m.DataFrame({"c": range(4)}, index=index))
+
+
+_EW6FT_CASES = {
+    "left sorted": lambda m: _ew6ft_join(m, [1, 2, 3, 4]),
+    "left unsorted": lambda m: _ew6ft_join(m, [3, 1, 4, 2]),
+    "inner unsorted": lambda m: _ew6ft_join(m, [3, 1, 4, 2], how="inner"),
+    "outer sorted": lambda m: _ew6ft_join(m, [1, 2, 3, 4], how="outer"),
+    "named text": lambda m: _ew6ft_join(m, ["x", "y", "z", "w"], name="k", name2="k"),
+    "shared dates keep freq": _ew6ft_shared,
+    "outer unsorted (NEGATIVE)": lambda m: _ew6ft_join(m, [3, 1, 4, 2], how="outer"),
+    "right (NEGATIVE)": lambda m: _ew6ft_join(m, [3, 1, 4, 2], how="right"),
+    "sort (NEGATIVE)": lambda m: _ew6ft_join(m, [3, 1, 4, 2], sort=True),
+    "repeated labels (NEGATIVE)": lambda m: _ew6ft_join(m, [1, 1, 2, 2]),
+    "overlap suffix (NEGATIVE)": lambda m: _ew6ft_join(m, [1, 2, 3, 4], cols2=("a",), rsuffix="_r"),
+    "names differ (NEGATIVE)": lambda m: _ew6ft_join(m, ["x", "y", "z", "w"], name="k", name2="j"),
+    "series other (NEGATIVE)": lambda m: (lambda left, right: left.join(right["c"]))(*_ew6ft_frames(m, [3, 1, 4, 2])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EW6FT_CASES))
+def test_join_equal_indexes_like_pandas_ew6ft(case: str) -> None:
+    def outcome(m: Any) -> Any:
+        out = _EW6FT_CASES[case](m)
+        return (
+            type(out.index).__name__,
+            str(out.index.dtype),
+            repr(out.index.name),
+            [repr(label) for label in out.index.tolist()],
+            getattr(out.index, "freqstr", None),
+            [repr(column) for column in out.columns],
+            [str(out[column].dtype) for column in out.columns],
+            repr(out.values.tolist()),
+        )
+
+    assert outcome(fpd) == outcome(pd)
+
+# br-frankenpandas-vvigx: an Index of a typed index is that index - class, name, freq -
+# renamed by name=; an int index joined with a float64 one is float64. NEGATIVE:
+# an Index of a list of Timestamps has no freq; an int index joined with an
+# int one stays int64, a float one with a float one float64.
+def _vvigx_typed(m: Any) -> dict[str, Any]:
+    return {
+        "dti": m.date_range("2020-01-01", periods=4, freq="D", name="when"),
+        "dti tz": m.date_range("2020-01-01", periods=3, freq="h", tz="UTC", name="z"),
+        "tdi": m.timedelta_range("1h", periods=3, freq="h", name="dur"),
+        "pi": m.period_range("2020-01", periods=3, freq="M", name="per"),
+        "ci": m.CategoricalIndex(["a", "b", "a"], name="cat"),
+    }
+
+
+def _vvigx_join(m: Any, left: Any, right: Any, how: str) -> Any:
+    return m.DataFrame({"a": [1, 2]}, index=m.Index(left)).join(m.DataFrame({"c": [3, 4]}, index=m.Index(right)), how=how)
+
+
+_VVIGX_CASES = {
+    **{f"Index of {kind}": (lambda kind: lambda m: m.Index(_vvigx_typed(m)[kind]))(kind) for kind in ("dti", "dti tz", "tdi", "pi", "ci")},
+    **{f"Index of {kind} renamed": (lambda kind: lambda m: m.Index(_vvigx_typed(m)[kind], name="o"))(kind) for kind in ("dti", "tdi", "ci")},
+    **{f"int with float {how}": (lambda how: lambda m: _vvigx_join(m, [1, 2], [1.0, 2.0], how))(how) for how in ("left", "inner", "outer", "right")},
+    "int with other floats left": lambda m: _vvigx_join(m, [1, 2], [2.0, 3.0], "left"),
+    "float with int left": lambda m: _vvigx_join(m, [1.0, 2.0], [1, 2], "left"),
+    "merge on indexes": lambda m: m.merge(m.DataFrame({"a": [1, 2]}, index=m.Index([1, 2])), m.DataFrame({"c": [3, 4]}, index=m.Index([2.0, 1.0])), left_index=True, right_index=True),
+    "Index of Timestamps (NEGATIVE)": lambda m: m.Index(list(m.date_range("2020-01-01", periods=3, freq="D"))),
+    "int with int (NEGATIVE)": lambda m: _vvigx_join(m, [1, 2], [2, 1], "left"),
+    "float with float (NEGATIVE)": lambda m: _vvigx_join(m, [1.5, 2.5], [2.5, 1.5], "inner"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VVIGX_CASES))
+def test_typed_index_and_number_join_like_pandas_vvigx(case: str) -> None:
+    def outcome(m: Any) -> Any:
+        out = _VVIGX_CASES[case](m)
+        index = out if not hasattr(out, "columns") else out.index
+        shown = (type(index).__name__, str(index.dtype), list(index.names), [repr(label) for label in index.tolist()], getattr(index, "freqstr", None))
+        if hasattr(out, "columns"):
+            shown += (repr(out.values.tolist()),)
+        return shown
+
+    assert outcome(fpd) == outcome(pd)
+
+
+# br-frankenpandas-35g3p: a flat-index frame's unstack is its transpose stacked with
+# future_stack, as pandas' - a Series under the (column, row) MultiIndex, NaN
+# cells kept. NEGATIVE: a row MultiIndex keeps its own unstack.
+_UNSTACK_35G3P_CASES = {
+    "int index": lambda m: m.DataFrame({"a": [1, 2], "b": [3, 4]}).unstack(),
+    "text index named": lambda m: m.DataFrame({"a": [1.5, None], "b": [3.0, 4.0]}, index=m.Index(["x", "y"], name="row")).unstack(),
+    "dates": lambda m: m.DataFrame({"v": [1, 2, 3]}, index=m.date_range("2020-01-01", periods=3, freq="D")).unstack(),
+    "columns named": lambda m: m.DataFrame({"a": [1, 2]}).rename_axis(columns="col").unstack(),
+    "level by number": lambda m: m.DataFrame({"a": [1, 2]}).unstack(level=0),
+    "level by name": lambda m: m.DataFrame({"a": [1, 2]}, index=m.Index([5, 6], name="k")).unstack(level="k"),
+    "level not the name (NEGATIVE)": lambda m: m.DataFrame({"a": [1, 2]}).unstack(level="zz"),
+    "row MultiIndex (NEGATIVE)": lambda m: m.DataFrame({"v": [1, 2, 3, 4]}, index=m.MultiIndex.from_product([["p", "q"], [1, 2]])).unstack(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_UNSTACK_35G3P_CASES))
+def test_flat_unstack_like_pandas_35g3p(case: str) -> None:
+    def outcome(m: Any) -> Any:
+        try:
+            out = _UNSTACK_35G3P_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__, str(error)
+        shown = (type(out).__name__, [repr(label) for label in out.index.tolist()], list(out.index.names))
+        if hasattr(out, "columns"):
+            return shown + ([repr(column) for column in out.columns], repr(out.values.tolist()))
+        return shown + (str(out.dtype), [repr(value) for value in out.tolist()])
+
+    assert outcome(fpd) == outcome(pd)
