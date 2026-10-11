@@ -37465,3 +37465,157 @@ def test_flat_unstack_like_pandas_35g3p(case: str) -> None:
         return shown + (str(out.dtype), [repr(value) for value in out.tolist()])
 
     assert outcome(fpd) == outcome(pd)
+
+
+# br-frankenpandas-ytumo: a naive Timestamp placed among zoned instants (or an aware
+# one among naive) makes pandas' object column holding it as it is - replace
+# (a value, a list of keys, a dict), fillna, where, mask, item assignment,
+# inplace too. NEGATIVE: another zone is read in the column's (pandas
+# converts it), and nothing placed - no NaT to fill, no key matched, a
+# condition that holds - keeps the zoned dtype.
+def _ytumo_zoned(m: Any) -> Any:
+    return m.Series(m.date_range("2020-01-01", periods=3, freq="D", tz="UTC"))
+
+
+def _ytumo_gappy(m: Any, zone: Any) -> Any:
+    return m.Series([m.Timestamp("2020-01-01", tz=zone), m.NaT, m.Timestamp("2020-01-03", tz=zone)])
+
+
+def _ytumo_set(series: Any, value: Any) -> Any:
+    series[1] = value
+    return series
+
+
+def _ytumo_inplace(series: Any, method: str, *args: Any) -> Any:
+    getattr(series, method)(*args, inplace=True)
+    return series
+
+
+_YTUMO_CASES = {
+    "replace naive in zoned": lambda m: _ytumo_zoned(m).replace(m.Timestamp("2020-01-02", tz="UTC"), m.Timestamp("2021-01-01")),
+    "replace aware in naive": lambda m: m.Series(m.date_range("2020-01-01", periods=3, freq="D")).replace(m.Timestamp("2020-01-02"), m.Timestamp("2021-01-01", tz="UTC")),
+    "replace same instant": lambda m: _ytumo_zoned(m).replace(m.Timestamp("2020-01-02", tz="UTC"), m.Timestamp("2020-01-02")),
+    "replace list of keys": lambda m: _ytumo_zoned(m).replace([m.Timestamp("2020-01-01", tz="UTC"), m.Timestamp("2020-01-03", tz="UTC")], m.Timestamp("2021-01-01")),
+    "replace dict": lambda m: _ytumo_zoned(m).replace({m.Timestamp("2020-01-02", tz="UTC"): m.Timestamp("2021-01-01")}),
+    "fillna naive in zoned": lambda m: _ytumo_gappy(m, "UTC").fillna(m.Timestamp("2021-01-01")),
+    "fillna aware in naive": lambda m: _ytumo_gappy(m, None).fillna(m.Timestamp("2021-01-01", tz="UTC")),
+    "fillna a datetime": lambda m: _ytumo_gappy(m, "UTC").fillna(__import__("datetime").datetime(2021, 1, 1)),
+    "where naive in zoned": lambda m: _ytumo_zoned(m).where([True, False, True], m.Timestamp("2021-01-01")),
+    "mask naive in zoned": lambda m: _ytumo_zoned(m).mask([True, False, True], m.Timestamp("2021-01-01")),
+    "setitem naive in zoned": lambda m: _ytumo_set(_ytumo_zoned(m), m.Timestamp("2021-01-01")),
+    "fillna inplace": lambda m: _ytumo_inplace(_ytumo_gappy(m, "UTC"), "fillna", m.Timestamp("2021-01-01")),
+    "where inplace": lambda m: _ytumo_inplace(_ytumo_zoned(m), "where", [True, False, True], m.Timestamp("2021-01-01")),
+    "another zone (NEGATIVE)": lambda m: _ytumo_zoned(m).replace(m.Timestamp("2020-01-02", tz="UTC"), m.Timestamp("2021-01-01", tz="America/New_York")),
+    "nothing to fill (NEGATIVE)": lambda m: _ytumo_zoned(m).fillna(m.Timestamp("2021-01-01")),
+    "no key matched (NEGATIVE)": lambda m: _ytumo_zoned(m).replace(m.Timestamp("1999-01-01", tz="UTC"), m.Timestamp("2021-01-01")),
+    "condition holds (NEGATIVE)": lambda m: _ytumo_zoned(m).where([True, True, True], m.Timestamp("2021-01-01")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_YTUMO_CASES))
+def test_awareness_mix_like_pandas_ytumo(case: str) -> None:
+    def outcome(m: Any) -> Any:
+        import warnings as _warnings
+
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore")
+            out = _YTUMO_CASES[case](m)
+        return str(out.dtype), [repr(value) for value in out.tolist()]
+
+    assert outcome(fpd) == outcome(pd)
+
+
+# br-frankenpandas-fuylb: pandas 2.2's default stack of MultiIndex columns at any level
+# - a name, a number, a list stacked in turn - is its future_stack answer with
+# the stacked labels sorted in each row and the rows holding no value
+# dropped; a row MultiIndex keeps its levels. NEGATIVE: dropna=False keeps
+# the empty rows, sort=False the column order, a list mixing names and
+# numbers is pandas' ValueError.
+def _fuylb_frame(m: Any, gap: str = "") -> Any:
+    columns = m.MultiIndex.from_tuples([("y", "q"), ("x", "p"), ("y", "p"), ("x", "q")], names=["top", "sub"])
+    frame = m.DataFrame(np.arange(12.0).reshape(3, 4), columns=columns, index=m.Index(["r2", "r0", "r1"], name="row"))
+    if gap == "row":
+        frame.iloc[1, :] = np.nan
+    elif gap == "cells":
+        frame.iloc[0, 1] = np.nan
+        frame.iloc[0, 3] = np.nan
+    return frame
+
+
+def _fuylb_three(m: Any) -> Any:
+    return m.DataFrame(np.arange(8.0).reshape(1, 8), columns=m.MultiIndex.from_product([["b", "a"], ["d", "c"], ["f", "e"]]))
+
+
+_FUYLB_CASES = {
+    "level 0": lambda m: _fuylb_frame(m).stack(0),
+    "level by name": lambda m: _fuylb_frame(m).stack("top"),
+    "a row of NaN dropped": lambda m: _fuylb_frame(m, "row").stack(0),
+    "rows without a value dropped": lambda m: _fuylb_frame(m, "cells").stack(0),
+    "list of numbers": lambda m: _fuylb_frame(m).stack([0, 1]),
+    "list reversed": lambda m: _fuylb_frame(m).stack([1, 0]),
+    "list of names": lambda m: _fuylb_frame(m).stack(["top", "sub"]),
+    "three levels middle": lambda m: _fuylb_three(m).stack(1),
+    "three levels first": lambda m: _fuylb_three(m).stack(0),
+    "three levels last": lambda m: _fuylb_three(m).stack(-1),
+    "three levels list": lambda m: _fuylb_three(m).stack([0, 2]),
+    "row MultiIndex": lambda m: m.DataFrame(_fuylb_frame(m).values, columns=_fuylb_frame(m).columns, index=m.MultiIndex.from_tuples([("g", 1), ("g", 2), ("h", 1)])).stack(0),
+    "int labels": lambda m: m.DataFrame(np.arange(8.0).reshape(2, 4), columns=m.MultiIndex.from_product([[20, 10], [2, 1]])).stack(0),
+    "dropna False (NEGATIVE)": lambda m: _fuylb_frame(m, "cells").stack(0, dropna=False),
+    "sort False (NEGATIVE)": lambda m: _fuylb_frame(m).stack(0, sort=False),
+    "mixed list (NEGATIVE)": lambda m: _fuylb_frame(m).stack([0, "sub"]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FUYLB_CASES))
+def test_legacy_stack_levels_like_pandas_fuylb(case: str) -> None:
+    def outcome(m: Any) -> Any:
+        import warnings as _warnings
+
+        try:
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore")
+                out = _FUYLB_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        shown = (type(out).__name__, [repr(label) for label in out.index.tolist()], list(out.index.names))
+        if hasattr(out, "columns"):
+            return shown + ([repr(column) for column in out.columns], repr(out.values.tolist()))
+        return shown + (repr(out.tolist()),)
+
+    assert outcome(fpd) == outcome(pd)
+
+
+# br-frankenpandas-eeywy: set_index of a MultiIndex - alone or a list's one item - makes it
+# the row MultiIndex. NEGATIVE: a list of column names still keys a
+# MultiIndex of those columns; a MultiIndex of another length is pandas'
+# ValueError.
+def _eeywy_frame(m: Any) -> Any:
+    return m.DataFrame({"v": [1, 2, 3], "w": ["a", "b", "c"]})
+
+
+def _eeywy_levels(m: Any, rows: int = 3) -> Any:
+    return m.MultiIndex.from_tuples([("g", 1), ("g", 2), ("h", 1)][:rows], names=["k", "n"])
+
+
+_EEYWY_CASES = {
+    "MultiIndex": lambda m: _eeywy_frame(m).set_index(_eeywy_levels(m)),
+    "list of a MultiIndex": lambda m: _eeywy_frame(m).set_index([_eeywy_levels(m)]),
+    "then loc": lambda m: _eeywy_frame(m).set_index(_eeywy_levels(m)).loc["g"],
+    "column names (NEGATIVE)": lambda m: _eeywy_frame(m).set_index(["w", "v"]),
+    "another length (NEGATIVE)": lambda m: _eeywy_frame(m).set_index(_eeywy_levels(m, 2)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_EEYWY_CASES))
+def test_set_index_multiindex_like_pandas_eeywy(case: str) -> None:
+    def outcome(m: Any) -> Any:
+        try:
+            out = _EEYWY_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return (type(out.index).__name__, [repr(label) for label in out.index.tolist()], list(out.index.names), [repr(column) for column in out.columns], repr(out.values.tolist()))
+
+    assert outcome(fpd) == outcome(pd)

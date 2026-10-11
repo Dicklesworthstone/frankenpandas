@@ -7031,6 +7031,95 @@ fn py_datetime_nanos(dt: &Bound<'_, PyDateTime>) -> PyResult<i64> {
 /// The zone of a tz-aware `datetime.datetime` as pandas names it: an IANA
 /// key (`zoneinfo.ZoneInfo`, pytz), `datetime.timezone`'s own name ('UTC',
 /// 'UTC+05:30'), else its fixed offset at that value; None for a naive one.
+/// Whether `value` - a Timestamp or a datetime - is naive where `series`
+/// holds zoned instants, or aware where it holds naive ones: pandas makes
+/// the column object when such a value is placed, each value as it is - the
+/// core read a naive value in the column's zone (another instant) or dropped
+/// a value's zone (br-frankenpandas-ytumo).
+fn mixes_awareness(series: &Series, value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let DType::Datetime64 { tz } = series.column().dtype() else {
+        return Ok(false);
+    };
+    let aware = if let Ok(stamp) = value.extract::<PyRef<'_, PyTimestamp>>() {
+        stamp.inner.tz.is_some()
+    } else if let Ok(datetime) = value.cast::<PyDateTime>() {
+        py_datetime_zone(datetime)?.is_some()
+    } else {
+        return Ok(false);
+    };
+    Ok(aware != tz.is_some())
+}
+
+/// `placed` - an op's answer that set `value` among `series`' instants, read
+/// in their awareness - as pandas answers when `value` mixes awareness with
+/// them ([`mixes_awareness`]): the object column of the instants with
+/// `value` itself in each row the op changed; `placed` as it is when it
+/// changed none, as pandas keeps the dtype then (br-frankenpandas-ytumo).
+fn mixed_placement(series: &Series, placed: Series, value: &Bound<'_, PyAny>) -> PyResult<Series> {
+    let before = series.column().values();
+    let after = placed.column().values();
+    if before.len() != after.len() {
+        return Ok(placed);
+    }
+    let changed: Vec<usize> = (0..before.len())
+        .filter(|&row| {
+            let (was, now) = (&before[row], &after[row]);
+            !(was == now || (was.is_missing() && now.is_missing()))
+        })
+        .collect();
+    if changed.is_empty() {
+        return Ok(placed);
+    }
+    objects_with(&placed, &[(changed, value.clone())])
+}
+
+/// The rows a where-condition leaves to `other`: false or missing (br-frankenpandas-ytumo).
+fn failing_rows(cond: &Series) -> Vec<usize> {
+    cond.column()
+        .values()
+        .iter()
+        .enumerate()
+        .filter(|(_, flag)| !matches!(flag, Scalar::Bool(true)))
+        .map(|(row, _)| row)
+        .collect()
+}
+
+/// The object column of `base`'s values with each `(rows, value)`'s value
+/// itself, as pandas holds it, in those rows (br-frankenpandas-ytumo).
+fn objects_with(base: &Series, placed: &[(Vec<usize>, Bound<'_, PyAny>)]) -> PyResult<Series> {
+    let mut cells = object_series(base)?.column().values().to_vec();
+    for (rows, value) in placed {
+        let cell = Scalar::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(
+            PyHost(value.clone().unbind()),
+        )));
+        for &row in rows {
+            cells[row] = cell.clone();
+        }
+    }
+    Series::new(
+        base.name().clone(),
+        base.index().clone(),
+        Column::from_object_values(cells),
+    )
+    .map_err(frame_error_to_py)
+}
+
+/// The rows of `series`' instants equal to `key`, a Timestamp / datetime of
+/// their awareness; none for another awareness (pandas compares aware and
+/// naive as unequal) or a key that is no instant (br-frankenpandas-ytumo).
+fn instant_rows(py: Python<'_>, series: &Series, key: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
+    if mixes_awareness(series, key)? {
+        return Ok(Vec::new());
+    }
+    let Ok(Scalar::Datetime64(nanos)) = py_to_scalar(py, key) else {
+        return Ok(Vec::new());
+    };
+    let values = series.column().values();
+    Ok((0..values.len())
+        .filter(|&row| matches!(values[row], Scalar::Datetime64(cell) if cell == nanos))
+        .collect())
+}
+
 fn py_datetime_zone(dt: &Bound<'_, PyDateTime>) -> PyResult<Option<String>> {
     let Some(tzinfo) = dt.get_tzinfo() else {
         return Ok(None);
@@ -33729,7 +33818,14 @@ impl PySeries {
     ) -> PyResult<()> {
         let key = &interval_point_key(py, self.inner.index(), key, false)?;
         let target = series_setitem_target(&self.inner, key)?;
-        self.inner = series_write(py, &self.inner, target, value, false)?;
+        let written = series_write(py, &self.inner, target, value, false)?;
+        // A naive value set into zoned instants (or an aware one into
+        // naive): pandas' object column where it lands (br-frankenpandas-ytumo).
+        self.inner = if mixes_awareness(&self.inner, value)? {
+            mixed_placement(&self.inner, written, value)?
+        } else {
+            written
+        };
         Ok(())
     }
 
@@ -35605,6 +35701,14 @@ impl PySeries {
         let result = PySeries {
             inner: downcast_object_fill(&self.inner, result.inner)?,
         };
+        // A naive fill in zoned instants (or an aware one in naive):
+        // pandas' object column where it is placed (br-frankenpandas-ytumo).
+        let result = match value {
+            Some(fill) if mixes_awareness(&self.inner, fill)? => PySeries {
+                inner: mixed_placement(&self.inner, result.inner, fill)?,
+            },
+            _ => result,
+        };
         Ok(series_inplace(&mut self.inner, result, inplace))
     }
 
@@ -36805,6 +36909,43 @@ impl PySeries {
         }
         let result = PySeries {
             inner: zoned_object_cells_kept(&self.inner, result.inner)?,
+        };
+        // A naive replacement in zoned instants (or an aware one in naive),
+        // as the value or a dict's: pandas' object column holding it in the
+        // rows its key matched (br-frankenpandas-ytumo).
+        let mut placed = Vec::new();
+        match (to_replace, value) {
+            (Some(keys), Some(replacement)) if mixes_awareness(&self.inner, replacement)? => {
+                let mut rows = Vec::new();
+                if keys.is_instance_of::<PyList>() || keys.is_instance_of::<PyTuple>() {
+                    for key in keys.try_iter()? {
+                        rows.extend(instant_rows(py, &self.inner, &key?)?);
+                    }
+                    rows.sort_unstable();
+                    rows.dedup();
+                } else {
+                    rows = instant_rows(py, &self.inner, keys)?;
+                }
+                placed.push((rows, replacement.clone()));
+            }
+            (Some(keys), None) => {
+                if let Ok(pairs) = keys.cast::<PyDict>() {
+                    for (key, replacement) in pairs.iter() {
+                        if mixes_awareness(&self.inner, &replacement)? {
+                            placed.push((instant_rows(py, &self.inner, &key)?, replacement));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        placed.retain(|(rows, _)| !rows.is_empty());
+        let result = if placed.is_empty() {
+            result
+        } else {
+            PySeries {
+                inner: objects_with(&result.inner, &placed)?,
+            }
         };
         Ok(series_inplace(&mut self.inner, result, inplace))
     }
@@ -39443,7 +39584,20 @@ impl PySeries {
             if inplace.unwrap_or(false) {
                 warn_inplace_upcast(py, &this.inner, &result, &other_val)?;
             }
-            result
+            // A naive value in zoned instants (or an aware one in naive):
+            // pandas' object column holding it where the condition fails
+            // (br-frankenpandas-ytumo).
+            match other.0.as_ref() {
+                Some(value) if mixes_awareness(&this.inner, value)? => {
+                    let rows = failing_rows(&cond_series);
+                    if rows.is_empty() {
+                        result
+                    } else {
+                        objects_with(&result, &[(rows, value.clone())])?
+                    }
+                }
+                _ => result,
+            }
         };
         if inplace.unwrap_or(false) {
             slf.borrow_mut().inner = res_inner;
@@ -39481,7 +39635,20 @@ impl PySeries {
             if inplace.unwrap_or(false) {
                 warn_inplace_upcast(py, &this.inner, &result, &other_val)?;
             }
-            result
+            // A naive value in zoned instants (or an aware one in naive):
+            // pandas' object column holding it where the condition fails
+            // (br-frankenpandas-ytumo).
+            match other.0.as_ref() {
+                Some(value) if mixes_awareness(&this.inner, value)? => {
+                    let rows = failing_rows(&not_cond_series);
+                    if rows.is_empty() {
+                        result
+                    } else {
+                        objects_with(&result, &[(rows, value.clone())])?
+                    }
+                }
+                _ => result,
+            }
         };
         if inplace.unwrap_or(false) {
             slf.borrow_mut().inner = res_inner;
@@ -43021,6 +43188,64 @@ impl PyDataFrame {
             .and_then(|frame| frame.with_row_multiindex(levels))
             .map(Some)
             .map_err(frame_error_to_py)
+    }
+
+    /// pandas 2.2's default (legacy) stack of MultiIndex columns at `level`,
+    /// any level of any depth, a row MultiIndex too: the future_stack answer
+    /// with each row's stacked labels in sorted order (`sort=False` keeps
+    /// their column order) and, under `dropna` (its default), the rows
+    /// holding no value dropped, as pandas' answers differ from it; with its
+    /// deprecation warning. It refused all but the last of two levels
+    /// (br-frankenpandas-fuylb).
+    fn stack_level_legacy(
+        &self,
+        py: Python<'_>,
+        multi: &fp_index::MultiIndex,
+        level: usize,
+        dropna: Option<bool>,
+        sort: Option<bool>,
+    ) -> PyResult<Py<PyAny>> {
+        PyErr::warn(
+            py,
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+            c"The previous implementation of stack is deprecated and will be removed in a future version of pandas. See the What's New notes for pandas 2.1.0 for details. Specify future_stack=True to adopt the new implementation and silence this warning.",
+            1,
+        )?;
+        let labels = multi
+            .level_labels(level)
+            .ok_or_else(|| not_implemented("stack of a column level without labels"))?;
+        let mut stacked: Vec<&IndexLabel> = Vec::new();
+        for label in labels {
+            if !stacked.contains(&label) {
+                stacked.push(label);
+            }
+        }
+        let width = stacked.len();
+        let mut order: Vec<usize> = (0..width).collect();
+        if sort != Some(false) {
+            order.sort_by(|&left, &right| stacked[left].cmp(stacked[right]));
+        }
+        let future = self
+            .stack_levels_future(py, multi, &[level])?
+            .into_bound(py);
+        let rows = self.inner.len();
+        if future.len()? != rows * width {
+            return Err(not_implemented(
+                "stack of a column level whose rows do not pair with every label",
+            ));
+        }
+        let positions: Vec<usize> = (0..rows)
+            .flat_map(|row| order.iter().map(move |&at| row * width + at))
+            .collect();
+        let mut out = future.call_method1("take", (positions,))?;
+        if dropna != Some(false) {
+            let options = PyDict::new(py);
+            if out.is_instance_of::<PyDataFrame>() {
+                options.set_item("how", "all")?;
+            }
+            out = out.call_method("dropna", (), Some(&options))?;
+        }
+        Ok(out.unbind())
     }
 
     /// pandas' `stack(level, future_stack=True)` of MultiIndex columns: the
@@ -52408,6 +52633,30 @@ impl PyDataFrame {
         inplace: bool,
         verify_integrity: bool,
     ) -> PyResult<Option<PyDataFrame>> {
+        // A MultiIndex key - alone or a list's one item - is the frame's row
+        // MultiIndex, as the index setter makes it: its flat 'g|1' labels
+        // were the index, and in a list it was a missing column (br-frankenpandas-eeywy).
+        if !append {
+            let key = match keys.cast::<PyList>() {
+                Ok(list) if list.len() == 1 => list.get_item(0)?,
+                _ => keys.clone(),
+            };
+            if let Ok(multi) = key.extract::<PyRef<'_, PyMultiIndex>>() {
+                if multi.inner.len() != self.inner.len() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Length mismatch: Expected {} rows, received array of length {}",
+                        self.inner.len(),
+                        multi.inner.len()
+                    )));
+                }
+                let res = self
+                    .inner
+                    .with_index(multi.inner.to_flat_index(MULTIINDEX_FLAT_SEP))
+                    .and_then(|frame| frame.with_row_multiindex(multi.inner.clone()))
+                    .map_err(frame_error_to_py)?;
+                return self.finish_set_index(py, res, inplace, verify_integrity);
+            }
+        }
         // An array key (a Series, an Index, a numpy array) is the new index
         // itself, named after it; `drop` concerns columns only. It raised
         // "keys must be a column name" (fvsao.66: set_index(s.dt.date)).
@@ -57255,6 +57504,57 @@ impl PyDataFrame {
             };
             return self.stack_levels_future(py, multi, &stacked);
         }
+        // A list of levels under pandas 2.2's default implementation: each
+        // stacked in turn, as its stack_multiple does - level numbers past
+        // the one stacked move down one (a list raised TypeError; br-frankenpandas-fuylb).
+        if self.inner.columns_multiindex().is_some()
+            && let Some(items) = level_arg.and_then(level_items)
+        {
+            let numbered = items.iter().all(|item| {
+                item.is_instance_of::<pyo3::types::PyInt>()
+                    && !item.is_instance_of::<pyo3::types::PyBool>()
+            });
+            let any_number = items.iter().any(|item| {
+                item.is_instance_of::<pyo3::types::PyInt>()
+                    && !item.is_instance_of::<pyo3::types::PyBool>()
+            });
+            if any_number && !numbered {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "level should contain all level names or all level numbers, not a mixture of the two.",
+                ));
+            }
+            let mut pending: Vec<Bound<'_, PyAny>> = items;
+            let options = PyDict::new(py);
+            if let Some(dropna) = dropna {
+                options.set_item("dropna", dropna)?;
+            }
+            if let Some(sort) = sort {
+                options.set_item("sort", sort)?;
+            }
+            let mut result = Bound::new(
+                py,
+                PyDataFrame {
+                    inner: self.inner.clone(),
+                },
+            )?
+            .into_any();
+            while !pending.is_empty() {
+                let level = pending.remove(0);
+                result = result.call_method("stack", (&level,), Some(&options))?;
+                if numbered {
+                    let stacked = level.extract::<i64>()?;
+                    pending = pending
+                        .into_iter()
+                        .map(|other| {
+                            let number = other.extract::<i64>()?;
+                            let moved = if number > stacked { number - 1 } else { number };
+                            Ok(moved.into_pyobject(py)?.into_any())
+                        })
+                        .collect::<PyResult<_>>()?;
+                }
+            }
+            return Ok(result.unbind());
+        }
         let level: i64 = match level_arg {
             None => -1,
             Some(level) => match level.extract::<i64>() {
@@ -57286,9 +57586,20 @@ impl PyDataFrame {
                 || dropna == Some(false)
                 || self.inner.row_multiindex().is_some()
             {
-                return Err(not_implemented(
-                    "stack of a MultiIndex column axis other than its last of two levels under pandas 2.2's default implementation",
-                ));
+                let depth = i64::try_from(multi.nlevels()).unwrap_or(i64::MAX);
+                let position = if level < 0 { level + depth } else { level };
+                let Ok(position) = usize::try_from(position) else {
+                    return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                        "Too many levels: Index has only {depth} levels, {level} is not a valid level number"
+                    )));
+                };
+                if position >= multi.nlevels() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                        "Too many levels: Index has only {depth} levels, not {}",
+                        position + 1
+                    )));
+                }
+                return self.stack_level_legacy(py, multi, position, dropna, sort);
             }
             // pandas warns on every stack of MultiIndex columns under its
             // deprecated implementation.
