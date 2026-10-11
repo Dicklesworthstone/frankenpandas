@@ -9,7 +9,7 @@
 > real citation did. The duplicates were renumbered to DISC-022/023/024, keeping the
 > number on whichever entry the existing in-tree citations actually meant. DISC-032
 > was skipped (DISC-033 was taken past it and is cited as such). The next free
-> number is DISC-034. To see every ID in use:
+> number is DISC-035. To see every ID in use:
 > `grep -n '^### DISC-' crates/fp-conformance/DISCREPANCIES.md`
 
 ## Active Divergences
@@ -178,6 +178,13 @@
 - **Impact:** the answer pandas gives depends on how the array was built (the hidden buffer is not observable through pandas' API), so it cannot be reproduced from the values alone.
 - **Resolution:** ACCEPTED (found by br-frankenpandas-1t4kg's sweep).
 - **Review date:** 2026-10-05
+
+### DISC-034: a categorical's `astype(str)` holds its missing value as the Python str `'nan'` (pandas 2.2.3: numpy's `np.str_('nan')`)
+- **Reference:** pandas 2.2.3 casts a categorical Series or CategoricalIndex to str through numpy, so a missing value becomes the numpy scalar `np.str_('nan')` beside Python strs for the categories: `pd.Series(['x', None], dtype='category').astype(str).tolist()` is `['x', np.str_('nan')]`, and `pd.CategoricalIndex(['x', None]).astype(str)` likewise. Measured live 2026-10-10.
+- **Our impl:** the missing value is the Python str `'nan'` - equal to pandas' under `==`, hashing, sorting and every `.str` method; only `type()` of that one cell differs.
+- **Impact:** code testing `type(v) is str` (or `isinstance(v, np.str_)`) on the cell. Holding the numpy scalar would make the cell a host object, which the core's string kernels cannot read (`.str.upper()` would skip it) - a worse divergence than the type.
+- **Resolution:** ACCEPTED (br-frankenpandas-76kq0 and br-frankenpandas-n3ktr's censuses: their only difference left of this kind).
+- **Review date:** 2026-10-10
 
 ## Resolved Divergences
 

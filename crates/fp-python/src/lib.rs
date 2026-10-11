@@ -8127,6 +8127,20 @@ fn py_to_cell_with_ancestors<'py>(
             fp_types::HostValue::new(PyHost(obj.clone().unbind())),
         )));
     }
+    // A tuple, dict or set is a cell as it is - the object cell
+    // py_to_scalar's failure below makes of it, reached through a string of
+    // failed conversions, each raising and formatting its error
+    // (s.str.partition(expand=False) of 500k strings 650 ms, pandas 110;
+    // br-frankenpandas-c1dhv).
+    if obj.is_exact_instance_of::<pyo3::types::PyTuple>()
+        || obj.is_exact_instance_of::<pyo3::types::PyDict>()
+        || obj.is_exact_instance_of::<pyo3::types::PySet>()
+        || obj.is_exact_instance_of::<pyo3::types::PyFrozenSet>()
+    {
+        return Ok(Scalar::Object(fp_types::ObjectValue::Host(
+            fp_types::HostValue::new(PyHost(obj.clone().unbind())),
+        )));
+    }
     let everyday = obj.is_instance_of::<pyo3::types::PyFloat>()
         || obj.is_exact_instance_of::<pyo3::types::PyString>()
         || obj.is_exact_instance_of::<pyo3::types::PyBool>()
@@ -8325,13 +8339,22 @@ fn refuse_datetime_unary(py: Python<'_>, series: &Series, op: &str) -> PyResult<
 /// TypeError, dates subtract), the first `periods` NaN; object unless every
 /// difference is a duration, which pandas' constructor makes timedelta64.
 /// fp-frame read the cells as numbers, so text and dates were NaN
-/// (br-frankenpandas-anux4).
+/// (br-frankenpandas-anux4). A period column is pandas' too: each
+/// difference a DateOffset of its freq (`<2 * MonthEnds>`), NaT where
+/// either period is NaT and for the first `periods` (it was float NaN
+/// throughout; br-frankenpandas-76kq0).
 fn object_diff(py: Python<'_>, series: &Series, periods: i64) -> PyResult<Series> {
     let column = series.column();
     let values = column.values();
     let len = values.len();
     let lag = usize::try_from(periods.unsigned_abs()).unwrap_or(usize::MAX);
-    let mut out = vec![Scalar::Null(NullKind::NaN); len];
+    let period = column.dtype() == DType::Period;
+    let missing = if period {
+        Scalar::Null(NullKind::NaT)
+    } else {
+        Scalar::Null(NullKind::NaN)
+    };
+    let mut out = vec![missing; len];
     for (row, slot) in out.iter_mut().enumerate() {
         let other = if periods >= 0 {
             row.checked_sub(lag)
@@ -8341,6 +8364,9 @@ fn object_diff(py: Python<'_>, series: &Series, periods: i64) -> PyResult<Series
         let Some(other) = other else {
             continue;
         };
+        if period && (values[row].is_missing() || values[other].is_missing()) {
+            continue;
+        }
         let left = cell_to_py(py, column, &values[row])?.into_bound(py);
         let right = cell_to_py(py, column, &values[other])?.into_bound(py);
         *slot = py_to_cell(py, &left.sub(&right)?)?;
@@ -35729,7 +35755,9 @@ impl PySeries {
                 ));
             }
         }
-        if column.dtype() == DType::Utf8 && !column.is_pandas_string() {
+        if (column.dtype() == DType::Utf8 && !column.is_pandas_string())
+            || column.dtype() == DType::Period
+        {
             let inner = Python::attach(|py| object_diff(py, &self.inner, periods))?;
             return Ok(PySeries { inner });
         }
@@ -64525,9 +64553,9 @@ impl PySeriesStringAccessor {
         // Compiled once, as pandas' (re.findall per row ran re's Python-level
         // compile cache lookup each time: 0.52x pandas; br-frankenpandas-e186m).
         let compiled = py.import("re")?.call_method1("compile", (pat, flags))?;
-        self.python_lists(py, |text| {
-            Ok(compiled.call_method1("findall", (text,))?.unbind())
-        })
+        // Its bound method read once (it was looked up a row; br-frankenpandas-c1dhv).
+        let findall = compiled.getattr("findall")?;
+        self.python_lists(py, |text| Ok(findall.call1((text,))?.unbind()))
     }
     /// pandas' `partition(sep=' ', expand=True)` / `rpartition`; with
     /// `expand=False` each string's 3-tuple, a missing value kept (it was
@@ -64943,24 +64971,100 @@ impl PySeriesStringAccessor {
         py: Python<'_>,
         each: impl Fn(&Bound<'_, PyAny>) -> PyResult<Py<PyAny>>,
     ) -> PyResult<PySeries> {
-        let cells = self
-            .series
-            .values()
-            .iter()
-            .map(|value| {
-                let object = scalar_to_py(py, value)?;
-                let bound = object.bind(py);
-                if bound.is_instance_of::<pyo3::types::PyString>() {
-                    py_to_cell(py, each(bound)?.bind(py))
-                } else {
-                    Ok(value.clone())
-                }
-            })
-            .collect::<PyResult<Vec<_>>>()?;
+        // Each distinct text's cell made once and shared by the rows
+        // repeating it: the methods are pure functions of the text and a
+        // cell is immutable shared data (a list cell an `Arc`) - a str was
+        // made, `each` called and its result converted for every row
+        // (s.str.findall(r'\d') of 500k strings over 70k values 423 ms,
+        // pandas 252; br-frankenpandas-c1dhv).
+        let cell_of = |text: &str| -> PyResult<Scalar> {
+            let text = pyo3::types::PyString::new(py, text).into_any();
+            py_to_cell(py, each(&text)?.bind(py))
+        };
+        let cells = if let Some((bytes, offsets)) = self.series.column().as_utf8_window() {
+            let mut made = TextCells::default();
+            offsets
+                .windows(2)
+                .map(|bounds| {
+                    let text = &bytes[bounds[0]..bounds[1]];
+                    made.cell(text, || {
+                        cell_of(std::str::from_utf8(text).map_err(|error| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(error.to_string())
+                        })?)
+                    })
+                })
+                .collect::<PyResult<Vec<_>>>()?
+        } else {
+            let values = self.series.values();
+            let mut made = TextCells::default();
+            values
+                .iter()
+                .map(|value| {
+                    if let Scalar::Utf8(text) = value {
+                        return made.cell(text.as_bytes(), || cell_of(text));
+                    }
+                    let object = scalar_to_py(py, value)?;
+                    let bound = object.bind(py);
+                    if bound.is_instance_of::<pyo3::types::PyString>() {
+                        py_to_cell(py, each(bound)?.bind(py))
+                    } else {
+                        Ok(value.clone())
+                    }
+                })
+                .collect::<PyResult<Vec<_>>>()?
+        };
         let column = Column::from_values(cells).map_err(column_error_to_py)?;
         let inner = Series::new(self.series.name(), self.series.index().clone(), column)
             .map_err(frame_error_to_py)?;
         self.finish(inner)
+    }
+}
+
+/// Each distinct text's cell made once and handed out again for a text
+/// that repeats. Making one calls Python, so a repeat pays even where texts
+/// repeat a few times (a first-rows sample read 500k strings over 70k
+/// values as distinct). A window of 16,384 texts with fewer than 1 in 64
+/// repeats stops the keeping (an all-distinct column's hashing cost it 16%);
+/// the table stops growing at 2^20 texts (br-frankenpandas-c1dhv).
+#[derive(Default)]
+struct TextCells<'a> {
+    made: FxHashMap<&'a [u8], Scalar>,
+    seen: usize,
+    repeats: usize,
+    off: bool,
+}
+
+impl<'a> TextCells<'a> {
+    fn cell(
+        &mut self,
+        text: &'a [u8],
+        make: impl FnOnce() -> PyResult<Scalar>,
+    ) -> PyResult<Scalar> {
+        const WINDOW: usize = 1 << 14;
+        const MOST: usize = 1 << 20;
+        if self.off {
+            return make();
+        }
+        self.seen += 1;
+        let cell = if let Some(kept) = self.made.get(text) {
+            self.repeats += 1;
+            kept.clone()
+        } else {
+            let cell = make()?;
+            if self.made.len() < MOST {
+                self.made.insert(text, cell.clone());
+            }
+            cell
+        };
+        if self.seen == WINDOW {
+            if self.repeats < WINDOW / 64 {
+                self.off = true;
+                self.made = FxHashMap::default();
+            }
+            self.seen = 0;
+            self.repeats = 0;
+        }
+        Ok(cell)
     }
 }
 

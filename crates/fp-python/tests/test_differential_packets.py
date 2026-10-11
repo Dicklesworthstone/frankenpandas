@@ -33474,22 +33474,10 @@ def _76kq0_show(value: Any) -> Any:
 
 
 _76KQ0_KINDS = ["int", "float", "datetime", "timedelta", "datetime tz", "category", "ordered category", "period", "Int64", "Float64", "string", "object"]
-# Still open on br-frankenpandas-76kq0: pandas' period diff holds DateOffset
-# objects (<-2 * MonthEnds>), fp's NaN.
-_76KQ0_OPEN = {("period", "diff")}
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.parametrize(
-    ("kind", "op"),
-    [
-        pytest.param(kind, op, marks=pytest.mark.xfail(strict=True, reason="period diff: DateOffset objects (76kq0)"))
-        if (kind, op) in _76KQ0_OPEN
-        else (kind, op)
-        for kind in _76KQ0_KINDS
-        for op in _76KQ0_OPS
-    ],
-)
+@pytest.mark.parametrize(("kind", "op"), [(kind, op) for kind in _76KQ0_KINDS for op in _76KQ0_OPS])
 def test_series_ops_keep_dtype_like_pandas_76kq0(kind: str, op: str) -> None:
     def run(m: Any) -> Any:
         try:
@@ -37269,3 +37257,78 @@ def _smlca_outcome(case: str, m: Any) -> Any:
 @pytest.mark.parametrize("case", list(_SMLCA_CASES))
 def test_float_index_like_pandas_smlca(case: str) -> None:
     assert _smlca_outcome(case, fpd) == _smlca_outcome(case, pd)
+
+
+# br-frankenpandas-c1dhv: str.findall / split / rsplit / partition (expand=False) give
+# each row its own list, each distinct text computed once - the same cells as
+# pandas' with texts repeating (past a window of 16,384 too) or all distinct,
+# on a text column held as one buffer or as cells. NEGATIVE: a missing value,
+# a non-text cell and the string dtype keep their own answers; changing one
+# row's list in Python leaves the row repeating its text alone.
+_C1DHV_TEXTS = ["a-b-c", "x-y", "a-b-c", "", "x-y", "1-22-333", "a-b-c"] * 3
+
+
+def _c1dhv_mutated(m: Any) -> Any:
+    # Row 0's list changed through tolist: the rows repeating its text keep
+    # theirs. (Row 0 itself is left out: pandas' tolist hands back the very
+    # list it holds, fp a new one - a list cell is its own value.)
+    lists = m.Series(_C1DHV_TEXTS).str.split("-")
+    first = lists.tolist()
+    first[0].append("Z")
+    return lists.iloc[1:]
+
+
+_C1DHV_CASES = {
+    "findall digits": lambda m: m.Series(_C1DHV_TEXTS).str.findall(r"\d"),
+    "findall group": lambda m: m.Series(_C1DHV_TEXTS).str.findall(r"(\w)-"),
+    "findall flags": lambda m: m.Series(["Ab", "aB", "Ab"]).str.findall("a", flags=2),
+    "split": lambda m: m.Series(_C1DHV_TEXTS).str.split("-"),
+    "split n": lambda m: m.Series(_C1DHV_TEXTS).str.split("-", n=1),
+    "split regex": lambda m: m.Series(_C1DHV_TEXTS).str.split(r"-\w", regex=True),
+    "rsplit n": lambda m: m.Series(_C1DHV_TEXTS).str.rsplit("-", n=1),
+    "partition": lambda m: m.Series(_C1DHV_TEXTS).str.partition("-", expand=False),
+    "rpartition": lambda m: m.Series(_C1DHV_TEXTS).str.rpartition("-", expand=False),
+    "split then len": lambda m: m.Series(_C1DHV_TEXTS).str.split("-").str.len(),
+    "split then get": lambda m: m.Series(_C1DHV_TEXTS).str.split("-").str[0],
+    "one buffer": lambda m: m.Series(_C1DHV_TEXTS).str.upper().str.split("-"),
+    "repeating past a window": lambda m: m.Series([f"k{i % 50}-{i % 7}" for i in range(20_000)]).str.findall(r"\d+"),
+    "all distinct": lambda m: m.Series([f"k{i}-{i % 7}" for i in range(20_000)]).str.findall(r"\d+"),
+    "missing value (NEGATIVE)": lambda m: m.Series(["a-b", None, "a-b", np.nan]).str.split("-"),
+    "non-text cell (NEGATIVE)": lambda m: m.Series(["a-b", 5, "a-b"]).str.split("-"),
+    "string dtype (NEGATIVE)": lambda m: m.Series(["a-b", None, "a-b"], dtype="string").str.split("-"),
+    "one row changed (NEGATIVE)": _c1dhv_mutated,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_C1DHV_CASES))
+def test_str_lists_like_pandas_c1dhv(case: str) -> None:
+    def outcome(m: Any) -> Any:
+        out = _C1DHV_CASES[case](m)
+        return str(out.dtype), [repr(value) for value in out.tolist()], [repr(label) for label in out.index.tolist()]
+
+    assert outcome(fpd) == outcome(pd)
+
+
+# br-frankenpandas-76kq0: a period Series' diff holds pandas' DateOffsets of its freq,
+# NaT where either period is NaT and for the rows before the lag, in either
+# direction. NEGATIVE: an int Series' diff stays numbers and a datetime
+# Series' is timedelta64.
+_PDIFF_76KQ0_CASES = {
+    "monthly": lambda m: m.Series(m.period_range("2020-01", periods=4, freq="M")).diff(),
+    "daily by two": lambda m: m.Series(m.period_range("2020-01-01", periods=5, freq="D")).diff(2),
+    "backwards": lambda m: m.Series(m.period_range("2020Q1", periods=3, freq="Q")).diff(-1),
+    "NaT inside": lambda m: m.Series([m.Period("2020-01", freq="M"), m.NaT, m.Period("2020-04", freq="M"), m.Period("2020-02", freq="M")], dtype="period[M]").diff(),
+    "ints (NEGATIVE)": lambda m: m.Series([5, 2, 9]).diff(),
+    "datetimes (NEGATIVE)": lambda m: m.Series(m.date_range("2020-01-01", periods=3, freq="D")).diff(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_PDIFF_76KQ0_CASES))
+def test_period_diff_like_pandas_76kq0(case: str) -> None:
+    def outcome(m: Any) -> Any:
+        out = _PDIFF_76KQ0_CASES[case](m)
+        return str(out.dtype), [repr(value) for value in out.tolist()]
+
+    assert outcome(fpd) == outcome(pd)
