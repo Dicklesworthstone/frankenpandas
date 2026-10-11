@@ -12450,20 +12450,29 @@ fn radix_argsort_u64(keys: &[u64]) -> Vec<usize> {
     // `keys`, and a histogram is invariant under permutation, so `count` — and
     // therefore both `count.contains(&n)` and every prefix offset — matches the
     // value the old code computed off `keys` directly.
+    //
+    // Every pass's histogram in one read of the keys: as above, a histogram
+    // is invariant under the permutation a pass applies, so the eight a pass
+    // each counted over `cur` are these - one read of the keys where each
+    // pass re-read every entry (argsort of 300k floats 6.9 ms, pandas 6.7;
+    // br-frankenpandas-yiio2).
+    let mut counts = [[0usize; 256]; 8];
+    for &k in keys {
+        for (byte, count) in counts.iter_mut().enumerate() {
+            count[((k >> (byte * 8)) & 0xff) as usize] += 1;
+        }
+    }
     let mut cur: Vec<(u64, usize)> = keys.iter().copied().zip(0..n).collect();
     let mut scratch: Vec<(u64, usize)> = vec![(0, 0); n];
-    for shift in (0..64).step_by(8) {
-        let mut count = [0usize; 256];
-        for &(k, _) in &cur {
-            count[((k >> shift) & 0xff) as usize] += 1;
-        }
+    for (byte, count) in counts.iter_mut().enumerate() {
+        let shift = byte * 8;
         // Skip a pass whose byte is constant across the whole column (common
         // for clustered / small-magnitude data) — keeps `cur` in place.
         if count.contains(&n) {
             continue;
         }
         let mut running = 0usize;
-        for slot in &mut count {
+        for slot in count.iter_mut() {
             let c = *slot;
             *slot = running;
             running += c;

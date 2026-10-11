@@ -37984,7 +37984,8 @@ def test_index_isin_needle_kinds_like_pandas_cs4fd(case: str) -> None:
 # needles at once (an int64 / float64 array read in place), as pandas: on
 # unsorted values the answer depends on the needles' order, a NaN sorts
 # last. NEGATIVE: sorted values, a scalar needle, side='right', a sorter,
-# NaN needles, strings answer as before and as pandas.
+# NaN needles, strings answer as before and as pandas; strings against numbers
+# raise or compare numpy's unicode cast as pandas (br-frankenpandas-ofp5w).
 _9HCOO_SERIES = {
     "sorted ints": lambda m: m.Series([0, 2, 2, 5, 9]),
     "unsorted ints": lambda m: m.Series([3, 1, 2, 9, 4, 0, 7]),
@@ -38009,8 +38010,6 @@ _9HCOO_NEEDLES = {
 def test_series_searchsorted_like_pandas_9hcoo(series: str, needles: str, side: str) -> None:
     import numpy as np
 
-    if (series == "strings") != (needles == "strings"):
-        pytest.skip("strings against numbers is br-frankenpandas-ofp5w")
     def answer(m: Any) -> Any:
         try:
             out = _9HCOO_SERIES[series](m).searchsorted(_9HCOO_NEEDLES[needles](np), side=side)
@@ -38177,7 +38176,17 @@ def _rc14i_frame(m: Any) -> Any:
 @pytest.mark.parametrize("column", ["w", "f", "o"])
 @pytest.mark.parametrize(
     "options",
-    ["default", "normalize", "sort=False", "ascending", "dropna=False", "two keys"],
+    [
+        "default",
+        "normalize",
+        "sort=False",
+        "ascending",
+        "dropna=False",
+        "two keys",
+        "groupby sort=False",
+        "category key",
+        "category key groupby sort=False",
+    ],
 )
 def test_groupby_value_counts_like_pandas_rc14i(column: str, options: str) -> None:
     kwargs = {
@@ -38187,6 +38196,9 @@ def test_groupby_value_counts_like_pandas_rc14i(column: str, options: str) -> No
         "ascending": {"ascending": True},
         "dropna=False": {"dropna": False},
         "two keys": {},
+        "groupby sort=False": {},
+        "category key": {},
+        "category key groupby sort=False": {},
     }[options]
 
     if column == "o":
@@ -38195,8 +38207,18 @@ def test_groupby_value_counts_like_pandas_rc14i(column: str, options: str) -> No
     def answer(m: Any) -> Any:
         frame = _rc14i_frame(m)
         keys = ["g", "h"] if options == "two keys" else "g"
+        if options.startswith("category key"):
+            frame = frame.assign(g=frame["g"].astype("category"))
         try:
-            out = frame.groupby(keys)[column].value_counts(**kwargs)
+            if options == "groupby sort=False":
+                grouped = frame.groupby(keys, sort=False)
+            elif options == "category key":
+                grouped = frame.groupby(keys, observed=True)
+            elif options == "category key groupby sort=False":
+                grouped = frame.groupby(keys, observed=True, sort=False)
+            else:
+                grouped = frame.groupby(keys)
+            out = grouped[column].value_counts(**kwargs)
         except Exception as error:  # noqa: BLE001 - the raised class is the outcome
             return type(error).__name__
         return out.name, list(out.index.names), [repr(x) for x in out.index], repr(out.tolist())
@@ -38330,3 +38352,314 @@ def test_frame_explode_like_pandas_250iy(case: str) -> None:
         return list(out.columns), [repr(x) for x in out.index], repr(out.values.tolist())
 
     assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-jq8qb: a datetime.date cell keeps its day number, so dates equate, order
+# and hash without Python; every op over date-object keys answers as pandas.
+# NEGATIVE: a datetime beside dates (never equal to a date), None beside
+# dates, a string beside dates (ordering raises), repeated equal dates, a
+# date subclass beside dates (equal by day; not the exact date's path).
+def _jq8qb_keys(kind: str) -> Any:
+    import datetime as _dt
+
+    class _Day(_dt.date):
+        pass
+
+    days = [_dt.date(2024, 1, 1 + (i * 7) % 28) for i in range(40)]
+    if kind == "with a date subclass (NEGATIVE)":
+        days = [_Day(day.year, day.month, day.day) if i % 3 == 0 else day for i, day in enumerate(days)]
+    if kind == "with a datetime (NEGATIVE)":
+        days[3] = _dt.datetime(2024, 1, 1)
+    if kind == "with None (NEGATIVE)":
+        days[5] = None
+    if kind == "with a string (NEGATIVE)":
+        days[7] = "2024-01-01"
+    return days
+
+
+_JQ8QB_OPS = {
+    "groupby sum": lambda m, keys: m.DataFrame({"k": keys, "x": range(len(keys))}).groupby("k")["x"].sum(),
+    "value_counts": lambda m, keys: m.Series(keys).value_counts(),
+    "unique": lambda m, keys: list(m.Series(keys).unique()),
+    "nunique": lambda m, keys: m.Series(keys).nunique(),
+    "sort_values": lambda m, keys: m.Series(keys).sort_values(),
+    "isin": lambda m, keys: m.Series(keys).isin([keys[0], keys[1]]),
+    "merge": lambda m, keys: m.DataFrame({"k": keys[:6]}).merge(m.DataFrame({"k": keys[2:8], "v": range(6)}), on="k"),
+    "drop_duplicates": lambda m, keys: m.Series(keys).drop_duplicates(),
+    "ndarray value_counts": lambda m, keys: m.Series(__import__("numpy").array(keys, dtype=object)).value_counts(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "dates",
+        "with a datetime (NEGATIVE)",
+        "with None (NEGATIVE)",
+        "with a string (NEGATIVE)",
+        "with a date subclass (NEGATIVE)",
+    ],
+)
+@pytest.mark.parametrize("op", list(_JQ8QB_OPS))
+def test_date_object_keys_like_pandas_jq8qb(kind: str, op: str) -> None:
+    if (
+        op in ("merge", "sort_values")
+        or kind == "with a datetime (NEGATIVE)"
+        or (op == "groupby sum" and kind == "with a string (NEGATIVE)")
+    ):
+        pytest.skip("merge / tie order / datetime cells / safe_sort are br-frankenpandas-l0i1l")
+
+    def answer(m: Any) -> Any:
+        try:
+            out = _JQ8QB_OPS[op](m, _jq8qb_keys(kind))
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        if isinstance(out, (list, int)):
+            return repr(out)
+        if hasattr(out, "columns"):
+            return [repr(x) for x in out.index], repr(out.values.tolist())
+        return [repr(x) for x in out.index], repr(out.tolist())
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-4g57c: a DateOffset moves a datetime column or index as pandas' array
+# move: months on each instant's day count (the day clipped to the month),
+# then the fixed part, normalize last; NaT kept. Instants from 1678 to 2261,
+# before and after 1970, with fractions. NEGATIVE: a month shift past
+# datetime64[ns] at either end is pandas' OverflowError; an absolute field
+# (year=) keeps each instant's apply.
+def _4g57c_array_instants() -> Any:
+    import numpy as np
+
+    rng = np.random.default_rng(57)
+    nanos = rng.integers(-9_000_000_000_000_000_000, 9_000_000_000_000_000_000, 300, dtype=np.int64)
+    # Month ends and leap days.
+    ends = np.array(["2024-01-31T10:00", "2023-01-31", "2000-02-29T23:59:59.5", "1900-03-31", "1969-12-31T23:59:59.999999999"], dtype="datetime64[ns]")
+    stamps = np.concatenate([nanos.view("datetime64[ns]"), ends])
+    stamps[7] = np.datetime64("NaT")
+    return stamps
+
+
+_4G57C_ARRAY_OFFSETS = {
+    "months +1": {"months": 1},
+    "months -13": {"months": -13},
+    "years +2": {"years": 2},
+    "n=3 months": {"n": 3, "months": 1},
+    "months days hours": {"months": 1, "days": 2, "hours": 3},
+    "months normalize": {"months": 1, "normalize": True},
+    "bare": {},
+    "year= (NEGATIVE)": {"year": 2020},
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("offset", list(_4G57C_ARRAY_OFFSETS))
+@pytest.mark.parametrize("target", ["Series", "DatetimeIndex", "zoned Series"])
+@pytest.mark.parametrize("sign", [1, -1])
+def test_date_offset_array_move_like_pandas_4g57c(offset: str, target: str, sign: int) -> None:
+    import warnings as _warnings
+
+    import numpy as np
+
+    stamps = _4g57c_array_instants()
+    # Room for a few years either way (the overflow cases are their own).
+    lo, hi = np.datetime64("1680-01-01", "ns"), np.datetime64("2258-01-01", "ns")
+    stamps = stamps[np.isnat(stamps) | ((stamps > lo) & (stamps < hi))]
+
+    def answer(m: Any) -> Any:
+        if target == "DatetimeIndex":
+            values = m.DatetimeIndex(stamps)
+        else:
+            values = m.Series(stamps)
+            if target == "zoned Series":
+                values = values.dt.tz_localize("UTC")
+        moved_by = m.DateOffset(**_4G57C_ARRAY_OFFSETS[offset])
+        try:
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore")
+                out = values + moved_by if sign == 1 else values - moved_by
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__, str(error)
+        return str(out.dtype), [str(x) for x in out]
+
+    assert answer(fpd) == answer(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case",
+    ["past 2262 (NEGATIVE)", "before 1677 (NEGATIVE)", "index past 2262 (NEGATIVE)", "in range"],
+)
+def test_date_offset_month_overflow_like_pandas_4g57c(case: str) -> None:
+    def answer(m: Any) -> Any:
+        stamp, months = {
+            "past 2262 (NEGATIVE)": ("2262-01-01", 12),
+            "before 1677 (NEGATIVE)": ("1677-10-01", -2),
+            "index past 2262 (NEGATIVE)": ("2262-01-01", 12),
+            "in range": ("2262-01-01", 3),
+        }[case]
+        values = m.to_datetime([stamp, "2000-01-31"])
+        if not case.startswith("index"):
+            values = m.Series(values)
+        try:
+            out = values + m.DateOffset(months=months)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__, str(error)
+        return [str(x) for x in out]
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-250iy: list cells read their everyday items without a path, and a list
+# joins the path only once an item nests; a Series or frame of list cells and
+# their explode answer as pandas, index given or not. NEGATIVE: nested lists,
+# tuples and dicts after leaves (the path made mid-list), dates, empty lists,
+# None. (numpy scalars inside a list cell are br-frankenpandas-iqtan's.)
+_250IY_CELLS = {
+    "leaves": lambda: [[1, 2], [3.5, None], ["a", True], []],
+    "nested after leaves (NEGATIVE)": lambda: [[1, 2, [3, [4, 5]]], [[6], 7], [8, (9, 10)], [{"k": 1}, 2]],
+    "dates": lambda: [[__import__("datetime").date(2024, 1, 1)], [__import__("datetime").date(2024, 1, 2), 3]],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("cells", list(_250IY_CELLS))
+@pytest.mark.parametrize("op", ["Series", "Series index=", "explode", "frame"])
+def test_list_cells_like_pandas_250iy(cells: str, op: str) -> None:
+    def answer(m: Any) -> Any:
+        data = _250IY_CELLS[cells]()
+        try:
+            if op == "Series":
+                out = m.Series(data)
+            elif op == "Series index=":
+                out = m.Series(data, index=list("wxyz")[: len(data)])
+            elif op == "explode":
+                out = m.Series(data).explode()
+            else:
+                frame = m.DataFrame({"a": data, "b": range(len(data))})
+                return list(frame.columns), repr(frame.values.tolist())
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return str(out.dtype), [repr(x) for x in out.index], repr(out.tolist())
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-250iy: the cycle and depth guards still hold with the path made only
+# once an item nests. FrankenPandas copies list cells, so it refuses a cyclic
+# one and one nested past 128 levels (pandas keeps either as the object it
+# is). NEGATIVE: the cycle reached after leaves, the cycle two lists down;
+# 120 levels convert.
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_list_cell_cycles_and_depth_refused_250iy() -> None:
+    after_leaves: list[Any] = [1, 2]
+    after_leaves.append(after_leaves)
+    inner: list[Any] = [1]
+    outer = [inner]
+    inner.append(outer)
+    for cyclic in (after_leaves, outer):
+        with pytest.raises(ValueError, match="cyclic"):
+            fpd.Series([[0], cyclic])
+
+    def nested(depth: int) -> list[Any]:
+        cell: list[Any] = [1]
+        for _ in range(depth):
+            cell = [0, cell]
+        return cell
+
+    assert len(fpd.Series([nested(120)])) == 1
+    with pytest.raises(ValueError, match="nesting exceeds"):
+        fpd.Series([nested(200)])
+
+
+# br-frankenpandas-yiio2: Series.argsort of a typed float / int column is the stable
+# radix permutation and answers as pandas wherever pandas' own quicksort is
+# determinate (distinct values; numpy's order of ties is
+# br-frankenpandas-l0i1l's). NEGATIVE: NaN rows (-1, pandas' FutureWarning),
+# negative values and infinities, a sorted and a reversed column.
+_YIIO2_CASES = {
+    "floats": lambda np: np.random.default_rng(2).permutation(np.linspace(-1e6, 1e6, 50_000)),
+    "ints": lambda np: np.random.default_rng(3).permutation(np.arange(-25_000, 25_000)),
+    "with NaN (NEGATIVE)": lambda np: np.where(np.arange(20_000) % 13 == 0, np.nan, np.random.default_rng(4).permutation(20_000) - 9_999.5),
+    "infinities (NEGATIVE)": lambda np: np.array([3.5, -np.inf, 0.25, np.inf, -7.0, 1e308, -1e-308]),
+    "sorted": lambda np: np.arange(1_000, dtype=float),
+    "reversed": lambda np: np.arange(1_000, dtype=float)[::-1].copy(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_YIIO2_CASES))
+def test_series_argsort_like_pandas_yiio2(case: str) -> None:
+    import warnings as _warnings
+
+    import numpy as np
+
+    values = _YIIO2_CASES[case](np)
+
+    def answer(m: Any) -> Any:
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("ignore")
+            out = m.Series(values).argsort()
+        return str(out.dtype), out.tolist()
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-xqa2l: to_datetime(format=...) of a format whose numbers each stand
+# before a separator (or end it) reads each string piece by piece and answers
+# as pandas: one- and two-digit months, days and hours, fractions, tabs and
+# space runs, a 60th second. NEGATIVE: a wrong separator, a digit too many
+# (unconverted data remains), a month 13, a day the month lacks, an empty
+# field - NaT under errors='coerce' and pandas' ValueError text under 'raise'.
+def _xqa2l_strings(format: str, seed: int) -> list[str]:
+    import random
+
+    rng = random.Random(seed)
+    out = []
+    for _ in range(300):
+        text = ""
+        at = 0
+        while at < len(format):
+            if format[at] == "%":
+                directive = format[at + 1]
+                if directive == "Y":
+                    text += str(rng.choice([2024, 1999, 2000, 20245, 203]))
+                elif directive == "f":
+                    text += "".join(rng.choice("0123456789") for _ in range(rng.choice([1, 3, 6, 9, 10])))
+                else:
+                    text += rng.choice(["1", "01", "9", "09", "10", "12", "13", "29", "30", "31", "59", "60", "", "123"])
+                at += 2
+            elif format[at] == " ":
+                text += rng.choice([" ", " ", "  ", "\t"])
+                at += 1
+            else:
+                text += format[at] if rng.random() > 0.08 else rng.choice(["x", "/", "-"])
+                at += 1
+        if rng.random() < 0.1:
+            text += rng.choice(["0", "Z", " "])
+        out.append(text)
+    return out
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "format",
+    ["%Y-%m-%d %H:%M", "%d/%m/%Y %H:%M:%S.%f", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S", "%d.%m.%Y %H"],
+)
+def test_to_datetime_linear_formats_like_pandas_xqa2l(format: str) -> None:
+    strings = _xqa2l_strings(format, len(format))
+
+    def coerced(m: Any) -> Any:
+        return [str(x) for x in m.to_datetime(m.Series(strings), format=format, errors="coerce")]
+
+    def raised(m: Any, text: str) -> Any:
+        try:
+            return str(m.to_datetime([text], format=format)[0])
+        except Exception as error:  # noqa: BLE001 - the raised class and text are the outcome
+            return type(error).__name__, str(error).split(", at position")[0]
+
+    assert coerced(fpd) == coerced(pd)
+    for text in strings[:60]:
+        assert raised(fpd, text) == raised(pd, text), text

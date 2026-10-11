@@ -7097,7 +7097,7 @@ fn objects_with(base: &Series, placed: &[(Vec<usize>, Bound<'_, PyAny>)]) -> PyR
     let mut cells = object_series(base)?.column().values().to_vec();
     for (rows, value) in placed {
         let cell = Scalar::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(
-            PyHost(value.clone().unbind()),
+            PyHost::new(value.clone().unbind()),
         )));
         for &row in rows {
             cells[row] = cell.clone();
@@ -7331,7 +7331,7 @@ fn mixed_zone_cells(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Option<
             let item = item?;
             if aware {
                 Ok(Scalar::Object(fp_types::ObjectValue::Host(
-                    fp_types::HostValue::new(PyHost(item.unbind())),
+                    fp_types::HostValue::new(PyHost::new(item.unbind())),
                 )))
             } else {
                 py_to_cell(py, &item)
@@ -7363,7 +7363,7 @@ fn host_object_index(items: &Bound<'_, PyAny>) -> PyResult<PyIndex> {
                 py_to_index_label(&item)
             } else {
                 Ok(IndexLabel::Object(fp_types::ObjectValue::Host(
-                    fp_types::HostValue::new(PyHost(item.unbind())),
+                    fp_types::HostValue::new(PyHost::new(item.unbind())),
                 )))
             }
         })
@@ -7658,7 +7658,7 @@ fn zoned_row(py: Python<'_>, frame: &DataFrame, row: Series) -> PyResult<Series>
         .map(|(cell, column)| match column {
             Some(column) if column.timezone().is_some() && !cell.is_missing() => {
                 Ok(Scalar::Object(fp_types::ObjectValue::Host(
-                    fp_types::HostValue::new(PyHost(cell_to_py(py, column, cell)?)),
+                    fp_types::HostValue::new(PyHost::new(cell_to_py(py, column, cell)?)),
                 )))
             }
             _ => Ok(cell.clone()),
@@ -7851,7 +7851,7 @@ fn temporal_object_fill(
             }
             if column.timezone().is_some() {
                 return Ok(Scalar::Object(fp_types::ObjectValue::Host(
-                    fp_types::HostValue::new(PyHost(cell_to_py(py, column, cell)?)),
+                    fp_types::HostValue::new(PyHost::new(cell_to_py(py, column, cell)?)),
                 )));
             }
             Ok(cell.clone())
@@ -8173,6 +8173,25 @@ fn py_to_cell(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
 
 const MAX_LIST_CELL_DEPTH: usize = 128;
 
+/// A float, str, bool or int - a list's items mostly - which
+/// [`everyday_leaf_cell`] reads.
+fn is_everyday_leaf(obj: &Bound<'_, PyAny>) -> bool {
+    obj.is_instance_of::<pyo3::types::PyFloat>()
+        || obj.is_exact_instance_of::<pyo3::types::PyString>()
+        || obj.is_exact_instance_of::<pyo3::types::PyBool>()
+        || obj.is_exact_instance_of::<pyo3::types::PyInt>()
+}
+
+/// An everyday leaf's cell: py_to_scalar's, as every check on the way
+/// sends one there; a value it refuses a host cell (br-frankenpandas-250iy).
+fn everyday_leaf_cell(py: Python<'_>, obj: &Bound<'_, PyAny>) -> Scalar {
+    py_to_scalar(py, obj).unwrap_or_else(|_| {
+        Scalar::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(
+            PyHost::new(obj.clone().unbind()),
+        )))
+    })
+}
+
 /// List cells are copied recursively, so reject cycles by identity on the
 /// active path and bound its depth. A shared acyclic sublist remains valid.
 fn py_to_cell_with_ancestors<'py>(
@@ -8184,16 +8203,8 @@ fn py_to_cell_with_ancestors<'py>(
     // mostly - straight to py_to_scalar as the checks below send them, a
     // value it refuses a host cell: each passed every check on the way
     // (Series([[1, 2, 3]] * 50_000) 7.7 ms, pandas 1.9; br-frankenpandas-250iy).
-    if obj.is_instance_of::<pyo3::types::PyFloat>()
-        || obj.is_exact_instance_of::<pyo3::types::PyString>()
-        || obj.is_exact_instance_of::<pyo3::types::PyBool>()
-        || obj.is_exact_instance_of::<pyo3::types::PyInt>()
-    {
-        return Ok(py_to_scalar(py, obj).unwrap_or_else(|_| {
-            Scalar::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(
-                PyHost(obj.clone().unbind()),
-            )))
-        }));
+    if is_everyday_leaf(obj) {
+        return Ok(everyday_leaf_cell(py, obj));
     }
     if let Ok(list) = obj.cast::<PyList>() {
         if ancestors.iter().any(|ancestor| ancestor.is(obj)) {
@@ -8206,14 +8217,39 @@ fn py_to_cell_with_ancestors<'py>(
                 "list cell nesting exceeds {MAX_LIST_CELL_DEPTH} levels"
             )));
         }
-        ancestors.push(obj.clone());
-        let items = list
-            .iter()
-            .map(|item| py_to_cell_with_ancestors(py, &item, ancestors))
-            .collect::<PyResult<Vec<_>>>();
+        // The list joins the path only once an item nests (the path then
+        // holds every list above a nested one, as before): a list of
+        // everyday leaves - nearly every list cell - neither allocates nor
+        // counts a path, which was a Vec a cell (Series([[1, 2], [3]] *
+        // 50_000) 12.5 ms, pandas 3.9; br-frankenpandas-250iy).
+        let mut items = Vec::with_capacity(list.len());
+        let mut on_path = false;
+        let mut failed = None;
+        for item in list.iter() {
+            if is_everyday_leaf(&item) {
+                items.push(everyday_leaf_cell(py, &item));
+                continue;
+            }
+            if !on_path {
+                ancestors.push(obj.clone());
+                on_path = true;
+            }
+            match py_to_cell_with_ancestors(py, &item, ancestors) {
+                Ok(cell) => items.push(cell),
+                Err(error) => {
+                    failed = Some(error);
+                    break;
+                }
+            }
+        }
         // Restore the path before propagating a child conversion error.
-        ancestors.pop();
-        return Ok(Scalar::Object(fp_types::ObjectValue::list(items?)));
+        if on_path {
+            ancestors.pop();
+        }
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        return Ok(Scalar::Object(fp_types::ObjectValue::list(items)));
     }
     // bytes are a bytes cell the core reads (they were a host object, so
     // every kernel over them ran single-threaded under the GIL; 4qg5w.8).
@@ -8231,11 +8267,18 @@ fn py_to_cell_with_ancestors<'py>(
     // py_to_scalar's failure below makes of it, which it reached through a
     // dozen failed conversions, several raising and formatting a TypeError
     // (groupby(ts.index.date) 0.12x pandas; br-frankenpandas-e186m).
+    // A date itself is its cell straight away (its subclasses as before:
+    // a datetime is one).
+    if let Ok(date) = obj.cast_exact::<pyo3::types::PyDate>() {
+        return Ok(Scalar::Object(fp_types::ObjectValue::Host(
+            fp_types::HostValue::new(PyHost::date(date)),
+        )));
+    }
     if obj.is_instance_of::<pyo3::types::PyDate>()
         && !obj.is_instance_of::<pyo3::types::PyDateTime>()
     {
         return Ok(Scalar::Object(fp_types::ObjectValue::Host(
-            fp_types::HostValue::new(PyHost(obj.clone().unbind())),
+            fp_types::HostValue::new(PyHost::new(obj.clone().unbind())),
         )));
     }
     // A tuple, dict or set is a cell as it is - the object cell
@@ -8249,18 +8292,18 @@ fn py_to_cell_with_ancestors<'py>(
         || obj.is_exact_instance_of::<pyo3::types::PyFrozenSet>()
     {
         return Ok(Scalar::Object(fp_types::ObjectValue::Host(
-            fp_types::HostValue::new(PyHost(obj.clone().unbind())),
+            fp_types::HostValue::new(PyHost::new(obj.clone().unbind())),
         )));
     }
     if obj.get_type().name().is_ok_and(|name| name == "ndarray") {
         return Ok(Scalar::Object(fp_types::ObjectValue::Host(
-            fp_types::HostValue::new(PyHost(obj.clone().unbind())),
+            fp_types::HostValue::new(PyHost::new(obj.clone().unbind())),
         )));
     }
     match py_to_scalar(py, obj) {
         Ok(scalar) => Ok(scalar),
         Err(_) => Ok(Scalar::Object(fp_types::ObjectValue::Host(
-            fp_types::HostValue::new(PyHost(obj.clone().unbind())),
+            fp_types::HostValue::new(PyHost::new(obj.clone().unbind())),
         ))),
     }
 }
@@ -8765,6 +8808,9 @@ fn refuse_unhashable_keys(py: Python<'_>, column: &Column) -> PyResult<()> {
         let unhashable = match object {
             fp_types::ObjectValue::List(_) => Some("list".to_owned()),
             fp_types::ObjectValue::Bytes(_) => None,
+            // A date hashes (asking Python was most of this scan over date
+            // keys; br-frankenpandas-jq8qb).
+            fp_types::ObjectValue::Host(host) if host.number().is_some() => None,
             fp_types::ObjectValue::Host(host) => host
                 .object()
                 .as_any()
@@ -8869,13 +8915,52 @@ fn pandas_pprint(
 
 /// A Python object an object cell carries (fvsao.33): the core compares,
 /// prints and hashes it through Python.
-struct PyHost(Py<PyAny>);
+struct PyHost(Py<PyAny>, Option<i64>);
+
+impl PyHost {
+    /// A Python object as a cell. A date that is no datetime keeps its day
+    /// number, which equates, orders and hashes it without Python: every
+    /// hash and comparison of a date cell called date.__hash__ / __eq__
+    /// (groupby(index.date) 0.41x pandas; br-frankenpandas-jq8qb). Its hash is the day's,
+    /// not Python's - a date only equals a date (a datetime never does),
+    /// and every date cell is made here; a date subclass overriding __eq__
+    /// would be read as its date.
+    fn new(object: Py<PyAny>) -> Self {
+        let day = Python::attach(|py| {
+            let value = object.bind(py);
+            if value.is_instance_of::<PyDateTime>() {
+                return None;
+            }
+            value.cast::<pyo3::types::PyDate>().ok().map(Self::day_of)
+        });
+        Self(object, day)
+    }
+
+    /// A `datetime.date` (no datetime) as a cell, its day number read off
+    /// the bound object: [`Self::new`] attached to Python again and
+    /// re-checked the type a cell (a fifth of Series(dates); br-frankenpandas-jq8qb).
+    fn date(date: &Bound<'_, pyo3::types::PyDate>) -> Self {
+        Self(date.clone().into_any().unbind(), Some(Self::day_of(date)))
+    }
+
+    /// Days since 1970-01-01 of `date`.
+    fn day_of(date: &Bound<'_, pyo3::types::PyDate>) -> i64 {
+        days_from_ymd(
+            i64::from(date.get_year()),
+            i64::from(date.get_month()),
+            i64::from(date.get_day()),
+        )
+    }
+}
 
 impl fp_types::HostObject for PyHost {
     fn host_eq(&self, other: &dyn fp_types::HostObject) -> bool {
         let Some(other) = other.as_any().downcast_ref::<PyHost>() else {
             return false;
         };
+        if let (Some(left), Some(right)) = (self.1, other.1) {
+            return left == right;
+        }
         Python::attach(|py| self.0.bind(py).eq(other.0.bind(py)).unwrap_or(false))
     }
 
@@ -8918,7 +9003,16 @@ impl fp_types::HostObject for PyHost {
         .unwrap_or_else(|_: PyErr| self.host_str())
     }
 
+    fn host_number(&self) -> Option<i64> {
+        // A date's day: a date equals only a date, of the same day
+        // (br-frankenpandas-jq8qb).
+        self.1
+    }
+
     fn host_hash(&self) -> Option<u64> {
+        if let Some(day) = self.1 {
+            return Some(u64::from_ne_bytes(day.to_ne_bytes()).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        }
         Python::attach(|py| {
             self.0
                 .bind(py)
@@ -8940,6 +9034,9 @@ impl fp_types::HostObject for PyHost {
     // Python's own < / > / ==; a TypeError (a date against a time) is None.
     fn host_cmp(&self, other: &dyn fp_types::HostObject) -> Option<std::cmp::Ordering> {
         let other = other.as_any().downcast_ref::<PyHost>()?;
+        if let (Some(left), Some(right)) = (self.1, other.1) {
+            return Some(left.cmp(&right));
+        }
         Python::attach(|py| {
             let (left, right) = (self.0.bind(py), other.0.bind(py));
             if left.lt(right).ok()? {
@@ -9815,10 +9912,13 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
                 .collect(),
         ),
         _ => {
-            let items = obj
-                .call_method0("tolist")?
-                .try_iter()?
-                .collect::<PyResult<Vec<_>>>()?;
+            // A list's items collect into a Vec of its length (an iterator
+            // of unknown length grew it, copying; br-frankenpandas-jq8qb).
+            let listed = obj.call_method0("tolist")?;
+            let items = match listed.cast::<PyList>() {
+                Ok(list) => list.iter().collect::<Vec<_>>(),
+                Err(_) => listed.try_iter()?.collect::<PyResult<Vec<_>>>()?,
+            };
             // Text (numpy's unicode kind, or an object array holding only
             // str; br-frankenpandas-djbjt) laid out contiguously.
             let text = matches!(kind.as_str(), "U" | "O")
@@ -9847,10 +9947,10 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
 /// inferred as a list is: ints int64 (beside a None, an int64 column holding
 /// a gap), floats float64, and a date raised (br-frankenpandas-22nzm).
 fn object_array_column(py: Python<'_>, items: &[Bound<'_, PyAny>]) -> PyResult<Column> {
-    let cells = items
-        .iter()
-        .map(|item| py_to_cell(py, item))
-        .collect::<PyResult<Vec<_>>>()?;
+    let mut cells = Vec::with_capacity(items.len());
+    for item in items {
+        cells.push(py_to_cell(py, item)?);
+    }
     let mut present = cells.iter().filter(|cell| !cell.is_missing());
     let temporal = match present.next() {
         Some(first) => {
@@ -9912,7 +10012,7 @@ fn object_index_of<'py>(
             let aware = item.getattr("tz").is_ok_and(|tz| !tz.is_none());
             labels.push(if aware {
                 IndexLabel::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(
-                    PyHost(item.unbind()),
+                    PyHost::new(item.unbind()),
                 )))
             } else {
                 py_to_index_label(&item)?
@@ -16642,20 +16742,16 @@ impl PyDatetimeIndex {
     /// clock, a tz-aware index's result placed back in its zone (a wall
     /// time a DST change skips or repeats raises, as pandas).
     fn offset_applied(&self, py: Python<'_>, offset: &PyDateOffset, times: i64) -> PyResult<Self> {
-        let wall = self
-            .inner
-            .tz_localize(None)
-            .map_err(index_error_to_py)?
-            .asi8()
-            .iter()
-            .map(|&value| {
-                if value == Timestamp::NAT {
-                    Ok(value)
-                } else {
-                    offset.apply(py, value, times)
-                }
-            })
-            .collect::<PyResult<Vec<i64>>>()?;
+        // The column's array move (br-frankenpandas-4g57c).
+        let wall = offset.moved_instants(
+            py,
+            &self
+                .inner
+                .tz_localize(None)
+                .map_err(index_error_to_py)?
+                .asi8(),
+            times,
+        )?;
         let moved = DatetimeIndex::new(wall).rename_index(self.inner.name());
         let inner = match self.inner.tz() {
             Some(zone) => moved.tz_localize(Some(&zone)).map_err(index_error_to_py)?,
@@ -33541,11 +33637,22 @@ impl PySeries {
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
                 return Ok(PySeries { inner: series });
             }
-            let scalars: Vec<Scalar> = pandas_promote_int_with_missing(
-                list.iter()
-                    .map(|v| py_to_cell(py, &v))
-                    .collect::<PyResult<Vec<_>>>()?,
-            );
+            let mut cells = Vec::with_capacity(list.len());
+            for value in list.iter() {
+                cells.push(py_to_cell(py, &value)?);
+            }
+            let scalars: Vec<Scalar> = pandas_promote_int_with_missing(cells);
+            // No index given is the default range, built as one (its labels
+            // were made and scanned back into a range; br-frankenpandas-250iy).
+            if index.is_none() {
+                let series = Column::from_values(scalars)
+                    .map_err(FrameError::from)
+                    .and_then(|column| {
+                        Series::new(series_name, Index::default_range(column.len()), column)
+                    })
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PySeries { inner: series });
+            }
             let labels = extract_index_labels(index, scalars.len())?;
             if labels.len() != scalars.len() {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -33660,7 +33767,7 @@ impl PySeries {
                             // (it became the naive UTC wall clock; an1xe).
                             if object && is_aware_datetime(&value)? {
                                 return Ok(Scalar::Object(fp_types::ObjectValue::Host(
-                                    fp_types::HostValue::new(PyHost(value.unbind())),
+                                    fp_types::HostValue::new(PyHost::new(value.unbind())),
                                 )));
                             }
                             py_to_cell(py, &value)
@@ -35582,7 +35689,7 @@ impl PySeries {
                 && r.index().labels().iter().any(IndexLabel::is_missing)
             {
                 let na = IndexLabel::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(
-                    PyHost(na_object(py)?),
+                    PyHost::new(na_object(py)?),
                 )));
                 let labels = r
                     .index()
@@ -39404,7 +39511,7 @@ impl PySeries {
                 let res = arg.call1((py_val,))?;
                 if self.inner.column().is_pandas_string() && res.is_instance_of::<PyNAType>() {
                     out.push(Scalar::Object(fp_types::ObjectValue::Host(
-                        fp_types::HostValue::new(PyHost(res.unbind())),
+                        fp_types::HostValue::new(PyHost::new(res.unbind())),
                     )));
                     continue;
                 }
@@ -39696,11 +39803,11 @@ impl PySeries {
                 s.values()
                     .iter()
                     .map(|cell| match cell {
-                        Scalar::Datetime64(nanos) if *nanos != Timestamp::NAT => {
-                            Ok(Scalar::Object(fp_types::ObjectValue::Host(
-                                fp_types::HostValue::new(PyHost(cell_to_py(py, &zoned, cell)?)),
-                            )))
-                        }
+                        Scalar::Datetime64(nanos) if *nanos != Timestamp::NAT => Ok(
+                            Scalar::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(
+                                PyHost::new(cell_to_py(py, &zoned, cell)?),
+                            ))),
+                        ),
                         other => Ok(other.clone()),
                     })
                     .collect::<PyResult<Vec<Scalar>>>()
@@ -44937,7 +45044,7 @@ impl PyDataFrame {
                         .collect::<PyResult<Vec<_>>>()?;
                     let tuple = PyTuple::new(py, labels)?.into_any().unbind();
                     Ok(Scalar::Object(fp_types::ObjectValue::Host(
-                        fp_types::HostValue::new(PyHost(tuple)),
+                        fp_types::HostValue::new(PyHost::new(tuple)),
                     )))
                 })
                 .collect::<PyResult<Vec<_>>>()?;
@@ -65513,7 +65620,7 @@ impl PySeriesStringAccessor {
             _ if source.has_nulls() => {
                 let na = Python::attach(|py| -> PyResult<Scalar> {
                     Ok(Scalar::Object(fp_types::ObjectValue::Host(
-                        fp_types::HostValue::new(PyHost(na_object(py)?)),
+                        fp_types::HostValue::new(PyHost::new(na_object(py)?)),
                     )))
                 })?;
                 let cells = values
@@ -66439,7 +66546,7 @@ impl PySeriesDatetimeAccessor {
                         pyo3::types::PyTime::new(py, hour, minute, second, micro, None)?.into_any()
                     };
                     Ok(Scalar::Object(fp_types::ObjectValue::Host(
-                        fp_types::HostValue::new(PyHost(object.unbind())),
+                        fp_types::HostValue::new(PyHost::new(object.unbind())),
                     )))
                 })
                 .collect::<PyResult<Vec<_>>>()?
@@ -73802,6 +73909,12 @@ fn group_key_object(py: Python<'_>, key: &[IndexLabel], numpy_parts: bool) -> Py
 /// `groups` at `positions`, a category key's groups keeping their
 /// categories (a take keeps the labels alone; br-frankenpandas-vriq2).
 fn taken_groups(groups: &Index, positions: &[usize]) -> Index {
+    // Every group once in code order - a reduction's own order - is the
+    // groups themselves, shared: the take copied every label and level
+    // (br-frankenpandas-cfoxn).
+    if positions.len() == groups.len() && positions.iter().enumerate().all(|(at, &p)| at == p) {
+        return groups.clone();
+    }
     let taken = groups.take(positions);
     match groups.categories() {
         Some(categories) => taken
@@ -73810,6 +73923,23 @@ fn taken_groups(groups: &Index, positions: &[usize]) -> Index {
             .unwrap_or(taken),
         None => taken,
     }
+}
+
+/// [`group_code_positions`] of an index's labels, read off its ints when
+/// it holds them as ints (each label was made; br-frankenpandas-cfoxn).
+fn group_code_positions_of(groups: &Index, index: &Index) -> PyResult<Vec<usize>> {
+    if let Some(codes) = index.int64_label_values() {
+        return codes
+            .iter()
+            .map(|&code| usize::try_from(code).ok().filter(|&p| p < groups.len()))
+            .collect::<Option<Vec<usize>>>()
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "a multi-key groupby result was not indexed by its group codes",
+                )
+            });
+    }
+    group_code_positions(groups, index.labels())
 }
 
 /// The positions among `groups` (a multi-key groupby's groups, in code
@@ -77535,6 +77665,22 @@ impl PySeriesGroupBy {
             // A (group, value) result - value_counts - orders its groups
             // and keeps each group's rows (by count) in their order; a
             // whole-label sort put them in value-text order.
+            // Rows already in group order - the groups' labels ascending in
+            // the order they first appear, each group's rows together, as
+            // fp-frame emits them - stay as they are: comparing every row's
+            // group label took a twentieth of a value_counts
+            // (br-frankenpandas-rc14i).
+            (true, None)
+                if s.index()
+                    .row_multiindex()
+                    .and_then(|levels| levels.level_codes(0))
+                    .is_some_and(|(uniques, codes)| {
+                        codes.windows(2).all(|pair| pair[0] <= pair[1])
+                            && uniques.windows(2).all(|pair| pair[0] < pair[1])
+                    }) =>
+            {
+                s
+            }
             (true, None) => match s
                 .index()
                 .row_multiindex()
@@ -77680,7 +77826,7 @@ impl PySeriesGroupBy {
             let index = coded_levels_index(groups, s.index())?;
             return Series::new(s.name(), index, s.column().clone()).map_err(frame_error_to_py);
         }
-        let positions = group_code_positions(groups, s.index().labels())?;
+        let positions = group_code_positions_of(groups, s.index())?;
         Series::new(
             s.name(),
             taken_groups(groups, &positions),
@@ -77696,7 +77842,7 @@ impl PySeriesGroupBy {
         let Some(groups) = &self.groups else {
             return Ok(frame);
         };
-        let positions = group_code_positions(groups, frame.index().labels())?;
+        let positions = group_code_positions_of(groups, frame.index())?;
         let index = taken_groups(groups, &positions);
         // `with_index` keeps the labels alone; the levels ride separately.
         let levels = index.row_multiindex().cloned();
@@ -78360,9 +78506,18 @@ impl PySeriesGroupBy {
                 Series::new(name, index, counts.column().clone()).map_err(frame_error_to_py)?;
             return PySeries { inner: counts }.into_py_any(py);
         }
+        // The rows come in pandas' order - groups sorted by label, or its
+        // groupby(sort=False) pairs, a categorical key's too - which
+        // per_group then keeps; a sorted categorical key's groups per_group
+        // orders by its categories (br-frankenpandas-rc14i).
+        let emission = match (self.sort, self.by.column().categorical()) {
+            (false, _) => fp_frame::ValueCountsOrder::PairsFirstSeen,
+            (true, None) => fp_frame::ValueCountsOrder::GroupsSorted,
+            (true, Some(_)) => fp_frame::ValueCountsOrder::GroupsFirstSeen,
+        };
         let res = self
             .grouped()?
-            .value_counts_with_options(normalize, sort, ascending, dropna)
+            .value_counts_with_options(normalize, sort, ascending, dropna, emission)
             .map_err(frame_error_to_py)?;
         self.wrap_result("value_counts", res)
     }
@@ -82003,7 +82158,7 @@ fn object_cells(column: &Column) -> PyResult<Vec<Scalar>> {
                     return Ok(cell.clone());
                 }
                 Ok(Scalar::Object(fp_types::ObjectValue::Host(
-                    fp_types::HostValue::new(PyHost(cell_to_py(py, column, cell)?)),
+                    fp_types::HostValue::new(PyHost::new(cell_to_py(py, column, cell)?)),
                 )))
             })
             .collect()
@@ -82042,7 +82197,7 @@ fn numpy_described(described: Series) -> PyResult<Series> {
                 Some(object) => {
                     changed = true;
                     Scalar::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(
-                        PyHost(object.unbind()),
+                        PyHost::new(object.unbind()),
                     )))
                 }
                 None => value.clone(),
@@ -82108,7 +82263,7 @@ fn object_series(series: &Series) -> PyResult<Series> {
     {
         let na = Python::attach(|py| -> PyResult<Scalar> {
             Ok(Scalar::Object(fp_types::ObjectValue::Host(
-                fp_types::HostValue::new(PyHost(na_object(py)?)),
+                fp_types::HostValue::new(PyHost::new(na_object(py)?)),
             )))
         })?;
         for value in &mut values {
@@ -96069,6 +96224,98 @@ impl PyDateOffset {
         self.apply(py, 0, times).map(Some)
     }
 
+    /// The calendar months and fixed nanoseconds one application `times`
+    /// times moves an instant by, when this offset is only those (no
+    /// anchor or absolute field): [`Self::apply`]'s relative part, read
+    /// once for a column - apply re-derived it a row (br-frankenpandas-4g57c). The fixed
+    /// part is None where it overflows (each moved row raises then, as
+    /// apply does); None for any other offset or months that overflow.
+    fn relative_parts(&self, times: i64) -> Option<(i64, Option<i64>)> {
+        const DAY: i64 = 86_400_000_000_000;
+        if self.anchor.is_some() || self.absolute.iter().any(Option::is_some) {
+            return None;
+        }
+        let n = self.n.checked_mul(times)?;
+        let months = self
+            .years
+            .checked_mul(12)?
+            .checked_add(self.months)?
+            .checked_mul(n)?;
+        let unit = if self.is_bare() {
+            Some(DAY)
+        } else {
+            self.fixed_nanos()
+        };
+        Some((months, unit.and_then(|unit| unit.checked_mul(n))))
+    }
+
+    /// Every instant of `nanos` with this offset applied `times` times,
+    /// NaT kept - a datetime column's or index's, as pandas' DateOffset
+    /// applies to an array: a shift the same for every instant one add a
+    /// row (s + DateOffset(days=3) 3.0 ms, pandas 0.22), months and a fixed
+    /// part read once, each row moved on its day count, a month past
+    /// datetime64[ns] pandas' OverflowError (apply re-derived the offset a
+    /// row and made a chrono date: s + DateOffset(months=1) of 300k 12.9 ms,
+    /// pandas 7.9; br-frankenpandas-4g57c); any other offset each instant's apply.
+    fn moved_instants(&self, py: Python<'_>, nanos: &[i64], times: i64) -> PyResult<Vec<i64>> {
+        const DAY: i64 = 86_400_000_000_000;
+        let overflow = || PyErr::new::<pyo3::exceptions::PyOverflowError, _>("offset overflow");
+        let month_overflow = || {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                "Overflow occurred in npy_datetimestruct_to_datetime",
+            )
+        };
+        let shift = self.constant_shift(py, times)?;
+        let relative = shift
+            .is_none()
+            .then(|| self.relative_parts(times))
+            .flatten();
+        // Into a Vec of the column's length (a collect of results grew it),
+        // the last day moved by months kept: the instants sharing a day - a
+        // minute or hourly series' - move by one add (br-frankenpandas-4g57c).
+        let mut moved = Vec::with_capacity(nanos.len());
+        let mut last_day: Option<(i64, Option<i64>)> = None;
+        for &value in nanos {
+            moved.push(match (shift, relative) {
+                _ if value == Timestamp::NAT => value,
+                (Some(shift), _) => value.checked_add(shift).ok_or_else(overflow)?,
+                (None, Some((months, fixed))) => {
+                    let value = if months == 0 {
+                        value
+                    } else {
+                        let day = value.div_euclid(DAY);
+                        let to = match last_day {
+                            Some((from, to)) if from == day => to,
+                            _ => {
+                                let to = fp_types::add_calendar_months_days(day, months);
+                                last_day = Some((day, to));
+                                to
+                            }
+                        };
+                        to.and_then(|to| {
+                            i64::try_from(
+                                i128::from(to) * i128::from(DAY)
+                                    + i128::from(value.rem_euclid(DAY)),
+                            )
+                            .ok()
+                        })
+                        .ok_or_else(month_overflow)?
+                    };
+                    let out = fixed
+                        .and_then(|fixed| value.checked_add(fixed))
+                        .ok_or_else(overflow)?;
+                    if self.normalize {
+                        out - out.rem_euclid(DAY)
+                    } else {
+                        out
+                    }
+                }
+                (None, None) => self.apply(py, value, times)?,
+            });
+        }
+        Ok(moved)
+    }
+
     /// `nanos` with this offset applied `times` times (1 adds, -1
     /// subtracts); NaT stays NaT.
     fn apply(&self, py: Python<'_>, nanos: i64, times: i64) -> PyResult<i64> {
@@ -96522,20 +96769,7 @@ fn series_apply_offset(
     // a Scalar was made each way a row (s + DateOffset(months=1) of 300k
     // 16.3 ms, pandas 7.7; br-frankenpandas-4g57c).
     if let Some(nanos) = series.column().as_datetime64_slice() {
-        // A shift the same for every instant (days, hours, ...) is one add
-        // a row, as pandas adds a fixed DateOffset (s + DateOffset(days=3)
-        // 3.0 ms, pandas 0.22).
-        let shift = offset.constant_shift(py, times)?;
-        let moved = nanos
-            .iter()
-            .map(|&nanos| match shift {
-                _ if nanos == Timestamp::NAT => Ok(nanos),
-                Some(shift) => nanos.checked_add(shift).ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyOverflowError, _>("offset overflow")
-                }),
-                None => offset.apply(py, nanos, times),
-            })
-            .collect::<PyResult<Vec<i64>>>()?;
+        let moved = offset.moved_instants(py, nanos, times)?;
         let column = Column::from_temporal_nanos(DType::datetime64_naive(), moved);
         return Series::new(series.name(), series.index().clone(), column)
             .map_err(frame_error_to_py);
@@ -101775,7 +102009,7 @@ fn excel_object_column(py: Python<'_>, column: &Column) -> PyResult<Column> {
                         .call_method0("to_pydatetime")?
                         .unbind();
                     Scalar::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(
-                        PyHost(date),
+                        PyHost::new(date),
                     )))
                 }
                 other => other.clone(),

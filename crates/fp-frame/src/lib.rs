@@ -7964,18 +7964,7 @@ pub fn is_on_anchored_offset(nanos: i64, freq: &str) -> Result<bool, FrameError>
 /// which pandas' `DateOffset(years=, months=)` applies (Jan 31 + 1 month is
 /// Feb 29 in 2024).
 pub fn add_calendar_months(nanos: i64, months: i64) -> Result<i64, FrameError> {
-    let at = naive_from_nanos(nanos)?;
-    let total = i64::from(at.year())
-        .checked_mul(12)
-        .and_then(|base| base.checked_add(i64::from(at.month0())))
-        .and_then(|base| base.checked_add(months))
-        .ok_or_else(calendar_out_of_range)?;
-    let year = i32::try_from(total.div_euclid(12)).map_err(|_| calendar_out_of_range())?;
-    let month = u32::try_from(total.rem_euclid(12)).map_err(|_| calendar_out_of_range())? + 1;
-    let last = period_last_day_of_month(year, month).ok_or_else(calendar_out_of_range)?;
-    let date = NaiveDate::from_ymd_opt(year, month, at.day().min(last))
-        .ok_or_else(calendar_out_of_range)?;
-    nanos_from_naive(date.and_time(at.time()))
+    fp_types::add_calendar_months_nanos(nanos, months).ok_or_else(calendar_out_of_range)
 }
 
 /// Convert (year, month, day) to Julian Day Number.
@@ -29276,62 +29265,23 @@ impl Series {
     /// Current pandas maps missing positions to `-1`; descending argsort is a
     /// FrankenPandas extension and keeps missing values last.
     pub fn argsort(&self, ascending: bool) -> Result<Self, FrameError> {
-        // perf (br-frankenpandas-asf64): typed Float64 fast path. `as_f64_slice` ⇒ all-valid
-        // no-NaN, so the missing branch never applies and the comparator is BIT-IDENTICAL to
-        // the general path: `compare_scalars_with_na_last` on two non-missing Float64 reduces
-        // to `compare_non_missing_scalars_for_sort` = `partial_cmp().unwrap_or(Equal)` (then
-        // reversed for descending), verified in this module. `sort_by` is stable in both, so
-        // ties keep original position. Skips the values() Vec<Scalar> materialization and the
-        // per-compare Scalar enum dispatch (the dominant cost — argsort was 21.7× slower).
-        if let Some(data) = self.column.as_f64_slice() {
-            // Cache-friendly pair-sort: sort co-located `(value, index)` pairs so each
-            // comparison reads the key from the element in hand, instead of an index sort
-            // whose comparator does two random `data[a]`/`data[b]` reads (cache misses) into
-            // the value buffer. Stable sort ⇒ ties keep original index order — bit-identical
-            // to the index sort and to the general Scalar path for no-missing Float64.
-            let mut pairs: Vec<(f64, i64)> = data
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(i, v)| (v, i as i64))
-                .collect();
-            // Hoist the asc/desc branch out of the per-compare hot loop (two specialized
-            // stable sorts) instead of branching on every comparison.
-            if ascending {
-                pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-            } else {
-                pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            }
-            // Build the position output as a typed Int64 column directly, skipping the 2M
-            // `Scalar::Int64` boxing + `Column::from_values` dtype re-inference. Index/name
-            // preserved (O(1) clone), bit-identical to with_values_preserving_index.
-            let positions: Vec<i64> = pairs.into_iter().map(|(_, i)| i).collect();
-            return Series::new(
-                self.name.clone(),
-                self.index.clone(),
-                Column::from_i64_values_owned(positions),
-            );
-        }
-
-        // Typed Int64 fast path (mirror of the f64 pair-sort): all-valid Int64 ⇒ no
-        // missing, so the comparator reduces to value order (Int64 `cmp` is total,
-        // no NaN). Cache-friendly `(value, index)` pair sort, stable ⇒ ties keep
-        // original index — bit-identical to the f64 path's structure and to the
-        // general Scalar path for no-missing Int64. Skips the values() Scalar
-        // materialization + per-compare enum dispatch (argsort i64 was ~6.5× slower).
-        if let Some(data) = self.column.as_i64_slice() {
-            let mut pairs: Vec<(i64, i64)> = data
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(i, v)| (v, i as i64))
-                .collect();
-            if ascending {
-                pairs.sort_by_key(|p| p.0);
-            } else {
-                pairs.sort_by_key(|p| std::cmp::Reverse(p.0));
-            }
-            let positions: Vec<i64> = pairs.into_iter().map(|(_, i)| i).collect();
+        // A typed Float64 / Int64 column (all valid; a float column holding
+        // NaN is not, br-frankenpandas-jyhf7) takes the stable LSD radix
+        // permutation sort_values orders it by: equal values keep their order
+        // either way, and the f64 key reads -0.0 as 0.0, as the partial_cmp
+        // sort of (value, position) pairs did - which compared every pair
+        // (argsort of 300k floats 8.0 ms, pandas 6.8; br-frankenpandas-yiio2).
+        // The positions come out as a typed Int64 column, the index and name
+        // kept.
+        let order = match self.column.as_f64_slice() {
+            Some(data) => Some(fp_columnar::radix_argsort_f64(data, ascending)),
+            None => self
+                .column
+                .as_i64_slice()
+                .map(|data| fp_columnar::radix_argsort_i64(data, ascending)),
+        };
+        if let Some(order) = order {
+            let positions: Vec<i64> = order.into_iter().map(|position| position as i64).collect();
             return Series::new(
                 self.name.clone(),
                 self.index.clone(),
@@ -29350,16 +29300,16 @@ impl Series {
             .as_f64_slice_with_validity()
             .filter(|_| self.column.nan_missing_exact())
         {
+            // The present values' radix permutation, as the typed arm above
+            // (br-frankenpandas-yiio2).
+            let present: Vec<f64> = data
+                .iter()
+                .copied()
+                .filter(|value| !value.is_nan())
+                .collect();
+            let order = fp_columnar::radix_argsort_f64(&present, ascending);
             let positions: Vec<i64> = if ascending {
-                let mut present: Vec<(f64, i64)> = data
-                    .iter()
-                    .copied()
-                    .filter(|value| !value.is_nan())
-                    .enumerate()
-                    .map(|(k, value)| (value, k as i64))
-                    .collect();
-                present.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-                let mut sorted = present.into_iter().map(|(_, k)| k);
+                let mut sorted = order.into_iter().map(|k| k as i64);
                 data.iter()
                     .map(|value| {
                         if value.is_nan() {
@@ -29370,17 +29320,10 @@ impl Series {
                     })
                     .collect()
             } else {
-                let mut present: Vec<(f64, i64)> = data
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .filter(|(_, value)| !value.is_nan())
-                    .map(|(i, value)| (value, i as i64))
-                    .collect();
-                present.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-                present
+                let rows: Vec<usize> = (0..data.len()).filter(|&i| !data[i].is_nan()).collect();
+                order
                     .into_iter()
-                    .map(|(_, i)| i)
+                    .map(|k| rows[k] as i64)
                     .chain(
                         data.iter()
                             .enumerate()
@@ -29797,6 +29740,50 @@ impl Series {
         // needle took 15.8 s for 50k needles in 300k values, and answered an
         // unsorted Series otherwise; br-frankenpandas-9hcoo).
         let vals = self.column.values();
+        // Text against numbers, as numpy answers pandas: a text column
+        // searched with a number is Python's TypeError ('<' between a str and
+        // the number), a numeric column searched with text compares numpy's
+        // unicode cast of both - each number its str (they compared by kind,
+        // left 0 where pandas answers 5; br-frankenpandas-ofp5w).
+        let number_type = |value: &Scalar| match value {
+            Scalar::Int64(_) => Some("int"),
+            Scalar::Float64(_) => Some("float"),
+            Scalar::Bool(_) => Some("bool"),
+            _ => None,
+        };
+        if self.column.dtype() == DType::Utf8
+            && vals.iter().any(|value| matches!(value, Scalar::Utf8(_)))
+            && let Some(number) = values.iter().find_map(number_type)
+        {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "'<' not supported between instances of 'str' and '{number}'"
+            )));
+        }
+        if matches!(
+            self.column.dtype(),
+            DType::Int64 | DType::Float64 | DType::Bool
+        ) && values.iter().any(|value| matches!(value, Scalar::Utf8(_)))
+        {
+            let text = |value: &Scalar| match value {
+                Scalar::Utf8(text) => text.clone(),
+                Scalar::Int64(number) => number.to_string(),
+                Scalar::Float64(number) => fp_types::float_to_string_for_astype(*number),
+                Scalar::Bool(flag) => if *flag { "True" } else { "False" }.to_owned(),
+                missing if missing.is_missing() => "nan".to_owned(),
+                other => other.to_string(),
+            };
+            let texts: Vec<String> = vals.iter().map(text).collect();
+            let keys: Vec<String> = values.iter().map(text).collect();
+            let ahead = |value: &String, key: &String| {
+                if right { value <= key } else { value < key }
+            };
+            return Ok(numpy_binsearch(
+                texts.len(),
+                &keys,
+                |position, key| ahead(&texts[position], key),
+                |previous, key| ahead(previous, key),
+            ));
+        }
         let ahead = |value: &Scalar, needle: &Scalar| {
             if right {
                 !searchsorted_less(needle, value)
@@ -46593,6 +46580,68 @@ pub struct SeriesGroupBy<'a> {
     dense_ids: Arc<DenseGroupLayout>,
 }
 
+/// One (group, value) row of a grouped value_counts: its group, its
+/// value's code (or the missing value itself), its count, its group's
+/// total and the row it is first seen at.
+#[derive(Clone, Copy)]
+struct ValueCountRow<'a> {
+    group: usize,
+    value: Result<usize, &'a Scalar>,
+    count: i64,
+    total: i64,
+    first_row: usize,
+}
+
+/// `order` stably reordered by each entry's count (`count_of`), descending
+/// unless `ascending`: a counting sort over the counts, which the stable
+/// comparison sort it stands for would order the same way.
+fn stable_order_by_count(
+    order: &[usize],
+    count_of: impl Fn(usize) -> i64,
+    ascending: bool,
+) -> Vec<usize> {
+    let counts: Vec<usize> = order
+        .iter()
+        .map(|&at| usize::try_from(count_of(at)).unwrap_or(0))
+        .collect();
+    let largest = counts.iter().copied().max().unwrap_or(0);
+    let bucket_of = |count: usize| if ascending { count } else { largest - count };
+    let mut starts = vec![0_usize; largest + 1];
+    for &count in &counts {
+        starts[bucket_of(count)] += 1;
+    }
+    let mut running = 0;
+    for start in &mut starts {
+        let size = *start;
+        *start = running;
+        running += size;
+    }
+    let mut sorted = vec![0_usize; order.len()];
+    for (&at, &count) in order.iter().zip(&counts) {
+        let bucket = bucket_of(count);
+        sorted[starts[bucket]] = at;
+        starts[bucket] += 1;
+    }
+    sorted
+}
+
+/// The order a grouped value_counts emits its (group, value) rows in
+/// ([`SeriesGroupBy::value_counts_with_options`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ValueCountsOrder {
+    /// Each group in first-seen order, its rows together by count (ties in
+    /// value order): a categorical key's, which the binding orders by its
+    /// categories.
+    GroupsFirstSeen,
+    /// Each group in its label's order (pandas' groupby sort=True; equal
+    /// labels first seen first), its rows together by count.
+    GroupsSorted,
+    /// pandas' groupby(sort=False): every (group, value) pair in the order
+    /// it is first seen, stable-sorted by count over the whole result when
+    /// value_counts sorts (br-frankenpandas-rc14i).
+    PairsFirstSeen,
+}
+
 /// The dense group ids of one grouping key - each row's group number in
 /// first-seen order, and the group count - computed by the first groupby
 /// that needs them and shared by every [`SeriesGroupBy`] built over that key
@@ -54169,9 +54218,10 @@ impl SeriesGroupBy<'_> {
         Series::new(self.series.name(), index, taken.column().clone())
     }
 
-    /// Count non-missing values within each group.
+    /// Count non-missing values within each group (groups first seen, as
+    /// this crate's groupbys emit them).
     pub fn value_counts(&self) -> Result<Series, FrameError> {
-        self.value_counts_with_options(false, true, false, true)
+        self.value_counts_with_options(false, true, false, true, ValueCountsOrder::GroupsFirstSeen)
     }
 
     /// pandas' `SeriesGroupBy.value_counts(normalize, sort, ascending,
@@ -54182,19 +54232,19 @@ impl SeriesGroupBy<'_> {
     /// is counted, as `proportion` (br-frankenpandas-n57tz: the keywords
     /// were unexpected).
     #[allow(clippy::cast_precision_loss)] // counts stay far below 2^53
+    ///
+    /// `emission` is the order of the (group, value) rows: see
+    /// [`ValueCountsOrder`].
     pub fn value_counts_with_options(
         &self,
         normalize: bool,
         sort: bool,
         ascending: bool,
         dropna: bool,
+        emission: ValueCountsOrder,
     ) -> Result<Series, FrameError> {
         let (order, order_keys, groups) = self.build_groups();
         let values = self.series.column.values();
-        let mut out_labels = Vec::new();
-        let mut group_level = Vec::new();
-        let mut value_level = Vec::new();
-        let mut out_counts = Vec::new();
 
         // The values factorized once - each row's code (None: missing), the
         // distinct values in first-seen order - and put in value order once,
@@ -54205,14 +54255,17 @@ impl SeriesGroupBy<'_> {
         // .value_counts() of 300k rows 0.31x pandas (br-frankenpandas-rc14i).
         let mut code_of: FxHashMap<ScalarKey<'_>, usize> = FxHashMap::default();
         let mut uniques: Vec<&Scalar> = Vec::new();
-        let codes: Vec<Option<usize>> = values
+        // A missing value's code is usize::MAX: half the bytes of an Option
+        // a row, which the groups read in their rows' scattered order
+        // (br-frankenpandas-rc14i).
+        let codes: Vec<usize> = values
             .iter()
-            .map(|value| {
-                let key = scalar_key_skip_missing(value)?;
-                Some(*code_of.entry(key).or_insert_with(|| {
+            .map(|value| match scalar_key_skip_missing(value) {
+                Some(key) => *code_of.entry(key).or_insert_with(|| {
                     uniques.push(value);
                     uniques.len() - 1
-                }))
+                }),
+                None => usize::MAX,
             })
             .collect();
         drop(code_of);
@@ -54237,26 +54290,72 @@ impl SeriesGroupBy<'_> {
             };
         }
         let mut value_texts: Vec<Option<String>> = vec![None; uniques.len()];
-        let mut value_labels: Vec<Option<IndexLabel>> = vec![None; uniques.len()];
         let mut counts = vec![0_i64; uniques.len()];
         let mut touched: Vec<usize> = Vec::new();
 
-        for (group_idx, key) in order_keys.iter().enumerate() {
-            let group_label = &order[group_idx];
+        // Each level's first-seen identity codes as the rows are emitted -
+        // equal labels sharing one, as the MultiIndex would hash them - so
+        // the levels are not hashed again a row: one hash a distinct label
+        // (br-frankenpandas-rc14i).
+        // Each level is its labels in identity order and the rows' codes
+        // into them (no label cloned a row; br-frankenpandas-rc14i).
+        let mut identity_of: [FxHashMap<IndexLabel, u32>; 2] = Default::default();
+        let mut level_uniques: [Vec<IndexLabel>; 2] = Default::default();
+        let mut identify = |level: usize, label: &IndexLabel| -> u32 {
+            let next = u32::try_from(identity_of[level].len()).unwrap_or(u32::MAX);
+            *identity_of[level].entry(label.clone()).or_insert_with(|| {
+                level_uniques[level].push(label.clone());
+                next
+            })
+        };
+        let mut value_identity: Vec<Option<u32>> = vec![None; uniques.len()];
+
+        // Every (group, value) row first - its group, its value's code (or
+        // the missing value itself), its count, its group's total and the
+        // row it is first seen at - then put in the emission order and
+        // emitted into Vecs of their length.
+        let by_count = |left: &i64, right: &i64| {
+            if ascending {
+                left.cmp(right)
+            } else {
+                right.cmp(left)
+            }
+        };
+        // At most a row a group's distinct value (and its missing one), so
+        // the rows are put in a Vec of that size once (it grew, copying
+        // them; br-frankenpandas-rc14i).
+        let most_rows: usize = groups
+            .values()
+            .map(|rows| rows.len().min(uniques.len() + 1))
+            .sum();
+        let mut pending: Vec<ValueCountRow<'_>> = Vec::with_capacity(most_rows);
+        let mut first_row = vec![0_usize; uniques.len()];
+        // The groups sorted here, a label compare a pair of groups: the
+        // binding sorted every emitted row by its group's label and copied
+        // the result (a fifth of a value_counts; br-frankenpandas-rc14i).
+        let mut emit: Vec<usize> = (0..order_keys.len()).collect();
+        if emission == ValueCountsOrder::GroupsSorted {
+            emit.sort_by(|&left, &right| order[left].cmp(&order[right]));
+        }
+        for group_idx in emit {
+            let key = &order_keys[group_idx];
             // The missing values count as one value (pandas groups None with
             // NaN), kept as the first one seen.
-            let mut missing: Option<(&Scalar, i64)> = None;
+            let mut missing: Option<(&Scalar, i64, usize)> = None;
             touched.clear();
             for &row_idx in &groups[key] {
                 match codes[row_idx] {
-                    Some(code) => {
+                    usize::MAX if !dropna => {
+                        missing.get_or_insert((&values[row_idx], 0, row_idx)).1 += 1;
+                    }
+                    usize::MAX => {}
+                    code => {
                         if counts[code] == 0 {
                             touched.push(code);
+                            first_row[code] = row_idx;
                         }
                         counts[code] += 1;
                     }
-                    None if !dropna => missing.get_or_insert((&values[row_idx], 0)).1 += 1,
-                    None => {}
                 }
             }
 
@@ -54264,63 +54363,105 @@ impl SeriesGroupBy<'_> {
             // missing value last, then stable-sorts by count: a tie keeps
             // value order.
             touched.sort_by_key(|&code| class[code]);
-            // A value's code, or the missing value itself.
-            let mut entries: Vec<(Result<usize, &Scalar>, i64)> = touched
-                .iter()
-                .map(|&code| (Ok(code), counts[code]))
-                .collect();
-            if let Some((value, count)) = missing {
-                entries.push((Err(value), count));
-            }
-            if sort {
-                entries.sort_by(|(_, left), (_, right)| {
-                    if ascending {
-                        left.cmp(right)
-                    } else {
-                        right.cmp(left)
-                    }
+            let start = pending.len();
+            pending.extend(touched.iter().map(|&code| ValueCountRow {
+                group: group_idx,
+                value: Ok(code),
+                count: counts[code],
+                total: 0,
+                first_row: first_row[code],
+            }));
+            if let Some((value, count, row)) = missing {
+                pending.push(ValueCountRow {
+                    group: group_idx,
+                    value: Err(value),
+                    count,
+                    total: 0,
+                    first_row: row,
                 });
             }
-            let total: i64 = entries.iter().map(|(_, count)| count).sum();
-
-            for (code, count) in entries {
-                match code {
-                    Ok(code) => {
-                        let text =
-                            value_texts[code].get_or_insert_with(|| uniques[code].to_string());
-                        out_labels.push(IndexLabel::Utf8(format!("{group_label}, {text}")));
-                        let label = match &value_labels[code] {
-                            Some(label) => label.clone(),
-                            None => {
-                                let label = scalar_to_index_label(uniques[code])?;
-                                value_labels[code] = Some(label.clone());
-                                label
-                            }
-                        };
-                        value_level.push(label);
-                    }
-                    Err(value) => {
-                        out_labels.push(IndexLabel::Utf8(format!("{group_label}, {value}")));
-                        // A float column's NaN labels as NaN, not its text
-                        // (pandas' nan; it was 'NaN' where the column held
-                        // the float; br-frankenpandas-rc14i).
-                        value_level.push(match value {
-                            Scalar::Float64(_) => {
-                                scalar_to_value_counts_index_label(&Scalar::Null(NullKind::NaN))
-                            }
-                            other => scalar_to_value_counts_index_label(other),
-                        });
-                    }
-                }
-                group_level.push(group_label.clone());
-                out_counts.push(if normalize {
-                    Scalar::Float64(count as f64 / total as f64)
-                } else {
-                    Scalar::Int64(count)
-                });
+            let rows = &mut pending[start..];
+            if sort && emission != ValueCountsOrder::PairsFirstSeen {
+                rows.sort_by(|left, right| by_count(&left.count, &right.count));
+            }
+            let total: i64 = rows.iter().map(|row| row.count).sum();
+            for row in rows.iter_mut() {
+                row.total = total;
             }
             for &code in &touched {
                 counts[code] = 0;
+            }
+        }
+        // pandas' groupby(sort=False) counts its (group, value) pairs in the
+        // order each is first seen, then stable-sorts the whole result by
+        // count (each group's rows were kept together; br-frankenpandas-rc14i).
+        // Both orders are placements, not sorts: a pair's first row is its
+        // own, and a stable counting sort by count is the stable sort.
+        if emission == ValueCountsOrder::PairsFirstSeen {
+            let mut at_row = vec![usize::MAX; values.len()];
+            for (at, row) in pending.iter().enumerate() {
+                at_row[row.first_row] = at;
+            }
+            let mut order: Vec<usize> = at_row.into_iter().filter(|&at| at != usize::MAX).collect();
+            if sort {
+                order = stable_order_by_count(&order, |at| pending[at].count, ascending);
+            }
+            pending = order.into_iter().map(|at| pending[at]).collect();
+        }
+
+        // The rows' flat "group, value" labels written into one buffer
+        // (a String a row was made and dropped; br-frankenpandas-rc14i), the counts typed.
+        let rows = pending.len();
+        let mut group_codes: Vec<u32> = Vec::with_capacity(rows);
+        let mut value_codes: Vec<u32> = Vec::with_capacity(rows);
+        let mut flat_text = String::with_capacity(rows * 12);
+        let mut flat_offsets: Vec<usize> = Vec::with_capacity(rows + 1);
+        flat_offsets.push(0);
+        let mut counted: Vec<i64> = Vec::with_capacity(rows);
+        let mut shares: Vec<f64> = Vec::with_capacity(if normalize { rows } else { 0 });
+        let mut group_texts: Vec<Option<String>> = vec![None; order.len()];
+        let mut group_identities: Vec<Option<u32>> = vec![None; order.len()];
+        for row in pending {
+            let (group_idx, count, total) = (row.group, row.count, row.total);
+            let group_label = &order[group_idx];
+            let group_text = group_texts[group_idx].get_or_insert_with(|| group_label.to_string());
+            flat_text.push_str(group_text);
+            flat_text.push_str(", ");
+            match row.value {
+                Ok(code) => {
+                    let text = value_texts[code].get_or_insert_with(|| uniques[code].to_string());
+                    flat_text.push_str(text);
+                    let identity = match value_identity[code] {
+                        Some(identity) => identity,
+                        None => {
+                            let identity = identify(1, &scalar_to_index_label(uniques[code])?);
+                            value_identity[code] = Some(identity);
+                            identity
+                        }
+                    };
+                    value_codes.push(identity);
+                }
+                Err(value) => {
+                    flat_text.push_str(&value.to_string());
+                    // A float column's NaN labels as NaN, not its text
+                    // (pandas' nan; it was 'NaN' where the column held
+                    // the float; br-frankenpandas-rc14i).
+                    let label = match value {
+                        Scalar::Float64(_) => {
+                            scalar_to_value_counts_index_label(&Scalar::Null(NullKind::NaN))
+                        }
+                        other => scalar_to_value_counts_index_label(other),
+                    };
+                    value_codes.push(identify(1, &label));
+                }
+            }
+            flat_offsets.push(flat_text.len());
+            group_codes
+                .push(*group_identities[group_idx].get_or_insert_with(|| identify(0, group_label)));
+            if normalize {
+                shares.push(count as f64 / total as f64);
+            } else {
+                counted.push(count);
             }
         }
 
@@ -54334,15 +54475,27 @@ impl SeriesGroupBy<'_> {
         } else {
             Some(by_name)
         };
-        let level_name = |name: &str| (!name.is_empty()).then(|| name.to_owned());
-        let levels = fp_index::MultiIndex::from_frame(vec![
-            (level_name(by_name), group_level),
-            (level_name(self.series.name()), value_level),
-        ])?;
-        let index = Index::new(out_labels)
-            .rename_index(idx_name)
-            .with_row_multiindex(levels)?;
-        let column = Column::from_values(out_counts)?;
+        let level_name = |name: &str| (!name.is_empty()).then(|| LabelName::from(name));
+        let levels =
+            fp_index::MultiIndex::from_two_coded_levels(level_uniques, [group_codes, value_codes])?
+                .set_names(vec![level_name(by_name), level_name(self.series.name())]);
+        // No rows keep the index and column an empty value_counts had.
+        let (flat, column) = if rows == 0 {
+            (Index::new(Vec::new()), Column::from_values(Vec::new())?)
+        } else {
+            (
+                Index::from_utf8_contiguous(
+                    std::sync::Arc::from(flat_text.into_bytes()),
+                    std::sync::Arc::from(flat_offsets),
+                ),
+                if normalize {
+                    Column::from_f64_values(shares)
+                } else {
+                    Column::from_i64_values_owned(counted)
+                },
+            )
+        };
+        let index = flat.rename_index(idx_name).with_row_multiindex(levels)?;
         Series::new(
             if normalize { "proportion" } else { "count" },
             index,
@@ -70258,6 +70411,11 @@ struct PandasStrptime<'a> {
     format: &'a str,
     iso: bool,
     pieces: Vec<StrptimePiece>,
+    /// Every number and fraction directive followed by a literal that is
+    /// no digit and no space, a run of spaces or the format's end, and no
+    /// name directive: the regex's match is then decided piece by piece
+    /// ([`PandasStrptime::match_linear`]).
+    linear: bool,
 }
 
 impl<'a> PandasStrptime<'a> {
@@ -70297,10 +70455,24 @@ impl<'a> PandasStrptime<'a> {
                 at += 1;
             }
         }
+        let linear = pieces.iter().enumerate().all(|(at, piece)| match piece {
+            StrptimePiece::Number(..) | StrptimePiece::Fraction => {
+                matches!(pieces.get(at + 1), None | Some(StrptimePiece::Space))
+                    || matches!(
+                        pieces.get(at + 1),
+                        Some(StrptimePiece::Literal(byte))
+                            if !byte.is_ascii_digit() && !byte.is_ascii_whitespace()
+                    )
+            }
+            StrptimePiece::Literal(byte) => !byte.is_ascii_digit() && !byte.is_ascii_whitespace(),
+            StrptimePiece::Space => true,
+            StrptimePiece::Name(..) => false,
+        });
         (pieces.len() <= STRPTIME_MAX_PIECES).then(|| Self {
             format,
             iso: format_is_iso(format),
             pieces,
+            linear,
         })
     }
 
@@ -70344,7 +70516,12 @@ impl<'a> PandasStrptime<'a> {
     /// digits.
     fn read_with(&self, text: &str, fraction: (usize, usize)) -> StrptimeRead {
         let mut spans = [(0, 0); STRPTIME_MAX_PIECES];
-        let Some(end) = self.match_at(text.as_bytes(), 0, 0, fraction, &mut spans) else {
+        let matched = if self.linear {
+            self.match_linear(text.as_bytes(), fraction, &mut spans)
+        } else {
+            self.match_at(text.as_bytes(), 0, 0, fraction, &mut spans)
+        };
+        let Some(end) = matched else {
             return StrptimeRead::NoMatch;
         };
         if end != text.len() {
@@ -70420,6 +70597,75 @@ impl<'a> PandasStrptime<'a> {
         clock.map_or(StrptimeRead::DayOutOfRange, |clock| {
             StrptimeRead::Instant(clock + Duration::seconds(i64::from(second)))
         })
+    }
+
+    /// [`Self::match_at`] for a `linear` format, without backtracking: the
+    /// same end and spans. A number before a literal that is no digit and no
+    /// space, or before spaces, matches only by an alternative as long as
+    /// its digit run (a shorter one leaves a digit where the next piece
+    /// needs none, a longer one needs a digit that is not there), and every
+    /// such alternative leaves the rest at the same place - so the first
+    /// that fits is the match, and when the rest fails, every one fails. The
+    /// format's last number is its first alternative that fits. A fraction
+    /// takes its whole run (up to its limit), spaces their whole run, for
+    /// the same reason. The backtracking took two thirds of
+    /// to_datetime(format=...) (50k '%Y-%m-%d %H:%M' 7.4 ms, pandas 4.9;
+    /// br-frankenpandas-xqa2l).
+    fn match_linear(
+        &self,
+        text: &[u8],
+        fraction: (usize, usize),
+        spans: &mut [(usize, usize); STRPTIME_MAX_PIECES],
+    ) -> Option<usize> {
+        let mut at = 0;
+        for (piece, current) in self.pieces.iter().enumerate() {
+            let rest = &text[at..];
+            let len = match *current {
+                StrptimePiece::Literal(byte) => {
+                    rest.first()
+                        .filter(|first| first.eq_ignore_ascii_case(&byte))?;
+                    1
+                }
+                StrptimePiece::Space => {
+                    let run = rest
+                        .iter()
+                        .take_while(|byte| byte.is_ascii_whitespace())
+                        .count();
+                    (run > 0).then_some(run)?
+                }
+                StrptimePiece::Fraction => {
+                    let run = rest
+                        .iter()
+                        .take(fraction.1)
+                        .take_while(|byte| byte.is_ascii_digit())
+                        .count();
+                    (run >= fraction.0).then_some(run)?
+                }
+                StrptimePiece::Number(_, alternatives) => {
+                    let fits = |alternative: &&&[(u8, u8)]| {
+                        rest.len() >= alternative.len()
+                            && alternative
+                                .iter()
+                                .zip(rest)
+                                .all(|(&(low, high), byte)| (low..=high).contains(byte))
+                    };
+                    if piece + 1 == self.pieces.len() {
+                        alternatives.iter().find(fits)?.len()
+                    } else {
+                        let run = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
+                        alternatives
+                            .iter()
+                            .filter(|alternative| alternative.len() == run)
+                            .find(fits)?
+                            .len()
+                    }
+                }
+                StrptimePiece::Name(..) => return None,
+            };
+            spans[piece] = (at, at + len);
+            at += len;
+        }
+        Some(at)
     }
 
     /// The end of the regex's match of `text` from `at` by the pieces from
@@ -110475,16 +110721,51 @@ fn mask_groups(
 /// A multi-key group's flat label: its key values' text joined by `|`,
 /// written into one String (a String a value and their join made three
 /// allocations a group; br-frankenpandas-cfoxn).
-fn joined_key_label<T: std::fmt::Display>(key: &[T]) -> String {
-    use std::fmt::Write as _;
+fn joined_key_label<T: KeyText>(key: &[T]) -> String {
     let mut label = String::with_capacity(8 * key.len());
     for (position, value) in key.iter().enumerate() {
         if position > 0 {
             label.push('|');
         }
-        let _ = write!(label, "{value}");
+        value.push_text(&mut label);
     }
     label
+}
+
+/// A multi-key group's key value written onto its flat label as its text
+/// (an int's digits, a string as it is) without the formatter's machinery,
+/// a quarter of groupby([a, b]).size() (br-frankenpandas-cfoxn).
+trait KeyText {
+    fn push_text(&self, label: &mut String);
+}
+
+impl KeyText for i64 {
+    fn push_text(&self, label: &mut String) {
+        let mut digits = [0_u8; 20];
+        let mut at = digits.len();
+        let mut rest = self.unsigned_abs();
+        loop {
+            at -= 1;
+            digits[at] = b'0' + (rest % 10) as u8;
+            rest /= 10;
+            if rest == 0 {
+                break;
+            }
+        }
+        if *self < 0 {
+            label.push('-');
+        }
+        label.extend(digits[at..].iter().map(|&digit| char::from(digit)));
+    }
+}
+
+impl KeyText for MixedKey<'_> {
+    fn push_text(&self, label: &mut String) {
+        match self {
+            MixedKey::Int64(value) => value.push_text(label),
+            MixedKey::Utf8(text) => label.push_str(text),
+        }
+    }
 }
 
 /// Each row's group code, its gid's position in the group `order` (as
@@ -114563,7 +114844,13 @@ impl DataFrameGroupBy<'_> {
             // from its minimum, the first level most significant): an
             // integer sort where comparing the tuples took a fifth of
             // groupby([a, b]).size() (br-frankenpandas-cfoxn). The slots are distinct.
-            order.sort_unstable_by_key(|&g| slot_of_gid[g]);
+            let mut by_slot: Vec<(usize, usize)> = slot_of_gid
+                .iter()
+                .enumerate()
+                .map(|(g, &slot)| (slot, g))
+                .collect();
+            by_slot.sort_unstable();
+            order = by_slot.into_iter().map(|(_, g)| g).collect();
         }
 
         Some(DenseMultiInt64Grouping {
@@ -170973,6 +171260,116 @@ mod tests {
         );
     }
 
+    /// The typed float / int argsort is the stable radix permutation, equal
+    /// to the stable sort of (value, position) pairs it replaced - ties in
+    /// their original order either way, -0.0 equal to 0.0, the infinities
+    /// at the ends - and the NaN-holding float column's likewise
+    /// (br-frankenpandas-yiio2). NEGATIVE: thousands of ties, descending
+    /// ties, NaN rows (-1 ascending, last descending).
+    #[test]
+    fn series_argsort_radix_matches_the_stable_pair_sort_yiio2() {
+        let pool = [
+            -0.0,
+            0.0,
+            1.5,
+            -2.25,
+            3.0,
+            1e300,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+        ];
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let floats: Vec<f64> = (0..5_000).map(|_| pool[(next() % 8) as usize]).collect();
+        let ints: Vec<i64> = (0..5_000).map(|_| (next() % 7) as i64 - 3).collect();
+        let mut with_nan = floats.clone();
+        for k in (0..with_nan.len()).step_by(37) {
+            with_nan[k] = f64::NAN;
+        }
+        let reference = |values: &[f64], ascending: bool| -> Vec<i64> {
+            let present: Vec<(f64, usize)> = values
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|(_, value)| !value.is_nan())
+                .map(|(i, value)| (value, i))
+                .collect();
+            let mut order: Vec<usize> = (0..present.len()).collect();
+            order.sort_by(|&a, &b| {
+                let ordering = present[a]
+                    .0
+                    .partial_cmp(&present[b].0)
+                    .unwrap_or(std::cmp::Ordering::Equal);
+                if ascending {
+                    ordering
+                } else {
+                    ordering.reverse()
+                }
+            });
+            if ascending {
+                let mut sorted = order.into_iter();
+                values
+                    .iter()
+                    .map(|value| {
+                        if value.is_nan() {
+                            -1
+                        } else {
+                            sorted.next().map_or(-1, |k| k as i64)
+                        }
+                    })
+                    .collect()
+            } else {
+                order
+                    .into_iter()
+                    .map(|k| present[k].1 as i64)
+                    .chain(
+                        values
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, value)| value.is_nan())
+                            .map(|(i, _)| i as i64),
+                    )
+                    .collect()
+            }
+        };
+        let positions = |column: Column, ascending: bool| -> Vec<i64> {
+            let rows = column.len() as i64;
+            Series::new("x", Index::from_range(0, rows, 1), column)
+                .and_then(|series| series.argsort(ascending))
+                .map(|order| {
+                    order
+                        .values()
+                        .iter()
+                        .map(|value| match value {
+                            Scalar::Int64(position) => *position,
+                            _ => i64::MIN,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let int_floats: Vec<f64> = ints.iter().map(|&value| value as f64).collect();
+        for ascending in [true, false] {
+            assert_eq!(
+                positions(Column::from_f64_values(floats.clone()), ascending),
+                reference(&floats, ascending)
+            );
+            assert_eq!(
+                positions(Column::from_i64_values_owned(ints.clone()), ascending),
+                reference(&int_floats, ascending)
+            );
+            assert_eq!(
+                positions(Column::from_f64_values(with_nan.clone()), ascending),
+                reference(&with_nan, ascending)
+            );
+        }
+    }
+
     #[test]
     fn series_argmin_argmax() {
         let s = Series::from_values(
@@ -198990,13 +199387,14 @@ mod tests {
                 .to_vec())
         };
         let text = |value: &str| IndexLabel::Utf8(value.into());
+        let first_seen = crate::ValueCountsOrder::GroupsFirstSeen;
         // Group b (first seen) holds a, b, None, b; group a holds a: counted
         // without the None (the default), then with it last as one NaN
         // value.
-        let counts = grouped.value_counts_with_options(false, true, false, true)?;
+        let counts = grouped.value_counts_with_options(false, true, false, true, first_seen)?;
         assert_eq!(counts.values(), grouped.value_counts()?.values());
         assert_eq!(value_level(&counts)?, [text("b"), text("a"), text("a")]);
-        let kept = grouped.value_counts_with_options(false, true, false, false)?;
+        let kept = grouped.value_counts_with_options(false, true, false, false, first_seen)?;
         assert_eq!(
             value_level(&kept)?,
             [
@@ -199007,7 +199405,7 @@ mod tests {
             ]
         );
         // Normalized by what is counted: b holds 4 values with dropna=False.
-        let shares = grouped.value_counts_with_options(true, true, false, false)?;
+        let shares = grouped.value_counts_with_options(true, true, false, false, first_seen)?;
         assert_eq!(shares.name(), "proportion");
         assert_eq!(
             shares.values(),
@@ -199020,11 +199418,92 @@ mod tests {
         );
         // ascending puts the smaller counts first; sort=false keeps value
         // order (the same here).
-        let ascending = grouped.value_counts_with_options(false, true, true, true)?;
+        let ascending = grouped.value_counts_with_options(false, true, true, true, first_seen)?;
         assert_eq!(value_level(&ascending)?, [text("a"), text("b"), text("a")]);
-        let unsorted = grouped.value_counts_with_options(false, false, false, true)?;
+        let unsorted = grouped.value_counts_with_options(false, false, false, true, first_seen)?;
         assert_eq!(value_level(&unsorted)?, [text("a"), text("b"), text("a")]);
+
+        // br-frankenpandas-rc14i: pandas' groupby sort=True emits the groups
+        // by label (a, then b), each group's rows by count; its sort=False
+        // the (group, value) pairs first seen, stable-sorted by count over
+        // the whole result. NEGATIVE: ascending interleaves the groups (b's
+        // a, a's a, b's b), which no group-by-group order does.
+        let group_level = |counts: &Series| -> Result<Vec<IndexLabel>, FrameError> {
+            Ok(counts
+                .index()
+                .row_multiindex()
+                .expect("(key, value) levels")
+                .get_level_values(0)?
+                .labels()
+                .to_vec())
+        };
+        let sorted = grouped.value_counts_with_options(
+            false,
+            true,
+            false,
+            true,
+            crate::ValueCountsOrder::GroupsSorted,
+        )?;
+        assert_eq!(group_level(&sorted)?, [text("a"), text("b"), text("b")]);
+        assert_eq!(value_level(&sorted)?, [text("a"), text("b"), text("a")]);
+        assert_eq!(
+            sorted.values(),
+            [Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(1)]
+        );
+        let pairs = grouped.value_counts_with_options(
+            false,
+            true,
+            true,
+            true,
+            crate::ValueCountsOrder::PairsFirstSeen,
+        )?;
+        assert_eq!(group_level(&pairs)?, [text("b"), text("a"), text("b")]);
+        assert_eq!(value_level(&pairs)?, [text("a"), text("a"), text("b")]);
+        assert_eq!(
+            pairs.values(),
+            [Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)]
+        );
         Ok(())
+    }
+
+    /// The counting sort by count is the stable comparison sort it stands
+    /// for, ascending and descending, over thousands of tied counts in a
+    /// shuffled order (br-frankenpandas-rc14i). NEGATIVE: an empty order, a
+    /// single count, counts of one value only.
+    #[test]
+    fn stable_order_by_count_is_the_stable_sort_rc14i() {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let counts: Vec<i64> = (0..4_000).map(|_| (next() % 9) as i64 + 1).collect();
+        let order: Vec<usize> = (0..counts.len()).rev().collect();
+        for ascending in [true, false] {
+            let mut expected = order.clone();
+            expected.sort_by(|&left, &right| {
+                if ascending {
+                    counts[left].cmp(&counts[right])
+                } else {
+                    counts[right].cmp(&counts[left])
+                }
+            });
+            assert_eq!(
+                crate::stable_order_by_count(&order, |at| counts[at], ascending),
+                expected
+            );
+            assert!(crate::stable_order_by_count(&[], |at| counts[at], ascending).is_empty());
+            assert_eq!(
+                crate::stable_order_by_count(&[7], |at| counts[at], ascending),
+                [7]
+            );
+            assert_eq!(
+                crate::stable_order_by_count(&[5, 2, 9], |_| 4, ascending),
+                [5, 2, 9]
+            );
+        }
     }
 
     #[test]
@@ -252050,6 +252529,90 @@ mod pandas_strptime_h9cug {
         // NEGATIVE: a directive the reader does not model is left to chrono.
         for format in ["%Y-%m-%d %z", "%j", "%Y-%U", "%Y-%m-%d %"] {
             assert!(PandasStrptime::new(format).is_none(), "{format}");
+        }
+    }
+
+    /// A linear format's piece-by-piece match is the backtracking match:
+    /// the same end and spans over random strings near each format - digit
+    /// runs of none to five (or ten to thirteen), the format's separator or
+    /// another byte, whitespace runs of none to two, a trailing digit - for
+    /// both fraction limits (br-frankenpandas-xqa2l). NEGATIVE: numbers side
+    /// by side and names keep the backtracking.
+    #[test]
+    fn linear_match_is_the_backtracking_match_xqa2l() {
+        let mut state = 0x853c_49e6_748f_ea9b_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for format in [
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%d/%m/%Y",
+            "%m/%d/%Y %H:%M:%S",
+            "%H:%M",
+            "%Y-%m-%dT%H:%M:%S",
+            "%d.%m.%Y %H",
+            "%Y-%m",
+        ] {
+            let strptime = PandasStrptime::new(format).unwrap();
+            assert!(strptime.linear, "{format}");
+            let bytes = format.as_bytes();
+            for _ in 0..20_000 {
+                let mut text = String::new();
+                let mut at = 0;
+                while at < bytes.len() {
+                    if bytes[at] == b'%' {
+                        let digits = if next() % 7 == 0 {
+                            10 + next() % 4
+                        } else {
+                            next() % 6
+                        };
+                        for _ in 0..digits {
+                            text.push(char::from(b'0' + (next() % 10) as u8));
+                        }
+                        at += 2;
+                    } else if bytes[at] == b' ' {
+                        for _ in 0..next() % 3 {
+                            text.push(if next() % 4 == 0 { '\t' } else { ' ' });
+                        }
+                        at += 1;
+                    } else {
+                        text.push(if next() % 8 == 0 {
+                            'x'
+                        } else {
+                            char::from(bytes[at])
+                        });
+                        at += 1;
+                    }
+                }
+                if next() % 5 == 0 {
+                    text.push(char::from(b'0' + (next() % 10) as u8));
+                }
+                for fraction in [(0, 18), (1, 9)] {
+                    let mut by_pieces = [(0, 0); super::STRPTIME_MAX_PIECES];
+                    let mut backtracked = [(0, 0); super::STRPTIME_MAX_PIECES];
+                    let end = strptime.match_at(text.as_bytes(), 0, 0, fraction, &mut backtracked);
+                    assert_eq!(
+                        strptime.match_linear(text.as_bytes(), fraction, &mut by_pieces),
+                        end,
+                        "{format} {text:?}"
+                    );
+                    if end.is_some() {
+                        let pieces = strptime.pieces.len();
+                        assert_eq!(
+                            by_pieces[..pieces],
+                            backtracked[..pieces],
+                            "{format} {text:?}"
+                        );
+                    }
+                }
+            }
+        }
+        for format in ["%Y%m%d", "%d %b %Y", "%H%M", "%Y-%m-%d%H"] {
+            assert!(!PandasStrptime::new(format).unwrap().linear, "{format}");
         }
     }
 

@@ -25538,6 +25538,56 @@ impl MultiIndex {
         })
     }
 
+    /// [`Self::from_two_arrays_with_identity_codes`] from each level's
+    /// distinct labels in first-seen order (`uniques`) and its rows'
+    /// first-seen codes into them, a row's labels made only when read: a
+    /// grouped value_counts numbers each row's labels as it emits them, and
+    /// cloned a label a row for the levels (br-frankenpandas-rc14i).
+    ///
+    /// # Errors
+    /// `LengthMismatch` when the two levels' codes differ in length,
+    /// `OutOfBounds` for a code past its level's labels.
+    #[doc(hidden)]
+    pub fn from_two_coded_levels(
+        uniques: [Vec<IndexLabel>; 2],
+        codes: [Vec<u32>; 2],
+    ) -> Result<Self, IndexError> {
+        let len = codes[0].len();
+        if codes[1].len() != len {
+            return Err(IndexError::LengthMismatch {
+                expected: len,
+                actual: codes[1].len(),
+                context: "two coded levels' code length mismatch".to_owned(),
+            });
+        }
+        for (labels, level_codes) in uniques.iter().zip(&codes) {
+            if let Some(&code) = level_codes
+                .iter()
+                .find(|&&code| code as usize >= labels.len())
+            {
+                return Err(IndexError::OutOfBounds {
+                    position: code as usize,
+                    length: labels.len(),
+                });
+            }
+        }
+        let identity_codes = capped_identity_codes(Vec::from(codes.clone()), len);
+        let levels: Vec<Level> = Vec::from(uniques)
+            .into_iter()
+            .zip(codes)
+            .map(|(uniques, codes)| Level::from_codes(Arc::new(uniques), CodesWindow::from(codes)))
+            .collect();
+        debug_assert_eq!(identity_codes, build_multi_index_identity_codes(&levels));
+        Ok(Self {
+            levels,
+            names: vec![None; 2],
+            identity_codes: Arc::new(std::sync::OnceLock::from(identity_codes)),
+            flat: Arc::default(),
+            lexsort_depth: Arc::default(),
+            missing_is_a_level: false,
+        })
+    }
+
     /// Construct a MultiIndex from frame-like columns.
     ///
     /// Matches `pd.MultiIndex.from_frame(frame)` at the payload level:
@@ -27993,6 +28043,47 @@ mod tests {
             [vec![], vec![]],
         )
         .unwrap();
+        assert!(empty.identity_codes().is_none());
+    }
+
+    #[test]
+    fn two_coded_levels_match_the_arrays_they_stand_for_rc14i() {
+        // Each level's first-seen labels and its rows' codes give the
+        // MultiIndex of the rows they stand for, the rows made when read
+        // (br-frankenpandas-rc14i).
+        let rows: Vec<IndexLabel> = [5, 5, 9, 2, 2].map(IndexLabel::Int64).to_vec();
+        let text = |name: &str| IndexLabel::Utf8(name.to_owned());
+        let columns: Vec<IndexLabel> = ["y", "x", "y", "x", "y"].map(text).to_vec();
+        let uniques = [
+            [5, 9, 2].map(IndexLabel::Int64).to_vec(),
+            ["y", "x"].map(text).to_vec(),
+        ];
+        let codes = [vec![0, 0, 1, 2, 2], vec![0, 1, 0, 1, 0]];
+        let coded = MultiIndex::from_two_coded_levels(uniques.clone(), codes.clone()).unwrap();
+        let hashed = MultiIndex::from_arrays(vec![rows.clone(), columns.clone()]).unwrap();
+        assert_eq!(coded, hashed);
+        assert_eq!(coded.identity_codes(), hashed.identity_codes());
+        assert_eq!(coded.level_labels(0), Some(rows.as_slice()));
+        assert_eq!(coded.level_labels(1), Some(columns.as_slice()));
+        assert_eq!(
+            coded.level_codes(1),
+            Some((uniques[1].as_slice(), codes[1].as_slice()))
+        );
+        // NEGATIVE: codes of another length, a code past its level's labels.
+        assert!(
+            MultiIndex::from_two_coded_levels(
+                uniques.clone(),
+                [codes[0].clone(), codes[1][..4].to_vec()]
+            )
+            .is_err()
+        );
+        assert!(
+            MultiIndex::from_two_coded_levels(uniques, [vec![0, 0, 1, 3, 2], codes[1].clone()])
+                .is_err()
+        );
+        let empty =
+            MultiIndex::from_two_coded_levels([Vec::new(), Vec::new()], [vec![], vec![]]).unwrap();
+        assert_eq!(empty.len(), 0);
         assert!(empty.identity_codes().is_none());
     }
 

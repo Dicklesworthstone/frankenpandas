@@ -2438,6 +2438,14 @@ pub trait HostObject: Send + Sync {
     }
     /// The value itself, for the host that made it to take back.
     fn as_any(&self) -> &dyn std::any::Any;
+    /// A number standing for the value where the host's values of its kind
+    /// are equal exactly when their numbers are, and equal to no value
+    /// without one (a date's day): [`HostValue`] keeps it, and equal cells
+    /// with one are found and hashed without the host (br-frankenpandas-jq8qb). None by
+    /// default.
+    fn host_number(&self) -> Option<i64> {
+        None
+    }
 }
 
 /// How many host objects are alive (see [`host_values_block_workers`]).
@@ -2475,10 +2483,16 @@ const fn workers_blocked(host_lock_declared: bool, live_host_values: usize) -> b
     host_lock_declared && live_host_values > 0
 }
 
-/// A host object, counted alive while any handle to it exists.
-struct HostSlot(Box<dyn HostObject>);
+/// A host object, counted alive while any handle to it exists. The object
+/// lives in the slot itself (one allocation a host value, where a boxed
+/// object in a slot made two; br-frankenpandas-jq8qb).
+struct HostSlot<T: ?Sized> {
+    /// The object's [`HostObject::host_number`], read once.
+    number: Option<i64>,
+    object: T,
+}
 
-impl Drop for HostSlot {
+impl<T: ?Sized> Drop for HostSlot<T> {
     fn drop(&mut self) {
         LIVE_HOST_VALUES.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
@@ -2486,24 +2500,39 @@ impl Drop for HostSlot {
 
 /// A shared handle on a [`HostObject`].
 #[derive(Clone)]
-pub struct HostValue(std::sync::Arc<HostSlot>);
+pub struct HostValue(std::sync::Arc<HostSlot<dyn HostObject>>);
 
 impl HostValue {
     #[must_use]
     pub fn new(object: impl HostObject + 'static) -> Self {
         LIVE_HOST_VALUES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Self(std::sync::Arc::new(HostSlot(Box::new(object))))
+        Self(std::sync::Arc::new(HostSlot {
+            number: object.host_number(),
+            object,
+        }))
     }
 
     #[must_use]
     pub fn object(&self) -> &dyn HostObject {
-        &*self.0.0
+        &self.0.object
+    }
+
+    /// The object's [`HostObject::host_number`].
+    #[must_use]
+    pub fn number(&self) -> Option<i64> {
+        self.0.number
     }
 }
 
 impl PartialEq for HostValue {
     fn eq(&self, other: &Self) -> bool {
-        std::sync::Arc::ptr_eq(&self.0, &other.0) || self.object().host_eq(other.object())
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+            || match (self.number(), other.number()) {
+                // Two numbered values: equal as their numbers, the host not
+                // asked (a call into it and a downcast a compare; br-frankenpandas-jq8qb).
+                (Some(left), Some(right)) => left == right,
+                _ => self.object().host_eq(other.object()),
+            }
     }
 }
 
@@ -2739,6 +2768,12 @@ impl std::hash::Hash for ObjectValue {
             }
             Self::Host(value) => {
                 1_u8.hash(state);
+                // A numbered value hashes as its number, as it compares
+                // (br-frankenpandas-jq8qb).
+                if let Some(number) = value.number() {
+                    number.hash(state);
+                    return;
+                }
                 match value.object().host_hash() {
                     Some(hash) => hash.hash(state),
                     None => value.object().host_repr().hash(state),
@@ -6373,6 +6408,45 @@ pub fn timestamp_text_in_zone(nanos: i64, tz: &str) -> String {
     let minutes = offset.unsigned_abs() / 60;
     text.push_str(&format!("{sign}{:02}:{:02}", minutes / 60, minutes % 60));
     text
+}
+
+/// `nanos` (datetime64[ns]) plus `months` calendar months, the day clipped
+/// to the target month's last day and the time of day kept - dateutil's
+/// relativedelta, which pandas' `DateOffset(years=, months=)` applies (Jan
+/// 31 + 1 month is Feb 29 in 2024). Civil-date arithmetic on the day count:
+/// a chrono date made and read back a row was most of
+/// s + DateOffset(months=1) (300k 12.9 ms, pandas 7.9; br-frankenpandas-4g57c).
+/// None when the result leaves datetime64[ns].
+#[must_use]
+pub fn add_calendar_months_nanos(nanos: i64, months: i64) -> Option<i64> {
+    const DAY: i64 = 86_400_000_000_000;
+    let moved = add_calendar_months_days(nanos.div_euclid(DAY), months)?;
+    i64::try_from(i128::from(moved) * i128::from(DAY) + i128::from(nanos.rem_euclid(DAY))).ok()
+}
+
+/// The day (days since 1970-01-01) `months` calendar months after `day`,
+/// the day of the month clipped to the target month's last day - the date
+/// part of [`add_calendar_months_nanos`], which a column moving instants
+/// that share a day computes once. None a million years out.
+#[must_use]
+pub fn add_calendar_months_days(day: i64, months: i64) -> Option<i64> {
+    // No date is a million years out (and the day counts below would
+    // overflow there).
+    if day.unsigned_abs() > 365_000_000 {
+        return None;
+    }
+    let (year, month, day) = civil_from_days(day);
+    let total = year
+        .checked_mul(12)?
+        .checked_add(i64::from(month) - 1)?
+        .checked_add(months)?;
+    let year = total.div_euclid(12);
+    if year.unsigned_abs() > 1_000_000 {
+        return None;
+    }
+    let month = u32::try_from(total.rem_euclid(12)).ok()? + 1;
+    let day = day.min(days_in_month(year, month)?);
+    Some(days_from_civil(year, month, day))
 }
 
 /// Days since 1970-01-01 of the proleptic-Gregorian date `(year, month,
@@ -23321,5 +23395,137 @@ mod pandas_decimal_py3c0 {
             pandas_int_to_f64(-99_999_999_999_999_999).to_bits(),
             0xc376_3457_85d8_a001
         );
+    }
+
+    /// The civil-date month shift is chrono's relativedelta (a date made,
+    /// moved and read back) for every day of the month at its edges, leap
+    /// and plain years, before and after 1970, sub-second times and month
+    /// counts of either sign (br-frankenpandas-4g57c). NEGATIVE: a shift past
+    /// datetime64[ns] (either end, or a month count near i64) is None, as
+    /// chrono's timestamp is out of range.
+    #[test]
+    fn calendar_months_match_chrono_relativedelta_4g57c() {
+        use chrono::{Datelike, NaiveDate};
+
+        use super::add_calendar_months_nanos;
+        let reference = |nanos: i64, months: i64| -> Option<i64> {
+            let at = chrono::DateTime::from_timestamp(
+                nanos.div_euclid(1_000_000_000),
+                u32::try_from(nanos.rem_euclid(1_000_000_000)).ok()?,
+            )?
+            .naive_utc();
+            let total = i64::from(at.year())
+                .checked_mul(12)?
+                .checked_add(i64::from(at.month0()))?
+                .checked_add(months)?;
+            let year = i32::try_from(total.div_euclid(12)).ok()?;
+            let month = u32::try_from(total.rem_euclid(12)).ok()? + 1;
+            let last = (28..=31)
+                .rev()
+                .find(|day| NaiveDate::from_ymd_opt(year, month, *day).is_some())?;
+            NaiveDate::from_ymd_opt(year, month, at.day().min(last))?
+                .and_time(at.time())
+                .and_utc()
+                .timestamp_nanos_opt()
+        };
+        let day_nanos = 86_400_000_000_000_i64;
+        let mut checked = 0;
+        for year in [1678, 1699, 1900, 1969, 1970, 2000, 2023, 2024, 2100, 2261] {
+            for month in 1..=12 {
+                for day in [1, 15, 27, 28, 29, 30, 31] {
+                    let Some(date) = NaiveDate::from_ymd_opt(year, month, day) else {
+                        continue;
+                    };
+                    let Some(midnight) = date
+                        .and_hms_opt(0, 0, 0)
+                        .and_then(|at| at.and_utc().timestamp_nanos_opt())
+                    else {
+                        continue;
+                    };
+                    for time in [0, 1, 37_123_456_789, day_nanos - 1] {
+                        let nanos = midnight + time;
+                        for months in [-2400, -13, -12, -1, 0, 1, 2, 11, 12, 25, 1200] {
+                            assert_eq!(
+                                add_calendar_months_nanos(nanos, months),
+                                reference(nanos, months),
+                                "{nanos} + {months} months"
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 30_000, "{checked}");
+        // NEGATIVE: out of range at both ends and for absurd month counts.
+        let last = i64::MAX - 1;
+        assert_eq!(add_calendar_months_nanos(last, 1), None);
+        assert_eq!(reference(last, 1), None);
+        assert_eq!(add_calendar_months_nanos(i64::MIN + 1, -1), None);
+        assert_eq!(add_calendar_months_nanos(0, i64::MAX), None);
+        assert_eq!(add_calendar_months_nanos(0, i64::MIN), None);
+        assert_eq!(add_calendar_months_nanos(0, 12 * 400), None);
+        assert_eq!(super::add_calendar_months_days(i64::MAX, 1), None);
+        assert_eq!(super::add_calendar_months_days(0, i64::MAX), None);
+        // The clipped day: Jan 31 2024 + 1 month is Feb 29.
+        let jan31 = 19_753 * day_nanos;
+        assert_eq!(
+            add_calendar_months_nanos(jan31, 1),
+            Some(19_782 * day_nanos)
+        );
+    }
+
+    /// A numbered host value equals another as their numbers and hashes as
+    /// its number, the host's own eq not asked; an unnumbered one asks it
+    /// (br-frankenpandas-jq8qb). NEGATIVE: numbered values of different
+    /// numbers differ though the host calls them equal; a numbered value
+    /// beside an unnumbered one takes the host's answer.
+    #[test]
+    fn numbered_host_values_compare_and_hash_by_number_jq8qb() {
+        use std::hash::{Hash, Hasher};
+
+        use super::{HostObject, HostValue, ObjectValue};
+
+        struct Numbered(Option<i64>, &'static str);
+        impl HostObject for Numbered {
+            fn host_eq(&self, other: &dyn HostObject) -> bool {
+                other
+                    .as_any()
+                    .downcast_ref::<Self>()
+                    .is_some_and(|other| other.1 == self.1)
+            }
+            fn host_repr(&self) -> String {
+                self.1.to_owned()
+            }
+            fn host_str(&self) -> String {
+                self.1.to_owned()
+            }
+            fn host_hash(&self) -> Option<u64> {
+                Some(self.1.len() as u64)
+            }
+            fn host_cmp(&self, _other: &dyn HostObject) -> Option<std::cmp::Ordering> {
+                None
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn host_number(&self) -> Option<i64> {
+                self.0
+            }
+        }
+        let hash = |value: &ObjectValue| {
+            let mut hasher = std::hash::DefaultHasher::new();
+            value.hash(&mut hasher);
+            hasher.finish()
+        };
+        let cell = |number, name| ObjectValue::Host(HostValue::new(Numbered(number, name)));
+        assert_eq!(cell(Some(7), "a"), cell(Some(7), "b"));
+        assert_eq!(hash(&cell(Some(7), "a")), hash(&cell(Some(7), "bb")));
+        assert_ne!(cell(Some(7), "a"), cell(Some(8), "a"));
+        assert_eq!(cell(Some(7), "a"), cell(None, "a"));
+        assert_ne!(cell(Some(7), "a"), cell(None, "b"));
+        assert_eq!(cell(None, "a"), cell(None, "a"));
+        assert_ne!(cell(None, "a"), cell(None, "b"));
+        assert_eq!(hash(&cell(None, "ab")), hash(&cell(None, "cd")));
     }
 }
