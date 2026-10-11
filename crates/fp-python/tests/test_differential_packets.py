@@ -38921,6 +38921,115 @@ def test_frame_update_like_pandas_skv4q(case: str) -> None:
     assert answer(fpd) == answer(pd)
 
 
+# br-frankenpandas-skv4q: DataFrame.align of a frame and its step-slice (an index within the
+# other) answers as pandas: the outer union a plain int64 Index, the int column gaining a gap
+# float64. NEGATIVE: the reversed pair, join='left' / 'inner', differing and equal names, a
+# text column (the Scalar path), indexes that only overlap, a repeated index.
+def _skv4q_align_case(m: Any, case: str) -> Any:
+    import numpy as np
+
+    num = m.DataFrame({"x": [1.5, 2.5, np.nan, 4.5, 5.5], "z": [1, 2, 3, 4, 5]})
+    half = num.iloc[::2]
+    if case == "full half":
+        return num.align(half)
+    if case == "half full":
+        return half.align(num)
+    if case == "left join":
+        return num.align(half, join="left")
+    if case == "inner join":
+        return num.align(half, join="inner")
+    if case == "named":
+        a, b = num.copy(), half.copy()
+        a.index.name = "k"
+        b.index.name = "k"
+        return a.align(b)
+    if case == "names differ":
+        a, b = num.copy(), half.copy()
+        a.index.name = "k"
+        b.index.name = "j"
+        return a.align(b)
+    if case == "text column":
+        t = m.DataFrame({"s": list("abcde"), "z": [1, 2, 3, 4, 5]})
+        return t.align(t.iloc[::2])
+    if case == "overlap only":
+        return num.align(m.DataFrame({"x": [9.0, 8.0], "z": [7, 6]}, index=[3, 10]))
+    if case == "repeated index":
+        r = m.DataFrame({"x": [1.0, 2.0, 3.0]}, index=[1, 1, 2])
+        return r.align(m.DataFrame({"x": [5.0]}, index=[2]))
+    raise AssertionError(case)
+
+
+_SKV4Q_ALIGN_CASES = [
+    "full half", "half full", "left join", "inner join", "named", "names differ", "text column", "overlap only",
+    "repeated index",
+]
+
+
+def _skv4q_align_answer(m: Any, case: str, part: str) -> Any:
+    def side(frame: Any) -> Any:
+        if part == "class":
+            return type(frame.index).__name__
+        return list(frame.index), frame.index.name, repr(frame.to_dict()), [str(d) for d in frame.dtypes]
+
+    try:
+        left, right = _skv4q_align_case(m, case)
+    except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+        return type(error).__name__
+    return side(left), side(right)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _SKV4Q_ALIGN_CASES)
+def test_frame_align_like_pandas_skv4q(case: str) -> None:
+    assert _skv4q_align_answer(fpd, case, "values") == _skv4q_align_answer(pd, case, "values")
+
+
+# The joined index's class: fp answers a RangeIndex where pandas' RangeIndex.join answers an
+# int64 Index (br-frankenpandas-5ibzp). NEGATIVE: join='left' keeps pandas' RangeIndex.
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(case, marks=pytest.mark.xfail(strict=True, reason="br-frankenpandas-5ibzp"))
+        if case in ("full half", "half full", "inner join", "named", "names differ", "text column")
+        else case
+        for case in _SKV4Q_ALIGN_CASES
+    ],
+)
+def test_frame_align_index_class_like_pandas_5ibzp(case: str) -> None:
+    assert _skv4q_align_answer(fpd, case, "class") == _skv4q_align_answer(pd, case, "class")
+
+
+# br-frankenpandas-skv4q: RangeIndex.union of two ranges answers as pandas' RangeIndex._union -
+# a RangeIndex where it joins them, a plain Index where it cannot. NEGATIVE: a gap, a step
+# multiple not within, an offset multiple, descending, empty, sort=False, names.
+_SKV4Q_RANGES = {
+    "subset step2": ((0, 10, 1), (0, 10, 2)), "superset": ((0, 10, 2), (0, 10, 1)),
+    "touching": ((0, 5, 1), (5, 10, 1)), "overlap": ((0, 6, 1), (3, 10, 1)), "gap": ((0, 3, 1), (5, 10, 1)),
+    "half step": ((0, 10, 2), (1, 11, 2)), "singles": ((3, 4, 1), (7, 8, 1)), "single into": ((0, 10, 3), (12, 13, 1)),
+    "descending": ((10, 0, -1), (0, 5, 1)), "empty": ((0, 0, 1), (0, 5, 1)),
+    "mult not within": ((0, 10, 1), (0, 30, 5)), "offset mult": ((0, 10, 2), (1, 9, 4)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", [*_SKV4Q_RANGES, "sort false", "names same", "names differ"])
+def test_range_union_like_pandas_skv4q(case: str) -> None:
+    def answer(m: Any) -> Any:
+        if case == "sort false":
+            out = m.RangeIndex(0, 10).union(m.RangeIndex(0, 10, 2), sort=False)
+        elif case.startswith("names"):
+            out = m.RangeIndex(0, 10, name="k").union(
+                m.RangeIndex(0, 10, 2, name="k" if case == "names same" else "j")
+            )
+        else:
+            a, b = _SKV4Q_RANGES[case]
+            out = m.RangeIndex(*a).union(m.RangeIndex(*b))
+        return type(out).__name__, list(out), out.name
+
+    assert answer(fpd) == answer(pd)
+
+
 # br-frankenpandas-l9t3g: to_datetime(format='ISO8601') of a text column of one plain ISO
 # shape reads its buffer as format=None does, and answers as pandas. NEGATIVE: mixed shapes
 # (each on its own), a tz offset, a None among them, a non-ISO value (raise / coerce), a
@@ -40177,5 +40286,79 @@ def test_typed_reindex_method_like_pandas_7krba(case: str) -> None:
         if hasattr(out, "columns"):
             return [repr(x) for x in out.index], [repr(x) for x in out.values.tolist()]
         return [repr(x) for x in out.index], [repr(x) for x in out.tolist()]
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-j4657: a multi-key merge whose text key sits beside int keys joins the
+# text as int codes over both sides' strings on the inner / left paths; every merge
+# answers as pandas. NEGATIVE: strings differing by case or a trailing space, a
+# right-only string, duplicates on both sides, right and outer merges and sort=True
+# (ordered by the keys, generic), an indicator, a missing text key (missing meets
+# missing, generic).
+def _j4657_case(m: Any, case: str) -> Any:
+    missing = "missing" in case
+    left = m.DataFrame(
+        {
+            "t": ["b", "a", "A", "a", "c", "b", "a "] + ([None] if missing else []),
+            "i": [1, 2, 2, 2, 7, 1, 2] + ([1] if missing else []),
+            "j": [0, 1, 0, 1, 0, 1, 0] + ([1] if missing else []),
+            "lv": list(range(8 if missing else 7)),
+        }
+    )
+    # No inner merge here is exactly as long as the left frame: pandas 2.2's
+    # inner_join(sort=False) then reorders its rows by a shortcut meant for
+    # one match a row (br-frankenpandas-ml0az).
+    right = m.DataFrame(
+        {
+            "t": ["q", "a", "b", "a", "b", "A", "c", "c", "b"] + ([None] if missing else []),
+            "i": [5, 2, 1, 2, 3, 9, 7, 7, 1] + ([1] if missing else []),
+            "j": [1, 1, 0, 1, 0, 1, 0, 0, 0] + ([1] if missing else []),
+            "rv": [10 * v for v in range(10 if missing else 9)],
+        }
+    )
+    if case == "left_on / right_on":
+        renamed = right.rename(columns={"t": "t2", "i": "i2"})
+        return left.merge(renamed, left_on=["t", "i"], right_on=["t2", "i2"])
+    on = ["t", "i"]
+    if "int first" in case:
+        on = ["i", "t"]
+    if "three keys" in case:
+        on = ["t", "i", "j"]
+    how = case.split()[0]
+    return left.merge(right, on=on, how=how, sort="sort" in case, indicator="indicator" in case)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case",
+    [
+        "inner",
+        "left",
+        "inner int first",
+        "left int first",
+        "inner three keys",
+        "left three keys",
+        "left_on / right_on",
+        "right (NEGATIVE)",
+        "outer (NEGATIVE)",
+        "inner sort (NEGATIVE)",
+        "left indicator (NEGATIVE)",
+        "inner missing (NEGATIVE)",
+        "left missing (NEGATIVE)",
+    ],
+)
+def test_text_and_int_key_merge_like_pandas_j4657(case: str) -> None:
+    def answer(m: Any) -> Any:
+        try:
+            out = _j4657_case(m, case)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return (
+            repr(out.to_dict("list")),
+            [str(dtype) for dtype in out.dtypes],
+            list(out.columns),
+            [repr(label) for label in out.index],
+        )
 
     assert answer(fpd) == answer(pd)

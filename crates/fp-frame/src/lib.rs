@@ -9737,6 +9737,42 @@ fn align_union_sorted_unique_i64_direct(left: &Index, right: &Index) -> Option<A
             rpos[slot] = p as u32;
         }
     }
+    // One side's labels all the other's, the other strictly ascending: the
+    // union is that side's values, typed (a range against its step-slice
+    // made a label a row of the range; num.align(num.iloc[::2]) 0.41x pandas,
+    // br-frankenpandas-skv4q). The same labels, positions and name.
+    let name = (left.name() == right.name()).then(|| left.name()).flatten();
+    let ascending = |values: &[i64]| values.windows(2).all(|pair| pair[0] < pair[1]);
+    let within = |inner: &[u32], outer: &[u32]| {
+        inner
+            .iter()
+            .zip(outer)
+            .all(|(&inside, &outside)| inside == u32::MAX || outside != u32::MAX)
+    };
+    let positions_of = |values: &[i64], pos: &[u32]| -> Vec<Option<usize>> {
+        values
+            .iter()
+            .map(|&v| {
+                let at = pos[(v - min) as usize];
+                (at != u32::MAX).then_some(at as usize)
+            })
+            .collect()
+    };
+    // pandas' union is a plain int64 Index (a range's too).
+    if ascending(lv) && within(&rpos, &lpos) {
+        return Some(AlignmentPlan {
+            union_index: Index::from_i64_values(lv.to_vec()).set_names(name),
+            left_positions: (0..lv.len()).map(Some).collect(),
+            right_positions: positions_of(lv, &rpos),
+        });
+    }
+    if ascending(rv) && within(&lpos, &rpos) {
+        return Some(AlignmentPlan {
+            union_index: Index::from_i64_values(rv.to_vec()).set_names(name),
+            left_positions: positions_of(rv, &lpos),
+            right_positions: (0..rv.len()).map(Some).collect(),
+        });
+    }
     let mut union_labels: Vec<IndexLabel> = Vec::new();
     let mut left_positions: Vec<Option<usize>> = Vec::new();
     let mut right_positions: Vec<Option<usize>> = Vec::new();
@@ -11290,6 +11326,59 @@ fn combined_int_row_keys(columns: &[&[i64]]) -> Option<Vec<i64>> {
     Some(keys)
 }
 
+/// First-seen dense group ids of `data` over the direct-address table of its
+/// `range` values from `min` (see [`i64_dense_histogram_range`]).
+fn dense_histogram_gids(data: &[i64], min: i64, range: usize) -> (Vec<usize>, usize) {
+    let mut gid_of = vec![usize::MAX; range];
+    let mut gid_per_row = vec![0usize; data.len()];
+    let mut ngroups = 0usize;
+    for (i, &v) in data.iter().enumerate() {
+        let off = (v as i128 - min as i128) as usize;
+        let g = if gid_of[off] == usize::MAX {
+            gid_of[off] = ngroups;
+            ngroups += 1;
+            ngroups - 1
+        } else {
+            gid_of[off]
+        };
+        gid_per_row[i] = g;
+    }
+    (gid_per_row, ngroups)
+}
+
+/// `data`'s distances from its least value counted in the coarsest of a day,
+/// an hour, a minute, a second, a millisecond and a microsecond (as
+/// nanoseconds) that divides each of them; None when none does or `data` is
+/// empty. Each unit a constant, so its checks and divisions are multiplies.
+fn calendar_steps(data: &[i64]) -> Option<Vec<i64>> {
+    fn on_grid<const UNIT: u64>(data: &[i64], min: i64) -> bool {
+        // In u64: a value at or past the least is that far from it exactly.
+        data.iter()
+            .all(|&value| (value.wrapping_sub(min) as u64).is_multiple_of(UNIT))
+    }
+    fn steps<const UNIT: u64>(data: &[i64], min: i64) -> Vec<i64> {
+        data.iter()
+            .map(|&value| ((value.wrapping_sub(min) as u64) / UNIT) as i64)
+            .collect()
+    }
+    let min = *data.iter().min()?;
+    Some(if on_grid::<86_400_000_000_000>(data, min) {
+        steps::<86_400_000_000_000>(data, min)
+    } else if on_grid::<3_600_000_000_000>(data, min) {
+        steps::<3_600_000_000_000>(data, min)
+    } else if on_grid::<60_000_000_000>(data, min) {
+        steps::<60_000_000_000>(data, min)
+    } else if on_grid::<1_000_000_000>(data, min) {
+        steps::<1_000_000_000>(data, min)
+    } else if on_grid::<1_000_000>(data, min) {
+        steps::<1_000_000>(data, min)
+    } else if on_grid::<1_000>(data, min) {
+        steps::<1_000>(data, min)
+    } else {
+        return None;
+    })
+}
+
 /// First-seen dense group ids for an all-valid `i64` key slice: a dense
 /// direct-address table when the span is bounded/dense, else an
 /// open-addressing table (splitmix probe, u32 codes, `i64::MIN` empty sentinel
@@ -11301,21 +11390,18 @@ fn combined_int_row_keys(columns: &[&[i64]]) -> Option<Vec<i64>> {
 /// open-addr capacity math overflows or `n > u32::MAX` (caller falls back).
 fn dense_gids_from_i64(data: &[i64]) -> Option<(Vec<usize>, usize)> {
     if let Some((min, range)) = i64_dense_histogram_range(data) {
-        let mut gid_of = vec![usize::MAX; range];
-        let mut gid_per_row = vec![0usize; data.len()];
-        let mut ngroups = 0usize;
-        for (i, &v) in data.iter().enumerate() {
-            let off = (v as i128 - min as i128) as usize;
-            let g = if gid_of[off] == usize::MAX {
-                gid_of[off] = ngroups;
-                ngroups += 1;
-                ngroups - 1
-            } else {
-                gid_of[off]
-            };
-            gid_per_row[i] = g;
-        }
-        return Some((gid_per_row, ngroups));
+        return Some(dense_histogram_gids(data, min, range));
+    }
+    // Values a common calendar step apart from the least one (a floored or
+    // resampled datetime key: days, hours, minutes, seconds, ms, us) are
+    // numbered by their steps on the dense table - their nanos span past it,
+    // so every row was hashed (groupby(index.floor('D')) of 200k rows 6.35
+    // ms, pandas 3.47; br-frankenpandas-errn5). The steps keep the rows'
+    // order, so the first-seen numbering is the same.
+    if let Some(steps) = calendar_steps(data)
+        && let Some((min, range)) = i64_dense_histogram_range(&steps)
+    {
+        return Some(dense_histogram_gids(&steps, min, range));
     }
     const EMPTY: i64 = i64::MIN;
     let n = data.len();
@@ -42671,8 +42757,29 @@ trait ResampleBin: Clone {
 
     fn add(&mut self, value: f64);
 
+    /// A run of the bin's rows, added in row order: the bin's state held
+    /// across the run, where a row at a time stored it and loaded it back.
+    fn add_run(&mut self, values: &[f64]) {
+        for &value in values {
+            self.add(value);
+        }
+    }
+
     /// The bin's reduction, an empty bin's included (NaN when missing).
     fn value(&self) -> f64;
+}
+
+/// Each run of `runs` (a bin and the row its run ends before) added to its
+/// bin in `acc`, in row order; a run of rows in no bin (`u32::MAX`) skipped.
+fn fold_row_runs<B: ResampleBin>(runs: &[(u32, u32)], vals: &[f64], acc: &mut [B]) {
+    let mut start = 0_usize;
+    for &(bin, end) in runs {
+        let end = end as usize;
+        if let Some(slot) = acc.get_mut(bin as usize) {
+            slot.add_run(&vals[start..end]);
+        }
+        start = end;
+    }
 }
 
 /// pandas' group_sum: compensated from 0.0, so an empty bin is 0.0
@@ -42775,21 +42882,36 @@ impl ResampleBin for BinOhlc {
     const SINGLETON_IS_VALUE: bool = false;
 
     fn add(&mut self, value: f64) {
-        if value.is_nan() {
-            return;
-        }
-        match &mut self.prices {
-            None => self.prices = Some([value; 4]),
-            Some([_, high, low, close]) => {
-                if value > *high {
-                    *high = value;
-                }
-                if value < *low {
-                    *low = value;
-                }
+        self.add_run(&[value]);
+    }
+
+    fn add_run(&mut self, values: &[f64]) {
+        // The prices as locals across the run, each a select a row - a NaN
+        // compares false and is no close: a row at a time loaded the bin's
+        // prices its previous row had just stored, a chain through memory
+        // (resample('1h').ohlc() 0.82x pandas; br-frankenpandas-1gkpa).
+        let (mut prices, rest) = match self.prices {
+            Some(prices) => (prices, values),
+            None => {
+                let Some(at) = values.iter().position(|value| !value.is_nan()) else {
+                    return;
+                };
+                ([values[at]; 4], &values[at + 1..])
+            }
+        };
+        let [_, high, low, close] = &mut prices;
+        for &value in rest {
+            if value > *high {
+                *high = value;
+            }
+            if value < *low {
+                *low = value;
+            }
+            if !value.is_nan() {
                 *close = value;
             }
         }
+        self.prices = Some(prices);
     }
 
     fn value(&self) -> f64 {
@@ -43486,10 +43608,9 @@ impl Resample<'_> {
     /// value added to its bin in row order, then each emitted bin's value -
     /// an empty bin's included. The bins are the ones an earlier reduction
     /// of the resampler kept in its [`ResampleLayout`]; else the rows are
-    /// binned now, each value folded as its row finds its bin (a second pass
-    /// over the kept bins cost a one-shot resample 10-20%), and the bins
-    /// kept. A sum or mean of stamps that are already their own bins is the
-    /// Series itself. `None` (caller uses build_groups) for other freqs or
+    /// binned now and the bins kept. Either way each bin's runs of rows are
+    /// folded a run at a time. A sum or mean of stamps that are already their
+    /// own bins is the Series itself. `None` (caller uses build_groups) for other freqs or
     /// when the binning bails (empty / sparse / non-datetime label).
     fn resample_reduce_single_pass<B: ResampleBin>(
         &self,
@@ -43532,16 +43653,7 @@ impl Resample<'_> {
             Some(kept) => {
                 let bins = kept.filter(|bins| bins.rows == vals.len())?;
                 let mut acc = vec![empty; bins.bins];
-                let mut start = 0_usize;
-                for &(bin, end) in &bins.runs {
-                    let end = end as usize;
-                    if let Some(slot) = acc.get_mut(bin as usize) {
-                        for &value in &vals[start..end] {
-                            slot.add(value);
-                        }
-                    }
-                    start = end;
-                }
+                fold_row_runs(&bins.runs, vals, &mut acc);
                 (bins, acc)
             }
             None => {
@@ -43560,10 +43672,8 @@ impl Resample<'_> {
     }
 
     /// Dispatch the calendar / daily / sub-daily binning of the rows - the
-    /// default edges, labels and origin only - each row's value in `vals`
-    /// folded into its bin (a clone of `empty`) as the row finds it, in the
-    /// binning's own loop (the bins a local of it, as the fold was before
-    /// the bins were kept).
+    /// default edges, labels and origin only - then fold the values in `vals`
+    /// into their bins (each a clone of `empty`) a run of rows at a time.
     fn compute_row_bins<B: ResampleBin>(
         &self,
         vals: &[f64],
@@ -43648,11 +43758,10 @@ impl Resample<'_> {
                 .map(|mo| ((bucket_end_mo(mo) - first) / bucket_months) as usize)
                 .filter(|&bidx| bidx < n)
                 .and_then(|bidx| u32::try_from(bidx).ok());
-            if let Some(bin) = bin {
-                acc[bin as usize].add(vals[i]);
-            }
             runs.row(i, bin.unwrap_or(u32::MAX));
         }
+        let runs = runs.finish(month_ords.len());
+        fold_row_runs(&runs, vals, &mut acc);
         let mut out_labels = Vec::new();
         let mut emitted = Vec::new();
         let mut cursor = first;
@@ -43666,7 +43775,7 @@ impl Resample<'_> {
             bidx += 1;
         }
         let bins = ResampleRowBins {
-            runs: runs.finish(month_ords.len()),
+            runs,
             rows: month_ords.len(),
             bins: n,
             emitted: Some(emitted),
@@ -43816,13 +43925,12 @@ impl Resample<'_> {
         // A run changes only where the cursor does: any other row closes
         // the cursor, so the next stamp reopens its day's run.
         let mut runs = RowRuns::default();
-        let (mut start, mut end, mut day_bin) = (0_i64, 0_i64, 0_u32);
+        let (mut start, mut end) = (0_i64, 0_i64);
         for (i, l) in labels.iter().enumerate() {
             if let IndexLabel::Datetime64(ns) = l
                 && *ns >= start
                 && *ns < end
             {
-                acc[day_bin as usize].add(vals[i]);
                 continue;
             }
             (start, end) = (0, 0);
@@ -43830,18 +43938,19 @@ impl Resample<'_> {
                 IndexLabel::Datetime64(ns) => {
                     let day = ns.div_euclid(DAY);
                     let bin = u32::try_from(day + 719_163 - min).ok();
-                    if let (Some(bin), Some(first)) = (bin, day.checked_mul(DAY)) {
-                        (start, end, day_bin) = (first, first.saturating_add(DAY), bin);
+                    if bin.is_some()
+                        && let Some(first) = day.checked_mul(DAY)
+                    {
+                        (start, end) = (first, first.saturating_add(DAY));
                     }
                     bin
                 }
                 _ => other_day(l).and_then(|ord| u32::try_from(ord - min).ok()),
             };
-            if let Some(bin) = bin {
-                acc[bin as usize].add(vals[i]);
-            }
             runs.row(i, bin.unwrap_or(u32::MAX));
         }
+        let runs = runs.finish(labels.len());
+        fold_row_runs(&runs, vals, &mut acc);
         let key_of = |ord: i64| -> Option<String> {
             let d = NaiveDate::from_num_days_from_ce_opt(i32::try_from(ord).ok()?)?;
             Some(format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day()))
@@ -43855,7 +43964,7 @@ impl Resample<'_> {
             }
         }
         let bins = ResampleRowBins {
-            runs: runs.finish(labels.len()),
+            runs,
             rows: labels.len(),
             bins: n,
             emitted: Some(emitted),
@@ -43948,14 +44057,13 @@ impl Resample<'_> {
         u32::try_from(nb).ok()?;
         let mut acc = vec![empty; nb];
         let mut runs = RowRuns::default();
-        if let Some((first, step, _)) = affine {
+        if let Some((first, step, len)) = affine {
             let mut ns = first;
-            for (i, &value) in vals.iter().enumerate() {
+            for i in 0..len {
                 if i > 0 {
                     ns += step;
                 }
                 let bin = (ns - origin).div_euclid(bucket_ns) as u32;
-                acc[bin as usize].add(value);
                 runs.row(i, bin);
             }
         }
@@ -43963,7 +44071,6 @@ impl Resample<'_> {
         // divide only where they cross into another bin - a division per
         // row was the pass's largest cost (br-frankenpandas-bss5q.3). A
         // stamp outside the cursor's bin, in any order, finds its own.
-        let mut bin = 0_u32;
         let mut start = origin;
         let mut end = origin;
         // A run changes only where the cursor does: a row in no bin closes
@@ -43976,13 +44083,13 @@ impl Resample<'_> {
             };
             if ns < start || ns >= end {
                 let offset = (ns - origin).div_euclid(bucket_ns);
-                bin = offset as u32;
                 start = origin + offset * bucket_ns;
                 end = start + bucket_ns;
-                runs.row(i, bin);
+                runs.row(i, offset as u32);
             }
-            acc[bin as usize].add(vals[i]);
         }
+        let runs = runs.finish(rows);
+        fold_row_runs(&runs, vals, &mut acc);
         let index =
             Index::from_datetime64_affine_range(origin, bucket_ns, nb).unwrap_or_else(|| {
                 let labels = (0..nb)
@@ -43991,7 +44098,7 @@ impl Resample<'_> {
                 Index::from_datetime64(labels)
             });
         let bins = ResampleRowBins {
-            runs: runs.finish(rows),
+            runs,
             rows,
             bins: nb,
             emitted: None,
@@ -92906,39 +93013,61 @@ impl DataFrame {
             // the identical per-row kernel; ascending worker ranges preserve row order.
             // Same partition+concat lever as the parallelized reshape/to_dict builds;
             // CPU-bound but wins with core headroom (single-threaded below the gate).
+            // Column by column over blocks of rows: a column's counts against
+            // each other column in one pass down a block's rows, contiguous,
+            // which vectorizes, the block's columns and counts held in L1 - the
+            // per-row pairwise loop did not vectorize (20k x 20 5.1 ms, pandas
+            // 3.6) and whole-column passes streamed from memory (4.1 ms;
+            // br-frankenpandas-kp3i0). A row's less / equal counts are the same
+            // integers either way, so the ranks are the same values.
+            const RANK_BLOCK: usize = 128;
             let rank_range = |lo: usize, hi: usize| -> Vec<Vec<f64>> {
                 let mut out: Vec<Vec<f64>> =
                     (0..n_cols).map(|_| Vec::with_capacity(hi - lo)).collect();
-                let mut rowvals = vec![0.0_f64; n_cols];
-                for row in lo..hi {
-                    for (i, c) in col_f64.iter().enumerate() {
-                        rowvals[i] = c[row];
-                    }
-                    for i in 0..n_cols {
-                        let b = rowvals[i];
-                        let mut less = 0.0_f64;
-                        let mut equal = 0.0_f64;
-                        for &a in &rowvals {
-                            let lt = if ascending { a < b } else { a > b };
-                            less += f64::from(u8::from(lt));
-                            equal += f64::from(u8::from(a == b));
-                        }
-                        let rank = match method {
-                            "min" => less + 1.0,
-                            "max" => less + equal,
-                            // "first": ties ranked by position — count equals at j<=i.
-                            // Only this (less common) method pays the extra inner pass.
-                            "first" => {
-                                let mut eli = 0.0_f64;
-                                for (j, &a) in rowvals.iter().enumerate() {
-                                    eli += f64::from(u8::from(a == b) & u8::from(j <= i));
+                let (mut less, mut equal, mut first) = (
+                    [0_u32; RANK_BLOCK],
+                    [0_u32; RANK_BLOCK],
+                    [0_u32; RANK_BLOCK],
+                );
+                let mut block = lo;
+                while block < hi {
+                    let end = (block + RANK_BLOCK).min(hi);
+                    let rows = end - block;
+                    for (i, ranks) in out.iter_mut().enumerate() {
+                        let ours = &col_f64[i][block..end];
+                        less[..rows].fill(0);
+                        equal[..rows].fill(0);
+                        for (j, column) in col_f64.iter().enumerate() {
+                            let theirs = &column[block..end];
+                            if ascending {
+                                for ((lt, &a), &b) in less.iter_mut().zip(theirs).zip(ours) {
+                                    *lt += u32::from(a < b);
                                 }
-                                less + eli
+                            } else {
+                                for ((lt, &a), &b) in less.iter_mut().zip(theirs).zip(ours) {
+                                    *lt += u32::from(a > b);
+                                }
                             }
-                            _ => less + (equal + 1.0) / 2.0,
-                        };
-                        out[i].push(rank);
+                            for ((eq, &a), &b) in equal.iter_mut().zip(theirs).zip(ours) {
+                                *eq += u32::from(a == b);
+                            }
+                            // "first": ties ranked by position - the running
+                            // equals at j == i count those at j <= i.
+                            if j == i && method == "first" {
+                                first[..rows].copy_from_slice(&equal[..rows]);
+                            }
+                        }
+                        ranks.extend((0..rows).map(|row| {
+                            let (lt, eq) = (f64::from(less[row]), f64::from(equal[row]));
+                            match method {
+                                "min" => lt + 1.0,
+                                "max" => lt + eq,
+                                "first" => lt + f64::from(first[row]),
+                                _ => lt + (eq + 1.0) / 2.0,
+                            }
+                        }));
                     }
+                    block = end;
                 }
                 out
             };
@@ -110400,7 +110529,7 @@ impl DataFrame {
                 left_positions,
                 right_positions,
             }
-        } else if outer && self.index.labels() != other.index.labels() {
+        } else if outer && self.index != other.index {
             // pandas' outer join of two different unique indexes is their
             // sorted union; first-seen order was fp's (br-frankenpandas-daigh).
             align_union_sorted_unique(&self.index, &other.index)
@@ -110421,7 +110550,8 @@ impl DataFrame {
             all_columns.sort();
         }
 
-        let n = plan.union_index.labels().len();
+        // The union's length, not its labels made (br-frankenpandas-skv4q).
+        let n = plan.union_index.len();
         let null = Scalar::Null(NullKind::NaN);
 
         // An alignment gap belongs to the dtype of the column that receives it.
@@ -110433,7 +110563,7 @@ impl DataFrame {
         // the all-NaN float column mandated by pandas.
         let absent_marker_for = |column: &Column| {
             let is_all_valid_numpy_int =
-                column.dtype() == DType::Int64 && !column.values().iter().any(Scalar::is_missing);
+                column.dtype() == DType::Int64 && !column.has_any_missing();
             if is_all_valid_numpy_int {
                 Scalar::Null(NullKind::NaN)
             } else if matches!(
@@ -110480,8 +110610,46 @@ impl DataFrame {
                 // A lane widens iff IT gains a gap; the join mode only decides
                 // which lanes do. (br-frankenpandas-nywa8)
                 let invents_a_gap = positions.iter().any(Option::is_none);
-                let is_all_valid_numpy_int = column.dtype() == DType::Int64
-                    && !column.values().iter().any(Scalar::is_missing);
+                let is_all_valid_numpy_int =
+                    column.dtype() == DType::Int64 && !column.has_any_missing();
+                // A float column or an all-valid numpy int one, typed: rows
+                // where they were (a clone for every row in place), a gap NaN
+                // and an int column with a gap float64, as below - each cell
+                // was a Scalar (br-frankenpandas-skv4q). A narrow, categorical
+                // or other column keeps the Scalar path.
+                if column.width().is_none() && column.categorical().is_none() {
+                    if !invents_a_gap
+                        && positions.len() == column.len()
+                        && positions
+                            .iter()
+                            .enumerate()
+                            .all(|(row, &position)| position == Some(row))
+                    {
+                        return Ok(column.clone());
+                    }
+                    if column.as_f64_slice_with_validity().is_some() {
+                        return column
+                            .reindex_by_positions(positions)
+                            .map_err(FrameError::from);
+                    }
+                    if is_all_valid_numpy_int && let Some(data) = column.as_i64_slice() {
+                        if !invents_a_gap {
+                            let rows: Vec<usize> = positions.iter().flatten().copied().collect();
+                            return Ok(column.take_positions(&rows));
+                        }
+                        let mut out = Vec::with_capacity(positions.len());
+                        let mut valid = vec![0_u64; positions.len().div_ceil(64)];
+                        for (row, position) in positions.iter().enumerate() {
+                            #[allow(clippy::cast_precision_loss)] // numpy's int64 -> float64
+                            out.push(position.map_or(0.0, |at| data[at] as f64));
+                            valid[row / 64] |= u64::from(position.is_some()) << (row % 64);
+                        }
+                        return Ok(Column::from_f64_values_with_validity(
+                            out,
+                            fp_columnar::ValidityMask::from_words(valid, positions.len()),
+                        ));
+                    }
+                }
                 let absent = absent_marker_for(column);
                 let values = positions
                     .iter()
@@ -148001,6 +148169,148 @@ mod tests {
         assert_eq!(ranked.columns["b"].values()[0], Scalar::Float64(1.0));
         assert_eq!(ranked.columns["b"].values()[1], Scalar::Float64(3.0));
         assert_eq!(ranked.columns["b"].values()[2], Scalar::Float64(2.0));
+    }
+
+    #[test]
+    fn calendar_grid_keys_number_by_their_steps_errn5() {
+        // br-frankenpandas-errn5: a datetime key on a day / minute grid is
+        // numbered on the dense table of its steps, first seen as the hashing
+        // numbers it. NEGATIVE: a key off any grid (None, still numbered), one
+        // value, no value, the i64 extremes (off every grid).
+        let day = 86_400_000_000_000_i64;
+        let base = 1_577_836_800_000_000_000_i64;
+        let days: Vec<i64> = [3, 0, 3, 1, 0, 59].iter().map(|d| base + d * day).collect();
+        assert_eq!(super::calendar_steps(&days), Some(vec![3, 0, 3, 1, 0, 59]));
+        assert_eq!(
+            super::dense_gids_from_i64(&days),
+            Some((vec![0, 1, 0, 2, 1, 3], 4))
+        );
+        let minutes: Vec<i64> = [5, 0, 10]
+            .iter()
+            .map(|m| base + m * 60_000_000_000)
+            .collect();
+        assert_eq!(super::calendar_steps(&minutes), Some(vec![5, 0, 10]));
+        let raw = vec![base + 1, base + 3, base];
+        assert_eq!(super::calendar_steps(&raw), None);
+        assert_eq!(super::dense_gids_from_i64(&raw), Some((vec![0, 1, 2], 3)));
+        assert_eq!(super::calendar_steps(&[base]), Some(vec![0]));
+        assert_eq!(super::calendar_steps(&[]), None);
+        assert_eq!(super::calendar_steps(&[i64::MIN + 1, i64::MAX]), None);
+    }
+
+    #[test]
+    fn rank_axis1_typed_counts_are_pandas_ranks_kp3i0() {
+        // br-frankenpandas-kp3i0: the typed row ranks - integer pairwise
+        // counts - answer as pandas 2.2.3 (measured) for each method and
+        // direction over rows with ties. NEGATIVE: descending, 'first' (ties
+        // by position), a row of three equal values.
+        let column = |name: &str, values: [f64; 3]| {
+            Series::from_values(
+                name,
+                vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+                values.iter().map(|&value| Scalar::Float64(value)).collect(),
+            )
+            .unwrap()
+        };
+        let df = DataFrame::from_series(vec![
+            column("a", [3.0, 1.0, 2.0]),
+            column("b", [1.0, 1.0, 2.0]),
+            column("c", [2.0, 1.0, 2.0]),
+            column("d", [3.0, 0.5, -1.0]),
+        ])
+        .unwrap();
+        assert!(
+            df.column_at(0).unwrap().as_f64_slice().is_some(),
+            "the typed path"
+        );
+        let cases: [(&str, bool, [[f64; 4]; 3]); 8] = [
+            (
+                "average",
+                true,
+                [
+                    [3.5, 1.0, 2.0, 3.5],
+                    [3.0, 3.0, 3.0, 1.0],
+                    [3.0, 3.0, 3.0, 1.0],
+                ],
+            ),
+            (
+                "average",
+                false,
+                [
+                    [1.5, 4.0, 3.0, 1.5],
+                    [2.0, 2.0, 2.0, 4.0],
+                    [2.0, 2.0, 2.0, 4.0],
+                ],
+            ),
+            (
+                "min",
+                true,
+                [
+                    [3.0, 1.0, 2.0, 3.0],
+                    [2.0, 2.0, 2.0, 1.0],
+                    [2.0, 2.0, 2.0, 1.0],
+                ],
+            ),
+            (
+                "min",
+                false,
+                [
+                    [1.0, 4.0, 3.0, 1.0],
+                    [1.0, 1.0, 1.0, 4.0],
+                    [1.0, 1.0, 1.0, 4.0],
+                ],
+            ),
+            (
+                "max",
+                true,
+                [
+                    [4.0, 1.0, 2.0, 4.0],
+                    [4.0, 4.0, 4.0, 1.0],
+                    [4.0, 4.0, 4.0, 1.0],
+                ],
+            ),
+            (
+                "max",
+                false,
+                [
+                    [2.0, 4.0, 3.0, 2.0],
+                    [3.0, 3.0, 3.0, 4.0],
+                    [3.0, 3.0, 3.0, 4.0],
+                ],
+            ),
+            (
+                "first",
+                true,
+                [
+                    [3.0, 1.0, 2.0, 4.0],
+                    [2.0, 3.0, 4.0, 1.0],
+                    [2.0, 3.0, 4.0, 1.0],
+                ],
+            ),
+            (
+                "first",
+                false,
+                [
+                    [1.0, 4.0, 3.0, 2.0],
+                    [1.0, 2.0, 3.0, 4.0],
+                    [1.0, 2.0, 3.0, 4.0],
+                ],
+            ),
+        ];
+        for (method, ascending, want) in cases {
+            let ranked = df
+                .rank_axis1_with_pct(method, ascending, "keep", false)
+                .unwrap();
+            for (row, want_row) in want.iter().enumerate() {
+                for (position, &rank) in want_row.iter().enumerate() {
+                    assert_eq!(
+                        ranked.column_at(position).unwrap().values()[row],
+                        Scalar::Float64(rank),
+                        "{method} ascending={ascending} row {row} column {position}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -190641,6 +190951,81 @@ mod tests {
         assert_eq!(ints(zeros.resample("h").nunique()), [1, 1, 0, 2, 1]);
         let counted = series(Column::from_i64_values(vec![1, 2, 3, 4, 5, 6, 7]));
         assert_eq!(ints(counted.resample("h").size()), [2, 2, 0, 2, 1]);
+    }
+
+    #[test]
+    fn resample_folds_each_run_of_a_bin_in_row_order_1gkpa() {
+        // The one-pass resample adds each run of a bin's rows at once, and
+        // ohlc holds its prices across a run: a bin whose rows come in
+        // several runs (stamps out of order, as the Rust API takes them)
+        // folds them in row order, as the row at a time did. Hourly bins of
+        // rows b0 b1 b0 b0 b1 b0 b0 b1 b3: bin 0 is the runs [NaN],
+        // [2.0, NaN], [9.0, 1.0]; bin 1 [5.0], [7.0], [NaN]; bin 2 empty; bin
+        // 3 [NaN] (br-frankenpandas-1gkpa). NEGATIVE: bin 0's open is its
+        // second run's 2.0 (a run restarting the prices answers 9.0), bin
+        // 1's close is 7.0 (a NaN taken as a close answers NaN), a NaN-only
+        // run before any price keeps none.
+        use std::sync::Arc;
+
+        use super::ResampleLayout;
+        let base = 1_577_836_800_000_000_000_i64;
+        let minute = 60_000_000_000_i64;
+        let stamps: Vec<i64> = [0, 70, 40, 20, 60, 10, 30, 80, 180]
+            .iter()
+            .map(|m| base + m * minute)
+            .collect();
+        let nan = f64::NAN;
+        let series = Series::new(
+            "x",
+            Index::from_datetime64(stamps),
+            Column::from_f64_values(vec![nan, 5.0, 2.0, nan, 7.0, 9.0, 1.0, nan, nan]),
+        )
+        .unwrap();
+        let floats = |column: &Column| -> Vec<Option<f64>> {
+            column
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Float64(x) if !x.is_nan() => Some(*x),
+                    _ => None,
+                })
+                .collect()
+        };
+        let layout = Arc::new(ResampleLayout::default());
+        for _ in 0..2 {
+            let view = || series.resample("h").sharing(&layout);
+            let ohlc = view().ohlc().unwrap();
+            let prices: Vec<Vec<Option<f64>>> = ["open", "high", "low", "close"]
+                .iter()
+                .map(|name| floats(ohlc.column(name).unwrap()))
+                .collect();
+            assert_eq!(
+                prices,
+                [
+                    [Some(2.0), Some(5.0), None, None],
+                    [Some(9.0), Some(7.0), None, None],
+                    [Some(1.0), Some(5.0), None, None],
+                    [Some(1.0), Some(7.0), None, None],
+                ]
+            );
+            assert_eq!(
+                floats(view().first().unwrap().column()),
+                [Some(2.0), Some(5.0), None, None]
+            );
+            assert_eq!(
+                floats(view().last().unwrap().column()),
+                [Some(1.0), Some(7.0), None, None]
+            );
+            assert_eq!(
+                floats(view().sum().unwrap().column()),
+                [Some(12.0), Some(12.0), Some(0.0), Some(0.0)]
+            );
+            assert_eq!(
+                floats(view().max().unwrap().column()),
+                [Some(9.0), Some(7.0), None, None]
+            );
+        }
+        assert!(layout.bins.get().is_some_and(Option::is_some));
     }
 
     #[test]

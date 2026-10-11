@@ -22732,6 +22732,17 @@ fn flat_label_bytes(label: &IndexLabel) -> Vec<u8> {
 /// The label each first-seen code first names: `codes[row]` new when it is
 /// the count of labels named so far.
 fn first_seen_uniques(rows: &[IndexLabel], codes: &[u32]) -> Vec<IndexLabel> {
+    // Every row first seen (the last its own code; a unique level, a
+    // RangeIndex): the rows themselves in one allocation - pushed one by one
+    // they regrew the buffer, its copies a quarter of df.stack() over 300k
+    // rows (br-frankenpandas-u4dmz).
+    if codes.len() == rows.len()
+        && codes
+            .last()
+            .is_some_and(|&last| last as usize + 1 == rows.len())
+    {
+        return rows.to_vec();
+    }
     let mut uniques = Vec::new();
     for (label, &code) in rows.iter().zip(codes) {
         if code as usize == uniques.len() {
@@ -27824,6 +27835,28 @@ mod tests {
         assert_eq!(ascending_i64_position(&[0, 3, 6], 4), None);
         assert_eq!(ascending_i64_position(&[0, 3, 6], -1), None);
         assert_eq!(ascending_i64_position(&[0, 3, 6], 7), None);
+    }
+
+    #[test]
+    fn first_seen_uniques_of_a_unique_level_are_its_rows_u4dmz() {
+        // br-frankenpandas-u4dmz: a level whose every row is first seen gives
+        // its rows back whole; NEGATIVE: a repeated label keeps the first-seen
+        // walk, unique text too.
+        let rows: Vec<IndexLabel> = (0..5_i64).map(IndexLabel::Int64).collect();
+        let codes = super::first_seen_label_codes(&rows).unwrap();
+        assert_eq!(super::first_seen_uniques(&rows, &codes), rows);
+        let text = |value: &str| IndexLabel::Utf8(value.into());
+        let repeated = vec![text("b"), text("a"), text("b"), text("c")];
+        let codes = super::first_seen_label_codes(&repeated).unwrap();
+        assert_eq!(codes, [0, 1, 0, 2]);
+        assert_eq!(
+            super::first_seen_uniques(&repeated, &codes),
+            [text("b"), text("a"), text("c")]
+        );
+        let unique_text = vec![text("z"), text("a")];
+        let codes = super::first_seen_label_codes(&unique_text).unwrap();
+        assert_eq!(super::first_seen_uniques(&unique_text, &codes), unique_text);
+        assert!(super::first_seen_uniques(&[], &[]).is_empty());
     }
 
     #[test]

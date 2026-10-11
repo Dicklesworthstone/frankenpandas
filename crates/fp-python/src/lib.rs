@@ -23317,6 +23317,73 @@ impl PyRangeIndex {
 }
 
 /// The `(start, stop, step)` of a RangeIndex object's labels.
+/// pandas' `RangeIndex._union` (sort None / True) of two ascending ranges
+/// where it answers a range: equal steps touching or overlapping, equal even
+/// steps half a step apart, or one step a multiple of the other with its
+/// range within the finer one's - a range of one taking the other's step
+/// (two of one, their distance). None for any other pair - empty,
+/// descending, or apart - which the generic union answers
+/// (br-frankenpandas-skv4q).
+fn range_union(ours: (i64, i64, i64), theirs: (i64, i64, i64)) -> Option<(i64, i64, i64)> {
+    let length = |(start, stop, step): (i64, i64, i64)| {
+        RangeIndex::new(start, stop, step)
+            .ok()
+            .and_then(|range| i128::try_from(range.len()).ok())
+    };
+    let (len_s, len_o) = (length(ours)?, length(theirs)?);
+    if len_s == 0 || len_o == 0 || ours.2 <= 0 || theirs.2 <= 0 {
+        return None;
+    }
+    let (start_s, start_o) = (i128::from(ours.0), i128::from(theirs.0));
+    let (mut step_s, mut step_o) = (i128::from(ours.2), i128::from(theirs.2));
+    let end_s = start_s + step_s * (len_s - 1);
+    let end_o = start_o + step_o * (len_o - 1);
+    if len_s == 1 && len_o == 1 {
+        step_s = (start_s - start_o).abs();
+        step_o = step_s;
+    } else if len_s == 1 {
+        step_s = step_o;
+    } else if len_o == 1 {
+        step_o = step_s;
+    }
+    if step_s == 0 || step_o == 0 {
+        return None;
+    }
+    let (start_r, end_r) = (start_s.min(start_o), end_s.max(end_o));
+    let joined = if step_o == step_s {
+        if (start_s - start_o) % step_s == 0
+            && start_s - end_o <= step_s
+            && start_o - end_s <= step_s
+        {
+            Some((start_r, end_r + step_s, step_s))
+        } else if step_s % 2 == 0
+            && (start_s - start_o).abs() == step_s / 2
+            && (end_s - end_o).abs() == step_s / 2
+        {
+            Some((start_r, end_r + step_s / 2, step_s / 2))
+        } else {
+            None
+        }
+    } else if step_o % step_s == 0 {
+        ((start_o - start_s) % step_s == 0
+            && start_o + step_s >= start_s
+            && end_o - step_s <= end_s)
+            .then_some((start_r, end_r + step_s, step_s))
+    } else if step_s % step_o == 0 {
+        ((start_s - start_o) % step_o == 0
+            && start_s + step_o >= start_o
+            && end_s - step_o <= end_o)
+            .then_some((start_r, end_r + step_o, step_o))
+    } else {
+        None
+    }?;
+    Some((
+        i64::try_from(joined.0).ok()?,
+        i64::try_from(joined.1).ok()?,
+        i64::try_from(joined.2).ok()?,
+    ))
+}
+
 fn range_span_of(index: &Index) -> (i64, i64, i64) {
     index
         .range_span()
@@ -23505,6 +23572,20 @@ impl PyRangeIndex {
 
     #[pyo3(signature = (other, sort=None))]
     fn union(slf: PyRef<'_, Self>, other: IndexArg, sort: Option<bool>) -> PyResult<Py<PyAny>> {
+        // Two ascending ranges pandas' RangeIndex._union joins into one range
+        // (see [`range_union`]), answered by their arithmetic: the generic
+        // union made every label (a range against its step-slice 0.97 ms,
+        // pandas 0.006; br-frankenpandas-skv4q).
+        let this = &slf.as_super().inner;
+        if sort != Some(false)
+            && let (Some(ours), Some(theirs)) = (this.range_span(), other.inner.range_span())
+            && let Some(joined) = range_union(ours, theirs)
+        {
+            let name = (this.name() == other.inner.name())
+                .then(|| this.name().cloned())
+                .flatten();
+            return PyRangeIndex::object(slf.py(), joined, name);
+        }
         let ranges = other.inner.range_span().is_some();
         let out = slf.as_super().union(other, sort).inner;
         Self::or_index(slf.py(), out, ranges)

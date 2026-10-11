@@ -8458,6 +8458,44 @@ fn hash_i64_inner_positions_slices(left: &[i64], right: &[i64]) -> (Vec<usize>, 
 /// unmatched left row. Bit-identical to the generic `CompositeJoinKey` path (same
 /// left iteration + ascending-right-per-key emit). Returns `None` for non-Inner/
 /// Left, non-2-key, or any non-all-valid-Int64 component.
+/// Each string of an all-valid text key column (a contiguous buffer or
+/// `Scalar::Utf8` cells) in row order; `None` for any other column.
+fn for_each_utf8_key<'a>(column: &'a Column, mut visit: impl FnMut(&'a [u8])) -> Option<()> {
+    if let Some((bytes, offsets)) = column.as_utf8_contiguous() {
+        for bounds in offsets.windows(2) {
+            visit(&bytes[bounds[0]..bounds[1]]);
+        }
+        return Some(());
+    }
+    for value in scalar_utf8_values(column)? {
+        visit(scalar_utf8_span(value)?);
+    }
+    Some(())
+}
+
+/// A text key pair of a merge as int64 codes over one dictionary of both
+/// sides' strings, a string numbered as its first row is met (the left's
+/// rows first): two rows' strings are equal exactly when their codes are.
+/// `None` unless both sides are all-valid text.
+fn utf8_key_pair_codes<'a>(left: &'a Column, right: &'a Column) -> Option<(Column, Column)> {
+    if left.dtype() != DType::Utf8 || right.dtype() != DType::Utf8 {
+        return None;
+    }
+    let mut codes: FxHashMap<&'a [u8], i64> = FxHashMap::default();
+    let mut code = |span: &'a [u8]| {
+        let next = codes.len() as i64;
+        *codes.entry(span).or_insert(next)
+    };
+    let mut left_codes = Vec::with_capacity(left.len());
+    for_each_utf8_key(left, |span| left_codes.push(code(span)))?;
+    let mut right_codes = Vec::with_capacity(right.len());
+    for_each_utf8_key(right, |span| right_codes.push(code(span)))?;
+    Some((
+        Column::from_i64_values_owned(left_codes),
+        Column::from_i64_values_owned(right_codes),
+    ))
+}
+
 fn typed_wide_two_i64_key_positions(
     join_type: JoinType,
     left_cols: &[&Column],
@@ -10059,6 +10097,59 @@ fn merge_dataframes_on_with_options_storage(
 
     let needs_key_order = sort || matches!(join_type, JoinType::Outer);
 
+    // A text key of a multi-key INNER / LEFT merge whose other keys are
+    // int64 joins as int64 codes over one dictionary of both sides' strings
+    // (see [`utf8_key_pair_codes`]), so the typed int-key paths below take
+    // it: their pairs follow equality and row order alone, never the keys'
+    // order, which codes do not keep (an outer join's or sort's do). A (str,
+    // int) key built a SmallVec of cloned labels a row and hashed it (merge
+    // on ['g', 'z'] of 200k rows 22.5 ms, pandas 19.0;
+    // br-frankenpandas-j4657). The key columns stay the output's.
+    let coded_keys: Vec<Option<(Column, Column)>> = if left_key_columns.len() >= 2
+        && matches!(join_type, JoinType::Inner | JoinType::Left)
+        && !sort
+        && indicator_name.is_none()
+        && validate_allows_fast_positions
+        && left_key_columns
+            .iter()
+            .any(|column| column.dtype() == DType::Utf8)
+        && left_key_columns
+            .iter()
+            .zip(&right_key_columns)
+            .all(|(left, right)| {
+                (left.dtype() == DType::Utf8 && right.dtype() == DType::Utf8)
+                    || (left.as_i64_slice().is_some() && right.as_i64_slice().is_some())
+            }) {
+        left_key_columns
+            .iter()
+            .zip(&right_key_columns)
+            .map(|(left, right)| utf8_key_pair_codes(left, right))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // Each key's column to match on: its codes, else itself.
+    let match_left: Vec<&Column> = left_key_columns
+        .iter()
+        .enumerate()
+        .map(|(key, &column)| {
+            coded_keys
+                .get(key)
+                .and_then(Option::as_ref)
+                .map_or(column, |(codes, _)| codes)
+        })
+        .collect();
+    let match_right: Vec<&Column> = right_key_columns
+        .iter()
+        .enumerate()
+        .map(|(key, &column)| {
+            coded_keys
+                .get(key)
+                .and_then(Option::as_ref)
+                .map_or(column, |(_, codes)| codes)
+        })
+        .collect();
+
     // Hash-free fast path: a plain inner join on all-valid bounded-Int64 key
     // column(s) packs the composite key into one i64 and runs the dense CSR
     // core, skipping CompositeJoinKey materialization + FxHashMap build/probe.
@@ -10069,7 +10160,7 @@ fn merge_dataframes_on_with_options_storage(
         && validate_allows_fast_positions
         && indicator_name.is_none()
     {
-        dense_packed_int64_inner_positions(&left_key_columns, &right_key_columns)
+        dense_packed_int64_inner_positions(&match_left, &match_right)
     } else {
         None
     };
@@ -10082,7 +10173,7 @@ fn merge_dataframes_on_with_options_storage(
         && validate_allows_fast_positions
         && packed_inner.is_none()
     {
-        typed_wide_two_i64_key_positions(join_type, &left_key_columns, &right_key_columns)
+        typed_wide_two_i64_key_positions(join_type, &match_left, &match_right)
     } else {
         None
     };
@@ -10097,7 +10188,7 @@ fn merge_dataframes_on_with_options_storage(
         && packed_inner.is_none()
         && typed_two_key.is_none()
     {
-        bounded_composite_multi_i64_key_positions(join_type, &left_key_columns, &right_key_columns)
+        bounded_composite_multi_i64_key_positions(join_type, &match_left, &match_right)
     } else {
         None
     };
@@ -10111,7 +10202,7 @@ fn merge_dataframes_on_with_options_storage(
         && typed_two_key.is_none()
         && composite_multi_key.is_none()
     {
-        typed_wide_multi_i64_key_positions(join_type, &left_key_columns, &right_key_columns)
+        typed_wide_multi_i64_key_positions(join_type, &match_left, &match_right)
     } else {
         None
     };
@@ -18954,6 +19045,158 @@ mod tests {
         assert_eq!(
             merged.columns.get("z").unwrap().values(),
             [1, 1, 2, 2].map(Scalar::Int64)
+        );
+    }
+
+    #[test]
+    fn text_and_int_keys_join_as_codes_in_row_order_j4657() {
+        // A (text, int) merge key's text joins as int64 codes over both
+        // sides' strings: an inner / left merge pairs each left row with its
+        // equal right rows in their order (a left row without one kept by
+        // the left join), as a loop over the rows pairs them; a contiguous
+        // and a Scalar text column alike. NEGATIVE: "a" never meets "A" or
+        // "a " (codes per byte string), a right-only string matches nothing,
+        // the right's first string ("q") is not the left's first code's, an
+        // outer merge sorts by the strings (codes would put "b" first), and
+        // a missing text key still joins its missing peer (the generic path).
+        // No inner merge here is as long as the left frame, where pandas 2.2
+        // reorders the rows (br-frankenpandas-ml0az; br-frankenpandas-j4657).
+        let left_text = ["b", "a", "A", "a", "c", "b", "a "];
+        let left_int = [1_i64, 2, 2, 2, 7, 1, 2];
+        let right_text = ["q", "a", "b", "a", "b", "A", "c", "c", "b"];
+        let right_int = [5_i64, 2, 1, 2, 3, 9, 7, 7, 1];
+        let frame = |text: Column, ints: &[i64], value: &str, base: i64| {
+            let rows = ints.len();
+            let mut columns = ColumnStore::new();
+            columns.insert("t".to_owned(), text);
+            columns.insert("i".to_owned(), Column::from_i64_values(ints.to_vec()));
+            columns.insert(
+                value.to_owned(),
+                Column::from_i64_values((0..rows as i64).map(|row| base + row).collect()),
+            );
+            DataFrame::new_with_column_order(
+                Index::new((0..rows as i64).map(IndexLabel::Int64).collect()),
+                columns,
+                vec!["t".to_owned(), "i".to_owned(), value.to_owned()],
+            )
+            .unwrap()
+        };
+        let scalar_text = |values: &[&str]| {
+            Column::from_values(
+                values
+                    .iter()
+                    .map(|value| Scalar::Utf8((*value).to_owned()))
+                    .collect(),
+            )
+            .unwrap()
+        };
+        for contiguous in [true, false] {
+            let text = |values: &[&str]| {
+                if contiguous {
+                    contiguous_utf8_column(values)
+                } else {
+                    scalar_text(values)
+                }
+            };
+            let left = frame(text(&left_text), &left_int, "lv", 100);
+            let right = frame(text(&right_text), &right_int, "rv", 200);
+            for join_type in [JoinType::Inner, JoinType::Left] {
+                let mut want: Vec<(Scalar, Scalar)> = Vec::new();
+                for (l, key) in left_text.iter().zip(&left_int).enumerate() {
+                    let matches: Vec<usize> = right_text
+                        .iter()
+                        .zip(&right_int)
+                        .enumerate()
+                        .filter(|(_, right_key)| *right_key == key)
+                        .map(|(r, _)| r)
+                        .collect();
+                    for &r in &matches {
+                        want.push((Scalar::Int64(100 + l as i64), Scalar::Int64(200 + r as i64)));
+                    }
+                    if matches.is_empty() && matches!(join_type, JoinType::Left) {
+                        want.push((Scalar::Int64(100 + l as i64), Scalar::Null(NullKind::NaN)));
+                    }
+                }
+                let merged = merge_dataframes_on(&left, &right, &["t", "i"], join_type).unwrap();
+                let got: Vec<(Scalar, Scalar)> = merged
+                    .columns
+                    .get("lv")
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .cloned()
+                    .zip(merged.columns.get("rv").unwrap().values().iter().cloned())
+                    .collect();
+                assert_eq!(got.len(), want.len(), "{contiguous} {join_type:?}");
+                for ((got_l, got_r), (want_l, want_r)) in got.iter().zip(&want) {
+                    assert_eq!(got_l, want_l, "{contiguous} {join_type:?}");
+                    assert_eq!(got_r.is_missing(), want_r.is_missing());
+                    if !want_r.is_missing() {
+                        assert_eq!(got_r.to_f64().ok(), want_r.to_f64().ok());
+                    }
+                }
+                // The key columns are the strings, not their codes.
+                let keys: Vec<Scalar> = want
+                    .iter()
+                    .map(|(l, _)| match l {
+                        Scalar::Int64(row) => {
+                            Scalar::Utf8(left_text[(*row - 100) as usize].to_owned())
+                        }
+                        _ => unreachable!(),
+                    })
+                    .collect();
+                assert_eq!(merged.columns.get("t").unwrap().values(), keys.as_slice());
+            }
+            // Inner pairs: b/1's two left rows with right rows 2 and 8, a/2's
+            // two with rows 1 and 3, c/7 with rows 6 and 7; A/2 none (right A
+            // is 9), "a " none.
+            let inner = merge_dataframes_on(&left, &right, &["t", "i"], JoinType::Inner).unwrap();
+            assert_eq!(inner.columns.get("lv").unwrap().len(), 10);
+            let outer = merge_dataframes_on(&left, &right, &["t", "i"], JoinType::Outer).unwrap();
+            let outer_keys: Vec<String> = outer
+                .columns
+                .get("t")
+                .unwrap()
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Utf8(text) => text.clone(),
+                    other => format!("{other:?}"),
+                })
+                .collect();
+            let mut sorted = outer_keys.clone();
+            sorted.sort();
+            assert_eq!(outer_keys, sorted, "{contiguous}");
+        }
+        // A missing text key meets its missing peer through the generic path.
+        let left = frame(
+            Column::from_values(vec![
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Null(NullKind::Null),
+            ])
+            .unwrap(),
+            &[1, 1],
+            "lv",
+            100,
+        );
+        let right = frame(
+            Column::from_values(vec![
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("a".to_owned()),
+            ])
+            .unwrap(),
+            &[1, 1],
+            "rv",
+            200,
+        );
+        let merged = merge_dataframes_on(&left, &right, &["t", "i"], JoinType::Inner).unwrap();
+        assert_eq!(
+            merged.columns.get("lv").unwrap().values(),
+            &[Scalar::Int64(100), Scalar::Int64(101)]
+        );
+        assert_eq!(
+            merged.columns.get("rv").unwrap().values(),
+            &[Scalar::Int64(201), Scalar::Int64(200)]
         );
     }
 
