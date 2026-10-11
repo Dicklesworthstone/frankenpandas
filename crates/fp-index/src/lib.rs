@@ -3350,6 +3350,11 @@ impl Index {
         if self.labels.timedelta64_strided().is_some() {
             return LabelKinds::TIMEDELTA64;
         }
+        // Text in one buffer is text alone: Index(<300k strs>) made every
+        // label for this (br-frankenpandas-5olp1).
+        if self.labels.utf8_contiguous.is_some() {
+            return LabelKinds::UTF8;
+        }
         let cache = INDEX_LABEL_KINDS_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
         if let Some(kinds) = cache
             .lock()
@@ -4270,7 +4275,21 @@ impl Index {
                     None
                 }
             }
-            SortOrder::Unsorted => self.labels.iter().position(|label| label == needle),
+            SortOrder::Unsorted => {
+                // A text key on a text index known unique: its cached table,
+                // as pandas' engine finds a key once its table is built - the
+                // labels were scanned a call (get_loc on 300k strs 31 us,
+                // pandas 1; br-frankenpandas-5olp1). Unasked, the uniqueness
+                // is not computed for this.
+                if let IndexLabel::Utf8(target) = needle
+                    && self.duplicate_cache.get() == Some(&false)
+                    && let Some(lookup) =
+                        utf8_position_lookup_cached(self.label_identity, self.labels())
+                {
+                    return lookup.get(target.as_str()).copied();
+                }
+                self.labels.iter().position(|label| label == needle)
+            }
         }
     }
 
@@ -4893,6 +4912,14 @@ impl Index {
 
     #[must_use]
     pub fn contains(&self, label: &IndexLabel) -> bool {
+        // A text key on an unsorted index asks its uniqueness once, so the
+        // cached table answers it and the next, as pandas' engine builds its
+        // table on the first lookup (`key in index` scanned the labels a
+        // call: 29 us on 300k strs, pandas 0.2; br-frankenpandas-5olp1).
+        if matches!(label, IndexLabel::Utf8(_)) && matches!(self.sort_order(), SortOrder::Unsorted)
+        {
+            let _ = self.has_duplicates();
+        }
         self.position(label).is_some()
     }
 
@@ -8126,7 +8153,24 @@ impl Index {
             )
         };
         if !non_missing.all(same_kind) {
-            return "mixed";
+            // Kinds mixed: pandas' last resort reads each label for an int -
+            // ints with floats alone (NaN among them) "mixed-integer-float",
+            // an int among any other kind "mixed-integer" (they were "mixed";
+            // br-frankenpandas-5olp1).
+            let int = |label: &IndexLabel| matches!(label, IndexLabel::Int64(_));
+            return if self.labels.iter().all(|label| {
+                int(label)
+                    || matches!(
+                        label,
+                        IndexLabel::Float64(_) | IndexLabel::Null(fp_types::NullKind::NaN)
+                    )
+            }) {
+                "mixed-integer-float"
+            } else if self.labels.iter().any(int) {
+                "mixed-integer"
+            } else {
+                "mixed"
+            };
         }
         // pandas infers with skipna=False: a missing label beside bools or
         // strings is a kind of its own (an object Index; `[True, None]` read
@@ -8139,6 +8183,26 @@ impl Index {
             }
         };
         match first {
+            // Ints beside a missing label are an object index of them:
+            // beside NaN alone pandas' "integer-na", beside None / NaT / NA
+            // "mixed-integer" (it read "integer"; br-frankenpandas-5olp1). A
+            // masked index's are its dtype's.
+            IndexLabel::Int64(_) if !matches!(self.declared, Some(DeclaredDtype::Masked(_))) => {
+                let mut missing = self
+                    .labels
+                    .iter()
+                    .filter(|label| label.is_missing())
+                    .peekable();
+                if missing.peek().is_none() {
+                    "integer"
+                } else if missing
+                    .all(|label| matches!(label, IndexLabel::Null(fp_types::NullKind::NaN)))
+                {
+                    "integer-na"
+                } else {
+                    "mixed-integer"
+                }
+            }
             IndexLabel::Int64(_) => "integer",
             IndexLabel::Float64(_) => "floating",
             IndexLabel::Bool(_) => beside_missing("boolean"),
@@ -32978,7 +33042,9 @@ mod tests {
             IndexLabel::Datetime64(i64::MIN),
         ]);
         assert_eq!(mixed.dtype(), "object");
-        assert_eq!(mixed.inferred_type(), "mixed");
+        // An int among them: pandas 2.2.3's Index([1, 'x', pd.NaT]).inferred_type
+        // is 'mixed-integer' (br-frankenpandas-5olp1).
+        assert_eq!(mixed.inferred_type(), "mixed-integer");
         assert!(mixed.is_object());
         assert!(mixed.hasnans());
         assert_eq!(mixed.isnull(), mixed.isna());
@@ -32990,6 +33056,120 @@ mod tests {
         assert_eq!(mixed.infer_objects(), mixed);
         assert!(ints.is_(&ints));
         assert!(!ints.is_(&Index::from_i64(vec![1, 2, 3])));
+    }
+
+    /// A text key on an unsorted text index known unique is found through
+    /// the index's cached table, at the position the scan finds
+    /// (br-frankenpandas-5olp1); held labels and one text buffer alike.
+    /// NEGATIVE: a missing key and an int key (None), a duplicate-holding
+    /// index (its first position, by the scan), a text index holding an int.
+    #[test]
+    fn unique_text_index_finds_a_key_through_its_table_5olp1() {
+        let texts = ["r1", "r10", "r2", "q", "a"];
+        let labels: Vec<IndexLabel> = texts
+            .iter()
+            .map(|text| IndexLabel::Utf8((*text).into()))
+            .collect();
+        let bytes: Vec<u8> = texts.concat().into_bytes();
+        let offsets: Vec<usize> = std::iter::once(0)
+            .chain(texts.iter().scan(0, |end, text| {
+                *end += text.len();
+                Some(*end)
+            }))
+            .collect();
+        for index in [
+            Index::new(labels.clone()),
+            Index::from_utf8_contiguous(Arc::from(bytes), Arc::from(offsets)),
+        ] {
+            assert!(index.is_unique());
+            for (at, label) in labels.iter().enumerate() {
+                assert_eq!(index.position(label), Some(at), "{label:?}");
+            }
+            assert_eq!(index.position(&IndexLabel::Utf8("zz".into())), None);
+            assert_eq!(index.position(&IndexLabel::Int64(1)), None);
+        }
+        let text = |value: &str| IndexLabel::Utf8(value.into());
+        // `contains` asks a fresh index's uniqueness for a text key, then
+        // answers through the table.
+        let fresh = Index::new(labels);
+        assert!(fresh.duplicate_cache.get().is_none());
+        assert!(fresh.contains(&text("r2")));
+        assert_eq!(fresh.duplicate_cache.get(), Some(&false));
+        assert!(fresh.contains(&text("a")));
+        assert!(!fresh.contains(&text("zz")));
+        assert!(!fresh.contains(&IndexLabel::Int64(1)));
+        let duplicated = Index::new(vec![text("b"), text("a"), text("b")]);
+        assert!(duplicated.contains(&text("a")));
+        assert!(!duplicated.is_unique());
+        assert_eq!(duplicated.position(&text("b")), Some(0));
+        let mixed = Index::new(vec![text("b"), IndexLabel::Int64(1), text("a")]);
+        assert!(mixed.is_unique());
+        assert_eq!(mixed.position(&text("a")), Some(2));
+        assert_eq!(mixed.position(&IndexLabel::Int64(1)), Some(1));
+    }
+
+    /// pandas' inferred_type of an object index holding ints, measured
+    /// (pandas 2.2.3, Index(v, dtype=object)): an int among other kinds
+    /// 'mixed-integer', ints with floats alone 'mixed-integer-float', ints
+    /// beside NaN alone 'integer-na', beside None / NaT 'mixed-integer'
+    /// (br-frankenpandas-5olp1). NEGATIVE: ints alone 'integer', a bool with
+    /// a string 'mixed' (a bool is no int), a float with a string 'mixed'.
+    #[test]
+    fn ints_among_other_labels_are_mixed_integer_5olp1() {
+        use fp_types::NullKind;
+        let text = || IndexLabel::Utf8("a".into());
+        let float = || IndexLabel::Float64(OrderedF64(2.5));
+        let cases = [
+            (vec![text(), IndexLabel::Int64(2), text()], "mixed-integer"),
+            (
+                vec![
+                    text(),
+                    IndexLabel::Null(NullKind::Null),
+                    IndexLabel::Int64(2),
+                ],
+                "mixed-integer",
+            ),
+            (
+                vec![IndexLabel::Bool(true), IndexLabel::Int64(2)],
+                "mixed-integer",
+            ),
+            (vec![IndexLabel::Int64(1), float()], "mixed-integer-float"),
+            (
+                vec![
+                    IndexLabel::Int64(1),
+                    float(),
+                    IndexLabel::Null(NullKind::NaN),
+                ],
+                "mixed-integer-float",
+            ),
+            (
+                vec![
+                    IndexLabel::Int64(1),
+                    float(),
+                    IndexLabel::Null(NullKind::Null),
+                ],
+                "mixed-integer",
+            ),
+            (
+                vec![IndexLabel::Int64(1), IndexLabel::Null(NullKind::NaN)],
+                "integer-na",
+            ),
+            (
+                vec![IndexLabel::Int64(1), IndexLabel::Null(NullKind::Null)],
+                "mixed-integer",
+            ),
+            (
+                vec![IndexLabel::Int64(1), IndexLabel::Null(NullKind::NaT)],
+                "mixed-integer",
+            ),
+            (vec![IndexLabel::Int64(1), IndexLabel::Int64(2)], "integer"),
+            (vec![IndexLabel::Bool(true), text()], "mixed"),
+            (vec![text(), float()], "mixed"),
+        ];
+        for (labels, expected) in cases {
+            let shown = format!("{labels:?}");
+            assert_eq!(Index::new(labels).inferred_type(), expected, "{shown}");
+        }
     }
 
     #[test]

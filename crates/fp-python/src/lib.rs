@@ -9294,26 +9294,48 @@ fn categorical_index_column(index: &CategoricalIndex) -> PyResult<Column> {
         .map_err(frame_error_to_py)
 }
 
-/// `items` as one Utf8 column when each is an exact `str`: their UTF-8 bytes
-/// end to end, the column `Column::from_values` makes of them without a
-/// String and a Scalar per cell (a million strings from a list took ~70 ms;
-/// br-frankenpandas-mf3tj). None for any other item - a str with lone
-/// surrogates too - or no items: the caller's path decides those.
+/// `items` as one Utf8 column when each is an exact `str` or None: their
+/// UTF-8 bytes end to end, a None a missing (None) cell - the column
+/// `Column::from_values` makes of them without a String and a Scalar per
+/// cell (a million strings from a list took ~70 ms; br-frankenpandas-mf3tj;
+/// one None among them sent every cell that way, Series of 50k strings
+/// 0.36 -> 2.2 ms; br-frankenpandas-xqa2l). None for any other item - a str
+/// with lone surrogates too - or no str at all: the caller's path decides
+/// those.
 fn contiguous_text_column<'py>(
     items: impl IntoIterator<Item = Bound<'py, PyAny>>,
 ) -> Option<Column> {
     let mut bytes = Vec::new();
     let mut offsets = vec![0];
-    for item in items {
-        let text = item
-            .cast_exact::<pyo3::types::PyString>()
-            .ok()?
-            .to_str()
-            .ok()?;
-        bytes.extend_from_slice(text.as_bytes());
+    let mut words: Vec<u64> = Vec::new();
+    let (mut texts, mut missing) = (0_usize, 0_usize);
+    for (row, item) in items.into_iter().enumerate() {
+        if row % 64 == 0 {
+            words.push(0);
+        }
+        if item.is_none() {
+            missing += 1;
+        } else {
+            let text = item
+                .cast_exact::<pyo3::types::PyString>()
+                .ok()?
+                .to_str()
+                .ok()?;
+            bytes.extend_from_slice(text.as_bytes());
+            texts += 1;
+            words[row / 64] |= 1_u64 << (row % 64);
+        }
         offsets.push(bytes.len());
     }
-    (offsets.len() > 1).then(|| Column::from_utf8_contiguous(bytes, offsets))
+    if texts == 0 {
+        return None;
+    }
+    Some(if missing == 0 {
+        Column::from_utf8_contiguous(bytes, offsets)
+    } else {
+        let validity = fp_columnar::ValidityMask::from_words(words, texts + missing);
+        Column::from_utf8_values_with_validity(bytes, offsets, validity)
+    })
 }
 
 /// A list of narrow numpy number scalars (np.float32, np.int8, np.uint16:
@@ -9592,11 +9614,110 @@ fn object_ndarray_index(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
     ))))
 }
 
+/// `data` - a list, a tuple or a 1-D object / unicode ndarray - as one text
+/// index when each item is an exact `str`: their UTF-8 bytes end to end, the
+/// index `set_index` makes of a text column, no String and no label made a
+/// row. Each was a label read through py_to_index_label and a String a take
+/// cloned: Series(v, index=<300k strs>) 159 ms vs pandas 0.2, its dropna
+/// 0.37x (br-frankenpandas-5olp1). None for any other data, any other item
+/// (None, a number, a str subclass or one with lone surrogates), or none.
+fn text_labels_index(data: &Bound<'_, PyAny>) -> PyResult<Option<Index>> {
+    fn gather<'py>(items: impl Iterator<Item = Bound<'py, PyAny>>) -> Option<Index> {
+        let mut bytes = Vec::new();
+        let mut offsets = vec![0];
+        for item in items {
+            let text = item
+                .cast_exact::<pyo3::types::PyString>()
+                .ok()?
+                .to_str()
+                .ok()?;
+            bytes.extend_from_slice(text.as_bytes());
+            offsets.push(bytes.len());
+        }
+        (offsets.len() > 1)
+            .then(|| Index::from_utf8_contiguous(Arc::from(bytes), Arc::from(offsets)))
+    }
+    if let Ok(tuple) = data.cast_exact::<PyTuple>() {
+        return Ok(gather(tuple.iter()));
+    }
+    // An object / unicode ndarray read through its list: numpy's tolist
+    // hands back its objects (a unicode array's as the Python strs pandas'
+    // object Index holds), three times faster than iterating the array.
+    let listed;
+    let list = if let Ok(list) = data.cast_exact::<PyList>() {
+        list
+    } else if data.get_type().name().is_ok_and(|name| name == "ndarray")
+        && data.getattr("ndim")?.extract::<usize>()? == 1
+        && matches!(
+            data.getattr("dtype")?
+                .getattr("kind")?
+                .extract::<String>()?
+                .as_str(),
+            "O" | "U"
+        )
+    {
+        listed = data.call_method0("tolist")?.cast_into::<PyList>()?;
+        &listed
+    } else {
+        return Ok(None);
+    };
+    Ok(gather(list.iter()))
+}
+
 /// `values` each mapped by `apply`: generic, so each operator's loop the
 /// caller picks is its own and vectorized (a function pointer per value was
 /// not).
 fn each_i64<T>(values: &[i64], apply: impl Fn(i64) -> T) -> Vec<T> {
     values.iter().map(|&value| apply(value)).collect()
+}
+
+/// The two sides of an index join as pandas sets them side by side: each
+/// column both sides name taking its side's suffix (an empty one keeping the
+/// name). None when a suffixed name would meet another column, a name is no
+/// text, or a side has a column MultiIndex - the merge decides those (pandas
+/// refuses suffixes that make a duplicate; br-frankenpandas-skv4q).
+fn suffixed_join_sides(
+    left: &DataFrame,
+    right: &DataFrame,
+    lsuffix: &str,
+    rsuffix: &str,
+) -> Option<(DataFrame, DataFrame)> {
+    let overlap: Vec<&String> = left
+        .column_names()
+        .into_iter()
+        .filter(|name| right.column(name).is_some())
+        .collect();
+    if overlap.is_empty() {
+        return Some((left.clone(), right.clone()));
+    }
+    if left.column_multiindex().is_some()
+        || right.column_multiindex().is_some()
+        || overlap.iter().any(|name| {
+            !matches!(left.column_label(name), IndexLabel::Utf8(_))
+                || !matches!(right.column_label(name), IndexLabel::Utf8(_))
+        })
+    {
+        return None;
+    }
+    let renamed = |frame: &DataFrame, suffix: &str| -> Option<DataFrame> {
+        let names: Vec<(String, String)> = overlap
+            .iter()
+            .map(|name| ((*name).clone(), format!("{name}{suffix}")))
+            .collect();
+        let pairs: Vec<(&str, &str)> = names
+            .iter()
+            .map(|(old, new)| (old.as_str(), new.as_str()))
+            .collect();
+        frame.rename_columns(&pairs).ok()
+    };
+    let left = renamed(left, lsuffix)?;
+    let right = renamed(right, rsuffix)?;
+    let mut seen = HashSet::new();
+    left.column_names()
+        .into_iter()
+        .chain(right.column_names())
+        .all(|name| seen.insert(name.clone()))
+        .then_some((left, right))
 }
 
 /// Whether no two of `frame`'s columns share a name (br-frankenpandas-ew6ft).
@@ -9998,6 +10119,39 @@ fn object_array_column(py: Python<'_>, items: &[Bound<'_, PyAny>]) -> PyResult<C
         return Column::new(DType::Datetime64 { tz: None }, cells).map_err(column_error_to_py);
     }
     Column::from_values(cells).map_err(column_error_to_py)
+}
+
+/// A list's cells holding a NaT beside only missing values, numbers, text
+/// or bools, as pandas types them: datetime64[ns] of NaT when every cell is
+/// missing (`[NaT, None]`, `[NaT, nan]`), else an object column of the cells
+/// as given (`[NaT, 1]`). A lone NaT was object and one beside NaN or an int
+/// float64 (br-frankenpandas-1aneh). None for any other list - one holding
+/// an instant, duration, period or interval too - which the inference
+/// decides.
+fn nat_cells_column(cells: &[Scalar]) -> PyResult<Option<Column>> {
+    if !cells
+        .iter()
+        .any(|cell| matches!(cell, Scalar::Null(NullKind::NaT)))
+        || !cells.iter().all(|cell| {
+            matches!(
+                cell,
+                Scalar::Null(_)
+                    | Scalar::Int64(_)
+                    | Scalar::Float64(_)
+                    | Scalar::Bool(_)
+                    | Scalar::Utf8(_)
+            )
+        })
+    {
+        return Ok(None);
+    }
+    if cells.iter().all(Scalar::is_missing) {
+        let nat = vec![Scalar::Null(NullKind::NaT); cells.len()];
+        return Column::new(DType::Datetime64 { tz: None }, nat)
+            .map(Some)
+            .map_err(column_error_to_py);
+    }
+    Ok(Some(Column::from_object_values(cells.to_vec())))
 }
 
 /// pandas refuses a set as column data: its order is arbitrary.
@@ -11380,6 +11534,14 @@ impl NativeTranslation {
 }
 
 fn py_to_index_label(obj: &Bound<'_, PyAny>) -> PyResult<IndexLabel> {
+    // A str is its text, read first: the int and float reads below each
+    // raised and formatted a Python error a text label (an index of 300k
+    // strs 159 ms, pandas 0.2; br-frankenpandas-5olp1).
+    if let Ok(text) = obj.cast_exact::<pyo3::types::PyString>()
+        && let Ok(text) = text.to_str()
+    {
+        return Ok(IndexLabel::Utf8(text.to_owned()));
+    }
     if obj.is_none() {
         return Ok(IndexLabel::Null(NullKind::Null));
     }
@@ -12352,6 +12514,9 @@ fn index_arg_index(index: &Bound<'_, PyAny>) -> PyResult<Index> {
         } else if let Some(typed) = typed_index_of(index)? {
             // A range or an int64 array, typed without a label each.
             typed
+        } else if let Some(text) = text_labels_index(index)? {
+            // Strs as one text buffer (br-frankenpandas-5olp1).
+            text
         } else if let Some(objects) = object_ndarray_index(index)? {
             objects
         } else {
@@ -12492,6 +12657,10 @@ fn index_from_axis_value(value: &Bound<'_, PyAny>) -> PyResult<Index> {
     }
     if let Some(typed) = typed_index_of(value)? {
         return Ok(typed);
+    }
+    // Strs as one text buffer (br-frankenpandas-5olp1).
+    if let Some(text) = text_labels_index(value)? {
+        return Ok(text);
     }
     if let Some(objects) = object_ndarray_index(value)? {
         return Ok(objects);
@@ -13769,7 +13938,11 @@ fn setop_sorted(result: Index, left: &Index, right: &Index, sort: Option<bool>) 
             .iter()
             .all(|&at| fp_index::LabelKinds::of(&labels[at]) == kind)
     });
-    let mixed = result.inferred_type() == "mixed" && !(gaps && one_kind);
+    // Kinds mixed, ints among them or not (br-frankenpandas-5olp1).
+    let mixed = matches!(
+        result.inferred_type(),
+        "mixed" | "mixed-integer" | "mixed-integer-float"
+    ) && !(gaps && one_kind);
     let sorts = match sort {
         Some(sort) => sort,
         None => {
@@ -14660,6 +14833,39 @@ impl PyIndex {
         tupleize_cols: bool,
     ) -> PyResult<Py<PyAny>> {
         let _ = copy; // pandas' copy= does not change the labels
+        // A list holding a NaT is typed as the Series constructor types it:
+        // a DatetimeIndex beside missing values, an object Index beside
+        // numbers or text (an object one and a float64 one;
+        // br-frankenpandas-1aneh). Only a list holding one is read cell by
+        // cell for it.
+        if dtype.is_none_or(|dtype| dtype.is_none())
+            && let Some(list) = data.and_then(|data| data.cast::<PyList>().ok())
+            && list.iter().any(|value| {
+                value.is_instance_of::<PyNaTType>()
+                    || (value.is_instance_of::<PyDateTime>() && is_pandas_nat(&value))
+            })
+        {
+            let cells = list
+                .iter()
+                .map(|value| py_to_cell(py, &value))
+                .collect::<PyResult<Vec<_>>>()?;
+            if let Some(column) = nat_cells_column(&cells)? {
+                let object = column.dtype() != (DType::Datetime64 { tz: None });
+                let series = Series::new("", Index::default_range(column.len()), column)
+                    .map_err(frame_error_to_py)?;
+                let kwargs = PyDict::new(py);
+                if let Some(name) = name {
+                    kwargs.set_item("name", name)?;
+                }
+                if object {
+                    kwargs.set_item("dtype", "object")?;
+                }
+                return Ok(py
+                    .get_type::<PyIndex>()
+                    .call((PySeries { inner: series },), Some(&kwargs))?
+                    .unbind());
+            }
+        }
         // pandas' own objects are read as this crate's; a Categorical is a
         // CategoricalIndex (br-frankenpandas-v6p80).
         let pandas_data = data.map(pandas_object_as_fp).transpose()?.flatten();
@@ -14698,6 +14904,14 @@ impl PyIndex {
         // Datetimes in more than one zone (or aware beside naive) are an
         // object Index of each as it is, with or without dtype=object - and
         // under dtype=object aware ones of one zone too (each lost its zone).
+        // Strs are one text buffer: nothing below reads them otherwise - no
+        // zone, no tuple, no number - and each was a label made
+        // (br-frankenpandas-5olp1).
+        if dtype.is_none_or(|dtype| dtype.is_none())
+            && let Some(text) = data.map(text_labels_index).transpose()?.flatten()
+        {
+            return row_index_to_py(py, &text.set_names(name));
+        }
         let object_dtype = dtype.is_some_and(is_object_dtype_arg);
         if (object_dtype || dtype.is_none_or(|dtype| dtype.is_none()))
             && let Some(data) = data
@@ -16086,10 +16300,31 @@ impl PyIndex {
         )
     }
 
-    /// pandas' property (it was a method).
+    /// pandas' property (it was a method). A str the core holds as a host
+    /// object (one with lone surrogates) is text, as pandas infers it: an
+    /// index of strs alone "string" (br-frankenpandas-5olp1).
     #[getter]
-    fn inferred_type(&self) -> &'static str {
-        self.inner.inferred_type()
+    fn inferred_type(&self, py: Python<'_>) -> &'static str {
+        let inferred = self.inner.inferred_type();
+        let host_str = |label: &IndexLabel| match label {
+            IndexLabel::Object(fp_types::ObjectValue::Host(value)) => value
+                .object()
+                .as_any()
+                .downcast_ref::<PyHost>()
+                .is_some_and(|host| host.0.bind(py).is_instance_of::<pyo3::types::PyString>()),
+            _ => false,
+        };
+        if inferred == "mixed"
+            && self.inner.labels().iter().any(host_str)
+            && self
+                .inner
+                .labels()
+                .iter()
+                .all(|label| matches!(label, IndexLabel::Utf8(_)) || host_str(label))
+        {
+            return "string";
+        }
+        inferred
     }
 
     fn is_numeric(&self) -> bool {
@@ -27670,26 +27905,50 @@ fn downcast_object_fill(source: &Series, filled: Series) -> PyResult<Series> {
 /// [`downcast_object_fill`] of a frame: its object columns' fills inferred
 /// (`infer_objects`), one FutureWarning when any moves.
 fn downcast_object_fill_frame(source: &DataFrame, filled: DataFrame) -> PyResult<DataFrame> {
-    let objects: Vec<&String> = source
+    // Only an object column the fill filled - a missing value it held now
+    // present - can downcast, and alone: pandas leaves a block it does not
+    // fill as it is. A column the dict did not name, or one with nothing
+    // missing, was downcast with the rest, and every text column's cells
+    // were made to infer the frame (df.fillna({'x': 0}) beside a text column
+    // 2.7 ms, pandas 1.0; br-frankenpandas-skv4q).
+    let objects: Vec<&str> = source
         .column_names()
         .into_iter()
-        .filter(|name| source.column(name).is_some_and(is_object_column))
+        .filter(|name| {
+            source.column(name).is_some_and(|column| {
+                is_object_column(column)
+                    && column.has_any_missing()
+                    && filled
+                        .column(name)
+                        .is_some_and(|after| after.count() > column.count())
+            })
+        })
+        .map(String::as_str)
         .collect();
     if objects.is_empty() {
         return Ok(filled);
     }
-    let inferred = filled.infer_objects().map_err(frame_error_to_py)?;
-    let moved = objects.iter().any(|name| {
-        filled.column(name).is_some_and(is_object_column)
-            && inferred
-                .column(name)
-                .is_some_and(|column| !is_object_column(column))
-    });
-    if !moved {
-        return Ok(filled);
+    let inferred = filled
+        .select_columns(&objects)
+        .and_then(|columns| columns.infer_objects())
+        .map_err(frame_error_to_py)?;
+    let mut result = filled;
+    let mut moved = false;
+    for name in objects {
+        if let Some(after) = inferred
+            .column(name)
+            .filter(|after| !is_object_column(after))
+        {
+            result = result
+                .with_column(name.to_owned(), after.clone())
+                .map_err(frame_error_to_py)?;
+            moved = true;
+        }
     }
-    warn_object_fill_downcast()?;
-    Ok(inferred)
+    if moved {
+        warn_object_fill_downcast()?;
+    }
+    Ok(result)
 }
 
 fn warn_object_fill_downcast() -> PyResult<()> {
@@ -28986,7 +29245,20 @@ fn refuse_int_overflow(column: &Column, other: &Bound<'_, PyAny>) -> PyResult<()
     Ok(())
 }
 
+/// `other` as this crate's object when it is pandas' own - a Series,
+/// DataFrame, Index or Categorical, then aligned and typed as one - else as
+/// it is: an operand or argument a user hands over from pandas
+/// (br-frankenpandas-rlf7v; `fp_s == pd_s` was all False, `fp_s + pd_s`,
+/// concat, merge, join, equals, fillna and map raised).
+fn fp_operand<'py>(other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    Ok(pandas_object_as_fp(other)?.unwrap_or_else(|| other.clone()))
+}
+
 fn arith_operand<'py>(other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    // A pandas operand as this crate's (rlf7v).
+    if let Some(converted) = pandas_object_as_fp(other)? {
+        return Ok(converted);
+    }
     let kind_of = |other: &Bound<'py, PyAny>| -> Option<String> {
         let kind = other.get_type();
         let numpy = kind.module().ok()?.to_str().ok()? == "numpy"
@@ -32966,6 +33238,9 @@ impl PySeries {
         op: impl Fn(&Self, Python<'_>, &Bound<'_, PyAny>) -> PyResult<Self>,
     ) -> PyResult<Self> {
         parse_axis_param_for_type(axis, "Series")?;
+        // A pandas operand as this crate's before its fill or level reads it
+        // (a one-row pandas Series was read as its float; rlf7v).
+        let other = &fp_operand(other)?;
         // `level` joins a Series operand on that level of this Series'
         // MultiIndex: its value under each row's label there (it was
         // refused, br-frankenpandas-u6p7i).
@@ -34119,6 +34394,15 @@ impl PySeries {
             for value in list.iter() {
                 cells.push(py_to_cell(py, &value)?);
             }
+            if let Some(column) = nat_cells_column(&cells)? {
+                let rows = match index {
+                    None => Index::default_range(column.len()),
+                    Some(index) => index_arg_rows(index, column.len())?,
+                };
+                let series = Series::new(series_name, rows, column)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                return Ok(PySeries { inner: series });
+            }
             let scalars: Vec<Scalar> = pandas_promote_int_with_missing(cells);
             // No index given is the default range, built as one (its labels
             // were made and scanned back into a range; br-frankenpandas-250iy).
@@ -35087,6 +35371,7 @@ impl PySeries {
         generic_getattr_error(slf.as_any(), name, "Series")
     }
     fn __gt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &fp_operand(other)?;
         if let Some(inner) =
             period_comparison(&self.inner, other, std::cmp::Ordering::is_gt, false)?
         {
@@ -35106,6 +35391,7 @@ impl PySeries {
         masked_string_comparison(&self.inner, other, wrap_series(self.inner.gt(&rhs)))
     }
     fn __ge__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &fp_operand(other)?;
         if let Some(inner) =
             period_comparison(&self.inner, other, std::cmp::Ordering::is_ge, false)?
         {
@@ -35125,6 +35411,7 @@ impl PySeries {
         masked_string_comparison(&self.inner, other, wrap_series(self.inner.ge(&rhs)))
     }
     fn __lt__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &fp_operand(other)?;
         if let Some(inner) =
             period_comparison(&self.inner, other, std::cmp::Ordering::is_lt, false)?
         {
@@ -35144,6 +35431,7 @@ impl PySeries {
         masked_string_comparison(&self.inner, other, wrap_series(self.inner.lt(&rhs)))
     }
     fn __le__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &fp_operand(other)?;
         if let Some(inner) =
             period_comparison(&self.inner, other, std::cmp::Ordering::is_le, false)?
         {
@@ -35163,6 +35451,7 @@ impl PySeries {
         masked_string_comparison(&self.inner, other, wrap_series(self.inner.le(&rhs)))
     }
     fn __eq__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &fp_operand(other)?;
         if let Some(inner) =
             period_comparison(&self.inner, other, std::cmp::Ordering::is_eq, false)?
         {
@@ -35174,6 +35463,7 @@ impl PySeries {
         masked_string_comparison(&self.inner, other, self.equality(py, other, true))
     }
     fn __ne__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        let other = &fp_operand(other)?;
         if let Some(inner) = period_comparison(&self.inner, other, std::cmp::Ordering::is_ne, true)?
         {
             return Ok(PySeries { inner });
@@ -36355,6 +36645,9 @@ impl PySeries {
         downcast: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<PySeries>> {
         unsupported_params("Series.fillna", &[("downcast", downcast.is_none())])?;
+        // A pandas value as this crate's (rlf7v).
+        let pandas_value = value.map(fp_operand).transpose()?;
+        let value = pandas_value.as_ref().or(value);
         let result = (|| -> PyResult<PySeries> {
             let ax = parse_axis_param_for_type(axis, "Series")?.unwrap_or(0);
             if ax != 0 {
@@ -39323,8 +39616,13 @@ impl PySeries {
         }
     }
 
-    fn equals(&self, other: &PySeries) -> bool {
-        self.inner.equals(&other.inner)
+    /// pandas' `equals(other)`: a pandas Series compared as this crate's,
+    /// any other object False (they raised TypeError; rlf7v).
+    fn equals(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let other = fp_operand(other)?;
+        Ok(other
+            .extract::<PyRef<'_, PySeries>>()
+            .is_ok_and(|other| self.inner.equals(&other.inner)))
     }
 
     fn pop(&mut self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -39984,6 +40282,8 @@ impl PySeries {
         arg: &Bound<'_, PyAny>,
         na_action: Option<&str>,
     ) -> PyResult<PySeries> {
+        // A pandas mapping as this crate's (rlf7v).
+        let arg = &fp_operand(arg)?;
         let ignore_na = na_action == Some("ignore");
         if let Some(mapped) = self.categorical_map(py, arg, ignore_na)? {
             return Ok(mapped);
@@ -45098,6 +45398,7 @@ impl PyDataFrame {
         other: &Bound<'_, PyAny>,
         op: ComparisonOp,
     ) -> PyResult<PyDataFrame> {
+        let other = &fp_operand(other)?;
         if let Ok(series) = other.extract::<PyRef<'_, PySeries>>() {
             return wrap_frame(self.inner.cmp_series(&series.inner, op, 1));
         }
@@ -45138,6 +45439,8 @@ impl PyDataFrame {
         reflected: bool,
     ) -> PyResult<PyDataFrame> {
         let axis = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(1);
+        // A pandas operand as this crate's (rlf7v).
+        let other = &fp_operand(other)?;
         let spread = match level.filter(|level| !level.is_none()) {
             Some(level) => frame_level_operand(py, &self.inner, other, axis, level)?,
             None => None,
@@ -48261,15 +48564,26 @@ impl PyDataFrame {
                                         .iter()
                                         .map(|v| py_to_cell(py, &v))
                                         .collect::<PyResult<Vec<_>>>()?;
-                                    // ints with a missing value are float64 with
-                                    // NaN, as the Series constructor already made
-                                    // them (the frame kept int64 with a null;
-                                    // DISC-011).
-                                    sequence_column(scalars).map_err(|e| {
-                                        PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                            e.to_string(),
-                                        )
-                                    })?
+                                    // A NaT among missing values, numbers or
+                                    // text is typed as the Series constructor
+                                    // types it (1aneh).
+                                    let nat = if dtype.is_none_or(|dtype| dtype.is_none()) {
+                                        nat_cells_column(&scalars)?
+                                    } else {
+                                        None
+                                    };
+                                    match nat {
+                                        Some(column) => column,
+                                        // ints with a missing value are float64
+                                        // with NaN, as the Series constructor
+                                        // already made them (the frame kept
+                                        // int64 with a null; DISC-011).
+                                        None => sequence_column(scalars).map_err(|e| {
+                                            PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                                e.to_string(),
+                                            )
+                                        })?,
+                                    }
                                 }
                             }
                         } else if let Ok(tuple) = value.cast::<PyTuple>() {
@@ -50677,6 +50991,9 @@ impl PyDataFrame {
         downcast: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<PyDataFrame>> {
         unsupported_params("DataFrame.fillna", &[("downcast", downcast.is_none())])?;
+        // A pandas value as this crate's (rlf7v).
+        let pandas_value = value.map(fp_operand).transpose()?;
+        let value = pandas_value.as_ref().or(value);
         let result = (|| -> PyResult<PyDataFrame> {
             let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
             if ax != 0 && ax != 1 {
@@ -56057,8 +56374,13 @@ impl PyDataFrame {
         }
     }
 
-    fn equals(&self, other: &PyDataFrame) -> bool {
-        self.inner.equals(&other.inner)
+    /// pandas' `equals(other)`: a pandas DataFrame compared as this crate's,
+    /// any other object False (they raised TypeError; rlf7v).
+    fn equals(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let other = fp_operand(other)?;
+        Ok(other
+            .extract::<PyRef<'_, PyDataFrame>>()
+            .is_ok_and(|other| self.inner.equals(&other.inner)))
     }
 
     /// pandas' `pop(item)`: the column labelled `item` (typed: `pop(0)`
@@ -58097,6 +58419,8 @@ impl PyDataFrame {
         sort: bool,
         validate: Option<&str>,
     ) -> PyResult<PyDataFrame> {
+        // A pandas frame or Series as this crate's (rlf7v).
+        let other = &fp_operand(other)?;
         if other.is_instance_of::<PyList>() || other.is_instance_of::<PyTuple>() {
             return self.join_many(py, other, on, how, lsuffix, rsuffix, sort, validate);
         }
@@ -58143,9 +58467,12 @@ impl PyDataFrame {
             // ms, pandas 1.7; br-frankenpandas-ew6ft). An outer join sorts
             // (pandas merges how='outer' with sort), so only an ascending
             // index is its own answer.
+            // Overlapping names take their sides' suffixes first, as pandas
+            // renames them (the merge built a row map of every row:
+            // num.join(other, rsuffix='_r') 4.6 ms, pandas 0.45;
+            // br-frankenpandas-skv4q).
             let index = self.inner.index();
-            if overlap.is_empty()
-                && !sort
+            if !sort
                 && validate.is_none()
                 && (matches!(how, "left" | "inner")
                     || (how == "outer" && index.is_monotonic_increasing()))
@@ -58155,11 +58482,13 @@ impl PyDataFrame {
                 && index.dtype() == right_df.index().dtype()
                 && index == right_df.index()
                 && index.is_unique()
-                && distinct_column_names(&self.inner)
-                && distinct_column_names(&right_df)
+                && let Some((left, right)) =
+                    suffixed_join_sides(&self.inner, &right_df, lsuffix, rsuffix)
+                && distinct_column_names(&left)
+                && distinct_column_names(&right)
             {
                 let inner = fp_frame::concat_dataframes_with_axis_join(
-                    &[&self.inner, &right_df],
+                    &[&left, &right],
                     1,
                     fp_frame::ConcatJoin::Outer,
                 )
@@ -62441,17 +62770,15 @@ fn series_loc_target(series: &Series, key: &Bound<'_, PyAny>) -> PyResult<RowTar
 /// pandas' `Index._should_fallback_to_positional`: an integer key names a
 /// POSITION on `index` unless its labels are integers, floats or (numeric)
 /// intervals - or mixed with integers, pandas' 'mixed-integer' - where it is
-/// a label (an empty RangeIndex is integer).
+/// a label (an empty RangeIndex is integer). Ints beside floats alone
+/// ('mixed-integer-float') or NaN alone ('integer-na') are positions, as
+/// pandas' (br-frankenpandas-5olp1).
 fn int_keys_are_positions(index: &Index) -> bool {
     if index.range_span().is_some() {
         return false;
     }
     match index.inferred_type() {
-        "integer" | "floating" | "complex" | "interval" => false,
-        "mixed" => !index
-            .labels()
-            .iter()
-            .any(|label| matches!(label, IndexLabel::Int64(_))),
+        "integer" | "mixed-integer" | "floating" | "complex" | "interval" => false,
         "empty" => index.range_span().is_none(),
         _ => true,
     }
@@ -79934,7 +80261,9 @@ impl PySeriesGroupBy {
         skipna: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let res = self.idx_extremes(py, "idxmax", axis, skipna)?;
-        self.keyed(py, res.inner)
+        // A category key's groups are a CategoricalIndex, as wrap_result's
+        // (they were object; br-frankenpandas-lpzmu).
+        self.keyed(py, with_group_categories(res.inner, self.by.column())?)
     }
 
     /// pandas' `idxmin(axis=0, skipna=True)` (see [`Self::idxmax`]).
@@ -79946,7 +80275,7 @@ impl PySeriesGroupBy {
         skipna: Option<bool>,
     ) -> PyResult<Py<PyAny>> {
         let res = self.idx_extremes(py, "idxmin", axis, skipna)?;
-        self.keyed(py, res.inner)
+        self.keyed(py, with_group_categories(res.inner, self.by.column())?)
     }
 
     #[getter]
@@ -81945,6 +82274,19 @@ fn concat(
     copy: Option<&Bound<'_, PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // pandas' own pieces as this crate's (rlf7v).
+    let converted = match pandas_dict_values_as_fp(objs)? {
+        Some(mapping) => Some(mapping),
+        None if objs.is_instance_of::<PyList>() || objs.is_instance_of::<PyTuple>() => {
+            let pieces = objs
+                .try_iter()?
+                .map(|piece| fp_operand(&piece?))
+                .collect::<PyResult<Vec<_>>>()?;
+            Some(PyList::new(py, pieces)?.into_any())
+        }
+        None => None,
+    };
+    let objs = converted.as_ref().unwrap_or(objs);
     let result = concat_objects(py, objs, axis, join, ignore_index, keys, sort, copy, kwargs)?;
     let stacked = !axis.is_some_and(|axis| {
         axis.extract::<i64>().is_ok_and(|axis| axis == 1)
@@ -85597,6 +85939,14 @@ fn merge_error_to_py(error: fp_join::JoinError) -> PyErr {
             ));
         }
     }
+    // Suffixes making a duplicate column: pandas' MergeError (a ValueError;
+    // br-frankenpandas-skv4q).
+    if message.contains("Passing 'suffixes' which cause duplicate columns") {
+        let text = message
+            .find("Passing 'suffixes'")
+            .map_or(message.as_str(), |at| &message[at..]);
+        return MergeError::new_err(text.to_owned());
+    }
     PyErr::new::<pyo3::exceptions::PyValueError, _>(message)
 }
 
@@ -85796,6 +86146,7 @@ fn merge_side_with_key_levels(
 /// as pandas' (a Series was a TypeError; an unnamed one is pandas'
 /// ValueError; br-frankenpandas-w932f).
 fn merge_side_frame(side: &Bound<'_, PyAny>) -> PyResult<DataFrame> {
+    let side = &fp_operand(side)?;
     if let Ok(frame) = side.extract::<PyRef<'_, PyDataFrame>>() {
         return Ok(frame.inner.clone());
     }
@@ -105660,7 +106011,7 @@ mod tests {
         let s_df = py_df.add_suffix("_end", None).expect("add_suffix"); // ubs:ignore — test fixture
         assert_eq!(s_df.column_labels(), vec!["a_end", "b_end"]);
 
-        assert!(py_df.equals(&df_copy));
+        assert!(py_df.inner.equals(&df_copy.inner));
 
         pyo3::Python::initialize();
         pyo3::Python::attach(|py| {

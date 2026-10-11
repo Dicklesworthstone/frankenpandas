@@ -24974,6 +24974,20 @@ impl Series {
         if let Some(data) = self.column.as_f64_slice() {
             return Ok(Scalar::Float64(data.iter().product()));
         }
+        // A float column with gaps: its present values in row order, a NaN
+        // or a gap skipped, as the Scalar fold below - each row was made a
+        // Scalar (300k rows with every 7th NaN 0.70 ms, pandas 0.50;
+        // br-frankenpandas-faizi).
+        if let Some((data, present)) = self.column.as_f64_slice_with_validity() {
+            let words = present.packed_words_for_scan();
+            let mut product = 1.0_f64;
+            for (row, &value) in data.iter().enumerate() {
+                if (words[row / 64] >> (row % 64)) & 1 == 1 && !value.is_nan() {
+                    product *= value;
+                }
+            }
+            return Ok(Scalar::Float64(product));
+        }
 
         let mut product = 1.0_f64;
         for val in self.column.values() {
@@ -31366,6 +31380,103 @@ impl Series {
             return Series::new(self.name.clone(), self.index.clone(), column);
         }
 
+        // A float column with gaps - the leading NaN a pad leaves, or the
+        // gaps of no fill - reads its mask beside its values: a gap at the
+        // row or at its previous row is missing, as the general path's
+        // `is_missing` has it, the rest as the path above. Each row was read
+        // as a Scalar: 300k rows with every 7th NaN 12.4 ms, pandas 0.66
+        // (br-frankenpandas-faizi).
+        if let Some((data, present)) = self.column.as_f64_slice_with_validity() {
+            // The mask's words read in the loop and the answer's written as
+            // words: `get` / `set` a row re-decided the mask's shape each
+            // time (1.7 ms a 300k rows, pandas 0.6).
+            let words = present.packed_words_for_scan();
+            let bit = |row: usize| (words[row / 64] >> (row % 64)) & 1 == 1;
+            let mut out = vec![0.0_f64; len];
+            let mut valid = vec![0_u64; len.div_ceil(64)];
+            if let Ok(p) = usize::try_from(periods)
+                && p > 0
+            {
+                // Forward periods: every row with a row `p` back changed in one
+                // loop the compiler vectorizes, then 64 rows at a time the rows
+                // present on both sides kept (a NaN ratio missing, its datum
+                // NaN as above) and the rest cleared to a 0.0 gap - a row's
+                // bit tests and branches were 0.55 ms a 300k rows, pandas'
+                // division 0.27 (br-frankenpandas-faizi).
+                if p < len {
+                    let pairs = out[p..].iter_mut().zip(&data[p..]).zip(&data[..len - p]);
+                    if float32 {
+                        for ((slot, &cur), &prev) in pairs {
+                            *slot = change(cur, prev);
+                        }
+                    } else {
+                        for ((slot, &cur), &prev) in pairs {
+                            *slot = cur / prev - 1.0;
+                        }
+                    }
+                }
+                // The 64 mask bits from row `at` on, zeros past the mask.
+                let window = |at: usize| -> u64 {
+                    let (word, offset) = (at / 64, at % 64);
+                    let low = words.get(word).copied().unwrap_or(0);
+                    match offset {
+                        0 => low,
+                        _ => {
+                            (low >> offset)
+                                | (words.get(word + 1).copied().unwrap_or(0) << (64 - offset))
+                        }
+                    }
+                };
+                for (block, slot) in valid.iter_mut().enumerate() {
+                    let base = block * 64;
+                    let rows = (len - base).min(64);
+                    let in_block = if rows == 64 {
+                        u64::MAX
+                    } else {
+                        (1_u64 << rows) - 1
+                    };
+                    // The block's first row with a row `p` back.
+                    let first = p.saturating_sub(base);
+                    let keep = if first >= 64 {
+                        0
+                    } else {
+                        let prev = if base >= p {
+                            window(base - p)
+                        } else {
+                            window(0) << first
+                        };
+                        words[block] & prev & (u64::MAX << first) & in_block
+                    };
+                    let mut nan = 0_u64;
+                    for (offset, &ratio) in out[base..base + rows].iter().enumerate() {
+                        nan |= u64::from(ratio.is_nan()) << offset;
+                    }
+                    *slot = keep & !nan;
+                    let mut cleared = !keep & in_block;
+                    while cleared != 0 {
+                        out[base + cleared.trailing_zeros() as usize] = 0.0;
+                        cleared &= cleared - 1;
+                    }
+                }
+            } else {
+                for i in 0..len {
+                    let prev_idx = (i as i64).checked_sub(periods).unwrap_or(-1);
+                    if prev_idx < 0 || prev_idx >= len_i {
+                        continue;
+                    }
+                    let prev = prev_idx as usize;
+                    if bit(i) && bit(prev) {
+                        let ratio = change(data[i], data[prev]);
+                        out[i] = ratio;
+                        valid[i / 64] |= u64::from(!ratio.is_nan()) << (i % 64);
+                    }
+                }
+            }
+            let validity = fp_columnar::ValidityMask::from_words(valid, len);
+            let column = Column::from_f64_values_with_validity(out, validity);
+            return Series::new(self.name.clone(), self.index.clone(), column);
+        }
+
         // Typed Int64 fast path (mirror of the f64 path): all-valid Int64 ⇒ no
         // missing inputs, output is the f64 ratio. Bit-identical to the general
         // path's i64 arm: each value `to_f64` first, then `(cur - prev)/prev`
@@ -34522,6 +34633,23 @@ impl Series {
             ));
         }
 
+        // A float column with gaps: the pairs whose values are both present
+        // read off its data and mask, then the general path's sums - a
+        // Scalar a row was read (300k rows with every 7th NaN 3.4 ms, pandas
+        // 1.9; br-frankenpandas-faizi).
+        if let Some((data, present)) = self.column.as_f64_slice_with_validity() {
+            if data.len() <= lag {
+                return Ok(f64::NAN);
+            }
+            let words = present.packed_words_for_scan();
+            let keep = |row: usize| (words[row / 64] >> (row % 64)) & 1 == 1 && !data[row].is_nan();
+            let (x_vals, y_vals): (Vec<f64>, Vec<f64>) = (0..data.len() - lag)
+                .filter(|&row| keep(row) && keep(row + lag))
+                .map(|row| (data[row], data[row + lag]))
+                .unzip();
+            return Ok(pearson_of_pairs(&x_vals, &y_vals));
+        }
+
         let vals = self.column.values();
         if vals.len() <= lag {
             return Ok(f64::NAN);
@@ -34544,32 +34672,7 @@ impl Series {
                 y_vals.push(y);
             }
         }
-
-        let count = x_vals.len();
-        if count < 2 {
-            return Ok(f64::NAN);
-        }
-
-        let n_f = count as f64;
-        let mean_x = x_vals.iter().sum::<f64>() / n_f;
-        let mean_y = y_vals.iter().sum::<f64>() / n_f;
-
-        let mut cov = 0.0_f64;
-        let mut var_x = 0.0_f64;
-        let mut var_y = 0.0_f64;
-        for i in 0..count {
-            let dx = x_vals[i] - mean_x;
-            let dy = y_vals[i] - mean_y;
-            cov += dx * dy;
-            var_x += dx * dx;
-            var_y += dy * dy;
-        }
-
-        Ok(pearson_ratio(
-            cov,
-            centered_sum_of_squares(var_x, n_f, mean_x),
-            centered_sum_of_squares(var_y, n_f, mean_y),
-        ))
+        Ok(pearson_of_pairs(&x_vals, &y_vals))
     }
 
     /// Compute the dot product with another Series.
@@ -42733,6 +42836,131 @@ impl ResampleBin for BinCount {
     }
 }
 
+/// pandas' first / last of a bin: its first / last present value (a NaN
+/// skipped), an empty or all-NaN bin NaN (br-frankenpandas-1gkpa).
+#[derive(Clone)]
+struct BinEdge {
+    value: Option<f64>,
+    last: bool,
+}
+
+impl BinEdge {
+    const fn new(last: bool) -> Self {
+        Self { value: None, last }
+    }
+}
+
+impl ResampleBin for BinEdge {
+    const SINGLETON_IS_VALUE: bool = true;
+
+    fn add(&mut self, value: f64) {
+        if !value.is_nan() && (self.last || self.value.is_none()) {
+            self.value = Some(value);
+        }
+    }
+
+    fn value(&self) -> f64 {
+        self.value.unwrap_or(f64::NAN)
+    }
+}
+
+/// pandas' group_prod: the product from 1.0 in row order, so an empty bin
+/// is 1.0 (br-frankenpandas-1gkpa).
+#[derive(Clone)]
+struct BinProd(f64);
+
+impl Default for BinProd {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+impl ResampleBin for BinProd {
+    const SINGLETON_IS_VALUE: bool = true;
+
+    fn add(&mut self, value: f64) {
+        self.0 *= value;
+    }
+
+    fn value(&self) -> f64 {
+        self.0
+    }
+}
+
+/// pandas' group_median: the median of a bin's present values (a NaN
+/// skipped) - the middle one, or the mean of the middle two - by the
+/// selection the build_groups path makes; an empty or all-NaN bin NaN
+/// (br-frankenpandas-1gkpa).
+#[derive(Clone, Default)]
+struct BinMedian(Vec<f64>);
+
+impl ResampleBin for BinMedian {
+    const SINGLETON_IS_VALUE: bool = true;
+
+    fn add(&mut self, value: f64) {
+        if !value.is_nan() {
+            self.0.push(value);
+        }
+    }
+
+    fn value(&self) -> f64 {
+        let mut bucket = self.0.clone();
+        let n = bucket.len();
+        if n == 0 {
+            return f64::NAN;
+        }
+        let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+        let (left, mid, _) = bucket.select_nth_unstable_by(n / 2, cmp);
+        if n.is_multiple_of(2) {
+            (left.iter().copied().fold(f64::NEG_INFINITY, f64::max) + *mid) / 2.0
+        } else {
+            *mid
+        }
+    }
+}
+
+/// pandas' nunique of a bin: its distinct present values (a NaN skipped;
+/// 0.0 and -0.0 one value, as the hashing path has them), an empty bin 0, as
+/// a float the caller turns back into pandas' int64 (br-frankenpandas-1gkpa).
+#[derive(Clone, Default)]
+struct BinDistinct(Vec<f64>);
+
+impl ResampleBin for BinDistinct {
+    const SINGLETON_IS_VALUE: bool = false;
+
+    fn add(&mut self, value: f64) {
+        if !value.is_nan() {
+            self.0.push(value);
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)] // a bin's count, far under 2^53
+    fn value(&self) -> f64 {
+        let mut values = self.0.clone();
+        // -0.0 sorts beside 0.0, which it equals.
+        values.sort_unstable_by(f64::total_cmp);
+        values.dedup_by(|value, kept| value == kept);
+        values.len() as f64
+    }
+}
+
+/// A bin's rows, a missing value's too (pandas' size), as a float the caller
+/// turns back into pandas' int64 (br-frankenpandas-1gkpa).
+#[derive(Clone, Default)]
+struct BinRows(u32);
+
+impl ResampleBin for BinRows {
+    const SINGLETON_IS_VALUE: bool = false;
+
+    fn add(&mut self, _value: f64) {
+        self.0 += 1;
+    }
+
+    fn value(&self) -> f64 {
+        f64::from(self.0)
+    }
+}
+
 /// Which spread a [`BinSpread`] reports.
 #[derive(Clone, Copy)]
 enum Spread {
@@ -43979,6 +44207,23 @@ impl Resample<'_> {
     /// `build_groups` (order, groups) and label construction as `aggregate_scalar`
     /// (so it reads `g[0]` / `g[last]` off the identical group ordering the generic
     /// gather-then-find would have scanned). `None` (fall back) for a non-Int64 column.
+    /// first / last of an all-valid or NaN-as-missing float column in the
+    /// one pass: each bin's first / last present value. aggregate_scalar's
+    /// Scalar a row and gather a bin took resample('h').first() 20.5 ms a
+    /// 300k rows, pandas 3.6 (br-frankenpandas-1gkpa). None for any other
+    /// column or binning.
+    fn resample_edge_f64(&self, last: bool) -> Option<Result<Series, FrameError>> {
+        let column = self.series.column();
+        let (vals, validity) = column.as_f64_slice_with_validity()?;
+        if !(validity.all() || column.nan_missing_exact()) {
+            return None;
+        }
+        if let Err(error) = self.validate() {
+            return Some(Err(error));
+        }
+        self.resample_reduce_single_pass(vals, BinEdge::new(last))
+    }
+
     fn resample_first_last_typed_i64(&self, want_last: bool) -> Option<Result<Series, FrameError>> {
         let data = self.series.column().as_i64_slice()?;
         Some((|| -> Result<Series, FrameError> {
@@ -44011,6 +44256,9 @@ impl Resample<'_> {
         if let Some(r) = self.resample_first_last_typed_i64(false) {
             return r;
         }
+        if let Some(r) = self.resample_edge_f64(false) {
+            return r;
+        }
         self.aggregate_scalar(|vals| {
             vals.iter()
                 .find(|v| !v.is_missing())
@@ -44025,6 +44273,9 @@ impl Resample<'_> {
             return result;
         }
         if let Some(r) = self.resample_first_last_typed_i64(true) {
+            return r;
+        }
+        if let Some(r) = self.resample_edge_f64(true) {
             return r;
         }
         self.aggregate_scalar(|vals| {
@@ -44168,6 +44419,19 @@ impl Resample<'_> {
         if let Some(result) = self.non_numeric_reduction("median") {
             return result;
         }
+        // An all-valid or NaN-as-missing float column in the one pass, each
+        // bin's present values selected: a NaN or an empty bin sent it to
+        // aggregate_scalar (resample('h').median() 24.8 ms a 300k rows,
+        // pandas 9.9; br-frankenpandas-1gkpa).
+        let column = self.series.column();
+        if let Some((vals, validity)) = column.as_f64_slice_with_validity()
+            && (validity.all() || column.nan_missing_exact())
+        {
+            self.validate()?;
+            if let Some(r) = self.resample_reduce_single_pass(vals, BinMedian::default()) {
+                return r;
+            }
+        }
         // Typed-f64 fast path: skip aggregate_scalar's column.values() Scalar
         // materialization AND the per-bucket Vec<Scalar> clone + collect_finite
         // re-scan. Gated on an all-valid no-NaN f64 column with NO empty bins, so
@@ -44228,6 +44492,24 @@ impl Resample<'_> {
     pub fn prod(&self) -> Result<Series, FrameError> {
         if let Some(result) = self.non_numeric_reduction("prod") {
             return result;
+        }
+        // An all-valid or NaN-as-missing float column in the one pass, a NaN
+        // skipped (an all-NaN bin 1.0): aggregate_scalar's Scalar a row took
+        // resample('h').prod() 22 ms a 300k rows, pandas 1.5
+        // (br-frankenpandas-1gkpa).
+        let column = self.series.column();
+        if let Some((vals, validity)) = column.as_f64_slice_with_validity()
+            && (validity.all() || column.nan_missing_exact())
+        {
+            self.validate()?;
+            let pass = if vals.iter().any(|value| value.is_nan()) {
+                self.resample_reduce_single_pass(vals, SkipNan(BinProd::default()))
+            } else {
+                self.resample_reduce_single_pass(vals, BinProd::default())
+            };
+            if let Some(r) = pass {
+                return r;
+            }
         }
         // Typed all-valid Int64 fast path (analog of resample sum): `nanprod` folds
         // `prod *= to_f64(v)` in f64 and returns `Scalar::Float64`, so an Int64
@@ -44828,11 +45110,66 @@ impl Resample<'_> {
 
     /// Resample bucket sizes including missing values.
     pub fn size(&self) -> Result<Series, FrameError> {
+        // Each bin's rows counted in the one pass, the values unread: every
+        // value was made a Scalar and each bin gathered to be counted
+        // (resample('h').size() 20.9 ms a 300k rows, pandas 1.4;
+        // br-frankenpandas-1gkpa).
+        let zeros;
+        let vals = match self.series.column().as_f64_slice_with_validity() {
+            Some((data, _)) => data,
+            None => {
+                zeros = vec![0.0; self.series.len()];
+                zeros.as_slice()
+            }
+        };
+        self.validate()?;
+        if let Some(r) = self.resample_reduce_single_pass(vals, BinRows::default()) {
+            return r.and_then(|counts| {
+                let ints = counts
+                    .column()
+                    .as_f64_slice()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|&count| count as i64)
+                    .collect();
+                Series::new(
+                    counts.name(),
+                    counts.index().clone(),
+                    Column::from_i64_values(ints),
+                )
+            });
+        }
         self.aggregate_scalar(|vals| Scalar::Int64(vals.len() as i64))
     }
 
     /// Count unique non-missing values in each bucket.
     pub fn nunique(&self) -> Result<Series, FrameError> {
+        // An all-valid or NaN-as-missing float column in the one pass, each
+        // bin's present values sorted and counted: a Scalar a row and a
+        // HashSet a bin took resample('h').nunique() 31.7 ms a 300k rows,
+        // pandas 11.0 (br-frankenpandas-1gkpa).
+        let column = self.series.column();
+        if let Some((vals, validity)) = column.as_f64_slice_with_validity()
+            && (validity.all() || column.nan_missing_exact())
+        {
+            self.validate()?;
+            if let Some(r) = self.resample_reduce_single_pass(vals, BinDistinct::default()) {
+                return r.and_then(|counts| {
+                    let ints = counts
+                        .column()
+                        .as_f64_slice()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|&count| count as i64)
+                        .collect();
+                    Series::new(
+                        counts.name(),
+                        counts.index().clone(),
+                        Column::from_i64_values(ints),
+                    )
+                });
+            }
+        }
         self.aggregate_scalar(|vals| {
             let mut seen = HashSet::new();
             for value in vals {
@@ -47755,6 +48092,50 @@ fn dense_groupby_pct_change_f64(
             }
         }
         hist[slot] = v;
+    }
+    (out, fp_columnar::ValidityMask::from_words(words, n))
+}
+
+/// [`dense_groupby_pct_change_f64`] of a float column with gaps under pandas'
+/// default fill: each group's values filled forward as the rows pass (a NaN
+/// or a gap takes the group's last present value), then `filled /
+/// filled.shift(periods) - 1` within the group. A row with no value yet in
+/// its group, or none a period back, is missing (its datum 0.0, as the
+/// general path's Null); a 0/0 is NaN as the clean kernel has it
+/// (br-frankenpandas-faizi).
+fn dense_groupby_pct_change_ffill_f64(
+    gid_per_row: &[usize],
+    ngroups: usize,
+    vals: &[f64],
+    present: &[u64],
+    periods: usize,
+) -> (Vec<f64>, fp_columnar::ValidityMask) {
+    let n = vals.len();
+    let mut last = vec![f64::NAN; ngroups];
+    let mut hist = vec![0.0_f64; ngroups.saturating_mul(periods)];
+    let mut ring = ShiftRing::new(ngroups, periods);
+    let mut out = vec![0.0_f64; n];
+    let mut words = vec![0u64; n.div_ceil(64)];
+    #[allow(clippy::needless_range_loop)] // row indexes vals, gids, present and out
+    for row in 0..n {
+        let gid = gid_per_row[row];
+        let value = vals[row];
+        if (present[row / 64] >> (row % 64)) & 1 == 1 && !value.is_nan() {
+            last[gid] = value;
+        }
+        let filled_value = last[gid];
+        let (slot, filled) = ring.step(gid);
+        if filled {
+            let prev = hist[slot];
+            if !filled_value.is_nan() && !prev.is_nan() {
+                let ratio = filled_value / prev - 1.0;
+                out[row] = ratio;
+                if !ratio.is_nan() {
+                    words[row / 64] |= 1u64 << (row % 64);
+                }
+            }
+        }
+        hist[slot] = filled_value;
     }
     (out, fp_columnar::ValidityMask::from_words(words, n))
 }
@@ -52867,49 +53248,50 @@ impl SeriesGroupBy<'_> {
     /// `Scalar::Int64(v).to_f64()` semantics above 2^53. Returns
     /// `None` (→ `agg_scalar`) for non-numeric values / non-dense Int64 keys.
     fn idx_extreme_dense(&self, want_max: bool) -> Option<Result<Series, FrameError>> {
-        let f64_data = self.series.column.as_f64_slice();
-        let i64_data = self.series.column.as_i64_slice();
-        let data_len = match (f64_data, i64_data) {
-            (Some(data), _) => data.len(),
-            (None, Some(data)) => data.len(),
-            (None, None) => return None,
-        };
-        let keys = self.by.column.as_i64_slice()?;
-        if keys.len() != data_len {
-            return None;
-        }
-        let (min, range) = i64_dense_histogram_range(keys)?;
-        let mut gid_of = vec![usize::MAX; range];
-        let mut key_of_gid: Vec<i64> = Vec::new();
-        let mut best_val: Vec<f64> = Vec::new();
-        let mut best_row: Vec<usize> = Vec::new();
-        let mut observe = |row: usize, k: i64, v: f64| {
-            let off = (k as i128 - min as i128) as usize;
-            let gid = gid_of[off];
-            if gid == usize::MAX {
-                gid_of[off] = key_of_gid.len();
-                key_of_gid.push(k);
-                best_val.push(v);
-                best_row.push(row);
-            } else if (want_max && v > best_val[gid]) || (!want_max && v < best_val[gid]) {
-                best_val[gid] = v;
-                best_row[gid] = row;
+        // Each group's first extreme over the dense ids (an int, categorical
+        // or text key), its values read as floats beside their mask - a NaN
+        // or a gap skipped, as pandas' skipna; an all-missing group NaN - and
+        // the chosen rows' labels taken from the index alone. A NaN-holding
+        // column or another key built the row lists and read a Scalar a row,
+        // the index's every label made (g.idxmax() 4.7 ms a 300k rows,
+        // pandas 1.0; br-frankenpandas-lpzmu).
+        let (gids, ngroups) = self.dense_group_ids()?;
+        let mut best: Vec<Option<(usize, f64)>> = vec![None; ngroups];
+        let mut observe = |row: usize, gid: usize, value: f64| {
+            if let Some(slot) = best.get_mut(gid) {
+                match slot {
+                    Some((_, current))
+                        if !((want_max && value > *current) || (!want_max && value < *current)) => {
+                    }
+                    _ => *slot = Some((row, value)),
+                }
             }
         };
-        if let Some(data) = f64_data {
-            for (row, (&k, &v)) in keys.iter().zip(data).enumerate() {
-                observe(row, k, v);
+        if let Some((data, validity)) = self.series.column.as_f64_slice_with_validity() {
+            let words = validity.packed_words_for_scan();
+            for (row, (&gid, &value)) in gids.iter().zip(data).enumerate() {
+                if (words[row / 64] >> (row % 64)) & 1 == 1 && !value.is_nan() {
+                    observe(row, gid, value);
+                }
             }
-        } else if let Some(data) = i64_data {
-            for (row, (&k, &v)) in keys.iter().zip(data).enumerate() {
-                observe(row, k, v as f64);
+        } else {
+            let data = self.series.column.as_i64_slice()?;
+            for (row, (&gid, &value)) in gids.iter().zip(data).enumerate() {
+                observe(row, gid, value as f64);
             }
         }
-        let idx_labels = self.series.index.labels();
-        let labels: Vec<IndexLabel> = key_of_gid.iter().map(|&k| IndexLabel::Int64(k)).collect();
-        let values: Vec<Scalar> = best_row
+        let labels = self.dense_group_labels(&gids, ngroups)?;
+        let rows: Vec<usize> = best.iter().flatten().map(|&(row, _)| row).collect();
+        let chosen = self.series.index.take(&rows);
+        let mut chosen = chosen.labels().iter();
+        let values: Vec<Scalar> = best
             .iter()
-            .map(|&r| index_label_to_scalar(&idx_labels[r]))
+            .map(|slot| match slot {
+                Some(_) => chosen
+                    .next()
+                    .map_or(Scalar::Null(NullKind::NaN), index_label_to_scalar),
+                None => Scalar::Null(NullKind::NaN),
+            })
             .collect();
         let by_name = self.by.name();
         let idx_name = if by_name.is_empty() {
@@ -54074,6 +54456,20 @@ impl SeriesGroupBy<'_> {
                     return Series::new(self.series.name(), index, column);
                 }
             }
+        }
+        // A float column with gaps under the default fill, over the dense
+        // ids in one pass: each group's Scalars were filled and changed
+        // (g.pct_change() 27.6 ms a 300k rows, pandas 17.8;
+        // br-frankenpandas-faizi).
+        if periods >= 1
+            && let Some((data, present)) = self.series.column.as_f64_slice_with_validity()
+            && let Some((gids, ngroups)) = self.dense_group_ids()
+        {
+            let words = present.packed_words_for_scan();
+            let (out, mask) =
+                dense_groupby_pct_change_ffill_f64(&gids, ngroups, data, &words, periods as usize);
+            let column = Column::from_f64_values_with_validity(out, mask);
+            return Series::new(self.series.name(), self.series.index.clone(), column);
         }
         // pandas groupby.pct_change default fill_method='ffill' forward-fills
         // within each group before computing. (br-frankenpandas-c3zld)
@@ -55998,6 +56394,31 @@ impl SeriesGroupBy<'_> {
 
     /// Number of elements in each group (including nulls).
     pub fn size(&self) -> Result<Series, FrameError> {
+        // Each group's rows tallied over the dense ids, the values unread:
+        // the build_groups row lists were 85% of g.size() (2.1 ms a 300k
+        // rows, pandas 0.53; br-frankenpandas-lpzmu).
+        if let Some((gids, ngroups)) = self.dense_group_ids()
+            && let Some(labels) = self.dense_group_labels(&gids, ngroups)
+        {
+            let mut sizes = vec![0_i64; ngroups];
+            for &gid in gids.iter() {
+                if let Some(size) = sizes.get_mut(gid) {
+                    *size += 1;
+                }
+            }
+            let by_name = self.by.name();
+            let idx_name = if by_name.is_empty() {
+                None
+            } else {
+                Some(by_name)
+            };
+            let index = Index::new(labels).rename_index(idx_name);
+            return Series::new(
+                self.series.name(),
+                index,
+                Column::from_i64_values_owned(sizes),
+            );
+        }
         let (order, order_keys, groups) = self.build_groups();
         let mut labels = Vec::with_capacity(order_keys.len());
         let mut values = Vec::with_capacity(order_keys.len());
@@ -69053,8 +69474,11 @@ pub fn to_datetime_with_options(
     // dayfirst reads a day before the month, which this ISO parse does not;
     // a text column that happened to be contiguous (a str-op output)
     // parsed month first under dayfirst=True (br-frankenpandas-gwtxd).
+    // format='ISO8601' reads each value as ISO on its own, which a column of
+    // one plain ISO shape answers the same: it took the per-value path
+    // (200k dates 109 ms, pandas 11; br-frankenpandas-l9t3g).
     if options.unit.is_none()
-        && options.format.is_none()
+        && matches!(options.format, None | Some("ISO8601"))
         && options.origin.is_none()
         && !options.utc
         && !options.dayfirst
@@ -69071,8 +69495,24 @@ pub fn to_datetime_with_options(
         // the lock. A uniform column is unaffected, so this stays bit-identical
         // wherever the fast path still fires.
         let mut lock: Option<String> = None;
+        // A repeated string read once when the first rows mostly repeat
+        // (pandas' cache): a span seen before passed the lock and parsed
+        // (200k dates of 8334 days 10.1 ms, pandas 11.5;
+        // br-frankenpandas-l9t3g).
+        let sample = nrows.min(500);
+        let repeats = (0..sample)
+            .map(|row| &bytes[offsets[row]..offsets[row + 1]])
+            .collect::<FxHashSet<&[u8]>>()
+            .len()
+            * 10
+            <= sample * 7;
+        let mut seen: FxHashMap<&[u8], i64> = FxHashMap::default();
         for row in 0..nrows {
             let span = &bytes[offsets[row]..offsets[row + 1]];
+            if repeats && let Some(&value) = seen.get(span) {
+                nanos.push(value);
+                continue;
+            }
             // Contiguous-Utf8 spans are valid UTF-8 by construction.
             let Some(text) = std::str::from_utf8(span).ok() else {
                 all_fast = false;
@@ -69087,7 +69527,12 @@ pub fn to_datetime_with_options(
                 Some(_) => {}
             }
             match fast_iso_datetime_nanos(text) {
-                Some(v) => nanos.push(v),
+                Some(v) => {
+                    nanos.push(v);
+                    if repeats {
+                        seen.insert(span, v);
+                    }
+                }
                 None => {
                     all_fast = false;
                     break;
@@ -69119,6 +69564,51 @@ pub fn to_datetime_with_options(
     {
         let index = series.index().clone();
         return Series::new(series.name().to_owned(), index, column);
+    }
+
+    // A text column in a format's fixed-width layout read off its buffer, a
+    // repeated string once when its first rows mostly repeat (pandas'
+    // cache): each row was made a Scalar String first (200k '%Y-%m-%d'
+    // dates 12.1 ms, pandas 11.1; br-frankenpandas-l9t3g). A string the
+    // layout does not take sends the column to the general path below.
+    if options.unit.is_none()
+        && options.origin.is_none()
+        && !options.utc
+        && let Some(format) = options.format
+        && !matches!(format, "mixed" | "ISO8601")
+        && let Some(strptime) = PandasStrptime::new(format)
+        && strptime.template.is_some()
+        && let Some((bytes, offsets)) = series.column().as_utf8_contiguous()
+    {
+        let nrows = offsets.len() - 1;
+        let span = |row: usize| &bytes[offsets[row]..offsets[row + 1]];
+        let parse = |text: &[u8]| {
+            std::str::from_utf8(text)
+                .ok()
+                .and_then(|text| strptime.template_nanos(text))
+        };
+        let sample = nrows.min(500);
+        let repeats = (0..sample).map(span).collect::<FxHashSet<&[u8]>>().len() * 10 <= sample * 7;
+        let nanos: Option<Vec<i64>> = if repeats {
+            let mut seen: FxHashMap<&[u8], i64> = FxHashMap::default();
+            (0..nrows)
+                .map(|row| {
+                    let text = span(row);
+                    if let Some(&value) = seen.get(text) {
+                        return Some(value);
+                    }
+                    let value = parse(text)?;
+                    seen.insert(text, value);
+                    Some(value)
+                })
+                .collect()
+        } else {
+            (0..nrows).map(|row| parse(span(row))).collect()
+        };
+        if let Some(nanos) = nanos {
+            let column = Column::from_datetime64_values(nanos);
+            return Series::new(series.name().to_owned(), series.index().clone(), column);
+        }
     }
 
     let utc = options.utc;
@@ -79485,6 +79975,33 @@ fn centered_sum_of_squares(sum_sq: f64, count: f64, mean: f64) -> f64 {
     } else {
         sum_sq
     }
+}
+
+/// Pearson's r of paired values (autocorr's pairs, each present): the
+/// means, then the centered cross and square sums, NaN under two pairs.
+fn pearson_of_pairs(x_vals: &[f64], y_vals: &[f64]) -> f64 {
+    let count = x_vals.len();
+    if count < 2 {
+        return f64::NAN;
+    }
+    let n_f = count as f64;
+    let mean_x = x_vals.iter().sum::<f64>() / n_f;
+    let mean_y = y_vals.iter().sum::<f64>() / n_f;
+    let mut cov = 0.0_f64;
+    let mut var_x = 0.0_f64;
+    let mut var_y = 0.0_f64;
+    for (&x, &y) in x_vals.iter().zip(y_vals) {
+        let dx = x - mean_x;
+        let dy = y - mean_y;
+        cov += dx * dy;
+        var_x += dx * dx;
+        var_y += dy * dy;
+    }
+    pearson_ratio(
+        cov,
+        centered_sum_of_squares(var_x, n_f, mean_x),
+        centered_sum_of_squares(var_y, n_f, mean_y),
+    )
 }
 
 /// Pearson's r from a cross product and two sums of squares (or the three
@@ -97273,42 +97790,63 @@ impl DataFrame {
         // and not NaN); a column absent from `other` keeps self unchanged. An
         // equal repeated index updates by position too, as pandas'
         // (br-frankenpandas-rbiki).
+        // An all-valid int column takes the same path: beside an all-valid int
+        // `other` it is that column (pandas' where of no missing value keeps
+        // int64), and a float column takes an all-valid int `other`'s values
+        // as floats - a frame of floats and ints went through the Scalar path
+        // below (num.copy().update(num * 2) 6.7 ms, pandas 2.0;
+        // br-frankenpandas-skv4q). The masks are read as words.
+        let n = self.index.len();
+        let typed = |name: &String| {
+            let column = &self.columns[name];
+            let float = column.as_f64_slice_with_validity().is_some();
+            let int = column.as_i64_slice().is_some();
+            // A narrow column (float32, int8: a width tag) keeps the Scalar
+            // path, which keeps its dtype.
+            (float || int)
+                && column.len() == n
+                && column.width().is_none()
+                && other.columns.get(name).is_none_or(|theirs| {
+                    theirs.len() == n
+                        && theirs.width().is_none()
+                        && ((float && theirs.as_f64_slice_with_validity().is_some())
+                            || theirs.as_i64_slice().is_some())
+                })
+        };
         if self.index == other.index
             && self.row_multiindex.is_none()
-            && self.column_order.iter().all(|name| {
-                self.columns[name].as_f64_slice_with_validity().is_some()
-                    && self.columns[name].len() == self.index.len()
-                    && other
-                        .columns
-                        .get(name)
-                        .is_none_or(|c| c.as_f64_slice_with_validity().is_some())
-            })
+            && self.column_order.iter().all(typed)
         {
-            let n = self.index.len();
             let computed = self.par_map_columns(&self.column_order, |name| {
-                let (sd, sv) = self.columns[name].as_f64_slice_with_validity().unwrap();
-                match other
-                    .columns
-                    .get(name)
-                    .and_then(|c| c.as_f64_slice_with_validity())
-                {
-                    Some((od, ov)) if od.len() == n => {
-                        let mut out = vec![0.0_f64; n];
-                        let mut valid = fp_columnar::ValidityMask::all_valid(n);
-                        for i in 0..n {
-                            if ov.get(i) && !od[i].is_nan() {
-                                out[i] = od[i];
-                            } else {
-                                out[i] = sd[i];
-                                if !sv.get(i) {
-                                    valid.set(i, false);
-                                }
-                            }
-                        }
-                        Ok(Column::from_f64_values_with_validity(out, valid))
-                    }
-                    _ => Ok(self.columns[name].clone()),
+                let ours = &self.columns[name];
+                let Some(theirs) = other.columns.get(name) else {
+                    return Ok(ours.clone());
+                };
+                if let Some(values) = theirs.as_i64_slice() {
+                    return Ok(if ours.as_i64_slice().is_some() {
+                        theirs.clone()
+                    } else {
+                        #[allow(clippy::cast_precision_loss)] // numpy's int64 -> float64
+                        Column::from_f64_values(values.iter().map(|&value| value as f64).collect())
+                    });
                 }
+                let ((sd, sv), (od, ov)) = (
+                    ours.as_f64_slice_with_validity().expect("gated typed"),
+                    theirs.as_f64_slice_with_validity().expect("gated typed"),
+                );
+                let (swords, owords) = (sv.packed_words_for_scan(), ov.packed_words_for_scan());
+                let bit = |words: &[u64], row: usize| (words[row / 64] >> (row % 64)) & 1 == 1;
+                let mut out = Vec::with_capacity(n);
+                let mut valid = vec![0_u64; n.div_ceil(64)];
+                for row in 0..n {
+                    let take = bit(&owords, row) && !od[row].is_nan();
+                    out.push(if take { od[row] } else { sd[row] });
+                    valid[row / 64] |= u64::from(take || bit(&swords, row)) << (row % 64);
+                }
+                Ok(Column::from_f64_values_with_validity(
+                    out,
+                    fp_columnar::ValidityMask::from_words(valid, n),
+                ))
             })?;
             let mut result_cols = BTreeMap::new();
             for (name, column) in self.column_order.iter().zip(computed) {
@@ -97367,7 +97905,12 @@ impl DataFrame {
             } else {
                 self_col.values().to_vec()
             };
-            result_cols.insert(col_name.clone(), Column::from_values(new_vals)?);
+            // A narrow column keeps its width where pandas does (int8 / float32
+            // updated came back int64 / float64; br-frankenpandas-skv4q).
+            result_cols.insert(
+                col_name.clone(),
+                Column::from_values(new_vals)?.narrowed_like(self_col),
+            );
         }
 
         Ok(Self {
@@ -134452,6 +134995,82 @@ mod tests {
     }
 
     #[test]
+    fn grouped_size_and_idx_extremes_over_dense_ids_lpzmu() {
+        // br-frankenpandas-lpzmu: size tallies the dense group ids and idxmax
+        // / idxmin fold over them beside the values' mask - a NaN skipped,
+        // the first extreme kept, an all-NaN group NaN - as pandas 2.2.3
+        // answers (measured) for keys [1, 2, 1, 3, 2, 1, 3] over [NaN, 5, 7,
+        // NaN, 5, 7, NaN] on labels a..g. NEGATIVE: ties (the first row), a
+        // text key the same, a key holding NaN (its row left out: the row
+        // lists), an int column.
+        let nan = f64::NAN;
+        let labels = || -> Vec<IndexLabel> {
+            ["a", "b", "c", "d", "e", "f", "g"]
+                .iter()
+                .map(|label| IndexLabel::Utf8((*label).into()))
+                .collect()
+        };
+        let series = |values: Vec<Scalar>| Series::from_values("x", labels(), values).unwrap();
+        let floats = |values: &[f64]| values.iter().map(|&value| Scalar::Float64(value)).collect();
+        let text = |value: &str| Scalar::Utf8(value.into());
+        // The chosen labels, a missing one None (its gap's kind aside).
+        let names = |result: Result<Series, FrameError>| -> Vec<Option<String>> {
+            result
+                .unwrap()
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Utf8(label) => Some(label.clone()),
+                    other => {
+                        assert!(other.is_missing(), "{other:?}");
+                        None
+                    }
+                })
+                .collect()
+        };
+        let some = |label: &str| Some(label.to_owned());
+        let values = series(floats(&[nan, 5.0, 7.0, nan, 5.0, 7.0, nan]));
+        let int_key = series(
+            [1, 2, 1, 3, 2, 1, 3]
+                .iter()
+                .map(|&key| Scalar::Int64(key))
+                .collect(),
+        );
+        let text_key = series(
+            ["p", "q", "p", "r", "q", "p", "r"]
+                .iter()
+                .map(|&key| text(key))
+                .collect(),
+        );
+        for key in [&int_key, &text_key] {
+            let grouped = values.groupby(key).unwrap();
+            assert_eq!(
+                grouped.size().unwrap().values(),
+                [Scalar::Int64(3), Scalar::Int64(2), Scalar::Int64(2)]
+            );
+            let first_max = [some("c"), some("b"), None];
+            assert_eq!(names(grouped.idxmax()), first_max);
+            assert_eq!(names(grouped.idxmin()), first_max);
+        }
+        let nan_key = series(floats(&[1.0, 2.0, 1.0, nan, 2.0, 1.0, 3.0]));
+        let grouped = values.groupby(&nan_key).unwrap();
+        assert_eq!(
+            grouped.size().unwrap().values(),
+            [Scalar::Int64(3), Scalar::Int64(2), Scalar::Int64(1)]
+        );
+        assert_eq!(names(grouped.idxmax()), [some("c"), some("b"), None]);
+        let ints = series(
+            [3, 1, 3, 2, 1, 3, 4]
+                .iter()
+                .map(|&value| Scalar::Int64(value))
+                .collect(),
+        );
+        let grouped = ints.groupby(&int_key).unwrap();
+        assert_eq!(names(grouped.idxmax()), [some("a"), some("b"), some("g")]);
+        assert_eq!(names(grouped.idxmin()), [some("a"), some("b"), some("d")]);
+    }
+
+    #[test]
     fn centered_rolling_ranks_the_newest_value_and_frames_center() {
         let floats = |values: &[f64]| values.iter().map(|&v| Scalar::Float64(v)).collect();
         let labels = |n: i64| (0..n).map(IndexLabel::from).collect::<Vec<_>>();
@@ -143982,6 +144601,271 @@ mod tests {
     }
 
     // --- Series::pct_change tests ---
+
+    #[test]
+    fn gapped_float_pct_change_reads_the_mask_faizi() {
+        // br-frankenpandas-faizi: a float column with gaps - NaN-as-missing
+        // or a validity gap - changes by the typed pass, a gap at the row or
+        // at its previous row NaN, as pandas 2.2.3 answers (measured) for
+        // [NaN, 1, 2, NaN, 4, 0, 0, inf, 5]. NEGATIVE: the pad default (the
+        // leading NaN stays), 0/0 (NaN), inf, negative periods, periods past
+        // a gap, a gap held as 0.0 behind the mask.
+        let nan = f64::NAN;
+        let inf = f64::INFINITY;
+        let floats = |result: Result<Series, FrameError>| -> Vec<Option<f64>> {
+            let result = result.unwrap();
+            assert_eq!(result.column().dtype(), DType::Float64);
+            result
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Float64(x) if !x.is_nan() => Some(*x),
+                    _ => None,
+                })
+                .collect()
+        };
+        let values = vec![nan, 1.0, 2.0, nan, 4.0, 0.0, 0.0, inf, 5.0];
+        let nan_held = Series::from_values(
+            "x",
+            (0..9_i64).map(IndexLabel::Int64).collect(),
+            values.iter().map(|&value| Scalar::Float64(value)).collect(),
+        )
+        .unwrap();
+        let mut present = fp_columnar::ValidityMask::all_valid(9);
+        present.set(0, false);
+        present.set(3, false);
+        let zero_gaps: Vec<f64> = values
+            .iter()
+            .map(|&value| if value.is_nan() { 0.0 } else { value })
+            .collect();
+        let masked = Series::new(
+            "x",
+            Index::from_i64_values((0..9).collect()),
+            Column::from_f64_values_with_validity(zero_gaps, present),
+        )
+        .unwrap();
+        for series in [&nan_held, &masked] {
+            assert!(series.column().as_f64_slice_with_validity().is_some());
+            assert_eq!(
+                floats(series.pct_change_with_fill(1, None, None)),
+                [
+                    None,
+                    None,
+                    Some(1.0),
+                    None,
+                    None,
+                    Some(-1.0),
+                    None,
+                    Some(inf),
+                    Some(-1.0)
+                ]
+            );
+            assert_eq!(
+                floats(series.pct_change(1)),
+                [
+                    None,
+                    None,
+                    Some(1.0),
+                    Some(0.0),
+                    Some(1.0),
+                    Some(-1.0),
+                    None,
+                    Some(inf),
+                    Some(-1.0)
+                ]
+            );
+            assert_eq!(
+                floats(series.pct_change_with_fill(-1, None, None)),
+                [
+                    None,
+                    Some(-0.5),
+                    None,
+                    None,
+                    Some(inf),
+                    None,
+                    Some(-1.0),
+                    Some(inf),
+                    None
+                ]
+            );
+            assert_eq!(
+                floats(series.pct_change_with_fill(2, None, None)),
+                [
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(1.0),
+                    None,
+                    Some(-1.0),
+                    Some(inf),
+                    Some(inf)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn forward_pct_change_blocks_are_the_row_rule_faizi() {
+        // br-frankenpandas-faizi: the 64-row blocks of a forward pct_change
+        // over a column with gaps answer the row rule - a row whose value
+        // and the value `p` rows back are both present changes (inf for a
+        // zero divisor, missing for 0/0), any other row missing - over gaps
+        // straddling words, `p` within a word, at one, across two and past
+        // the length, and a length off a word.
+        let len = 300;
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut values = Vec::with_capacity(len);
+        let mut present = fp_columnar::ValidityMask::all_valid(len);
+        for row in 0..len {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            values.push((state % 11) as f64);
+            if state % 5 == 0 {
+                present.set(row, false);
+            }
+        }
+        let series = Series::new(
+            "x",
+            Index::from_i64_values((0..300).collect()),
+            Column::from_f64_values_with_validity(values.clone(), present.clone()),
+        )
+        .unwrap();
+        for p in [1_usize, 2, 63, 64, 65, 130, 299, 300, 301] {
+            let got = series.pct_change_with_fill(p as i64, None, None).unwrap();
+            for (row, cell) in got.values().iter().enumerate() {
+                let want = (row >= p && present.get(row) && present.get(row - p))
+                    .then(|| values[row] / values[row - p] - 1.0)
+                    .filter(|ratio| !ratio.is_nan());
+                match want {
+                    Some(ratio) => assert_eq!(cell, &Scalar::Float64(ratio), "p {p} row {row}"),
+                    None => assert!(cell.is_missing(), "p {p} row {row}: {cell:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grouped_gapped_pct_change_fills_each_group_faizi() {
+        // br-frankenpandas-faizi: a grouped pct_change of a float column with
+        // gaps fills each group forward over the dense ids, then changes it,
+        // as pandas 2.2.3 answers (measured) for keys [1, 2, 1, 1, 2, 2, 1, 3,
+        // 3] over [NaN, 2, 4, NaN, NaN, 6, 8, 0, 0]. NEGATIVE: a group's
+        // leading NaN (missing), a filled row (0.0), 0/0 (NaN), periods 2,
+        // the general path's missing rows read as missing.
+        let nan = f64::NAN;
+        let series = Series::from_values(
+            "x",
+            (0..9_i64).map(IndexLabel::Int64).collect(),
+            [nan, 2.0, 4.0, nan, nan, 6.0, 8.0, 0.0, 0.0]
+                .iter()
+                .map(|&value| Scalar::Float64(value))
+                .collect(),
+        )
+        .unwrap();
+        let keys = Series::from_values(
+            "k",
+            (0..9_i64).map(IndexLabel::Int64).collect(),
+            [1, 2, 1, 1, 2, 2, 1, 3, 3]
+                .iter()
+                .map(|&key| Scalar::Int64(key))
+                .collect(),
+        )
+        .unwrap();
+        let floats = |result: Result<Series, FrameError>| -> Vec<Option<f64>> {
+            result
+                .unwrap()
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Float64(x) if !x.is_nan() => Some(*x),
+                    other => {
+                        assert!(other.is_missing(), "{other:?}");
+                        None
+                    }
+                })
+                .collect()
+        };
+        let grouped = series.groupby(&keys).unwrap();
+        assert_eq!(
+            floats(grouped.pct_change(1)),
+            [
+                None,
+                None,
+                None,
+                Some(0.0),
+                Some(0.0),
+                Some(2.0),
+                Some(1.0),
+                None,
+                None
+            ]
+        );
+        assert_eq!(
+            floats(grouped.pct_change(2)),
+            [
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(2.0),
+                Some(1.0),
+                None,
+                None
+            ]
+        );
+        // A gap is Null, not a NaN datum: row 0 has nothing before it.
+        assert_eq!(
+            grouped.pct_change(1).unwrap().values()[0],
+            Scalar::Null(NullKind::NaN)
+        );
+    }
+
+    #[test]
+    fn gapped_float_prod_and_autocorr_read_the_mask_faizi() {
+        // br-frankenpandas-faizi: prod and autocorr of a float column with
+        // gaps - NaN-as-missing or a validity gap held as 0.0 - read its data
+        // and mask, as pandas 2.2.3 answers (measured) for [NaN, 1, 2, NaN,
+        // 4, 3, 7, NaN, 5, 6]: prod 5040.0, autocorr(1) 0.5329480400990121,
+        // autocorr(2) 0.21677749238103, autocorr(8) NaN (one pair).
+        // NEGATIVE: the gap held as 0.0 is not multiplied (prod 0.0 if it
+        // were), a lag past the length (NaN).
+        let nan = f64::NAN;
+        let values = [nan, 1.0, 2.0, nan, 4.0, 3.0, 7.0, nan, 5.0, 6.0];
+        let nan_held = Series::new(
+            "x",
+            Index::from_i64_values((0..10).collect()),
+            Column::from_f64_values(values.to_vec()),
+        )
+        .unwrap();
+        let mut present = fp_columnar::ValidityMask::all_valid(10);
+        for gap in [0, 3, 7] {
+            present.set(gap, false);
+        }
+        let masked = Series::new(
+            "x",
+            Index::from_i64_values((0..10).collect()),
+            Column::from_f64_values_with_validity(
+                values
+                    .iter()
+                    .map(|&value| if value.is_nan() { 0.0 } else { value })
+                    .collect(),
+                present,
+            ),
+        )
+        .unwrap();
+        for series in [&nan_held, &masked] {
+            assert!(series.column().as_f64_slice_with_validity().is_some());
+            assert_eq!(series.prod().unwrap(), Scalar::Float64(5040.0));
+            let close = |got: f64, want: f64| (got - want).abs() < 1e-12;
+            assert!(close(series.autocorr(1).unwrap(), 0.532_948_040_099_012_1));
+            assert!(close(series.autocorr(2).unwrap(), 0.216_777_492_381_03));
+            assert!(series.autocorr(8).unwrap().is_nan());
+            assert!(series.autocorr(10).unwrap().is_nan());
+        }
+    }
 
     #[test]
     fn series_pct_change_basic() {
@@ -189648,6 +190532,115 @@ mod tests {
             floats(full.resample("h").max()),
             [Some(5.0), Some(7.0), Some(3.0), Some(8.0)]
         );
+    }
+
+    #[test]
+    fn resample_first_last_prod_size_one_pass_1gkpa() {
+        // br-frankenpandas-1gkpa: first / last / prod / size of a float column
+        // run the one-pass bins - binning, and over a resampler's kept bins -
+        // and answer as pandas 2.2.3 does over these stamps (measured): a
+        // bin's first / last present value, its product skipping NaN, its
+        // rows. NEGATIVE: an all-NaN bin (NaN, NaN, 1.0, 2 rows), an empty bin
+        // (NaN, NaN, 1.0, 0), a lone value, the NaN-free column, closed='right'
+        // (binned by the groups, not the one pass), an int column's size.
+        use std::sync::Arc;
+
+        use super::ResampleLayout;
+        let base = 1_577_836_800_000_000_000_i64;
+        let half_hour = 1_800_000_000_000_i64;
+        let stamps: Vec<i64> = [0, 1, 2, 3, 6, 7, 8]
+            .iter()
+            .map(|i| base + i * half_hour)
+            .collect();
+        let series = |column: Column| {
+            Series::new("x", Index::from_datetime64(stamps.clone()), column).unwrap()
+        };
+        let floats = |result: Result<Series, FrameError>| -> Vec<Option<f64>> {
+            result
+                .unwrap()
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Float64(x) if !x.is_nan() => Some(*x),
+                    _ => None,
+                })
+                .collect()
+        };
+        let ints = |result: Result<Series, FrameError>| -> Vec<i64> {
+            let result = result.unwrap();
+            assert_eq!(result.column().dtype(), DType::Int64);
+            result.column().as_i64_slice().unwrap().to_vec()
+        };
+        // Hourly bins [NaN, 2.0], [NaN, NaN], (none), [1.0, 3.0], [4.0].
+        let nan = f64::NAN;
+        let holed = series(Column::from_f64_values(vec![
+            nan, 2.0, nan, nan, 1.0, 3.0, 4.0,
+        ]));
+        assert!(holed.column().nan_missing_exact(), "the one pass reads it");
+        let layout = Arc::new(ResampleLayout::default());
+        for _ in 0..2 {
+            let view = || holed.resample("h").sharing(&layout);
+            assert_eq!(
+                floats(view().first()),
+                [Some(2.0), None, None, Some(1.0), Some(4.0)]
+            );
+            assert_eq!(
+                floats(view().last()),
+                [Some(2.0), None, None, Some(3.0), Some(4.0)]
+            );
+            assert_eq!(
+                floats(view().prod()),
+                [Some(2.0), Some(1.0), Some(1.0), Some(3.0), Some(4.0)]
+            );
+            assert_eq!(ints(view().size()), [2, 2, 0, 2, 1]);
+            assert_eq!(
+                floats(view().median()),
+                [Some(2.0), None, None, Some(2.0), Some(4.0)]
+            );
+            assert_eq!(ints(view().nunique()), [1, 0, 0, 2, 1]);
+        }
+        assert!(layout.bins.get().is_some_and(Option::is_some));
+        let full = series(Column::from_f64_values(vec![
+            5.0, 2.0, 7.0, 6.0, 1.0, 3.0, 4.0,
+        ]));
+        assert_eq!(
+            floats(full.resample("h").first()),
+            [Some(5.0), Some(7.0), None, Some(1.0), Some(4.0)]
+        );
+        assert_eq!(
+            floats(full.resample("h").last()),
+            [Some(2.0), Some(6.0), None, Some(3.0), Some(4.0)]
+        );
+        assert_eq!(
+            floats(full.resample("h").prod()),
+            [Some(10.0), Some(42.0), Some(1.0), Some(3.0), Some(4.0)]
+        );
+        assert_eq!(
+            floats(full.resample("h").median()),
+            [Some(3.5), Some(6.5), None, Some(2.0), Some(4.0)]
+        );
+        // closed='right': bins (23:00, 00:00] .. (03:00, 04:00].
+        let right = || holed.resample("h").closed("right");
+        assert_eq!(
+            floats(right().first()),
+            [None, Some(2.0), None, Some(1.0), Some(3.0)]
+        );
+        assert_eq!(
+            floats(right().last()),
+            [None, Some(2.0), None, Some(1.0), Some(4.0)]
+        );
+        assert_eq!(
+            floats(right().prod()),
+            [Some(1.0), Some(2.0), Some(1.0), Some(1.0), Some(12.0)]
+        );
+        assert_eq!(ints(right().size()), [1, 2, 1, 1, 2]);
+        // nunique: 0.0 and -0.0 one value, a repeat once.
+        let zeros = series(Column::from_f64_values(vec![
+            0.0, -0.0, 2.0, 2.0, 1.0, 3.0, 4.0,
+        ]));
+        assert_eq!(ints(zeros.resample("h").nunique()), [1, 1, 0, 2, 1]);
+        let counted = series(Column::from_i64_values(vec![1, 2, 3, 4, 5, 6, 7]));
+        assert_eq!(ints(counted.resample("h").size()), [2, 2, 0, 2, 1]);
     }
 
     #[test]
@@ -253572,7 +254565,8 @@ mod ewm_moments_match_pandas_c5nwf {
 /// not ISO8601. Pinned to live pandas 2.2.3.
 #[cfg(test)]
 mod to_datetime_iso8601_f1jm5 {
-    use fp_index::IndexLabel;
+    use fp_columnar::Column;
+    use fp_index::{Index, IndexLabel};
     use fp_types::{DType, Scalar};
 
     use super::{
@@ -253673,6 +254667,144 @@ mod to_datetime_iso8601_f1jm5 {
             err.contains("month must be in 1..12: 2024-13-01, at position 0"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn iso8601_of_one_plain_shape_takes_the_text_buffer_l9t3g() {
+        // br-frankenpandas-l9t3g: format='ISO8601' over a text column of one
+        // plain ISO shape reads its buffer as format=None does - the same
+        // instants, typed - as pandas 2.2.3 answers (measured). NEGATIVE:
+        // mixed shapes still each read on their own (the general path), a
+        // date-only and a fractional-second column, a non-ISO value refused.
+        let contiguous = |texts: &[&str]| {
+            let mut bytes = Vec::new();
+            let mut offsets = vec![0];
+            for text in texts {
+                bytes.extend_from_slice(text.as_bytes());
+                offsets.push(bytes.len());
+            }
+            Series::new(
+                "d",
+                Index::from_i64_values((0..texts.len() as i64).collect()),
+                Column::from_utf8_contiguous(bytes, offsets),
+            )
+            .unwrap()
+        };
+        let iso = ToDatetimeOptions {
+            format: Some("ISO8601"),
+            ..Default::default()
+        };
+        let nanos = |series: Series| -> Vec<i64> {
+            assert!(matches!(series.column().dtype(), DType::Datetime64 { .. }));
+            series
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Datetime64(nanos) => *nanos,
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        };
+        for (texts, want) in [
+            (
+                vec!["2024-01-05", "2024-01-06", "1999-12-31"],
+                vec![
+                    1_704_412_800_000_000_000,
+                    1_704_499_200_000_000_000,
+                    946_598_400_000_000_000,
+                ],
+            ),
+            (
+                vec!["2024-01-05 10:30:00.123456", "2024-01-06 23:59:59.000001"],
+                vec![1_704_450_600_123_456_000, 1_704_585_599_000_001_000],
+            ),
+            (
+                vec!["2024-01-05", "2024-02-02T12:00:00"],
+                vec![1_704_412_800_000_000_000, 1_706_875_200_000_000_000],
+            ),
+        ] {
+            let series = contiguous(&texts);
+            assert!(series.column().as_utf8_contiguous().is_some());
+            assert_eq!(
+                nanos(to_datetime_with_options(&series, iso).unwrap()),
+                want,
+                "{texts:?}"
+            );
+        }
+        let refused = contiguous(&["2024-01-05", "01/05/2024"]);
+        let raise = ToDatetimeOptions {
+            errors: DatetimeErrors::Raise,
+            ..iso
+        };
+        assert!(to_datetime_with_options(&refused, raise).is_err());
+    }
+
+    #[test]
+    fn a_format_layout_reads_the_text_buffer_once_a_string_l9t3g() {
+        // br-frankenpandas-l9t3g: a text column under a fixed-width format
+        // reads its buffer - a repeated string parsed once - as pandas 2.2.3
+        // answers (measured). NEGATIVE: an unpadded value ('2024-1-6') the
+        // layout does not take sends the column to the general path, which
+        // reads it; an invalid date is still refused.
+        let contiguous = |texts: &[&str]| {
+            let mut bytes = Vec::new();
+            let mut offsets = vec![0];
+            for text in texts {
+                bytes.extend_from_slice(text.as_bytes());
+                offsets.push(bytes.len());
+            }
+            Series::new(
+                "d",
+                Index::from_i64_values((0..texts.len() as i64).collect()),
+                Column::from_utf8_contiguous(bytes, offsets),
+            )
+            .unwrap()
+        };
+        let nanos = |series: Series| -> Vec<i64> {
+            series
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Datetime64(nanos) => *nanos,
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        };
+        let day = ToDatetimeOptions {
+            format: Some("%Y-%m-%d"),
+            ..Default::default()
+        };
+        let minute = ToDatetimeOptions {
+            format: Some("%Y-%m-%d %H:%M"),
+            ..Default::default()
+        };
+        let jan5 = 1_704_412_800_000_000_000_i64;
+        let jan6 = 1_704_499_200_000_000_000_i64;
+        let repeated = contiguous(&["2024-01-05", "2024-01-05", "2024-01-06", "2024-01-05"]);
+        assert_eq!(
+            nanos(to_datetime_with_options(&repeated, day).unwrap()),
+            [jan5, jan5, jan6, jan5]
+        );
+        let unpadded = contiguous(&["2024-01-05", "2024-1-6"]);
+        assert_eq!(
+            nanos(to_datetime_with_options(&unpadded, day).unwrap()),
+            [jan5, jan6]
+        );
+        let minutes = contiguous(&["2024-01-05 10:30", "2024-01-05 10:30", "1999-12-31 23:59"]);
+        assert_eq!(
+            nanos(to_datetime_with_options(&minutes, minute).unwrap()),
+            [
+                1_704_450_600_000_000_000,
+                1_704_450_600_000_000_000,
+                946_684_740_000_000_000
+            ]
+        );
+        let invalid = contiguous(&["2024-01-05", "2024-02-30"]);
+        let raise = ToDatetimeOptions {
+            errors: DatetimeErrors::Raise,
+            ..day
+        };
+        assert!(to_datetime_with_options(&invalid, raise).is_err());
     }
 
     #[test]

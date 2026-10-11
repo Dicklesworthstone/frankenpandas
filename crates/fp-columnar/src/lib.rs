@@ -106,6 +106,17 @@ pub fn affine_positions(start: usize, step: isize, len: usize) -> impl Iterator<
     (0..len).map(move |i| affine_position(start, step, i))
 }
 
+/// Bits 0, 2, .., 62 of `bits` packed into the low 32: a step-2 selection's
+/// compress, by shifts and masks.
+const fn even_bits(bits: u64) -> u64 {
+    let mut packed = bits & 0x5555_5555_5555_5555;
+    packed = (packed | (packed >> 1)) & 0x3333_3333_3333_3333;
+    packed = (packed | (packed >> 2)) & 0x0F0F_0F0F_0F0F_0F0F;
+    packed = (packed | (packed >> 4)) & 0x00FF_00FF_00FF_00FF;
+    packed = (packed | (packed >> 8)) & 0x0000_FFFF_0000_FFFF;
+    (packed | (packed >> 16)) & 0x0000_0000_FFFF_FFFF
+}
+
 /// An affine selection `start + i * step` of a column that is itself rows
 /// `offset + j * source_step` of a buffer, as `(start, step)` in the buffer.
 fn compose_affine(
@@ -897,9 +908,49 @@ impl ValidityMask {
             return Self::from_words(words, len);
         }
         let source = self.materialized_words();
-        let mut words = vec![0_u64; len.div_ceil(64)];
-        for (i, pos) in affine_positions(start, step, len).enumerate() {
-            words[i / 64] |= ((source[pos / 64] >> (pos % 64)) & 1) << (i % 64);
+        let mut words: Vec<u64> = if step == 2 {
+            // Two source words an output word: the 64 bits from `at` on
+            // (zeros past the mask), their even bits compressed - a bit a
+            // probe was 95% of a NaN column's iloc[::2] (0.15 ms a 300k,
+            // pandas' view 0.007; br-frankenpandas-5olp1).
+            let window = |at: usize| {
+                let (word, offset) = (at / 64, at % 64);
+                let low = source.get(word).copied().unwrap_or(0);
+                match offset {
+                    0 => low,
+                    _ => {
+                        (low >> offset)
+                            | (source.get(word + 1).copied().unwrap_or(0) << (64 - offset))
+                    }
+                }
+            };
+            (0..len.div_ceil(64))
+                .map(|k| {
+                    let at = start + 128 * k;
+                    even_bits(window(at)) | (even_bits(window(at + 64)) << 32)
+                })
+                .collect()
+        } else {
+            // Each word gathered in a register: an OR into memory a bit
+            // chained every store through the next load.
+            let mut positions = affine_positions(start, step, len);
+            (0..len.div_ceil(64))
+                .map(|_| {
+                    positions
+                        .by_ref()
+                        .take(64)
+                        .enumerate()
+                        .fold(0_u64, |word, (bit, pos)| {
+                            word | (((source[pos / 64] >> (pos % 64)) & 1) << bit)
+                        })
+                })
+                .collect()
+        };
+        // Bits past the selection (a step-2 window reads on) are clear.
+        if !len.is_multiple_of(64)
+            && let Some(last) = words.last_mut()
+        {
+            *last &= (1_u64 << (len % 64)) - 1;
         }
         Self::from_words(words, len)
     }
@@ -42985,6 +43036,60 @@ mod tests {
         );
         assert!(!affine_positions_fit(5, 2, 3, 9), "row 9 is past the last");
         assert!(affine_positions_fit(5, 2, 3, 10));
+    }
+
+    /// A forward step reads bit `start + i * step` for each `i`: step 2 by
+    /// the even-bit compress of two source words, any other a word at a
+    /// time (br-frankenpandas-5olp1). NEGATIVE: odd and word-straddling
+    /// starts, lengths off a word boundary, one bit, the last bits of the
+    /// mask, a mask of invalid ranges, steps of 3, 5, 7, 64 and 65.
+    #[test]
+    fn forward_strided_validity_is_the_bit_gather_5olp1() {
+        let len = 1_000;
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut packed = ValidityMask::all_valid(len);
+        for i in 0..len {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            if state.is_multiple_of(3) {
+                packed.set(i, false);
+            }
+        }
+        let ranges =
+            ValidityMask::from_invalid_ranges(std::sync::Arc::from(vec![(3, 70), (500, 129)]), len);
+        let cases = [
+            (0, 2, 500),
+            (1, 2, 499),
+            (63, 2, 400),
+            (64, 2, 300),
+            (65, 2, 467),
+            (130, 2, 435),
+            (5, 2, 1),
+            (998, 2, 1),
+            (871, 2, 64),
+            (0, 3, 334),
+            (7, 5, 190),
+            (10, 7, 140),
+            (1, 64, 15),
+            (2, 65, 15),
+        ];
+        for mask in [&packed, &ranges] {
+            for (start, step, n) in cases {
+                assert!(affine_positions_fit(start, step, n, len));
+                let got = mask.strided(start, step, n);
+                assert_eq!(got.len(), n);
+                let expected: Vec<bool> = affine_positions(start, step, n)
+                    .map(|p| mask.get(p))
+                    .collect();
+                let read: Vec<bool> = (0..n).map(|i| got.get(i)).collect();
+                assert_eq!(read, expected, "start {start} step {step} n {n}");
+                assert_eq!(
+                    got.count_valid(),
+                    expected.iter().filter(|&&bit| bit).count()
+                );
+            }
+        }
     }
 
     #[test]

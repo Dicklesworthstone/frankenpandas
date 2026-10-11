@@ -38681,6 +38681,669 @@ def test_value_counts_over_cut_bins_like_pandas_oe9l6() -> None:
     assert answer(fpd) == answer(pd)
 
 
+# br-frankenpandas-xqa2l: a list (or object array) of str holding None builds one text
+# column, None missing as None - the column, its ops and to_datetime as pandas'.
+# NEGATIVE: all None (object of None), NaN beside text (the cell path), a str
+# subclass, None first and last, a dict of such lists.
+class _XQA2LText(str):
+    pass
+
+
+_XQA2L_LISTS = {
+    "one None": ["a", None, "c"],
+    "None first and last": [None, "b", None],
+    "all None (NEGATIVE)": [None, None],
+    "NaN beside text (NEGATIVE)": ["a", float("nan")],
+    "str subclass (NEGATIVE)": ["a", _XQA2LText("b"), None],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_XQA2L_LISTS))
+@pytest.mark.parametrize("container", ["list", "object array", "dict"])
+def test_text_list_with_none_like_pandas_xqa2l(case: str, container: str) -> None:
+    import numpy as np
+
+    data = _XQA2L_LISTS[case]
+
+    def answer(m: Any) -> Any:
+        if container == "list":
+            s = m.Series(data)
+        elif container == "object array":
+            s = m.Series(np.array(data, dtype=object))
+        else:
+            s = m.DataFrame({"t": data})["t"]
+        values = [repr(v) for v in s.tolist()]
+        return str(s.dtype), values, s.isna().tolist(), s.str.upper().isna().tolist(), repr(s.value_counts(dropna=False).tolist())
+
+    assert answer(fpd) == answer(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_to_datetime_text_list_with_none_like_pandas_xqa2l() -> None:
+    data = ["2024-01-05 10:30", None, "2024-02-06 11:45"]
+
+    def answer(m: Any) -> Any:
+        return [repr(v) for v in list(m.to_datetime(data, format="%Y-%m-%d %H:%M"))]
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-1aneh: a list holding NaT beside only missing values is datetime64[ns],
+# beside numbers, text or bools object, as pandas types it - a Series, a frame's
+# column, an Index. NEGATIVE: NaT beside an instant or a duration (their dtype),
+# a period (period[M]), None alone (object), NaN alone (float64), pandas' NaT
+# as fp's. (Beside an interval pandas makes object; fp's interval column is
+# the inference's, noted on the bead.)
+_1ANEH_LISTS = {
+    "lone NaT": lambda m: [m.NaT],
+    "NaT, None": lambda m: [m.NaT, None],
+    "NaT, nan": lambda m: [m.NaT, float("nan")],
+    "None, NaT, nan": lambda m: [None, m.NaT, float("nan")],
+    "NaT, 1": lambda m: [m.NaT, 1],
+    "NaT, 1.5": lambda m: [m.NaT, 1.5],
+    "NaT, text": lambda m: [m.NaT, "a"],
+    "NaT, True": lambda m: [m.NaT, True],
+    "NaT, None, 1": lambda m: [m.NaT, None, 1],
+    "pandas NaT, None": lambda m: [pd.NaT, None],
+    "NaT, instant (NEGATIVE)": lambda m: [m.NaT, m.Timestamp("2024-01-02")],
+    "NaT, duration (NEGATIVE)": lambda m: [m.NaT, m.Timedelta(1, "s")],
+    "NaT, period (NEGATIVE)": lambda m: [m.NaT, m.Period("2024-01", "M")],
+    "None alone (NEGATIVE)": lambda m: [None],
+    "nan alone (NEGATIVE)": lambda m: [float("nan")],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_1ANEH_LISTS))
+@pytest.mark.parametrize("container", ["Series", "frame column", "Index"])
+def test_nat_lists_like_pandas_1aneh(case: str, container: str) -> None:
+    def answer(m: Any) -> Any:
+        data = _1ANEH_LISTS[case](m)
+        try:
+            if container == "Series":
+                out = m.Series(data)
+            elif container == "frame column":
+                out = m.DataFrame({"a": data})["a"]
+            else:
+                out = m.Index(data)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return str(out.dtype), [repr(v) for v in list(out)]
+
+    assert answer(fpd) == answer(pd)
+
+
+def _c248_answer(out: Any) -> Any:
+    if hasattr(out, "columns"):
+        return "frame", repr(out.to_dict()), [str(d) for d in out.dtypes], repr(list(out.index)), str(out.index.dtype)
+    if hasattr(out, "to_dict"):
+        return "series", repr(out.to_dict()), str(out.dtype), repr(list(out.index)), str(out.index.dtype), out.name
+    return repr(out)
+
+
+# br-frankenpandas-skv4q: DataFrame.fillna downcasts (with pandas' FutureWarning) only an
+# object column it filled, as pandas leaves a block it does not fill as it is. NEGATIVE: an
+# object column the dict does not name, one with nothing missing, a text column beside the
+# fill, a scalar fill of every column, a fill that leaves the column object.
+def _skv4q_fillna_case(m: Any, case: str) -> Any:
+    import numpy as np
+
+    if case == "text untouched":
+        return m.DataFrame({"g": ["a", "b"], "x": [np.nan, 1.0]}).fillna({"x": 0})
+    if case == "object filled":
+        return m.DataFrame({"o": m.Series([None, 1], dtype=object), "x": [1.0, 2.0]}).fillna({"o": 0})
+    if case == "object not named":
+        return m.DataFrame({"o": m.Series([None, 1], dtype=object), "x": [np.nan, 2.0]}).fillna({"x": 0})
+    if case == "object nothing missing":
+        return m.DataFrame({"o": m.Series([2, 1], dtype=object), "x": [np.nan, 2.0]}).fillna({"x": 0})
+    if case == "scalar fill":
+        return m.DataFrame({"o": m.Series([None, 1], dtype=object), "x": [np.nan, 2.0]}).fillna(0)
+    if case == "stays object":
+        return m.DataFrame({"o": m.Series([None, "a"], dtype=object)}).fillna({"o": 1})
+    raise AssertionError(case)
+
+
+_SKV4Q_FILLNA_CASES = [
+    "text untouched", "object filled", "object not named", "object nothing missing", "scalar fill", "stays object",
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _SKV4Q_FILLNA_CASES)
+def test_fillna_downcasts_only_what_it_fills_skv4q(case: str) -> None:
+    import warnings
+
+    def answer(m: Any) -> Any:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            out = _skv4q_fillna_case(m, case)
+        kinds = sorted({type(w.message).__name__ for w in caught if issubclass(w.category, FutureWarning)})
+        return repr(out.to_dict()), [str(d) for d in out.dtypes], kinds
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-skv4q: DataFrame.join of equal unique indexes with overlapping names sets
+# the frames side by side under pandas' suffixes. NEGATIVE: a suffix making a duplicate
+# (pandas' MergeError), an empty lsuffix (left names kept), how='outer' / 'inner', an
+# unequal and a repeated index (the merge), int column labels, a named Series.
+def _skv4q_join_case(m: Any, case: str) -> Any:
+    left = m.DataFrame({"x": [1.0, 2.0, 3.0], "y": [4, 5, 6]}, index=[10, 20, 30])
+    right = m.DataFrame({"x": [7.0, 8.0, 9.0], "z": ["a", "b", "c"]}, index=[10, 20, 30])
+    if case == "rsuffix":
+        return left.join(right, rsuffix="_r")
+    if case == "both suffixes":
+        return left.join(right, lsuffix="_l", rsuffix="_r")
+    if case == "lsuffix only":
+        return left.join(right, lsuffix="_l")
+    if case == "duplicate made":
+        return left.join(m.DataFrame({"x": [1, 2, 3], "x_r": [4, 5, 6]}, index=[10, 20, 30]), rsuffix="_r")
+    if case == "outer":
+        return left.join(right, how="outer", rsuffix="_r")
+    if case == "inner":
+        return left.join(right, how="inner", rsuffix="_r")
+    if case == "unequal index":
+        return left.join(right.iloc[::-1].iloc[:2], rsuffix="_r")
+    if case == "repeated index":
+        return m.DataFrame({"x": [1, 2]}, index=[1, 1]).join(m.DataFrame({"x": [3, 4]}, index=[1, 1]), rsuffix="_r")
+    if case == "int labels":
+        return m.DataFrame({0: [1, 2], 1: [3, 4]}).join(m.DataFrame({0: [5, 6]}), rsuffix="_r")
+    if case == "named series":
+        return left.join(m.Series([7, 8, 9], index=[10, 20, 30], name="x"), rsuffix="_r")
+    raise AssertionError(case)
+
+
+_SKV4Q_JOIN_CASES = [
+    "rsuffix", "both suffixes", "lsuffix only", "duplicate made", "outer", "inner", "unequal index",
+    "repeated index", "int labels", "named series",
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _SKV4Q_JOIN_CASES)
+def test_suffixed_join_like_pandas_skv4q(case: str) -> None:
+    def answer(m: Any) -> Any:
+        try:
+            out = _skv4q_join_case(m, case)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return repr(out.to_dict()), [str(c) for c in out.columns], [str(d) for d in out.dtypes], list(out.index)
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-skv4q: DataFrame.update over an equal index of float and int columns
+# answers as pandas: an int column beside an all-valid int one takes it (int64), a float
+# column takes ints as floats, a NaN in `other` keeps the caller's value. NEGATIVE: an int
+# column beside floats holding NaN (float64), a column `other` lacks, an unequal index, int8
+# / float32 columns, a text column.
+def _skv4q_update_case(m: Any, case: str) -> Any:
+    import numpy as np
+
+    base = {"x": [1.5, np.nan, 3.0], "z": [1, 2, 3]}
+    if case == "floats and ints":
+        df, other = m.DataFrame(base), m.DataFrame({"x": [np.nan, 8.0, 9.0], "z": [7, 8, 9]})
+    elif case == "float takes ints":
+        df, other = m.DataFrame(base), m.DataFrame({"x": [7, 8, 9]})
+    elif case == "int beside nan floats":
+        df, other = m.DataFrame(base), m.DataFrame({"z": [7.5, np.nan, 9.0]})
+    elif case == "column absent":
+        df, other = m.DataFrame(base), m.DataFrame({"q": [1, 2, 3]})
+    elif case == "unequal index":
+        df, other = m.DataFrame(base), m.DataFrame({"x": [9.0], "z": [9]}, index=[1])
+    elif case == "narrow":
+        df = m.DataFrame({"a": np.array([1, 2, 3], dtype="int8"), "f": np.array([1.5, np.nan, 2.5], dtype="float32")})
+        other = m.DataFrame({"a": np.array([4, 5, 6], dtype="int8"), "f": np.array([np.nan, 3.5, 4.5], dtype="float32")})
+    elif case == "text":
+        df, other = m.DataFrame({"s": ["a", "b", "c"], "x": [1.0, 2.0, 3.0]}), m.DataFrame({"s": [None, "y", "z"]})
+    else:
+        raise AssertionError(case)
+    df.update(other)
+    return df
+
+
+_SKV4Q_UPDATE_CASES = [
+    "floats and ints", "float takes ints", "int beside nan floats", "column absent", "unequal index", "narrow", "text",
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _SKV4Q_UPDATE_CASES)
+def test_frame_update_like_pandas_skv4q(case: str) -> None:
+    def answer(m: Any) -> Any:
+        try:
+            out = _skv4q_update_case(m, case)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return repr(out.to_dict()), [str(d) for d in out.dtypes]
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-l9t3g: to_datetime(format='ISO8601') of a text column of one plain ISO
+# shape reads its buffer as format=None does, and answers as pandas. NEGATIVE: mixed shapes
+# (each on its own), a tz offset, a None among them, a non-ISO value (raise / coerce), a
+# list, utc=True.
+def _l9t3g_case(m: Any, case: str) -> Any:
+    texts = {
+        "dates": ["2024-01-05", "2024-01-06", "1999-12-31"],
+        "datetimes": ["2024-01-05 10:30:00", "2024-01-06 23:59:59"],
+        "fraction": ["2024-01-05 10:30:00.123456", "2024-01-06T23:59:59.000001"],
+        "t separator": ["2024-01-05T10:30:00", "2024-01-06T23:59:59"],
+        "mixed": ["2024-01-05", "2024-02-02T12:00:00"],
+        "offset": ["2024-01-05T10:00:00+01:00", "2024-01-06T10:00:00+01:00"],
+        "none": ["2024-01-05", None, "2024-01-07"],
+        "not iso": ["2024-01-05", "01/05/2024"],
+    }
+    formatted = {
+        "fmt repeated": (["2024-01-05", "2024-01-05", "2024-01-06"] * 300, "%Y-%m-%d"),
+        "fmt unpadded": (["2024-01-05", "2024-1-6"], "%Y-%m-%d"),
+        "fmt minutes": (["2024-01-05 10:30", "1999-12-31 23:59"], "%Y-%m-%d %H:%M"),
+        "fmt out of range": (["2024-01-05", "1500-01-01"], "%Y-%m-%d"),
+        "fmt invalid": (["2024-01-05", "2024-02-30"], "%Y-%m-%d"),
+    }
+    if case in formatted:
+        values, format = formatted[case]
+        return m.to_datetime(m.Series(values), format=format)
+    if case == "fmt invalid / coerce":
+        return m.to_datetime(m.Series(["2024-01-05", "2024-02-30"]), format="%Y-%m-%d", errors="coerce")
+    kind, _, how = case.partition(" / ")
+    if how == "coerce":
+        return m.to_datetime(m.Series(texts[kind]), format="ISO8601", errors="coerce")
+    if how == "list":
+        return m.Series(m.to_datetime(texts[kind], format="ISO8601"))
+    if how == "utc":
+        return m.to_datetime(m.Series(texts[kind]), format="ISO8601", utc=True)
+    return m.to_datetime(m.Series(texts[kind]), format="ISO8601")
+
+
+_L9T3G_CASES = [
+    "dates", "datetimes", "fraction", "t separator", "mixed", "offset", "none", "not iso", "not iso / coerce",
+    "dates / list", "dates / utc", "fmt repeated", "fmt unpadded", "fmt minutes", "fmt out of range", "fmt invalid",
+    "fmt invalid / coerce",
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _L9T3G_CASES)
+def test_iso8601_to_datetime_like_pandas_l9t3g(case: str) -> None:
+    def answer(m: Any) -> Any:
+        try:
+            out = _l9t3g_case(m, case)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return [str(value) for value in out], str(out.dtype)
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-1gkpa: resample first / last / prod / size / median of a float column
+# run the one-pass bins and answer as pandas: NaN skipped, an all-NaN bin NaN (first /
+# last / median) or 1.0 (prod), an empty bin too, size counting every row. NEGATIVE:
+# closed= / label= (the groups path), a tz-aware index, an unsorted index, int values,
+# text values (size), agg of a list, daily bins.
+def _1gkpa_case(m: Any, case: str) -> Any:
+    import numpy as np
+
+    stamps = m.DatetimeIndex(
+        ["2024-01-01 00:00", "2024-01-01 00:30", "2024-01-01 01:00", "2024-01-01 01:30", "2024-01-01 03:00",
+         "2024-01-01 03:30", "2024-01-01 04:00", "2024-01-02 05:00"]
+    )
+    values = [np.nan, 2.0, np.nan, np.nan, 1.0, 3.0, 4.0, 6.0]
+    s = m.Series(values, index=stamps, name="x")
+    op = case.split(" ")[-1]
+    if case.startswith("h "):
+        return getattr(s.resample("h"), op)()
+    if case.startswith("right "):
+        return getattr(s.resample("h", closed="right", label="right"), op)()
+    if case.startswith("D "):
+        return getattr(s.resample("D"), op)()
+    if case.startswith("tz "):
+        return getattr(m.Series(values, index=stamps.tz_localize("US/Eastern")).resample("h"), op)()
+    if case.startswith("unsorted "):
+        return getattr(s.iloc[[3, 0, 1, 2, 7, 4, 6, 5]].resample("h"), op)()
+    if case.startswith("ints "):
+        return getattr(m.Series([5, 2, 7, 6, 1, 3, 4, 8], index=stamps).resample("h"), op)()
+    if case == "text size":
+        return m.Series(list("abcdefgh"), index=stamps).resample("h").size()
+    if case == "agg list":
+        return s.resample("h").agg(["first", "last", "size", "prod", "median"])
+    if case == "frame first":
+        return m.DataFrame({"x": values, "y": values[::-1]}, index=stamps).resample("h").first()
+    raise AssertionError(case)
+
+
+_1GKPA_CASES = [
+    f"{where} {op}"
+    for where in ["h", "right", "D", "tz", "unsorted", "ints"]
+    for op in ["first", "last", "prod", "size", "median"]
+] + ["text size", "agg list", "frame first"]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _1GKPA_CASES)
+def test_resample_one_pass_reductions_like_pandas_1gkpa(case: str) -> None:
+    def answer(m: Any) -> Any:
+        try:
+            return _c248_answer(_1gkpa_case(m, case))
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-faizi: pct_change of a float column with gaps answers as pandas - a gap
+# at the row or its previous row NaN. NEGATIVE: the pad default (a leading NaN stays),
+# fill_method=None / 'bfill', negative and zero periods, 0/0, inf, an all-NaN column,
+# float32, a DataFrame.
+def _faizi_case(m: Any, case: str) -> Any:
+    import numpy as np
+
+    values = [np.nan, 1.0, 2.0, np.nan, 4.0, 0.0, 0.0, np.inf, 5.0, np.nan]
+    s = m.Series(values, name="v")
+    if case == "default":
+        return s.pct_change()
+    if case == "no fill":
+        return s.pct_change(fill_method=None)
+    if case == "bfill":
+        return s.pct_change(fill_method="bfill")
+    if case == "periods -1":
+        return s.pct_change(periods=-1, fill_method=None)
+    if case == "periods 3":
+        return s.pct_change(periods=3, fill_method=None)
+    if case == "periods 0":
+        return s.pct_change(periods=0, fill_method=None)
+    if case == "all nan":
+        return m.Series([np.nan] * 4).pct_change(fill_method=None)
+    if case == "float32":
+        return m.Series(np.array(values, dtype="float32")).pct_change(fill_method=None)
+    if case == "frame":
+        return m.DataFrame({"a": values, "b": values[::-1]}).pct_change(fill_method=None)
+    finite = [np.nan, 1.0, 2.0, np.nan, 4.0, 3.0, 7.0, np.nan, 5.0, 6.0]
+    if case == "prod":
+        return m.Series(finite).prod()
+    if case == "prod all nan":
+        return m.Series([np.nan, np.nan]).prod()
+    if case.startswith("autocorr "):
+        return round(float(m.Series(finite).autocorr(int(case.split(" ")[1]))), 12)
+    raise AssertionError(case)
+
+
+_FAIZI_CASES = [
+    "default", "no fill", "bfill", "periods -1", "periods 3", "periods 0", "all nan", "float32", "frame", "prod",
+    "prod all nan", "autocorr 1", "autocorr 2", "autocorr 8", "autocorr 12",
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _FAIZI_CASES)
+def test_gapped_pct_change_like_pandas_faizi(case: str) -> None:
+    def answer(m: Any) -> Any:
+        try:
+            return _c248_answer(_faizi_case(m, case))
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-lpzmu: SeriesGroupBy size / idxmax / idxmin over a NaN-holding column
+# answer as pandas - NaN skipped, the first extreme, an all-NaN group NaN. NEGATIVE: an
+# int, text, categorical and NaN-holding key, sort=False, a string and a range index, an
+# int column.
+def _lpzmu_case(m: Any, case: str) -> Any:
+    import numpy as np
+
+    labels = list("abcdefghij")
+    values = [np.nan, 5.0, 7.0, np.nan, 5.0, 7.0, np.nan, 1.0, 9.0, 9.0]
+    keys = {
+        "int": [1, 2, 1, 3, 2, 1, 3, 4, 4, 2],
+        "text": list("pqprqprssq"),
+        "nan": [1.0, 2.0, 1.0, np.nan, 2.0, 1.0, 3.0, 4.0, 4.0, 2.0],
+    }
+    where, key, op = case.split(" ")
+    index = labels if where == "labels" else None
+    s = m.Series(values if where != "ints" else [3, 1, 3, 2, 1, 3, 4, 8, 0, 2], index=index, name="v")
+    by = keys["int" if key == "cat" or key == "unsorted" else key]
+    if key == "cat":
+        by = m.Series(m.Categorical([str(k) for k in by]), index=index)
+    elif index is not None:
+        by = m.Series(by, index=index)
+    else:
+        by = m.Series(by)
+    grouped = s.groupby(by, sort=key != "unsorted")
+    return getattr(grouped, op)()
+
+
+_LPZMU_CASES = [
+    f"{where} {key} {op}"
+    for where in ["labels", "range", "ints"]
+    for key in ["int", "text", "nan", "cat", "unsorted"]
+    for op in ["size", "idxmax", "idxmin"]
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _LPZMU_CASES)
+def test_grouped_size_idx_extremes_like_pandas_lpzmu(case: str) -> None:
+    def answer(m: Any) -> Any:
+        try:
+            return _c248_answer(_lpzmu_case(m, case))
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-5olp1: strs given as an index - a list, tuple, object or unicode
+# ndarray, to the constructors, Index(...) and obj.index = - are pandas' object index of
+# them, and every op over it answers as pandas'. NEGATIVE: None / NaN / a number among
+# the strs, a str subclass, a lone surrogate, an empty list, dtype=object, tuples (a
+# MultiIndex), duplicates.
+class _Str5olp1(str):
+    pass
+
+
+def _5olp1_case(m: Any, case: str) -> Any:
+    import numpy as np
+
+    labels = ["b", "a", "c", "a2", "d"]
+    values = [1.0, np.nan, 3.0, 4.0, np.nan]
+    s = m.Series(values, index=np.array(labels, dtype=object))
+    if case == "series objarr":
+        return s
+    if case == "series list":
+        return m.Series(values, index=labels)
+    if case == "series tuple":
+        return m.Series(values, index=tuple(labels))
+    if case == "series unicode array":
+        return m.Series(values, index=np.array(labels))
+    if case == "frame list":
+        return m.DataFrame({"x": values}, index=labels)
+    if case == "Index objarr":
+        return m.Index(np.array(labels, dtype=object), name="k")
+    if case == "Index list":
+        return m.Index(labels)
+    if case == "Index unicode array":
+        return m.Index(np.array(labels))
+    if case == "set index":
+        out = m.Series(values)
+        out.index = labels
+        return out
+    if case == "dropna":
+        return s.dropna()
+    if case == "loc":
+        return s.loc["c"]
+    if case == "loc list":
+        return s.loc[["d", "b"]]
+    if case == "get_loc":
+        return m.Index(labels).get_loc("a2")
+    if case == "isin":
+        return list(m.Index(labels).isin(["a", "d", "z"]))
+    if case == "sort_index":
+        return s.sort_index()
+    if case == "take":
+        return s.take([4, 0, 2])
+    if case == "iloc step":
+        return s.iloc[::2]
+    if case == "mask":
+        return s[s > 2]
+    if case == "align add":
+        return s + m.Series([10.0, 20.0], index=["a", "c"])
+    if case == "reindex":
+        return s.reindex(["c", "z", "b"])
+    if case == "concat":
+        return m.concat([s, m.Series([7.0], index=["e"])])
+    if case == "duplicated":
+        return list(m.Index(["a", "b", "a"]).duplicated())
+    if case == "is_unique":
+        return (m.Index(labels).is_unique, m.Index(["a", "a"]).is_unique)
+    if case == "monotonic":
+        return (m.Index(["a", "b", "c"]).is_monotonic_increasing, m.Index(labels).is_monotonic_increasing)
+    if case == "None among (NEGATIVE)":
+        return m.Series([1, 2, 3], index=["a", None, "c"])
+    if case == "NaN among (NEGATIVE)":
+        return m.Index(["a", np.nan, "c"])
+    if case == "number among (NEGATIVE)":
+        return m.Series([1, 2, 3], index=["a", 2, "c"])
+    if case == "subclass (NEGATIVE)":
+        return m.Index([_Str5olp1("a"), "b"])
+    if case == "lone surrogate (NEGATIVE)":
+        return m.Index(["a", "b\ud800"])
+    if case == "empty (NEGATIVE)":
+        return m.Index([])
+    if case == "dtype object (NEGATIVE)":
+        return m.Index(labels, dtype=object)
+    if case == "tuples (NEGATIVE)":
+        return m.Index([("a", 1), ("b", 2)])
+    if case == "duplicates (NEGATIVE)":
+        return m.Series([1, 2, 3], index=["a", "b", "a"]).loc["a"]
+    if case.startswith("inferred "):
+        kinds = {
+            "a,2,c": ["a", 2, "c"], "a,None,2": ["a", None, 2], "True,2": [True, 2], "True,a": [True, "a"],
+            "1,2.5": [1, 2.5], "1,nan": [1, np.nan], "1,None": [1, None], "1,NaT": [1, m.NaT],
+            "a,2.5": ["a", 2.5], "1,2": [1, 2],
+        }[case.split(" ", 1)[1]]
+        index = m.Index(kinds, dtype=object)
+        return index.inferred_type, str(index.dtype), m.Index(kinds).inferred_type
+    if case.startswith("int key "):
+        kinds = {"1,2.5": [1, 2.5], "1,nan": [1, np.nan], "1,a": [1, "a"], "a,b": ["a", "b"]}[case.split(" ", 2)[2]]
+        return m.Series([10, 20], index=m.Index(kinds, dtype=object))[1]
+    raise AssertionError(case)
+
+
+_5OLP1_CASES = [
+    "series objarr", "series list", "series tuple", "series unicode array", "frame list", "Index objarr",
+    "Index list", "Index unicode array", "set index", "dropna", "loc", "loc list", "get_loc", "isin",
+    "sort_index", "take", "iloc step", "mask", "align add", "reindex", "concat", "duplicated", "is_unique",
+    "monotonic", "None among (NEGATIVE)", "NaN among (NEGATIVE)", "number among (NEGATIVE)",
+    "subclass (NEGATIVE)", "lone surrogate (NEGATIVE)", "empty (NEGATIVE)", "dtype object (NEGATIVE)",
+    "tuples (NEGATIVE)", "duplicates (NEGATIVE)", "inferred a,2,c", "inferred a,None,2", "inferred True,2",
+    "inferred True,a", "inferred 1,2.5", "inferred 1,nan", "inferred 1,None", "inferred 1,NaT", "inferred a,2.5",
+    "inferred 1,2", "int key 1,2.5", "int key 1,nan", "int key 1,a", "int key a,b",
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _5OLP1_CASES)
+def test_str_index_like_pandas_5olp1(case: str) -> None:
+    def labels_of(index: Any) -> Any:
+        return (type(index).__name__, repr(list(index)), str(index.dtype), index.inferred_type, index.name)
+
+    def answer(m: Any) -> Any:
+        try:
+            out = _5olp1_case(m, case)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        if hasattr(out, "columns"):
+            return "frame", repr(out.to_dict()), [str(d) for d in out.dtypes], labels_of(out.index)
+        if hasattr(out, "to_dict"):
+            return "series", repr(out.to_dict()), str(out.dtype), labels_of(out.index)
+        if hasattr(out, "inferred_type"):
+            return "index", labels_of(out)
+        return repr(out)
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-rlf7v: pandas objects as arguments - an operand aligned by label as
+# this crate's own, concat / merge / join pieces, equals, fillna and map values -
+# answer as pandas. NEGATIVE: a reordered and a partly missing index, a numpy
+# array operand (positional), equals of a non-Series (False), DataFrame op a
+# pandas Series (column-wise).
+def _rlf7v_case(m: Any, case: str) -> Any:
+    import numpy as np
+
+    s = m.Series([1, 2, 3], index=["a", "b", "c"])
+    df = m.DataFrame({"k": ["a", "b"], "w": [1, 2]})
+    ps = pd.Series([10, 20, 30], index=["c", "a", "b"])
+    pdf = pd.DataFrame({"k": ["a", "b"], "v": [1.5, 2.5]})
+    if case == "add aligned":
+        return s + ps
+    if case == "add partly missing":
+        return s + pd.Series([5, 6], index=["a", "z"])
+    if case == "add numpy (NEGATIVE)":
+        return s + np.array([1, 2, 3])
+    if case == "flex add fill_value":
+        return s.add(pd.Series([5], index=["z"]), fill_value=0)
+    if case == "eq":
+        return s == pd.Series([1, 0, 3], index=["a", "b", "c"])
+    if case == "gt":
+        return s > pd.Series([0, 5, 1], index=["a", "b", "c"])
+    if case == "frame add series (columns)":
+        return m.DataFrame({"x": [1, 2], "y": [3, 4]}) + pd.Series({"x": 10, "y": 100})
+    if case == "frame eq frame":
+        return m.DataFrame({"x": [1, 2]}) == pd.DataFrame({"x": [1, 5]})
+    if case == "concat":
+        return m.concat([df, pdf])
+    if case == "concat dict":
+        return m.concat({"p": pdf, "f": df})
+    if case == "merge":
+        return df.merge(pdf, on="k")
+    if case == "module merge":
+        return m.merge(df, pdf, on="k")
+    if case == "join":
+        return df.set_index("k").join(pdf.set_index("k"))
+    if case == "equals":
+        return s.equals(pd.Series([1, 2, 3], index=["a", "b", "c"]))
+    if case == "equals non-Series (NEGATIVE)":
+        return s.equals(5)
+    if case == "frame equals":
+        return df.equals(pd.DataFrame({"k": ["a", "b"], "w": [1, 2]}))
+    if case == "fillna series":
+        return m.DataFrame({"a": [np.nan, 1.0], "b": [2.0, np.nan]}).fillna(pd.Series({"a": 0.0, "b": 9.0}))
+    if case == "series fillna series":
+        return m.Series([np.nan, 1.0], index=["x", "y"]).fillna(pd.Series({"x": 7.0}))
+    if case == "map":
+        return s.map(pd.Series({1: "x", 2: "y"}))
+    raise AssertionError(case)
+
+
+_RLF7V_CASES = [
+    "add aligned", "add partly missing", "add numpy (NEGATIVE)", "flex add fill_value", "eq", "gt",
+    "frame add series (columns)", "frame eq frame", "concat", "concat dict", "merge", "module merge", "join",
+    "equals", "equals non-Series (NEGATIVE)", "frame equals", "fillna series", "series fillna series", "map",
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _RLF7V_CASES)
+def test_pandas_arguments_like_pandas_rlf7v(case: str) -> None:
+    def answer(m: Any) -> Any:
+        try:
+            out = _rlf7v_case(m, case)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        if hasattr(out, "columns"):
+            return "frame", repr(out.to_dict()), [str(d) for d in out.dtypes]
+        if hasattr(out, "to_dict"):
+            return "series", repr(out.to_dict()), str(out.dtype)
+        return repr(out)
+
+    assert answer(fpd) == answer(pd)
+
+
 # br-frankenpandas-4g57c: to_timedelta of an int64 array reads it in place and answers as
 # pandas for each unit; an overflow raises (or coerces to NaT). NEGATIVE: a
 # list, a float array and a byte-swapped array keep the general path.
