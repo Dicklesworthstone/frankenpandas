@@ -10037,58 +10037,55 @@ fn compare_scalar_values(left: &Scalar, right: &Scalar) -> std::cmp::Ordering {
 /// values. Returns the first index whose insertion predicate is true (or
 /// `len`). Shared by the single-value and unsorted-array paths so they remain
 /// byte-for-byte identical regardless of input ordering.
-fn searchsorted_linear(vals: &[Scalar], value: &Scalar, right: bool) -> usize {
-    if value.is_missing() {
-        return if right {
-            vals.iter()
-                .rposition(Scalar::is_missing)
-                .map_or(vals.len(), |pos| pos + 1)
+/// numpy's `searchsorted` (npysort/binsearch.cpp), which pandas'
+/// `Series.searchsorted` runs: a binary search per key over `len` values,
+/// `before(i, key)` whether the value at `i` goes before `key` (`<` for
+/// side='left', `<=` for 'right'), each key starting from the bounds the
+/// previous key left when it sorts after that key - so an unsorted Series
+/// answers as numpy does, the keys' order included (a linear scan per key
+/// answered the first value not below it, and took 15.8 s for 50k keys in
+/// 300k values; br-frankenpandas-9hcoo). On sorted values every key's answer is its
+/// insertion point, whatever the bounds it starts from.
+fn numpy_binsearch<K>(
+    len: usize,
+    keys: &[K],
+    before: impl Fn(usize, &K) -> bool,
+    key_before: impl Fn(&K, &K) -> bool,
+) -> Vec<usize> {
+    let mut out = Vec::with_capacity(keys.len());
+    let (mut low, mut high) = (0_usize, len);
+    let mut last: Option<&K> = None;
+    for key in keys {
+        if let Some(previous) = last
+            && key_before(previous, key)
+        {
+            high = len;
         } else {
-            vals.iter()
-                .position(Scalar::is_missing)
-                .unwrap_or(vals.len())
-        };
-    }
-    vals.iter()
-        .position(|v| {
-            if v.is_missing() {
-                // Missing values sort last; any needle inserts before them.
-                return true;
-            }
-            let ord = compare_scalar_values(v, value);
-            if right {
-                matches!(ord, std::cmp::Ordering::Greater)
+            low = 0;
+            high = if high < len { high + 1 } else { len };
+        }
+        last = Some(key);
+        while low < high {
+            let middle = low + ((high - low) >> 1);
+            if before(middle, key) {
+                low = middle + 1;
             } else {
-                !matches!(ord, std::cmp::Ordering::Less)
+                high = middle;
             }
-        })
-        .unwrap_or(vals.len())
+        }
+        out.push(low);
+    }
+    out
 }
 
-/// Whether `vals` is monotonically non-decreasing under the searchsorted order
-/// (non-missing ascending, missing values last). Only when this holds is the
-/// per-needle predicate monotonic, making binary search bit-identical to the
-/// linear scan. Uses the same comparison as the predicate for consistency.
-fn searchsorted_is_sorted(vals: &[Scalar]) -> bool {
-    let mut seen_missing = false;
-    let mut prev: Option<&Scalar> = None;
-    for v in vals {
-        if v.is_missing() {
-            seen_missing = true;
-            continue;
-        }
-        if seen_missing {
-            // A real value after a missing one => not in missing-last order.
-            return false;
-        }
-        if let Some(p) = prev
-            && compare_scalar_values(p, v) == std::cmp::Ordering::Greater
-        {
-            return false;
-        }
-        prev = Some(v);
+/// numpy's sort order for searchsorted: `a` before `b`, a missing value
+/// after every present one (br-frankenpandas-9hcoo).
+fn searchsorted_less(a: &Scalar, b: &Scalar) -> bool {
+    match (a.is_missing(), b.is_missing()) {
+        (true, _) => false,
+        (false, true) => true,
+        (false, false) => compare_scalar_values(a, b) == std::cmp::Ordering::Less,
     }
-    true
 }
 
 fn range_index(len: usize) -> Result<Index, FrameError> {
@@ -29616,22 +29613,10 @@ impl Series {
                 "searchsorted: side must be 'left' or 'right', got {side:?}"
             )));
         }
-        let right = side == "right";
-        // Typed all-valid Int64 fast path: skip the O(n) `.values()` Scalar Vec
-        // materialization (searchsorted only needs one position). For an all-
-        // valid Int64 column and an Int64 needle, searchsorted_linear's predicate
-        // is exactly `right ? x > needle : x >= needle` — `compare_scalar_values`
-        // on two Int64 is `i64::cmp` (no missing/NaN/-0.0 ambiguity), and
-        // as_i64_slice carries no missing — so this is bit-identical.
-        if let (Some(data), Scalar::Int64(needle)) = (self.column.as_i64_slice(), value) {
-            let pos = data
-                .iter()
-                .position(|&x| if right { x > *needle } else { x >= *needle })
-                .unwrap_or(data.len());
-            return Ok(pos);
-        }
-        let vals = self.column.values();
-        Ok(searchsorted_linear(vals, value, right))
+        // numpy's binary search, as pandas (a linear scan answered an
+        // unsorted Series otherwise; br-frankenpandas-9hcoo).
+        let positions = self.searchsorted_values(std::slice::from_ref(value), side)?;
+        Ok(positions.first().copied().unwrap_or(0))
     }
 
     /// Find insertion points for array-like values to maintain sorted order.
@@ -29661,7 +29646,6 @@ impl Series {
         // cmp, so `partition_point(x < k)` [left] / `(x <= k)` [right] reproduces
         // the general path's first-true-index insertion site. (br-frankenpandas ss-i64)
         if let Some(data) = self.column.as_i64_slice()
-            && data.windows(2).all(|w| w[0] <= w[1])
             && values.iter().all(|v| matches!(v, Scalar::Int64(_)))
         {
             // MANY-needle finger-search (Int64 sibling of the f64 ss-f64-finger
@@ -29673,7 +29657,10 @@ impl Series {
             // (`pos` stops at first `data[pos] >= k` [left] / `> k` [right]; equal
             // needles share `pos`). Gated to large m where the O(n) sweep pays off.
             let m = values.len();
-            if m >= 4096 && m.saturating_mul(64) >= data.len() {
+            if m >= 4096
+                && m.saturating_mul(64) >= data.len()
+                && data.windows(2).all(|w| w[0] <= w[1])
+            {
                 let nvals: Vec<i64> = values
                     .iter()
                     .map(|v| match v {
@@ -29701,21 +29688,23 @@ impl Series {
                 }
                 return Ok(out);
             }
-            let out: Vec<usize> = values
+            // numpy's binary search on the raw ints, sorted or not: no scan
+            // of the values for their order first (a needle cost 0.077 ms on
+            // a 300k Series, pandas 0.009; br-frankenpandas-9hcoo).
+            let keys: Vec<i64> = values
                 .iter()
-                .map(|v| {
-                    let k = match v {
-                        Scalar::Int64(k) => *k,
-                        _ => unreachable!("gated on all-Int64 needles above"),
-                    };
-                    if right {
-                        data.partition_point(|&x| x <= k)
-                    } else {
-                        data.partition_point(|&x| x < k)
-                    }
+                .map(|v| match v {
+                    Scalar::Int64(k) => *k,
+                    _ => unreachable!("gated on all-Int64 needles above"),
                 })
                 .collect();
-            return Ok(out);
+            let ahead = |value: i64, key: i64| if right { value <= key } else { value < key };
+            return Ok(numpy_binsearch(
+                data.len(),
+                &keys,
+                |position, &key| ahead(data[position], key),
+                |&previous, &key| ahead(previous, key),
+            ));
         }
         // Float64 sibling of the Int64 fast path. `compare_scalar_values` orders
         // Float64 with `a.partial_cmp(b).unwrap_or(Equal)`; for a no-NaN column
@@ -29725,7 +29714,6 @@ impl Series {
         // partial_cmp also treats equal). A NaN or non-Float64 needle keeps the
         // general path (which maps NaN → Equal). Bit-identical. (br-frankenpandas ss-f64)
         if let Some(data) = self.column.as_f64_slice()
-            && data.windows(2).all(|w| w[0] <= w[1])
             && values
                 .iter()
                 .all(|v| matches!(v, Scalar::Float64(f) if !f.is_nan()))
@@ -29744,7 +29732,10 @@ impl Series {
             // back to original needle order. Gated to large m where the O(n) sweep
             // pays for itself (m ≥ n/64 and ≥ 4096); smaller m keeps per-needle.
             let m = values.len();
-            if m >= 4096 && m.saturating_mul(64) >= data.len() {
+            if m >= 4096
+                && m.saturating_mul(64) >= data.len()
+                && data.windows(2).all(|w| w[0] <= w[1])
+            {
                 let nvals: Vec<f64> = values
                     .iter()
                     .map(|v| match v {
@@ -29776,64 +29767,49 @@ impl Series {
                 }
                 return Ok(out);
             }
-            let out: Vec<usize> = values
+            // numpy's binary search on the raw floats, sorted or not, a NaN
+            // value after every number (its float order); the needles hold
+            // none (br-frankenpandas-9hcoo).
+            let keys: Vec<f64> = values
                 .iter()
-                .map(|v| {
-                    let k = match v {
-                        Scalar::Float64(k) => *k,
-                        _ => unreachable!("gated on all-non-NaN-Float64 needles above"),
-                    };
-                    if right {
-                        data.partition_point(|&x| x <= k)
-                    } else {
-                        data.partition_point(|&x| x < k)
-                    }
+                .map(|v| match v {
+                    Scalar::Float64(k) => *k,
+                    _ => unreachable!("gated on all-non-NaN-Float64 needles above"),
                 })
                 .collect();
-            return Ok(out);
+            let ahead = |value: f64, key: f64| {
+                if right {
+                    !value.is_nan() && value <= key
+                } else {
+                    !value.is_nan() && value < key
+                }
+            };
+            return Ok(numpy_binsearch(
+                data.len(),
+                &keys,
+                |position, &key| ahead(data[position], key),
+                |&previous, &key| ahead(previous, key),
+            ));
         }
-        // Materialize the column once instead of per needle, then binary-search
-        // when the Series satisfies its documented sorted precondition. Linear
-        // `.position()` returns the first index whose predicate is true, which
-        // for a sorted (non-missing ascending, missing last) array is exactly
-        // the partition_point insertion site — so binary search is bit-identical
-        // there. For unsorted input the predicate is not monotonic, so fall back
-        // to the exact original linear scan to preserve behavior.
+        // numpy's binary search over the values in its order (missing last),
+        // each needle starting from the bounds the one before left - pandas'
+        // answer for sorted and unsorted values alike (a linear scan per
+        // needle took 15.8 s for 50k needles in 300k values, and answered an
+        // unsorted Series otherwise; br-frankenpandas-9hcoo).
         let vals = self.column.values();
-        if searchsorted_is_sorted(vals) {
-            // Count of leading non-missing values: the insertion point for a
-            // missing needle (left) and the boundary used by binary search.
-            let non_missing = vals.partition_point(|v| !v.is_missing());
-            let out: Vec<usize> = values
-                .iter()
-                .map(|value| {
-                    if value.is_missing() {
-                        // Missing values sort last; a missing needle inserts at
-                        // the start of the trailing missing block (left) or at
-                        // the very end (right) — identical to the linear path's
-                        // first/last is_missing positions on a sorted array.
-                        return if right { vals.len() } else { non_missing };
-                    }
-                    // First index whose comparison predicate is true.
-                    vals.partition_point(|v| {
-                        if v.is_missing() {
-                            return false; // missing sorts after any real needle
-                        }
-                        let ord = compare_scalar_values(v, value);
-                        if right {
-                            !matches!(ord, std::cmp::Ordering::Greater)
-                        } else {
-                            matches!(ord, std::cmp::Ordering::Less)
-                        }
-                    })
-                })
-                .collect();
-            return Ok(out);
-        }
-        Ok(values
-            .iter()
-            .map(|value| searchsorted_linear(vals, value, right))
-            .collect())
+        let ahead = |value: &Scalar, needle: &Scalar| {
+            if right {
+                !searchsorted_less(needle, value)
+            } else {
+                searchsorted_less(value, needle)
+            }
+        };
+        Ok(numpy_binsearch(
+            vals.len(),
+            values,
+            |position, needle| ahead(&vals[position], needle),
+            |previous, needle| ahead(previous, needle),
+        ))
     }
 
     /// Find an insertion point using an explicit sorter permutation.
@@ -42430,6 +42406,47 @@ impl ResampleBin for BinExtreme {
     }
 }
 
+/// pandas' group_ohlc: a bin's first present value, its first extremes
+/// (strict `>` / `<`) and its last present value, a NaN skipped; an empty
+/// or all-NaN bin NaN for each - the four prices in one fold (br-frankenpandas-jinml).
+#[derive(Clone, Default)]
+struct BinOhlc {
+    prices: Option<[f64; 4]>,
+}
+
+impl BinOhlc {
+    /// Open, high, low and close.
+    fn prices(&self) -> [f64; 4] {
+        self.prices.unwrap_or([f64::NAN; 4])
+    }
+}
+
+impl ResampleBin for BinOhlc {
+    const SINGLETON_IS_VALUE: bool = false;
+
+    fn add(&mut self, value: f64) {
+        if value.is_nan() {
+            return;
+        }
+        match &mut self.prices {
+            None => self.prices = Some([value; 4]),
+            Some([_, high, low, close]) => {
+                if value > *high {
+                    *high = value;
+                }
+                if value < *low {
+                    *low = value;
+                }
+                *close = value;
+            }
+        }
+    }
+
+    fn value(&self) -> f64 {
+        self.prices()[0]
+    }
+}
+
 /// A bin that passes a NaN over before `B` sees it, as pandas' group
 /// reductions skip a missing value (br-frankenpandas-8ycr8). A bin of one
 /// value is not that value: a NaN alone sums to 0.0.
@@ -43004,6 +43021,34 @@ impl Resample<'_> {
         vals: &[f64],
         empty: B,
     ) -> Option<Result<Series, FrameError>> {
+        let (bins, acc) = self.resample_fold(vals, empty)?;
+        if B::SINGLETON_IS_VALUE && bins.identity {
+            return Some(Series::new(
+                self.series.name(),
+                self.series.index().clone(),
+                self.series.column().clone(),
+            ));
+        }
+        let out_f64: Vec<f64> = match &bins.emitted {
+            Some(emitted) => emitted.iter().map(|&bin| acc[bin].value()).collect(),
+            None => acc.iter().map(ResampleBin::value).collect(),
+        };
+        let index = bins.index.clone().rename_index(self.series.index().name());
+        Some(Series::new(
+            self.series.name(),
+            index,
+            Column::from_f64_values(out_f64),
+        ))
+    }
+
+    /// The fold of [`Self::resample_reduce_single_pass`]: the bins (kept
+    /// ones, else binned now and kept) and each bin's reduction, a clone of
+    /// `empty` per bin with every row's value added in row order (br-frankenpandas-jinml).
+    fn resample_fold<B: ResampleBin>(
+        &self,
+        vals: &[f64],
+        empty: B,
+    ) -> Option<(Arc<ResampleRowBins>, Vec<B>)> {
         let kept = self
             .layout
             .as_ref()
@@ -43036,23 +43081,7 @@ impl Resample<'_> {
                 (bins?, acc)
             }
         };
-        if B::SINGLETON_IS_VALUE && bins.identity {
-            return Some(Series::new(
-                self.series.name(),
-                self.series.index().clone(),
-                self.series.column().clone(),
-            ));
-        }
-        let out_f64: Vec<f64> = match &bins.emitted {
-            Some(emitted) => emitted.iter().map(|&bin| acc[bin].value()).collect(),
-            None => acc.iter().map(ResampleBin::value).collect(),
-        };
-        let index = bins.index.clone().rename_index(self.series.index().name());
-        Some(Series::new(
-            self.series.name(),
-            index,
-            Column::from_f64_values(out_f64),
-        ))
+        Some((bins, acc))
     }
 
     /// Dispatch the calendar / daily / sub-daily binning of the rows - the
@@ -44572,6 +44601,40 @@ impl Resample<'_> {
     pub fn ohlc(&self) -> Result<DataFrame, FrameError> {
         // Per br-frankenpandas-7bc60.
         self.validate()?;
+        // A float column's prices in one fold over the bins (kept, or
+        // binned now and kept), as pandas' group_ohlc: build_groups' keyed
+        // buckets and a Scalar a row took resample('1h').ohlc() of 300k rows
+        // 29.6 ms, pandas 2.0; four folds 4.3 (br-frankenpandas-jinml).
+        if let Some(vals) = self
+            .series
+            .column()
+            .as_f64_slice()
+            .or_else(|| self.nan_holding_f64())
+            && let Some((bins, acc)) = self.resample_fold(vals, BinOhlc::default())
+        {
+            let names = ["open", "high", "low", "close"];
+            let prices: Vec<[f64; 4]> = match &bins.emitted {
+                Some(emitted) => emitted.iter().map(|&bin| acc[bin].prices()).collect(),
+                None => acc.iter().map(BinOhlc::prices).collect(),
+            };
+            let columns: BTreeMap<String, Column> = names
+                .iter()
+                .enumerate()
+                .map(|(price, name)| {
+                    let values = prices.iter().map(|bin| bin[price]).collect();
+                    ((*name).to_owned(), Column::from_f64_values(values))
+                })
+                .collect();
+            let index = bins.index.clone().rename_index(self.series.index().name());
+            return DataFrame::new_with_column_order(
+                index,
+                columns,
+                names
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect::<Vec<String>>(),
+            );
+        }
         let (order, groups) = self.build_groups()?;
         let vals = self.series.values();
         let mut labels = Vec::with_capacity(order.len());
@@ -54133,41 +54196,84 @@ impl SeriesGroupBy<'_> {
         let mut value_level = Vec::new();
         let mut out_counts = Vec::new();
 
+        // The values factorized once - each row's code (None: missing), the
+        // distinct values in first-seen order - and put in value order once,
+        // equal-comparing ones sharing a class; each group then counts codes
+        // into one array and sorts its codes by class (stable: first seen
+        // among equals, as a sort of its values). A map, a sort of Scalars
+        // and a Scalar clone a group's value made groupby(...)[col]
+        // .value_counts() of 300k rows 0.31x pandas (br-frankenpandas-rc14i).
+        let mut code_of: FxHashMap<ScalarKey<'_>, usize> = FxHashMap::default();
+        let mut uniques: Vec<&Scalar> = Vec::new();
+        let codes: Vec<Option<usize>> = values
+            .iter()
+            .map(|value| {
+                let key = scalar_key_skip_missing(value)?;
+                Some(*code_of.entry(key).or_insert_with(|| {
+                    uniques.push(value);
+                    uniques.len() - 1
+                }))
+            })
+            .collect();
+        drop(code_of);
+        let mut by_value: Vec<usize> = (0..uniques.len()).collect();
+        by_value.sort_by(|&left, &right| {
+            compare_scalars_with_na_position(uniques[left], uniques[right], true, false)
+        });
+        let mut class = vec![0_usize; uniques.len()];
+        for (position, &code) in by_value.iter().enumerate() {
+            class[code] = match position.checked_sub(1) {
+                Some(previous) => {
+                    let previous_code = by_value[previous];
+                    let same = compare_scalars_with_na_position(
+                        uniques[previous_code],
+                        uniques[code],
+                        true,
+                        false,
+                    ) == Ordering::Equal;
+                    class[previous_code] + usize::from(!same)
+                }
+                None => 0,
+            };
+        }
+        let mut value_texts: Vec<Option<String>> = vec![None; uniques.len()];
+        let mut value_labels: Vec<Option<IndexLabel>> = vec![None; uniques.len()];
+        let mut counts = vec![0_i64; uniques.len()];
+        let mut touched: Vec<usize> = Vec::new();
+
         for (group_idx, key) in order_keys.iter().enumerate() {
             let group_label = &order[group_idx];
-            let mut value_counts: Vec<(Scalar, i64)> = Vec::new();
-            let mut index_by_key: FxHashMap<ScalarKey<'_>, usize> = FxHashMap::default();
             // The missing values count as one value (pandas groups None with
             // NaN), kept as the first one seen.
-            let mut missing: Option<(Scalar, i64)> = None;
-
+            let mut missing: Option<(&Scalar, i64)> = None;
+            touched.clear();
             for &row_idx in &groups[key] {
-                let value = &values[row_idx];
-                let Some(value_key) = scalar_key_skip_missing(value) else {
-                    if !dropna {
-                        missing.get_or_insert_with(|| (value.clone(), 0)).1 += 1;
+                match codes[row_idx] {
+                    Some(code) => {
+                        if counts[code] == 0 {
+                            touched.push(code);
+                        }
+                        counts[code] += 1;
                     }
-                    continue;
-                };
-                match index_by_key.get(&value_key) {
-                    Some(&idx) => value_counts[idx].1 += 1,
-                    None => {
-                        index_by_key.insert(value_key, value_counts.len());
-                        value_counts.push((value.clone(), 1));
-                    }
+                    None if !dropna => missing.get_or_insert((&values[row_idx], 0)).1 += 1,
+                    None => {}
                 }
             }
-            drop(index_by_key);
 
             // pandas counts over (group, value) keys sorted by value, the
             // missing value last, then stable-sorts by count: a tie keeps
             // value order.
-            value_counts.sort_by(|(left, _), (right, _)| {
-                compare_scalars_with_na_position(left, right, true, false)
-            });
-            value_counts.extend(missing);
+            touched.sort_by_key(|&code| class[code]);
+            // A value's code, or the missing value itself.
+            let mut entries: Vec<(Result<usize, &Scalar>, i64)> = touched
+                .iter()
+                .map(|&code| (Ok(code), counts[code]))
+                .collect();
+            if let Some((value, count)) = missing {
+                entries.push((Err(value), count));
+            }
             if sort {
-                value_counts.sort_by(|(_, left), (_, right)| {
+                entries.sort_by(|(_, left), (_, right)| {
                     if ascending {
                         left.cmp(right)
                     } else {
@@ -54175,21 +54281,46 @@ impl SeriesGroupBy<'_> {
                     }
                 });
             }
-            let total: i64 = value_counts.iter().map(|(_, count)| count).sum();
+            let total: i64 = entries.iter().map(|(_, count)| count).sum();
 
-            for (value, count) in value_counts {
-                out_labels.push(IndexLabel::Utf8(format!("{group_label}, {value}")));
+            for (code, count) in entries {
+                match code {
+                    Ok(code) => {
+                        let text =
+                            value_texts[code].get_or_insert_with(|| uniques[code].to_string());
+                        out_labels.push(IndexLabel::Utf8(format!("{group_label}, {text}")));
+                        let label = match &value_labels[code] {
+                            Some(label) => label.clone(),
+                            None => {
+                                let label = scalar_to_index_label(uniques[code])?;
+                                value_labels[code] = Some(label.clone());
+                                label
+                            }
+                        };
+                        value_level.push(label);
+                    }
+                    Err(value) => {
+                        out_labels.push(IndexLabel::Utf8(format!("{group_label}, {value}")));
+                        // A float column's NaN labels as NaN, not its text
+                        // (pandas' nan; it was 'NaN' where the column held
+                        // the float; br-frankenpandas-rc14i).
+                        value_level.push(match value {
+                            Scalar::Float64(_) => {
+                                scalar_to_value_counts_index_label(&Scalar::Null(NullKind::NaN))
+                            }
+                            other => scalar_to_value_counts_index_label(other),
+                        });
+                    }
+                }
                 group_level.push(group_label.clone());
-                value_level.push(if value.is_missing() {
-                    scalar_to_value_counts_index_label(&value)
-                } else {
-                    scalar_to_index_label(&value)?
-                });
                 out_counts.push(if normalize {
                     Scalar::Float64(count as f64 / total as f64)
                 } else {
                     Scalar::Int64(count)
                 });
+            }
+            for &code in &touched {
+                counts[code] = 0;
             }
         }
 
@@ -70968,16 +71099,42 @@ pub fn to_timedelta_with_options(
     options: ToTimedeltaOptions<'_>,
 ) -> Result<Series, FrameError> {
     let nanos_per_unit = resolve_timedelta_unit(options.unit)?;
+    // An all-valid int column: its buffer multiplied into durations, no
+    // Scalar a row (to_timedelta of 300k ints 28 ms, pandas 12.5; br-frankenpandas-4g57c).
+    if let Some(ints) = series.column().as_i64_slice() {
+        let nanos = ints
+            .iter()
+            .map(|&value| {
+                value.checked_mul(nanos_per_unit).ok_or_else(|| {
+                    FrameError::CompatibilityRejected(timedelta_overflow_message(
+                        value,
+                        options.unit,
+                    ))
+                })
+            })
+            .collect::<Result<Vec<i64>, FrameError>>()?;
+        return Series::new(
+            series.name().to_owned(),
+            series.index().clone(),
+            Column::from_temporal_nanos(DType::Timedelta64, nanos),
+        );
+    }
     let mut converted = Vec::with_capacity(series.len());
 
     for (i, val) in series.values().iter().enumerate() {
         let result = match val {
             Scalar::Null(_) => Scalar::Timedelta64(fp_types::Timedelta::NAT),
             Scalar::Timedelta64(ns) => Scalar::Timedelta64(*ns),
-            Scalar::Int64(v) => {
-                let nanos = (*v).saturating_mul(nanos_per_unit);
-                Scalar::Timedelta64(nanos)
-            }
+            // Past the nanosecond range is pandas' OutOfBoundsTimedelta,
+            // whatever `errors` says (it saturated; br-frankenpandas-4g57c).
+            Scalar::Int64(v) => match v.checked_mul(nanos_per_unit) {
+                Some(nanos) => Scalar::Timedelta64(nanos),
+                None => {
+                    return Err(FrameError::CompatibilityRejected(
+                        timedelta_overflow_message(*v, options.unit),
+                    ));
+                }
+            },
             Scalar::Float64(v) => {
                 if v.is_nan() || v.is_infinite() {
                     Scalar::Timedelta64(fp_types::Timedelta::NAT)
@@ -71055,6 +71212,24 @@ pub fn to_timedelta_with_options(
     let index = series.index().clone();
     let column = Column::from_values(converted)?;
     Series::new(series.name().to_owned(), index, column)
+}
+
+/// pandas' OutOfBoundsTimedelta text for an int past the nanosecond range
+/// in `unit` ("Cannot convert 1000000000000 days to timedelta64[ns] without
+/// overflow"; br-frankenpandas-4g57c).
+#[must_use]
+pub fn timedelta_overflow_message(value: i64, unit: Option<&str>) -> String {
+    let word = match unit.unwrap_or("ns") {
+        "D" | "d" | "day" | "days" => "days",
+        "h" | "H" | "hour" | "hours" => "hours",
+        "m" | "min" | "T" | "minute" | "minutes" => "minutes",
+        "s" | "S" | "sec" | "second" | "seconds" => "seconds",
+        "ms" | "L" | "milli" | "millis" | "millisecond" | "milliseconds" => "milliseconds",
+        "us" | "U" | "micro" | "micros" | "microsecond" | "microseconds" => "microseconds",
+        "W" | "w" => "weeks",
+        _ => "nanoseconds",
+    };
+    format!("Cannot convert {value} {word} to timedelta64[ns] without overflow")
 }
 
 /// The nanoseconds of a fixed frequency as `dt.floor` / `ceil` / `round`
@@ -109912,31 +110087,38 @@ impl DataFrame {
                 })
             })
             .collect::<Result<_, _>>()?;
-        let items_of = |value: &Scalar| -> Vec<Scalar> {
-            match value {
-                Scalar::Object(fp_types::ObjectValue::List(items)) if items.is_empty() => {
-                    vec![Scalar::Null(NullKind::NaN)]
-                }
-                Scalar::Object(fp_types::ObjectValue::List(items)) => items.to_vec(),
-                other => vec![other.clone()],
-            }
+        // Each cell's row count (an empty list one row of NaN), and its rows'
+        // values pushed straight onto the column's output: two vectors a row
+        // were made and dropped (Series([[1, 2, 3]] * 50_000).explode()
+        // 6.7 ms, pandas 3.1; br-frankenpandas-250iy).
+        let rows_of = |value: &Scalar| match value {
+            Scalar::Object(fp_types::ObjectValue::List(items)) => items.len().max(1),
+            _ => 1,
         };
-        let mut rows: Vec<usize> = Vec::new();
-        let mut exploded: Vec<Vec<Scalar>> = vec![Vec::new(); sources.len()];
+        let values: Vec<&[Scalar]> = sources.iter().map(|column| column.values()).collect();
+        let mut rows: Vec<usize> = Vec::with_capacity(self.len());
+        let mut exploded: Vec<Vec<Scalar>> = sources
+            .iter()
+            .map(|_| Vec::with_capacity(self.len()))
+            .collect();
         for row in 0..self.len() {
-            let cells: Vec<Vec<Scalar>> = sources
-                .iter()
-                .map(|column| items_of(&column.values()[row]))
-                .collect();
-            let count = cells[0].len();
-            if cells.iter().any(|items| items.len() != count) {
+            let count = rows_of(&values[0][row]);
+            if values.iter().any(|cells| rows_of(&cells[row]) != count) {
                 return Err(FrameError::CompatibilityRejected(
                     "columns must have matching element counts".to_owned(),
                 ));
             }
             rows.extend(std::iter::repeat_n(row, count));
-            for (out, items) in exploded.iter_mut().zip(cells) {
-                out.extend(items);
+            for (out, cells) in exploded.iter_mut().zip(&values) {
+                match &cells[row] {
+                    Scalar::Object(fp_types::ObjectValue::List(items)) if items.is_empty() => {
+                        out.push(Scalar::Null(NullKind::NaN));
+                    }
+                    Scalar::Object(fp_types::ObjectValue::List(items)) => {
+                        out.extend(items.iter().cloned());
+                    }
+                    other => out.push(other.clone()),
+                }
             }
         }
         let mut out = self.take_rows_by_positions(&rows)?;
@@ -110290,11 +110472,101 @@ fn mask_groups(
     Ok(Some(masked))
 }
 
+/// A multi-key group's flat label: its key values' text joined by `|`,
+/// written into one String (a String a value and their join made three
+/// allocations a group; br-frankenpandas-cfoxn).
+fn joined_key_label<T: std::fmt::Display>(key: &[T]) -> String {
+    use std::fmt::Write as _;
+    let mut label = String::with_capacity(8 * key.len());
+    for (position, value) in key.iter().enumerate() {
+        if position > 0 {
+            label.push('|');
+        }
+        let _ = write!(label, "{value}");
+    }
+    label
+}
+
+/// Each row's group code, its gid's position in the group `order` (as
+/// [`DataFrameGroupBy::group_codes`] numbers the groups; br-frankenpandas-cfoxn).
+fn ranked_group_codes(gid_per_row: &[usize], order: &[usize]) -> Result<Column, FrameError> {
+    let mut rank = vec![0_i64; order.len()];
+    for (position, &gid) in order.iter().enumerate() {
+        rank[gid] = i64::try_from(position).map_err(|_| {
+            FrameError::CompatibilityRejected("too many groups for Int64 codes".to_owned())
+        })?;
+    }
+    Ok(Column::from_i64_values(
+        gid_per_row.iter().map(|&gid| rank[gid]).collect(),
+    ))
+}
+
+/// The first-seen group id of each packed key slot of a multi-key
+/// grouping: a direct-address table while the slots stay within the cap
+/// (2^24, and 16 a row), past it a hash of the slots - the groupings
+/// bailed there, to build_groups' per-row `Vec<ScalarKey>` (br-frankenpandas-cfoxn).
+/// None when the slots overflow a `usize`.
+enum PackedSlots {
+    Dense(Vec<usize>),
+    Hashed(FxHashMap<usize, usize>),
+}
+
+impl PackedSlots {
+    fn new(combined: u128, rows: usize) -> Option<Self> {
+        if combined <= (1u128 << 24) && combined <= (rows as u128).saturating_mul(16) {
+            let len = usize::try_from(combined).ok()?;
+            return Some(Self::Dense(vec![usize::MAX; len]));
+        }
+        usize::try_from(combined).ok()?;
+        Some(Self::Hashed(FxHashMap::default()))
+    }
+
+    /// The group id of `slot`, `next` (and true) when it is new.
+    fn gid(&mut self, slot: usize, next: usize) -> (usize, bool) {
+        match self {
+            Self::Dense(table) => {
+                if table[slot] == usize::MAX {
+                    table[slot] = next;
+                    (next, true)
+                } else {
+                    (table[slot], false)
+                }
+            }
+            Self::Hashed(map) => match map.entry(slot) {
+                std::collections::hash_map::Entry::Occupied(entry) => (*entry.get(), false),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(next);
+                    (next, true)
+                }
+            },
+        }
+    }
+
+    /// The direct-address table when walking it in slot order beats
+    /// sorting `groups` gids by slot (at most 8 slots a group).
+    fn dense_table(&self, groups: usize) -> Option<&[usize]> {
+        match self {
+            Self::Dense(table) if table.len() <= groups.saturating_mul(8) => Some(table),
+            _ => None,
+        }
+    }
+}
+
 struct DenseMultiInt64Grouping {
     gid_per_row: Vec<usize>,
     ngroups: usize,
     order: Vec<usize>,
-    key_of_gid: Vec<Vec<i64>>,
+    /// Each group's key tuple, `ncol` values a group in gid order (a Vec a
+    /// group was a heap allocation each; br-frankenpandas-cfoxn).
+    keys: Vec<i64>,
+    ncol: usize,
+}
+
+impl DenseMultiInt64Grouping {
+    /// Group `g`'s key tuple, one value per `by` level.
+    fn key(&self, g: usize) -> &[i64] {
+        &self.keys[g * self.ncol..(g + 1) * self.ncol]
+    }
 }
 
 /// One key-column value within a dense multi-key group tuple. Derived `Ord` orders
@@ -111079,6 +111351,22 @@ impl DataFrameGroupBy<'_> {
     /// labels the groups - how the Python binding runs `gb[col]` over several
     /// keys (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.9).
     pub fn group_codes(&self) -> Result<(Column, Index), FrameError> {
+        // Several all-valid int / text keys: the dense groupings' gids ranked
+        // in their group order, and the same flat labels and MultiIndex -
+        // build_groups' per-row Vec<ScalarKey> made gb[col].sum() over two
+        // keys of 300k rows 513 ms, pandas 48 (br-frankenpandas-cfoxn).
+        if self.by.len() >= 2 {
+            if let Some(grouping) = self.multi_int64_dense_grouping() {
+                let (index, levels) = self.multi_dense_index(&grouping)?;
+                let codes = ranked_group_codes(&grouping.gid_per_row, &grouping.order)?;
+                return Ok((codes, index.with_row_multiindex(levels)?));
+            }
+            if let Some(grouping) = self.multi_mixed_dense_grouping() {
+                let (index, levels) = self.multi_dense_index_mixed(&grouping)?;
+                let codes = ranked_group_codes(&grouping.gid_per_row, &grouping.order)?;
+                return Ok((codes, index.with_row_multiindex(levels)?));
+            }
+        }
         let (group_order, groups) = self.build_groups();
         let mut codes = vec![None; self.df.len()];
         let mut labels = Vec::with_capacity(group_order.len());
@@ -113829,7 +114117,7 @@ impl DataFrameGroupBy<'_> {
                 .map(|_| Vec::with_capacity(grouping.order.len()))
                 .collect();
             for &g in &grouping.order {
-                let key = &grouping.key_of_gid[g];
+                let key = grouping.key(g);
                 let parts: Vec<String> = key.iter().map(ToString::to_string).collect();
                 labels.push(IndexLabel::Utf8(parts.join("|")));
                 for (level_idx, &value) in key.iter().enumerate() {
@@ -114241,48 +114529,49 @@ impl DataFrameGroupBy<'_> {
         let combined = ranges
             .iter()
             .fold(1u128, |acc, &range| acc.saturating_mul(range as u128));
-        if combined > (1u128 << 24) || combined > (n as u128).saturating_mul(16) {
-            return None;
-        }
-
-        let combined = combined as usize;
+        // Past the direct-address cap the packed slots are hashed: the
+        // grouping fell to build_groups' per-row Vec<ScalarKey> (two keys of
+        // 1000 x 5000 values over 300k rows, 5M slots, 0.08x pandas; br-frankenpandas-cfoxn).
+        let mut slots = PackedSlots::new(combined, n)?;
         let ncol = ranges.len();
         let mut strides = vec![1usize; ncol];
         for c in (0..ncol - 1).rev() {
             strides[c] = strides[c + 1] * ranges[c + 1];
         }
 
-        let mut gid_table = vec![usize::MAX; combined];
         let mut gid_per_row = vec![0usize; n];
-        let mut key_of_gid: Vec<Vec<i64>> = Vec::new();
+        let mut keys: Vec<i64> = Vec::new();
+        let mut slot_of_gid: Vec<usize> = Vec::new();
         #[allow(clippy::needless_range_loop)] // row indexes every key slice
         for row in 0..n {
             let mut slot = 0usize;
             for c in 0..ncol {
                 slot += (slices[c][row] as i128 - mins[c] as i128) as usize * strides[c];
             }
-            let g = if gid_table[slot] == usize::MAX {
-                let ng = key_of_gid.len();
-                gid_table[slot] = ng;
-                key_of_gid.push((0..ncol).map(|c| slices[c][row]).collect());
-                ng
-            } else {
-                gid_table[slot]
-            };
+            let (g, new) = slots.gid(slot, slot_of_gid.len());
+            if new {
+                slot_of_gid.push(slot);
+                keys.extend((0..ncol).map(|c| slices[c][row]));
+            }
             gid_per_row[row] = g;
         }
 
-        let ngroups = key_of_gid.len();
+        let ngroups = slot_of_gid.len();
         let mut order: Vec<usize> = (0..ngroups).collect();
         if self.sort {
-            order.sort_by(|&a, &b| key_of_gid[a].cmp(&key_of_gid[b]));
+            // The packed slot orders the key tuples (each level's offset
+            // from its minimum, the first level most significant): an
+            // integer sort where comparing the tuples took a fifth of
+            // groupby([a, b]).size() (br-frankenpandas-cfoxn). The slots are distinct.
+            order.sort_unstable_by_key(|&g| slot_of_gid[g]);
         }
 
         Some(DenseMultiInt64Grouping {
             gid_per_row,
             ngroups,
             order,
-            key_of_gid,
+            keys,
+            ncol,
         })
     }
 
@@ -114397,16 +114686,14 @@ impl DataFrameGroupBy<'_> {
         let combined: u128 = ranges
             .iter()
             .fold(1u128, |acc, &r| acc.saturating_mul(r as u128));
-        if combined > (1u128 << 24) || combined > (n as u128).saturating_mul(16) {
-            return None;
-        }
-        let combined = combined as usize;
+        // Past the direct-address cap the packed slots are hashed (see
+        // [`PackedSlots`]; br-frankenpandas-cfoxn).
+        let mut slots = PackedSlots::new(combined, n)?;
         let ncol = ranges.len();
         let mut strides = vec![1usize; ncol];
         for c in (0..ncol - 1).rev() {
             strides[c] = strides[c + 1] * ranges[c + 1];
         }
-        let mut gid_table = vec![usize::MAX; combined];
         let mut gid_per_row = vec![0usize; n];
         let mut key_cells: Vec<MixedKey<'_>> = Vec::new();
         // Which slot each gid occupies, in gid order. Recorded here because gids are
@@ -114423,9 +114710,8 @@ impl DataFrameGroupBy<'_> {
                 };
                 slot += code * strides[c];
             }
-            let g = if gid_table[slot] == usize::MAX {
-                let ng = slot_of_gid.len();
-                gid_table[slot] = ng;
+            let (g, new) = slots.gid(slot, slot_of_gid.len());
+            if new {
                 slot_of_gid.push(slot);
                 for c in 0..ncol {
                     key_cells.push(match &cols[c] {
@@ -114435,10 +114721,7 @@ impl DataFrameGroupBy<'_> {
                         }
                     });
                 }
-                ng
-            } else {
-                gid_table[slot]
-            };
+            }
             gid_per_row[row] = g;
         }
         let ngroups = slot_of_gid.len();
@@ -114448,9 +114731,9 @@ impl DataFrameGroupBy<'_> {
             // enumerate the occupied slots in ascending order, chosen on which is
             // cheaper — they produce the SAME sequence, because each occupied slot
             // holds exactly one gid.
-            if combined <= ngroups.saturating_mul(8) {
+            if let Some(gid_table) = slots.dense_table(ngroups) {
                 // Dense table: walk it. O(combined), no comparisons at all.
-                for &g in &gid_table {
+                for &g in gid_table {
                     if g != usize::MAX {
                         order.push(g);
                     }
@@ -115766,9 +116049,8 @@ impl DataFrameGroupBy<'_> {
             .map(|_| Vec::with_capacity(grouping.order.len()))
             .collect();
         for &g in &grouping.order {
-            let key = &grouping.key_of_gid[g];
-            let parts: Vec<String> = key.iter().map(ToString::to_string).collect();
-            labels.push(IndexLabel::Utf8(parts.join("|")));
+            let key = grouping.key(g);
+            labels.push(IndexLabel::Utf8(joined_key_label(key)));
             for (level_idx, &value) in key.iter().enumerate() {
                 level_arrays[level_idx].push(IndexLabel::Int64(value));
             }
@@ -115792,8 +116074,7 @@ impl DataFrameGroupBy<'_> {
             .collect();
         for &g in &grouping.order {
             let key = grouping.key(g);
-            let parts: Vec<String> = key.iter().map(ToString::to_string).collect();
-            labels.push(IndexLabel::Utf8(parts.join("|")));
+            labels.push(IndexLabel::Utf8(joined_key_label(key)));
             for (level_idx, value) in key.iter().enumerate() {
                 level_arrays[level_idx].push(value.to_index_label());
             }
@@ -117235,7 +117516,7 @@ impl DataFrameGroupBy<'_> {
                 .collect();
 
             for &g in &grouping.order {
-                let key = &grouping.key_of_gid[g];
+                let key = grouping.key(g);
                 let parts: Vec<String> = key.iter().map(ToString::to_string).collect();
                 labels.push(IndexLabel::Utf8(parts.join("|")));
                 for (level_idx, &value) in key.iter().enumerate() {
@@ -171119,6 +171400,81 @@ mod tests {
             .searchsorted(&Scalar::Utf8("a".into()), "middle")
             .unwrap_err();
         assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+    }
+
+    #[test]
+    fn series_searchsorted_answers_unsorted_values_as_numpy_9hcoo() {
+        // pandas runs numpy's binary search: on unsorted values its answer
+        // depends on the needles' order (live pandas 2.2.3: [2, 6, 0] for
+        // [2, 5, 1], [0, 2, 6] for [1, 2, 5]); a linear scan answered 0 for
+        // 2 (br-frankenpandas-9hcoo).
+        let ints = |values: &[i64]| {
+            Series::from_values(
+                "x",
+                (0..values.len() as i64).map(Into::into).collect::<Vec<_>>(),
+                values.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>(),
+            )
+            .unwrap()
+        };
+        let needles = |values: &[i64]| values.iter().map(|&v| Scalar::Int64(v)).collect::<Vec<_>>();
+        let unsorted = ints(&[3, 1, 2, 9, 4, 0, 7]);
+        assert_eq!(unsorted.searchsorted(&Scalar::Int64(2), "left").unwrap(), 2);
+        assert_eq!(
+            unsorted.searchsorted(&Scalar::Int64(2), "right").unwrap(),
+            3
+        );
+        assert_eq!(
+            unsorted
+                .searchsorted_values(&needles(&[2, 5, 1]), "left")
+                .unwrap(),
+            vec![2, 6, 0]
+        );
+        assert_eq!(
+            unsorted
+                .searchsorted_values(&needles(&[1, 2, 5]), "left")
+                .unwrap(),
+            vec![0, 2, 6]
+        );
+        // A NaN in unsorted floats sorts last (pandas: [3, 4, 4]).
+        let floats = Series::from_values(
+            "x",
+            (0..4_i64).map(Into::into).collect::<Vec<_>>(),
+            vec![
+                Scalar::Float64(0.5),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(0.1),
+                Scalar::Float64(0.9),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            floats
+                .searchsorted_values(
+                    &[
+                        Scalar::Float64(0.2),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(0.95)
+                    ],
+                    "left"
+                )
+                .unwrap(),
+            vec![3, 4, 4]
+        );
+        // NEGATIVE: sorted values answer each needle's insertion point in any
+        // needle order, as before.
+        let sorted = ints(&[0, 2, 2, 5, 9]);
+        assert_eq!(
+            sorted
+                .searchsorted_values(&needles(&[9, 2, -1, 6, 2]), "left")
+                .unwrap(),
+            vec![4, 1, 0, 4, 1]
+        );
+        assert_eq!(
+            sorted
+                .searchsorted_values(&needles(&[9, 2, -1, 6, 2]), "right")
+                .unwrap(),
+            vec![5, 3, 0, 4, 3]
+        );
     }
 
     #[test]

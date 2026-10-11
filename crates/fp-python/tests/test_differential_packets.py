@@ -37978,3 +37978,355 @@ def test_index_isin_needle_kinds_like_pandas_cs4fd(case: str) -> None:
             return type(error).__name__, str(error)
 
     assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-9hcoo: Series.searchsorted runs numpy's binary search over all the
+# needles at once (an int64 / float64 array read in place), as pandas: on
+# unsorted values the answer depends on the needles' order, a NaN sorts
+# last. NEGATIVE: sorted values, a scalar needle, side='right', a sorter,
+# NaN needles, strings answer as before and as pandas.
+_9HCOO_SERIES = {
+    "sorted ints": lambda m: m.Series([0, 2, 2, 5, 9]),
+    "unsorted ints": lambda m: m.Series([3, 1, 2, 9, 4, 0, 7]),
+    "sorted floats with NaN": lambda m: m.Series([0.1, 0.5, 2.5, float("nan")]),
+    "unsorted floats with NaN": lambda m: m.Series([0.5, float("nan"), 0.1, 0.9]),
+    "strings": lambda m: m.Series(["b", "a", "d", "c"]),
+}
+_9HCOO_NEEDLES = {
+    "scalar (NEGATIVE)": lambda np: 2,
+    "list": lambda np: [2, 5, 1],
+    "int array": lambda np: np.array([1, 2, 5, -3, 11]),
+    "float array": lambda np: np.array([0.2, 2.0, 9.5]),
+    "float array with NaN": lambda np: np.array([0.2, np.nan]),
+    "strings": lambda np: ["a", "c", "zz"],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("series", list(_9HCOO_SERIES))
+@pytest.mark.parametrize("needles", list(_9HCOO_NEEDLES))
+@pytest.mark.parametrize("side", ["left", "right"])
+def test_series_searchsorted_like_pandas_9hcoo(series: str, needles: str, side: str) -> None:
+    import numpy as np
+
+    if (series == "strings") != (needles == "strings"):
+        pytest.skip("strings against numbers is br-frankenpandas-ofp5w")
+    def answer(m: Any) -> Any:
+        try:
+            out = _9HCOO_SERIES[series](m).searchsorted(_9HCOO_NEEDLES[needles](np), side=side)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return np.asarray(out).tolist()
+
+    assert answer(fpd) == answer(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_series_searchsorted_with_sorter_like_pandas_9hcoo() -> None:
+    import numpy as np
+
+    def answer(m: Any) -> Any:
+        s = m.Series([30, 10, 20, 50])
+        return np.asarray(s.searchsorted(np.array([15, 40]), sorter=[1, 2, 0, 3])).tolist()
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-jinml: resample(...).ohlc() of a float Series folds its prices in one
+# pass per price over the kept bins, as pandas' group_ohlc: open / close the
+# first / last present value, high / low the extremes, NaN skipped, an empty
+# bin NaN. NEGATIVE: an int and a bool Series keep their dtypes (the general
+# path), closed= / label= bins, a zoned index, a DataFrame's ohlc.
+def _jinml_series(m: Any, kind: str) -> Any:
+    import numpy as np
+
+    rng = np.random.default_rng(11)
+    stamps = m.date_range("2024-03-09 20:00", periods=600, freq="7min")
+    values = rng.normal(size=600).round(3)
+    values[::17] = np.nan
+    values[100:140] = np.nan
+    if kind == "gappy floats":
+        keep = np.r_[0:200, 260:600]
+        return m.Series(values[keep], index=stamps[keep])
+    if kind == "ints (NEGATIVE)":
+        return m.Series(np.arange(600) % 13, index=stamps)
+    if kind == "bools (NEGATIVE)":
+        return m.Series(np.arange(600) % 3 == 0, index=stamps)
+    if kind == "zoned floats (NEGATIVE)":
+        return m.Series(values, index=stamps.tz_localize("UTC").tz_convert("US/Eastern"))
+    return m.Series(values, index=stamps)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", ["floats", "gappy floats", "ints (NEGATIVE)", "bools (NEGATIVE)", "zoned floats (NEGATIVE)"])
+@pytest.mark.parametrize("rule", ["1h", "30min", "1D", "closed right (NEGATIVE)", "label right (NEGATIVE)"])
+def test_resample_ohlc_like_pandas_jinml(kind: str, rule: str) -> None:
+    def answer(m: Any) -> Any:
+        s = _jinml_series(m, kind)
+        if rule == "closed right (NEGATIVE)":
+            r = s.resample("1h", closed="right")
+        elif rule == "label right (NEGATIVE)":
+            r = s.resample("1h", label="right")
+        else:
+            r = s.resample(rule)
+        out = r.ohlc()
+        return (
+            [str(label) for label in out.index],
+            str(out.index.freq),
+            list(out.columns),
+            [str(dtype) for dtype in out.dtypes],
+            repr(out.values.tolist()),
+        )
+
+    assert answer(fpd) == answer(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_frame_resample_ohlc_like_pandas_jinml() -> None:
+    def answer(m: Any) -> Any:
+        s = _jinml_series(m, "floats")
+        out = m.DataFrame({"a": s, "b": s * 2}).resample("2h").ohlc()
+        return [str(label) for label in out.index], [str(c) for c in out.columns], repr(out.values.tolist())
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-cfoxn: a two-key groupby whose packed key slots pass the direct-address
+# cap (here 200 x 300 slots over 2,000 rows) hashes the slots instead of
+# falling to the generic per-row keys; every result answers as pandas.
+# NEGATIVE: a small product (the direct table), sort=False's first-seen
+# order, as_index=False, three keys, a missing key (dropna both ways).
+def _cfoxn_frame(m: Any, keys: str) -> Any:
+    import numpy as np
+
+    rng = np.random.default_rng(5)
+    n = 2_000
+    g = rng.integers(0, 200, n)
+    i = rng.integers(-150, 150, n)
+    k = np.array([f"k{v}" for v in rng.integers(0, 300, n)], dtype=object)
+    small = rng.integers(0, 3, n)
+    x = rng.normal(size=n).round(3)
+    frame = {"g": g, "i": i, "k": k, "small": small, "x": x}
+    if keys == "missing key":
+        kk = k.copy()
+        kk[::37] = None
+        frame["k"] = kk
+    return m.DataFrame(frame)
+
+
+_CFOXN_KEYS = {
+    "int,int": ["g", "i"],
+    "int,str": ["g", "k"],
+    "str,int": ["k", "i"],
+    "small product (NEGATIVE)": ["small", "g"],
+    "three keys (NEGATIVE)": ["g", "i", "small"],
+    "missing key": ["g", "k"],
+}
+_CFOXN_OPS = {
+    "size": lambda gb: gb.size(),
+    "sum": lambda gb: gb["x"].sum(),
+    "mean": lambda gb: gb["x"].mean(),
+    "count": lambda gb: gb["x"].count(),
+    "first": lambda gb: gb["x"].first(),
+    "nunique": lambda gb: gb["x"].nunique(),
+    "idxmax": lambda gb: gb["x"].idxmax(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("keys", list(_CFOXN_KEYS))
+@pytest.mark.parametrize("op", list(_CFOXN_OPS))
+@pytest.mark.parametrize("options", ["default", "sort=False", "as_index=False", "dropna=False"])
+def test_two_key_groupby_past_the_dense_cap_like_pandas_cfoxn(keys: str, op: str, options: str) -> None:
+    kwargs = {
+        "default": {},
+        "sort=False": {"sort": False},
+        "as_index=False": {"as_index": False},
+        "dropna=False": {"dropna": False},
+    }[options]
+
+    def answer(m: Any) -> Any:
+        out = _CFOXN_OPS[op](_cfoxn_frame(m, keys).groupby(_CFOXN_KEYS[keys], **kwargs))
+        if hasattr(out, "columns"):
+            return [repr(c) for c in out.columns], repr(out.values.tolist()), [repr(x) for x in out.index]
+        return repr(out.tolist()), [repr(x) for x in out.index], list(out.index.names)
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-rc14i: SeriesGroupBy.value_counts counts each group's value codes (the
+# values factorized and put in value order once) and answers as pandas: by
+# count, ties in value order, the missing values one value last. NEGATIVE:
+# normalize, sort=False, ascending=True, dropna=False, a float column with
+# NaN (labelled nan, not 'NaN'), two keys; an object column holding 1 and
+# 1.0 is br-frankenpandas-bz15u's (skipped).
+def _rc14i_frame(m: Any) -> Any:
+    import numpy as np
+
+    rng = np.random.default_rng(14)
+    n = 3_000
+    words = np.array([f"w{v}" for v in rng.integers(0, 40, n)], dtype=object)
+    words[::29] = None
+    floats = rng.integers(0, 12, n).astype(float)
+    floats[::31] = np.nan
+    mixed = np.array([1, 1.0, "a", 2, 2.5] * (n // 5), dtype=object)
+    return m.DataFrame({"g": rng.integers(0, 25, n), "h": rng.integers(0, 3, n), "w": words, "f": floats, "o": mixed})
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("column", ["w", "f", "o"])
+@pytest.mark.parametrize(
+    "options",
+    ["default", "normalize", "sort=False", "ascending", "dropna=False", "two keys"],
+)
+def test_groupby_value_counts_like_pandas_rc14i(column: str, options: str) -> None:
+    kwargs = {
+        "default": {},
+        "normalize": {"normalize": True},
+        "sort=False": {"sort": False},
+        "ascending": {"ascending": True},
+        "dropna=False": {"dropna": False},
+        "two keys": {},
+    }[options]
+
+    if column == "o":
+        pytest.skip("1, 1.0 and True as one object value is br-frankenpandas-bz15u")
+
+    def answer(m: Any) -> Any:
+        frame = _rc14i_frame(m)
+        keys = ["g", "h"] if options == "two keys" else "g"
+        try:
+            out = frame.groupby(keys)[column].value_counts(**kwargs)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return out.name, list(out.index.names), [repr(x) for x in out.index], repr(out.tolist())
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-4g57c: to_timedelta of an int64 array reads it in place and answers as
+# pandas for each unit; an overflow raises (or coerces to NaT). NEGATIVE: a
+# list, a float array and a byte-swapped array keep the general path.
+_4G57C_CASES = {
+    "seconds": lambda np: (np.array([0, 1, -5, 86_400]), {"unit": "s"}),
+    "days": lambda np: (np.array([1, 2, 365]), {"unit": "D"}),
+    "ms": lambda np: (np.array([1_500, -2]), {"unit": "ms"}),
+    "default ns": lambda np: (np.array([1, 10**12]), {}),
+    "overflow": lambda np: (np.array([1, 10**12]), {"unit": "D"}),
+    "overflow coerce": lambda np: (np.array([1, 10**12]), {"unit": "D", "errors": "coerce"}),
+    "list (NEGATIVE)": lambda np: ([0, 1, -5], {"unit": "s"}),
+    "list overflow": lambda np: ([1, 10**12], {"unit": "D"}),
+    "floats (NEGATIVE)": lambda np: (np.array([0.5, 1.25, np.nan]), {"unit": "s"}),
+    "byte-swapped (NEGATIVE)": lambda np: (np.array([1, 2], dtype=">i8"), {"unit": "s"}),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_4G57C_CASES))
+def test_to_timedelta_int_array_like_pandas_4g57c(case: str) -> None:
+    import numpy as np
+
+    def answer(m: Any) -> Any:
+        values, kwargs = _4G57C_CASES[case](np)
+        try:
+            out = m.to_timedelta(values, **kwargs)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__, str(error)
+        return type(out).__name__, [str(x) for x in out]
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-4g57c: dt.to_period and + DateOffset read the instants off their buffer
+# and answer as pandas: month ends (Jan 31 + 1 month is Feb 29 in 2024),
+# leap days, negative offsets, period freqs. NEGATIVE: NaT, a zoned column,
+# an anchored freq (W-SUN) keep their paths and pandas' answers.
+def _4g57c_dates(m: Any, kind: str) -> Any:
+    stamps = ["2024-01-31 10:00:00", "2024-02-29 00:00:00", "2023-12-31 23:59:59", "2024-03-15 00:00:00"]
+    if kind == "NaT (NEGATIVE)":
+        stamps = stamps + [None]
+    s = m.Series(m.to_datetime(stamps))
+    if kind == "zoned (NEGATIVE)":
+        s = s.dt.tz_localize("UTC")
+    return s
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", ["plain", "NaT (NEGATIVE)", "zoned (NEGATIVE)"])
+@pytest.mark.parametrize(
+    "op",
+    ["to_period M", "to_period D", "to_period Q", "to_period W-SUN", "months +1", "months -1", "years +1", "days +3"],
+)
+def test_datetime_conversions_like_pandas_4g57c(kind: str, op: str) -> None:
+    import warnings as _warnings
+
+    def answer(m: Any) -> Any:
+        s = _4g57c_dates(m, kind)
+        try:
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore")
+                if op.startswith("to_period"):
+                    out = s.dt.to_period(op.split()[1])
+                else:
+                    unit, amount = op.split()
+                    out = s + m.DateOffset(**{unit: int(amount)})
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return str(out.dtype), [str(x) for x in out]
+
+    assert answer(fpd) == answer(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("offset", ["days into a gap", "months", "years"])
+def test_zoned_series_date_offset_like_pandas_4g57c(offset: str) -> None:
+    def answer(m: Any) -> Any:
+        s = m.Series(m.to_datetime(["2024-03-09 02:30:00", "2024-01-31 23:00:00"])).dt.tz_localize("US/Eastern")
+        kwargs = {"days into a gap": {"days": 1}, "months": {"months": 1}, "years": {"years": 1}}[offset]
+        try:
+            out = s + m.DateOffset(**kwargs)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__, str(error)
+        return str(out.dtype), [str(x) for x in out]
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-250iy: explode pushes each list cell's items straight onto the output and
+# list cells of everyday values are read without the cell checks; both answer
+# as pandas. NEGATIVE: an empty list (one NaN row), a scalar, None, a string
+# (one row), nested lists (one level), ignore_index, two columns with
+# mismatched counts (pandas' ValueError).
+_250IY_SERIES = {
+    "ints": [[1, 2, 3], [4], [5, 6]],
+    "mixed cells (NEGATIVE)": [[1, "a"], [], 7, None, "text", [[1, 2], 3]],
+    "floats with NaN": [[1.5, float("nan")], [2.5]],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("cells", list(_250IY_SERIES))
+@pytest.mark.parametrize("ignore_index", [False, True])
+def test_series_explode_like_pandas_250iy(cells: str, ignore_index: bool) -> None:
+    def answer(m: Any) -> Any:
+        out = m.Series(_250IY_SERIES[cells], index=list("pqrstu")[: len(_250IY_SERIES[cells])]).explode(
+            ignore_index=ignore_index
+        )
+        return str(out.dtype), [repr(x) for x in out.index], [repr(x) for x in out.tolist()]
+
+    assert answer(fpd) == answer(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", ["two columns", "mismatched counts (NEGATIVE)"])
+def test_frame_explode_like_pandas_250iy(case: str) -> None:
+    def answer(m: Any) -> Any:
+        b = [[1, 2], [3]] if case == "two columns" else [[1], [3]]
+        frame = m.DataFrame({"a": [["x", "y"], ["z"]], "b": b, "c": [10, 20]})
+        try:
+            out = frame.explode(["a", "b"])
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return list(out.columns), [repr(x) for x in out.index], repr(out.values.tolist())
+
+    assert answer(fpd) == answer(pd)

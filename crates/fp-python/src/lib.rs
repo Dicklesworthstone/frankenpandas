@@ -8180,6 +8180,21 @@ fn py_to_cell_with_ancestors<'py>(
     obj: &Bound<'py, PyAny>,
     ancestors: &mut Vec<Bound<'py, PyAny>>,
 ) -> PyResult<Scalar> {
+    // The everyday leaves first - a float, str, bool or int, a list's items
+    // mostly - straight to py_to_scalar as the checks below send them, a
+    // value it refuses a host cell: each passed every check on the way
+    // (Series([[1, 2, 3]] * 50_000) 7.7 ms, pandas 1.9; br-frankenpandas-250iy).
+    if obj.is_instance_of::<pyo3::types::PyFloat>()
+        || obj.is_exact_instance_of::<pyo3::types::PyString>()
+        || obj.is_exact_instance_of::<pyo3::types::PyBool>()
+        || obj.is_exact_instance_of::<pyo3::types::PyInt>()
+    {
+        return Ok(py_to_scalar(py, obj).unwrap_or_else(|_| {
+            Scalar::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(
+                PyHost(obj.clone().unbind()),
+            )))
+        }));
+    }
     if let Ok(list) = obj.cast::<PyList>() {
         if ancestors.iter().any(|ancestor| ancestor.is(obj)) {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -8237,11 +8252,7 @@ fn py_to_cell_with_ancestors<'py>(
             fp_types::HostValue::new(PyHost(obj.clone().unbind())),
         )));
     }
-    let everyday = obj.is_instance_of::<pyo3::types::PyFloat>()
-        || obj.is_exact_instance_of::<pyo3::types::PyString>()
-        || obj.is_exact_instance_of::<pyo3::types::PyBool>()
-        || obj.is_exact_instance_of::<pyo3::types::PyInt>();
-    if !everyday && obj.get_type().name().is_ok_and(|name| name == "ndarray") {
+    if obj.get_type().name().is_ok_and(|name| name == "ndarray") {
         return Ok(Scalar::Object(fp_types::ObjectValue::Host(
             fp_types::HostValue::new(PyHost(obj.clone().unbind())),
         )));
@@ -13356,6 +13367,33 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Positions {
             }
         })
     }
+}
+
+/// The values of a native one-dimensional int64 or float64 numpy array as
+/// the cells their numpy scalars read as (Int64 / Float64), read through
+/// its buffer; None for any other object, or a float array holding a NaN
+/// (whose scalar reads as missing; br-frankenpandas-9hcoo).
+fn ndarray_number_needles(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec<Scalar>>> {
+    if let Some(buffer) = native_int64_buffer(obj)? {
+        return Ok(Some(
+            buffer.to_vec(py)?.into_iter().map(Scalar::Int64).collect(),
+        ));
+    }
+    if !obj.get_type().name().is_ok_and(|name| name == "ndarray") {
+        return Ok(None);
+    }
+    let dtype = obj.getattr("dtype")?;
+    if !(dtype.getattr("isnative")?.extract::<bool>()?
+        && obj.getattr("ndim")?.extract::<usize>()? == 1
+        && dtype.getattr("name")?.extract::<String>()? == "float64")
+    {
+        return Ok(None);
+    }
+    let values = pyo3::buffer::PyBuffer::<f64>::get(obj)?.to_vec(py)?;
+    if values.iter().any(|value| value.is_nan()) {
+        return Ok(None);
+    }
+    Ok(Some(values.into_iter().map(Scalar::Float64).collect()))
 }
 
 /// The buffer of a native one-dimensional int64 numpy array, for reading
@@ -38826,21 +38864,28 @@ impl PySeries {
             None => None,
         };
         let searched = sorted.as_ref().unwrap_or(&self.inner);
-        let position = |item: &Bound<'_, PyAny>| -> PyResult<usize> {
-            searched
-                .searchsorted(&py_to_scalar(py, item)?, side)
-                .map_err(frame_error_to_py)
-        };
+        // Every needle searched at once - a native int64 / float64 array's
+        // read in place - each one was a search of its own (50k needles in
+        // 300k values 15.8 s, pandas 6 ms; br-frankenpandas-9hcoo).
         if !value.is_instance_of::<pyo3::types::PyString>()
             && let Ok(items) = value.try_iter()
         {
-            let positions = items
-                .map(|item| position(&item?))
-                .collect::<PyResult<Vec<_>>>()?;
+            let needles = match ndarray_number_needles(py, value)? {
+                Some(needles) => needles,
+                None => items
+                    .map(|item| py_to_scalar(py, &item?))
+                    .collect::<PyResult<Vec<_>>>()?,
+            };
+            let positions = searched
+                .searchsorted_values(&needles, side)
+                .map_err(frame_error_to_py)?;
             return IndexerArray::from(positions).into_py_any(py);
         }
+        let position = searched
+            .searchsorted(&py_to_scalar(py, value)?, side)
+            .map_err(frame_error_to_py)?;
         // One position is a numpy int64, as pandas' (a Python int).
-        NumpyInt64::from(position(value)?).into_py_any(py)
+        NumpyInt64::from(position).into_py_any(py)
     }
 
     /// pandas' `memory_usage(index=True, deep=False)`; deep=True counts an
@@ -66213,6 +66258,26 @@ impl PySeriesDatetimeAccessor {
             }
             None => self.series.clone(),
         };
+        // Instants held as nanoseconds, none NaT: each period's ordinal
+        // straight into a period column - a Period Scalar was made a row
+        // (dt.to_period('M') of 300k 11.3 ms, pandas 5.9;
+        // br-frankenpandas-4g57c).
+        if let Some(nanos) = wall.column().as_datetime64_slice()
+            && !nanos.contains(&i64::MIN)
+        {
+            let ordinals = nanos
+                .iter()
+                .map(|&nanos| {
+                    fp_index::datetime_nanos_to_period(nanos, period_freq)
+                        .map(|period| period.ordinal)
+                })
+                .collect::<Result<Vec<i64>, _>>()
+                .map_err(index_error_to_py)?;
+            let column = Column::from_period_values_owned(ordinals, period_freq);
+            return Series::new(self.series.name(), self.series.index().clone(), column)
+                .map(|inner| PySeries { inner })
+                .map_err(frame_error_to_py);
+        }
         let values = wall
             .column()
             .values()
@@ -75287,11 +75352,21 @@ impl PyGroupBy {
     /// column (br-frankenpandas-n57tz: it came back named "size" with an
     /// unnamed index whatever as_index said).
     fn size(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let counts = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .size()
-            .map_err(frame_error_to_py)?;
+        // Several keys are counted under their MultiIndex, whose levels
+        // reset_index makes the key columns (as_index=False counted under
+        // flat 'g|i' labels: an 'index' column; br-frankenpandas-cfoxn).
+        let counts = if self.as_index || self.by.len() < 2 {
+            self.grouped()
+        } else {
+            let by_refs: Vec<&str> = self.by.iter().map(String::as_str).collect();
+            self.df
+                .groupby_full_options(&by_refs, true, self.sort, self.dropna)
+                .and_then(|grouped| grouped.with_key_names(self.key_names.clone()))
+                .map(|grouped| grouped.sharing(&self.layout))
+        }
+        .map_err(frame_error_to_py)?
+        .size()
+        .map_err(frame_error_to_py)?;
         let key = match self.key_names.as_slice() {
             [key] => key.clone(),
             _ => counts.index().name().cloned(),
@@ -77468,8 +77543,15 @@ impl PySeriesGroupBy {
                 Some(groups) => {
                     let mut positions: Vec<usize> = (0..s.len()).collect();
                     positions.sort_by(|&a, &b| groups.labels()[a].cmp(&groups.labels()[b]));
-                    let positions: Vec<i64> = positions.into_iter().map(|p| p as i64).collect();
-                    s.take(&positions).map_err(frame_error_to_py)?
+                    // Already in group order (fp-frame emits the groups
+                    // sorted): no take, which copied every row and label
+                    // (br-frankenpandas-rc14i).
+                    if positions.iter().enumerate().all(|(at, &p)| at == p) {
+                        s
+                    } else {
+                        let positions: Vec<i64> = positions.into_iter().map(|p| p as i64).collect();
+                        s.take(&positions).map_err(frame_error_to_py)?
+                    }
                 }
                 None => s.sort_index(true).map_err(frame_error_to_py)?,
             },
@@ -77799,19 +77881,23 @@ impl PySeriesGroupBy {
         let res = rezoned(res, self.series.column().timezone())?;
         // A category key's groups are a CategoricalIndex (cld41).
         let res = with_group_categories(res, self.by.column())?;
-        Python::attach(|py| {
-            if self.as_index {
-                return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        Python::attach(|py| self.keyed(py, res))
+    }
+
+    /// A per-group answer under the keys (as_index=True) or as pandas'
+    /// frame of the key columns beside it (as_index=False).
+    fn keyed(&self, py: Python<'_>, res: Series) -> PyResult<Py<PyAny>> {
+        if self.as_index {
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        match res.reset_index(false).map_err(frame_error_to_py)? {
+            fp_frame::SeriesResetIndexResult::DataFrame(df) => {
+                Ok(Py::new(py, PyDataFrame { inner: df })?.into_any())
             }
-            match res.reset_index(false).map_err(frame_error_to_py)? {
-                fp_frame::SeriesResetIndexResult::DataFrame(df) => {
-                    Ok(Py::new(py, PyDataFrame { inner: df })?.into_any())
-                }
-                fp_frame::SeriesResetIndexResult::Series(s) => {
-                    Ok(Py::new(py, PySeries { inner: s })?.into_any())
-                }
+            fp_frame::SeriesResetIndexResult::Series(s) => {
+                Ok(Py::new(py, PySeries { inner: s })?.into_any())
             }
-        })
+        }
     }
 
     /// The aggregations `agg` runs by name; None for any other name (which
@@ -79081,24 +79167,30 @@ impl PySeriesGroupBy {
         })
     }
 
+    /// pandas' `idxmax(axis=0, skipna=True)` of each group; with
+    /// as_index=False a frame of the keys and the positions (it was the
+    /// keyed Series whatever as_index said; br-frankenpandas-cfoxn).
     #[pyo3(signature = (axis=0, skipna=true))]
     fn idxmax(
         &self,
         py: Python<'_>,
         axis: Option<usize>,
         skipna: Option<bool>,
-    ) -> PyResult<PySeries> {
-        self.idx_extremes(py, "idxmax", axis, skipna)
+    ) -> PyResult<Py<PyAny>> {
+        let res = self.idx_extremes(py, "idxmax", axis, skipna)?;
+        self.keyed(py, res.inner)
     }
 
+    /// pandas' `idxmin(axis=0, skipna=True)` (see [`Self::idxmax`]).
     #[pyo3(signature = (axis=0, skipna=true))]
     fn idxmin(
         &self,
         py: Python<'_>,
         axis: Option<usize>,
         skipna: Option<bool>,
-    ) -> PyResult<PySeries> {
-        self.idx_extremes(py, "idxmin", axis, skipna)
+    ) -> PyResult<Py<PyAny>> {
+        let res = self.idx_extremes(py, "idxmin", axis, skipna)?;
+        self.keyed(py, res.inner)
     }
 
     #[getter]
@@ -86873,6 +86965,27 @@ fn notnull(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     notna(py, obj)
 }
 
+/// fp-frame's to_timedelta error as pandas raises it: an int past the
+/// nanosecond range is OutOfBoundsTimedelta - a list's worded as pandas'
+/// object path words it ("Cannot cast 1000000000000 from D to 'ns' without
+/// overflow."); any other error as frame errors are (br-frankenpandas-4g57c).
+fn to_timedelta_error(error: FrameError, unit: Option<&str>, list: bool) -> PyErr {
+    if let FrameError::CompatibilityRejected(message) = &error
+        && let Some(rest) = message.strip_prefix("Cannot convert ")
+        && message.ends_with(" to timedelta64[ns] without overflow")
+    {
+        if list {
+            let value = rest.split(' ').next().unwrap_or_default();
+            return OutOfBoundsTimedelta::new_err(format!(
+                "Cannot cast {value} from {} to 'ns' without overflow.",
+                unit.unwrap_or("ns")
+            ));
+        }
+        return OutOfBoundsTimedelta::new_err(message.clone());
+    }
+    frame_error_to_py(error)
+}
+
 /// Convert argument to timedelta (pandas `to_timedelta`).
 #[pyfunction]
 #[pyo3(signature = (arg, unit=None, errors="raise"))]
@@ -86898,7 +87011,8 @@ fn to_timedelta(
     };
 
     if let Ok(s) = arg.extract::<PyRef<'_, PySeries>>() {
-        let res = fp_frame::to_timedelta_with_options(&s.inner, opts).map_err(frame_error_to_py)?;
+        let res = fp_frame::to_timedelta_with_options(&s.inner, opts)
+            .map_err(|error| to_timedelta_error(error, unit, false))?;
         return Ok(Py::new(py, PySeries { inner: res })?.into_any());
     }
     if let Ok(tdi) = arg.extract::<PyRef<'_, PyTimedeltaIndex>>() {
@@ -86956,8 +87070,8 @@ fn to_timedelta(
             values,
         )
         .map_err(frame_error_to_py)?;
-        let res =
-            fp_frame::to_timedelta_with_options(&temp_series, opts).map_err(frame_error_to_py)?;
+        let res = fp_frame::to_timedelta_with_options(&temp_series, opts)
+            .map_err(|error| to_timedelta_error(error, unit, true))?;
         let nanos: Vec<i64> = res
             .values()
             .iter()
@@ -86982,6 +87096,40 @@ fn to_timedelta(
         return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
             "arg must be a string, timedelta, list, tuple, 1-d array, or Series",
         ));
+    }
+    // A native int64 array's values read in place, the Int64 cells its
+    // tolist() reads as: a Python int a value was made and read back
+    // (to_timedelta of 300k ints with unit='s' 28 ms, pandas 12.5;
+    // br-frankenpandas-4g57c).
+    if ndarray && let Some(buffer) = native_int64_buffer(arg)? {
+        let values = buffer.to_vec(py)?;
+        let rows = i64::try_from(values.len()).unwrap_or(i64::MAX);
+        let temp_series = Series::new(
+            "",
+            Index::from_range(0, rows, 1),
+            Column::from_i64_values(values),
+        )
+        .map_err(frame_error_to_py)?;
+        let res = fp_frame::to_timedelta_with_options(&temp_series, opts)
+            .map_err(|error| to_timedelta_error(error, unit, false))?;
+        let nanos: Vec<i64> = match res.column().as_timedelta64_slice() {
+            Some(nanos) => nanos.to_vec(),
+            None => res
+                .values()
+                .iter()
+                .map(|s| match s {
+                    Scalar::Timedelta64(ns) => *ns,
+                    _ => 0,
+                })
+                .collect(),
+        };
+        return Ok(Py::new(
+            py,
+            PyTimedeltaIndex {
+                inner: TimedeltaIndex::new(nanos),
+            },
+        )?
+        .into_any());
     }
     if ndarray || arg.is_instance_of::<PyTuple>() {
         let items = if ndarray {
@@ -95905,6 +96053,22 @@ impl PyDateOffset {
             && self.absolute.iter().all(Option::is_none)
     }
 
+    /// The nanoseconds this offset moves every instant by, applied `times`
+    /// times, when it moves each by the same amount - no anchor, absolute
+    /// field, month, year or normalize; None otherwise
+    /// (br-frankenpandas-4g57c).
+    fn constant_shift(&self, py: Python<'_>, times: i64) -> PyResult<Option<i64>> {
+        if self.anchor.is_some()
+            || self.normalize
+            || self.years != 0
+            || self.months != 0
+            || self.absolute.iter().any(Option::is_some)
+        {
+            return Ok(None);
+        }
+        self.apply(py, 0, times).map(Some)
+    }
+
     /// `nanos` with this offset applied `times` times (1 adds, -1
     /// subtracts); NaT stays NaT.
     fn apply(&self, py: Python<'_>, nanos: i64, times: i64) -> PyResult<i64> {
@@ -96334,12 +96498,47 @@ fn series_apply_offset(
         return Series::new(series.name(), series.index().clone(), column)
             .map_err(frame_error_to_py);
     }
+    // A tz-aware column moves its wall clock and is localized back, as
+    // pandas' DateOffset applies to an aware array (it raised TypeError;
+    // br-frankenpandas-4g57c).
+    if matches!(series.column().dtype(), DType::Datetime64 { .. })
+        && let Some(zone) = series.column().timezone().map(str::to_owned)
+    {
+        let wall = series.dt().tz_localize(None).map_err(frame_error_to_py)?;
+        let moved = series_apply_offset(py, &wall, offset, times)?;
+        return moved
+            .dt()
+            .tz_localize(Some(&zone))
+            .map_err(frame_error_to_py);
+    }
     if !matches!(series.column().dtype(), DType::Datetime64 { tz: None }) {
         return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
             "cannot add {} to a Series of dtype {}",
             offset.__repr__(),
             column_pandas_dtype_name(series.column())
         )));
+    }
+    // The instants moved off their buffer, NaT kept, into a datetime column:
+    // a Scalar was made each way a row (s + DateOffset(months=1) of 300k
+    // 16.3 ms, pandas 7.7; br-frankenpandas-4g57c).
+    if let Some(nanos) = series.column().as_datetime64_slice() {
+        // A shift the same for every instant (days, hours, ...) is one add
+        // a row, as pandas adds a fixed DateOffset (s + DateOffset(days=3)
+        // 3.0 ms, pandas 0.22).
+        let shift = offset.constant_shift(py, times)?;
+        let moved = nanos
+            .iter()
+            .map(|&nanos| match shift {
+                _ if nanos == Timestamp::NAT => Ok(nanos),
+                Some(shift) => nanos.checked_add(shift).ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyOverflowError, _>("offset overflow")
+                }),
+                None => offset.apply(py, nanos, times),
+            })
+            .collect::<PyResult<Vec<i64>>>()?;
+        let column = Column::from_temporal_nanos(DType::datetime64_naive(), moved);
+        return Series::new(series.name(), series.index().clone(), column)
+            .map_err(frame_error_to_py);
     }
     let values = series
         .values()

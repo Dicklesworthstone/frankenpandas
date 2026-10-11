@@ -890,6 +890,13 @@ const INDEX_LABEL_EQUALITY_CACHE_MAX: usize = 4096;
 /// change under one), as `INDEX_LABEL_EQUALITY_CACHE` keeps equality.
 static INDEX_LABEL_KINDS_CACHE: OnceLock<Mutex<FxHashMap<u64, LabelKinds>>> = OnceLock::new();
 
+/// A DatetimeIndex's inferred freq per label identity and zone (the wall
+/// clocks it reads), as pandas keeps it on the index: a read inferred it
+/// again each time (2.8 ms of a million, pandas 0.00; br-frankenpandas-6pqf3). A key holds
+/// a short text, so the cap is the label kinds'.
+type InferredFreqCache = FxHashMap<(u64, Option<String>), Option<String>>;
+static INDEX_INFERRED_FREQ_CACHE: OnceLock<Mutex<InferredFreqCache>> = OnceLock::new();
+
 const INDEX_LABEL_KINDS_CACHE_MAX: usize = 4096;
 
 /// The kinds of label an index holds ([`Index::label_kinds`]): which
@@ -11786,6 +11793,29 @@ impl DatetimeIndex {
     /// (it was always None).
     #[must_use]
     pub fn inferred_freq(&self) -> Option<String> {
+        let key = (
+            self.index.label_identity,
+            self.index.tz().map(str::to_owned),
+        );
+        let cache = INDEX_INFERRED_FREQ_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
+        if let Some(known) = cache
+            .lock()
+            .expect("index inferred freq cache poisoned")
+            .get(&key)
+        {
+            return known.clone();
+        }
+        let freq = self.infer_freq_of_labels();
+        let mut guard = cache.lock().expect("index inferred freq cache poisoned");
+        if guard.len() >= INDEX_LABEL_KINDS_CACHE_MAX {
+            guard.clear();
+        }
+        guard.insert(key, freq.clone());
+        freq
+    }
+
+    /// [`Self::inferred_freq`] worked out (br-frankenpandas-6pqf3).
+    fn infer_freq_of_labels(&self) -> Option<String> {
         // Off the held instants: every label was made, twice (8 ms a read
         // of a million; br-frankenpandas-6pqf3).
         if let Some(wall) = self.wall_nanos() {
@@ -27558,6 +27588,20 @@ mod tests {
             .map(|nanos| nanos.unwrap_or(i64::MIN))
             .collect();
         assert_eq!(DatetimeIndex::new(gappy).inferred_freq(), None);
+        // The inferred freq is kept per label identity AND zone: month-start
+        // instants read naive are 'MS'; the same labels shown in US/Eastern
+        // (one identity) are the evenings before, no month start - a cache
+        // keyed by identity alone would answer 'MS' twice.
+        let month_starts = DatetimeIndex::new(
+            [19_723_i64, 19_754, 19_783, 19_814]
+                .iter()
+                .map(|&day| day * 24 * HOUR)
+                .collect(),
+        );
+        assert_eq!(month_starts.inferred_freq(), Some("MS".to_owned()));
+        assert_eq!(month_starts.inferred_freq(), Some("MS".to_owned()));
+        let eastern = month_starts.with_tz(Some("US/Eastern")).unwrap();
+        assert_ne!(eastern.inferred_freq(), Some("MS".to_owned()));
     }
 
     #[test]
