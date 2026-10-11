@@ -2414,6 +2414,12 @@ impl fmt::Debug for IndexLabels {
 
 impl PartialEq for IndexLabels {
     fn eq(&self, other: &Self) -> bool {
+        // Labels of two lengths differ, with no label made (reindex asked
+        // whether its 20k-row target equals the 10k-row index and made the
+        // labels of both; br-frankenpandas-7krba).
+        if self.len() != other.len() {
+            return false;
+        }
         // Two typed DatetimeIndex backings are equal as their instants
         // (a Datetime64 label is equal by its nanoseconds, NaT's too).
         if let (Some(left), Some(right)) = (self.datetime64_nanos(), other.datetime64_nanos()) {
@@ -2423,7 +2429,11 @@ impl PartialEq for IndexLabels {
             (Some(left), Some(right)) => left == right,
             (Some(range), None) => range.equals_slice(other.as_slice()),
             (None, Some(range)) => range.equals_slice(self.as_slice()),
-            (None, None) => self.as_slice() == other.as_slice(),
+            // Two int backings are equal as their ints (7krba).
+            (None, None) => match (self.int64_view(), other.int64_view()) {
+                (Some(left), Some(right)) => left == right,
+                _ => self.as_slice() == other.as_slice(),
+            },
         }
     }
 }
@@ -5245,7 +5255,17 @@ impl Index {
             return false;
         }
         if self.labels.len() <= 1 {
-            return true;
+            // A lone NaN or NaT is not monotonic in pandas; a lone None is.
+            // Held labels only: a typed backing's NaN / NaT answered above,
+            // and its lone label is not made for this.
+            return !self
+                .labels
+                .held()
+                .and_then(<[IndexLabel]>::first)
+                .is_some_and(|label| {
+                    label.is_missing()
+                        && !matches!(label, IndexLabel::Null(fp_types::NullKind::Null))
+                });
         }
         // Affine Int64 backings (RangeIndex / unit / affine) are monotonic by
         // construction: ascending iff the step is non-negative. O(1), no
@@ -5269,6 +5289,14 @@ impl Index {
         // Ord, so this is bit-identical to the fallback.
         if let Some(values) = self.labels.int64_view() {
             return values.windows(2).all(|pair| pair[0] <= pair[1]);
+        }
+        // A NaN, NaT or None beside another label orders against none:
+        // pandas' is_monotonic is False with one (the label order put a
+        // missing label last - Index([1.0, 2.0, nan]) read ascending, and a
+        // reindex(method=) over it filled where pandas raises;
+        // br-frankenpandas-7krba).
+        if self.labels.iter().any(IndexLabel::is_missing) {
+            return false;
         }
         for pair in self.labels.windows(2) {
             if pair[0] > pair[1] {
@@ -5307,7 +5335,17 @@ impl Index {
             return false;
         }
         if self.labels.len() <= 1 {
-            return true;
+            // A lone NaN or NaT is not monotonic in pandas; a lone None is.
+            // Held labels only: a typed backing's NaN / NaT answered above,
+            // and its lone label is not made for this.
+            return !self
+                .labels
+                .held()
+                .and_then(<[IndexLabel]>::first)
+                .is_some_and(|label| {
+                    label.is_missing()
+                        && !matches!(label, IndexLabel::Null(fp_types::NullKind::Null))
+                });
         }
         // Affine Int64 backings are monotonic by construction: descending iff the
         // step is non-positive. O(1), no IndexLabel materialization
@@ -5324,6 +5362,14 @@ impl Index {
         // bit-identical to the IndexLabel fallback for all-Int64 backings.
         if let Some(values) = self.labels.int64_view() {
             return values.windows(2).all(|pair| pair[0] >= pair[1]);
+        }
+        // A NaN, NaT or None beside another label orders against none:
+        // pandas' is_monotonic is False with one (the label order put a
+        // missing label last - Index([1.0, 2.0, nan]) read ascending, and a
+        // reindex(method=) over it filled where pandas raises;
+        // br-frankenpandas-7krba).
+        if self.labels.iter().any(IndexLabel::is_missing) {
+            return false;
         }
         for pair in self.labels.windows(2) {
             if pair[0] < pair[1] {
@@ -28055,6 +28101,26 @@ mod tests {
         )
         .unwrap();
         assert!(empty.identity_codes().is_none());
+    }
+
+    /// Index equality reads two typed int backings as their ints and two
+    /// lengths as unequal without a label made, answering as the label
+    /// compare does (br-frankenpandas-7krba). NEGATIVE: one int differing, a
+    /// shorter index, a range beside its typed copy, labels made beside a
+    /// typed backing.
+    #[test]
+    fn typed_int_index_equality_is_the_label_compare_7krba() {
+        let typed = Index::from_i64_values(vec![3, 1, 4, 1, 5]);
+        let made = Index::new([3, 1, 4, 1, 5].map(IndexLabel::Int64).to_vec());
+        assert_eq!(typed, made);
+        assert_eq!(made, typed);
+        assert_eq!(typed, Index::from_i64_values(vec![3, 1, 4, 1, 5]));
+        assert_ne!(typed, Index::from_i64_values(vec![3, 1, 4, 1, 6]));
+        assert_ne!(typed, Index::from_i64_values(vec![3, 1, 4, 1]));
+        assert_ne!(Index::from_i64_values(vec![3, 1, 4, 1]), made);
+        let counted = Index::from_i64_values((0..6).collect());
+        assert_eq!(counted, Index::from_range(0, 6, 1));
+        assert_ne!(counted, Index::from_range(0, 7, 1));
     }
 
     #[test]

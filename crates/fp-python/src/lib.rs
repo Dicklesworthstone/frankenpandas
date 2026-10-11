@@ -7460,7 +7460,20 @@ fn numpy_temporal_nanos(obj: &Bound<'_, PyAny>, ns_dtype: &str) -> PyResult<Opti
 
 /// Convert a Python value to a FrankenPandas Scalar.
 #[allow(clippy::only_used_in_recursion)]
-fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
+/// pandas' NaT, known by its class (pandas not imported): it reads as this
+/// crate's NaT. A datetime subclass, it was read as the year-1 instant and
+/// raised OutOfBoundsDatetime (`Index([pd.NaT, ts])`; br-frankenpandas-v6p80).
+fn is_pandas_nat(obj: &Bound<'_, PyAny>) -> bool {
+    let kind = obj.get_type();
+    kind.name().is_ok_and(|name| name == "NaTType")
+        && kind.module().is_ok_and(|module| {
+            module
+                .to_str()
+                .is_ok_and(|module| module.starts_with("pandas"))
+        })
+}
+
+fn py_to_scalar(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     // The everyday cells by exact type first, as the checks below read them:
     // a float or a str reached its extraction through a dozen failed ones,
     // raising and formatting a TypeError on the way (a million floats from a
@@ -7501,7 +7514,7 @@ fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     if obj.is_instance_of::<PyNAType>() {
         return Ok(Scalar::Null(fp_types::NullKind::Null));
     }
-    if obj.is_instance_of::<PyNaTType>() {
+    if obj.is_instance_of::<PyNaTType>() || is_pandas_nat(obj) {
         return Ok(Scalar::Null(fp_types::NullKind::NaT));
     }
     if let Ok(ts) = obj.extract::<PyRef<'_, PyTimestamp>>() {
@@ -7567,7 +7580,7 @@ fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     if let Ok(item_fn) = obj.getattr("item")
         && let Ok(val) = item_fn.call0()
     {
-        return py_to_scalar(py, &val);
+        return py_to_scalar(val.py(), &val);
     }
     Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
         "Cannot convert {} to Scalar",
@@ -10656,12 +10669,321 @@ fn py_index_arg_name(obj: &Bound<'_, PyAny>) -> Option<LabelName> {
     }
 }
 
+/// pandas' own objects - a DataFrame, Series, Index or Categorical - as this
+/// crate's, built through its constructors, so a constructor or a column
+/// setter reads one as it reads its own: a column by its dtype (a numpy one
+/// through the ndarray path, a categorical from its codes and categories, a
+/// zoned datetime in its zone, a period / interval one as such, a nullable
+/// one as its values under its dtype), the index and column labels (a
+/// MultiIndex, a RangeIndex, a freq) and the names kept. A DataFrame was
+/// 'data format not recognized', a Series lost its index and a Categorical
+/// became object (br-frankenpandas-v6p80). None for anything else. pandas
+/// is never imported: its classes are known by name ([`pandas_class`]) and
+/// its objects read through their own methods.
+fn pandas_object_as_fp<'py>(data: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let py = data.py();
+    Ok(
+        match pandas_class(data, &["DataFrame", "Series", "Index", "Categorical"])? {
+            Some("DataFrame") => Some(pandas_frame_as_fp(data)?),
+            Some("Series") => {
+                let (values, dtype) = pandas_values_as_fp(data)?;
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("index", pandas_index_as_fp(&data.getattr("index")?)?)?;
+                kwargs.set_item("name", data.getattr("name")?)?;
+                if let Some(dtype) = dtype {
+                    kwargs.set_item("dtype", dtype)?;
+                }
+                Some(py.get_type::<PySeries>().call((values,), Some(&kwargs))?)
+            }
+            Some("Index") => Some(pandas_index_as_fp(data)?),
+            Some(_) => Some(pandas_categorical_as_fp(data)?),
+            None => None,
+        },
+    )
+}
+
+/// The first of `names` that `obj` is an instance of: a class of a
+/// `pandas.` module of that name on its type's MRO. pandas' objects are
+/// known without pandas imported (the binding imports no incumbent).
+fn pandas_class<'a>(obj: &Bound<'_, PyAny>, names: &[&'a str]) -> PyResult<Option<&'a str>> {
+    for class in obj.get_type().mro().iter() {
+        let class = class.cast_into::<pyo3::types::PyType>()?;
+        if !class.module()?.to_str()?.starts_with("pandas.") {
+            continue;
+        }
+        let name = class.name()?;
+        let name = name.to_str()?;
+        if let Some(&found) = names.iter().find(|&&wanted| wanted == name) {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
+/// A dict holding pandas objects among its values as one holding this
+/// crate's ([`pandas_object_as_fp`]), its order kept; None for any other
+/// data, or a dict holding none.
+fn pandas_dict_values_as_fp<'py>(data: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let Ok(dict) = data.cast::<PyDict>() else {
+        return Ok(None);
+    };
+    let mut converted: Option<Bound<'py, PyDict>> = None;
+    for (key, value) in dict.iter() {
+        if let Some(value) = pandas_object_as_fp(&value)? {
+            let out = match &converted {
+                Some(out) => out.clone(),
+                None => dict.copy()?,
+            };
+            out.set_item(key, value)?;
+            converted = Some(out);
+        }
+    }
+    Ok(converted.map(Bound::into_any))
+}
+
+/// A pandas DataFrame as this crate's: each column by position (labels may
+/// repeat) read as [`pandas_values_as_fp`] reads it, then its index and
+/// column labels set.
+fn pandas_frame_as_fp<'py>(frame: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = frame.py();
+    let index = pandas_index_as_fp(&frame.getattr("index")?)?;
+    let columns = pandas_index_as_fp(&frame.getattr("columns")?)?;
+    let width: usize = frame.getattr("shape")?.get_item(1)?.extract()?;
+    if width == 0 {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("index", &index)?;
+        kwargs.set_item("columns", &columns)?;
+        return py.get_type::<PyDataFrame>().call((), Some(&kwargs));
+    }
+    let by_position = PyDict::new(py);
+    let iloc = frame.getattr("iloc")?;
+    for position in 0..width {
+        let column = iloc.get_item((pyo3::types::PySlice::full(py), position))?;
+        let (values, dtype) = pandas_values_as_fp(&column)?;
+        let kwargs = PyDict::new(py);
+        if let Some(dtype) = dtype {
+            kwargs.set_item("dtype", dtype)?;
+        }
+        by_position.set_item(
+            position,
+            py.get_type::<PySeries>().call((values,), Some(&kwargs))?,
+        )?;
+    }
+    let built = py.get_type::<PyDataFrame>().call1((by_position,))?;
+    built.setattr("index", index)?;
+    built.setattr("columns", columns)?;
+    Ok(built)
+}
+
+/// A pandas Series' values as this crate's constructors read them, and the
+/// dtype to read them under: a numpy array as it is; a categorical, zoned,
+/// period or interval column as this crate's Categorical or Index of them;
+/// any other extension dtype (Int64, boolean, string, Float64) its values
+/// as objects, a missing one None, under the dtype's name.
+fn pandas_values_as_fp<'py>(
+    series: &Bound<'py, PyAny>,
+) -> PyResult<(Bound<'py, PyAny>, Option<Bound<'py, PyAny>>)> {
+    let py = series.py();
+    let dtype = series.getattr("dtype")?;
+    if dtype.is_instance(&py.import("numpy")?.getattr("dtype")?)? {
+        return Ok((series.call_method0("to_numpy")?, None));
+    }
+    let array = series.getattr("array")?;
+    match pandas_class(
+        &dtype,
+        &[
+            "CategoricalDtype",
+            "DatetimeTZDtype",
+            "PeriodDtype",
+            "IntervalDtype",
+        ],
+    )? {
+        Some("CategoricalDtype") => return Ok((pandas_categorical_as_fp(&array)?, None)),
+        Some(kind) => {
+            return Ok((
+                pandas_dated_as_fp(&array, kind, &py.None().into_bound(py))?,
+                None,
+            ));
+        }
+        None => {}
+    }
+    let objects = series
+        .call_method1("astype", ("object",))?
+        .call_method1("where", (series.call_method0("notna")?, py.None()))?;
+    Ok((
+        objects.call_method0("tolist")?,
+        Some(dtype.str()?.into_any()),
+    ))
+}
+
+/// pandas' instants, periods or intervals - an Index or an array of them,
+/// `kind` naming which (DatetimeIndex / DatetimeTZDtype, PeriodIndex /
+/// PeriodDtype, IntervalIndex / IntervalDtype) - as this crate's Index of
+/// them named `name`: the instants from their UTC values, put in their zone
+/// and given their freq there (a daily freq does not hold in UTC across a
+/// DST change); the periods from their text (NaT None) under their freq;
+/// the intervals from their ends and closed side.
+fn pandas_dated_as_fp<'py>(
+    values: &Bound<'py, PyAny>,
+    kind: &str,
+    name: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = values.py();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("name", name)?;
+    if kind.starts_with("Datetime") {
+        let zone = values.getattr("tz")?;
+        kwargs.set_item("freq", values.getattr("freqstr")?)?;
+        if zone.is_none() {
+            return py
+                .get_type::<PyDatetimeIndex>()
+                .call((values.call_method0("to_numpy")?,), Some(&kwargs));
+        }
+        let utc = values
+            .call_method1("tz_convert", ("UTC",))?
+            .call_method1("tz_localize", (py.None(),))?;
+        let zoned = py
+            .get_type::<PyDatetimeIndex>()
+            .call1((utc.call_method0("to_numpy")?,))?
+            .call_method1("tz_localize", ("UTC",))?
+            .call_method1("tz_convert", (zone,))?;
+        return py
+            .get_type::<PyDatetimeIndex>()
+            .call((zoned,), Some(&kwargs));
+    }
+    if kind.starts_with("Period") {
+        let texts = values
+            .call_method1("astype", ("str",))?
+            .call_method0("tolist")?;
+        let missing: Vec<bool> = values
+            .call_method0("isna")?
+            .call_method0("tolist")?
+            .extract()?;
+        let periods = texts
+            .try_iter()?
+            .zip(missing)
+            .map(|(text, missing)| {
+                if missing {
+                    Ok(py.None().into_bound(py))
+                } else {
+                    text
+                }
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        kwargs.set_item("freq", values.getattr("freqstr")?)?;
+        return py
+            .get_type::<PyPeriodIndex>()
+            .call((PyList::new(py, periods)?,), Some(&kwargs));
+    }
+    kwargs.set_item("closed", values.getattr("closed")?)?;
+    py.get_type::<PyIntervalIndex>().call_method(
+        "from_arrays",
+        (
+            values.getattr("left")?.call_method0("to_numpy")?,
+            values.getattr("right")?.call_method0("to_numpy")?,
+        ),
+        Some(&kwargs),
+    )
+}
+
+/// A pandas Index as this crate's: a MultiIndex from its levels' values
+/// and names, a RangeIndex from its range, a CategoricalIndex from its
+/// Categorical, a datetime / period / interval one as
+/// [`pandas_dated_as_fp`] reads it, a numpy-typed one from its array and
+/// any other as its values under its dtype - the name kept.
+fn pandas_index_as_fp<'py>(index: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = index.py();
+    let name = index.getattr("name")?;
+    let kwargs = PyDict::new(py);
+    match pandas_class(
+        index,
+        &[
+            "MultiIndex",
+            "RangeIndex",
+            "CategoricalIndex",
+            "DatetimeIndex",
+            "PeriodIndex",
+            "IntervalIndex",
+        ],
+    )? {
+        Some("MultiIndex") => {
+            let levels: usize = index.getattr("nlevels")?.extract()?;
+            let arrays = (0..levels)
+                .map(|level| pandas_index_as_fp(&index.call_method1("get_level_values", (level,))?))
+                .collect::<PyResult<Vec<_>>>()?;
+            let names = index.getattr("names")?;
+            kwargs.set_item(
+                "names",
+                PyList::new(py, names.try_iter()?.collect::<PyResult<Vec<_>>>()?)?,
+            )?;
+            return py.get_type::<PyMultiIndex>().call_method(
+                "from_arrays",
+                (PyList::new(py, arrays)?,),
+                Some(&kwargs),
+            );
+        }
+        Some("RangeIndex") => {
+            kwargs.set_item("name", &name)?;
+            return py.get_type::<PyRangeIndex>().call(
+                (
+                    index.getattr("start")?,
+                    index.getattr("stop")?,
+                    index.getattr("step")?,
+                ),
+                Some(&kwargs),
+            );
+        }
+        Some("CategoricalIndex") => {
+            kwargs.set_item("name", &name)?;
+            return py.get_type::<PyCategoricalIndex>().call(
+                (pandas_categorical_as_fp(&index.getattr("array")?)?,),
+                Some(&kwargs),
+            );
+        }
+        Some(kind) => return pandas_dated_as_fp(index, kind, &name),
+        None => {}
+    }
+    kwargs.set_item("name", &name)?;
+    let dtype = index.getattr("dtype")?;
+    if dtype.is_instance(&py.import("numpy")?.getattr("dtype")?)? {
+        return py
+            .get_type::<PyIndex>()
+            .call((index.call_method0("to_numpy")?,), Some(&kwargs));
+    }
+    let objects = index
+        .call_method1("astype", ("object",))?
+        .call_method1("where", (index.call_method0("notna")?, py.None()))?;
+    kwargs.set_item("dtype", dtype.str()?)?;
+    py.get_type::<PyIndex>()
+        .call((objects.call_method0("tolist")?,), Some(&kwargs))
+}
+
+/// A pandas Categorical as this crate's: its codes over its categories,
+/// ordered as it is.
+fn pandas_categorical_as_fp<'py>(categorical: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = categorical.py();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item(
+        "categories",
+        pandas_index_as_fp(&categorical.getattr("categories")?)?,
+    )?;
+    kwargs.set_item("ordered", categorical.getattr("ordered")?)?;
+    py.get_type::<PyCategorical>().call_method(
+        "from_codes",
+        (categorical.getattr("codes")?,),
+        Some(&kwargs),
+    )
+}
+
 /// Convert an arbitrary Python value (Series, list, tuple, or scalar) into a Column.
 fn py_value_to_column(
     py: Python<'_>,
     val: &Bound<'_, PyAny>,
     expected_len: usize,
 ) -> PyResult<Column> {
+    if let Some(converted) = pandas_object_as_fp(val)? {
+        return py_value_to_column(py, &converted, expected_len);
+    }
     if let Ok(s) = val.extract::<PyRef<'_, PySeries>>() {
         if s.inner.len() != expected_len {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
@@ -10960,6 +11282,103 @@ fn index_fill_label(index: &Index, value: Option<&Bound<'_, PyAny>>) -> PyResult
 }
 
 /// Convert a Python value to an IndexLabel.
+/// pandas' own naive Timestamp or Timedelta as the label it names, to the
+/// nanosecond (pandas not imported): a datetime / timedelta subclass, it
+/// was read to the microsecond (`Index([pd.Timestamp('...123456789')])`;
+/// br-frankenpandas-v6p80). None for anything else, or one `value` cannot
+/// give (past the nanosecond range), which the datetime path reads.
+fn pandas_temporal_label(obj: &Bound<'_, PyAny>) -> PyResult<Option<IndexLabel>> {
+    let kind = obj.get_type();
+    if !kind.module()?.to_str()?.starts_with("pandas") {
+        return Ok(None);
+    }
+    let name = kind.name()?;
+    let nanos = || {
+        obj.getattr("value")
+            .and_then(|value| value.extract::<i64>())
+            .ok()
+    };
+    Ok(match name.to_str()? {
+        "Timestamp" if obj.getattr("tz")?.is_none() => nanos().map(IndexLabel::Datetime64),
+        "Timedelta" => nanos().map(IndexLabel::Timedelta64),
+        _ => None,
+    })
+}
+
+/// A `str.translate` table applied in Rust: what `str.maketrans` makes - an
+/// exact dict of int code points to a code point, text or None (delete) -
+/// as an array over ASCII and a map for the rest. Any other table (a
+/// sequence, a mapping class, a float or bool key, a target that is no
+/// char: past the range or a surrogate) is None, Python's to apply - and to
+/// raise for (br-frankenpandas-8skmg).
+struct NativeTranslation {
+    ascii: Vec<Option<Option<String>>>,
+    rest: FxHashMap<char, Option<String>>,
+}
+
+impl NativeTranslation {
+    fn of(table: &Bound<'_, PyAny>) -> PyResult<Option<Self>> {
+        let Ok(dict) = table.cast_exact::<PyDict>() else {
+            return Ok(None);
+        };
+        let mut native = Self {
+            ascii: vec![None; 128],
+            rest: FxHashMap::default(),
+        };
+        for (key, value) in dict.iter() {
+            if !key.is_exact_instance_of::<pyo3::types::PyInt>() {
+                return Ok(None);
+            }
+            let Ok(code) = key.extract::<u32>() else {
+                return Ok(None);
+            };
+            // A key no char of a Rust string has (a surrogate, past the
+            // range) is never looked up.
+            let Some(from) = char::from_u32(code) else {
+                continue;
+            };
+            let to = if value.is_none() {
+                None
+            } else if value.is_exact_instance_of::<pyo3::types::PyInt>() {
+                match value.extract::<u32>().ok().and_then(char::from_u32) {
+                    Some(to) => Some(to.to_string()),
+                    None => return Ok(None),
+                }
+            } else if value.is_exact_instance_of::<pyo3::types::PyString>() {
+                Some(value.extract::<String>()?)
+            } else {
+                return Ok(None);
+            };
+            match usize::try_from(code).ok().filter(|&code| code < 128) {
+                Some(code) => native.ascii[code] = Some(to),
+                None => {
+                    native.rest.insert(from, to);
+                }
+            }
+        }
+        Ok(Some(native))
+    }
+
+    fn apply(&self, text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        for c in text.chars() {
+            let mapped = match usize::try_from(u32::from(c))
+                .ok()
+                .filter(|&code| code < 128)
+            {
+                Some(code) => self.ascii[code].as_ref(),
+                None => self.rest.get(&c),
+            };
+            match mapped {
+                None => out.push(c),
+                Some(None) => {}
+                Some(Some(to)) => out.push_str(to),
+            }
+        }
+        out
+    }
+}
+
 fn py_to_index_label(obj: &Bound<'_, PyAny>) -> PyResult<IndexLabel> {
     if obj.is_none() {
         return Ok(IndexLabel::Null(NullKind::Null));
@@ -10967,7 +11386,7 @@ fn py_to_index_label(obj: &Bound<'_, PyAny>) -> PyResult<IndexLabel> {
     if obj.is_instance_of::<PyNAType>() {
         return Ok(IndexLabel::Null(NullKind::Null));
     }
-    if obj.is_instance_of::<PyNaTType>() {
+    if obj.is_instance_of::<PyNaTType>() || is_pandas_nat(obj) {
         return Ok(IndexLabel::Null(NullKind::NaT));
     }
     if let Ok(ts) = obj.extract::<PyRef<'_, PyTimestamp>>() {
@@ -10975,6 +11394,9 @@ fn py_to_index_label(obj: &Bound<'_, PyAny>) -> PyResult<IndexLabel> {
     }
     if let Ok(td) = obj.extract::<PyRef<'_, PyTimedelta>>() {
         return Ok(IndexLabel::Timedelta64(td.nanos));
+    }
+    if let Some(label) = pandas_temporal_label(obj)? {
+        return Ok(label);
     }
     // A Period is the period label (a PeriodIndex's; 45fzr).
     if let Ok(period) = obj.extract::<PyRef<'_, PyPeriod>>() {
@@ -14238,6 +14660,22 @@ impl PyIndex {
         tupleize_cols: bool,
     ) -> PyResult<Py<PyAny>> {
         let _ = copy; // pandas' copy= does not change the labels
+        // pandas' own objects are read as this crate's; a Categorical is a
+        // CategoricalIndex (br-frankenpandas-v6p80).
+        let pandas_data = data.map(pandas_object_as_fp).transpose()?.flatten();
+        let data = pandas_data.as_ref().or(data);
+        if dtype.is_none_or(|dtype| dtype.is_none())
+            && let Some(categorical) = data.filter(|data| data.is_instance_of::<PyCategorical>())
+        {
+            let kwargs = PyDict::new(py);
+            if let Some(name) = name {
+                kwargs.set_item("name", name)?;
+            }
+            return Ok(py
+                .get_type::<PyCategoricalIndex>()
+                .call((categorical,), Some(&kwargs))?
+                .unbind());
+        }
         // An Index of a datetime / timedelta / period / categorical index is
         // that index - its class, name and freq - renamed by a name given,
         // as pandas' (its labels were read out: the name and freq were lost
@@ -17820,13 +18258,21 @@ impl PyDatetimeIndex {
         Ok(self.get_loc(py, key).is_ok())
     }
 
-    fn get_indexer(&self, target: IndexArg) -> IndexerArray {
-        self.inner
-            .as_index()
-            .get_indexer(&target.inner)
-            .into_iter()
-            .map(|opt| opt.map(|u| u as i64).unwrap_or(-1))
-            .collect()
+    /// pandas' `get_indexer(target, method=None, limit=None, tolerance=None)`
+    /// as `Index.get_indexer` answers it (method= was unexpected;
+    /// br-frankenpandas-7krba).
+    #[pyo3(signature = (target, method=None, limit=None, tolerance=None))]
+    fn get_indexer(
+        &self,
+        target: IndexArg,
+        method: Option<&str>,
+        limit: Option<usize>,
+        tolerance: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<IndexerArray> {
+        PyIndex {
+            inner: self.inner.as_index().clone(),
+        }
+        .get_indexer(target, method, limit, tolerance)
     }
 
     /// pandas' `slice_locs(start, end, step)` (see [`stepped_slice_locs`]).
@@ -21876,13 +22322,21 @@ impl PyTimedeltaIndex {
         Ok(self.get_loc(py, key).is_ok())
     }
 
-    fn get_indexer(&self, target: IndexArg) -> IndexerArray {
-        self.inner
-            .as_index()
-            .get_indexer(&target.inner)
-            .into_iter()
-            .map(|opt| opt.map(|u| u as i64).unwrap_or(-1))
-            .collect()
+    /// pandas' `get_indexer(target, method=None, limit=None, tolerance=None)`
+    /// as `Index.get_indexer` answers it (method= was unexpected;
+    /// br-frankenpandas-7krba).
+    #[pyo3(signature = (target, method=None, limit=None, tolerance=None))]
+    fn get_indexer(
+        &self,
+        target: IndexArg,
+        method: Option<&str>,
+        limit: Option<usize>,
+        tolerance: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<IndexerArray> {
+        PyIndex {
+            inner: self.inner.as_index().clone(),
+        }
+        .get_indexer(target, method, limit, tolerance)
     }
 
     /// pandas' `slice_locs(start, end, step)` (see [`stepped_slice_locs`]).
@@ -33481,6 +33935,7 @@ impl PySeries {
             dropna,
             group_keys,
             unused: Vec::new(),
+            all_categories: false,
             selection: None,
             repeated: None,
             layout: Arc::default(),
@@ -33582,6 +34037,17 @@ impl PySeries {
                     .inner
                     .reindex(labels)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                // The index given names the result's - a list none - as
+                // pandas' ensure_index does (the Series' own name was kept;
+                // br-frankenpandas-v6p80).
+                let reindexed = Series::new(
+                    reindexed.name(),
+                    reindexed
+                        .index()
+                        .rename_index(py_index_arg_name(idx_arg).as_ref()),
+                    reindexed.column().clone(),
+                )
+                .map_err(frame_error_to_py)?;
                 let renamed = reindexed.rename(s_name).map_err(frame_error_to_py)?;
                 return Ok(PySeries { inner: renamed });
             } else {
@@ -33752,6 +34218,11 @@ impl PySeries {
         copy: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let _ = copy; // pandas' copy= does not change the result
+        // pandas' own objects are read as this crate's (br-frankenpandas-v6p80).
+        let pandas_data = data.map(pandas_object_as_fp).transpose()?.flatten();
+        let data = pandas_data.as_ref().or(data);
+        let pandas_index = index.map(pandas_object_as_fp).transpose()?.flatten();
+        let index = pandas_index.as_ref().or(index);
         let name = name
             .filter(|name| !name.is_none())
             .map(py_series_name)
@@ -35609,6 +36080,19 @@ impl PySeries {
             let counts = counted
                 .value_counts_with_options(false, sort, ascending, true)
                 .map_err(frame_error_to_py)?;
+            // ... and under dropna empties them when no value falls in a bin
+            // (each missing or outside them), which leaves such a group out
+            // of a grouped value_counts(bins=) (br-frankenpandas-rc14i).
+            let counts = if dropna
+                && counts
+                    .values()
+                    .iter()
+                    .all(|count| matches!(count, Scalar::Int64(0)))
+            {
+                counts.take(&[]).map_err(frame_error_to_py)?
+            } else {
+                counts
+            };
             if normalize {
                 let total = self.inner.len() as f64;
                 let shares = counts
@@ -38417,6 +38901,9 @@ impl PySeries {
         } else {
             Vec::new()
         };
+        // observed=False over a category key: value_counts answers its every
+        // category (br-frankenpandas-oe9l6).
+        let all_categories = observed != Some(true) && by_series.column().categorical().is_some();
         let (series, by) = if self.inner.index() != by_series.index()
             && !self.inner.index().has_duplicates()
             && !by_series.index().has_duplicates()
@@ -38457,6 +38944,7 @@ impl PySeries {
             as_index: true,
             groups,
             unused,
+            all_categories,
             group_keys,
             layout: Arc::default(),
         }
@@ -40290,12 +40778,10 @@ impl PySeries {
             tolerance,
         )?;
         let reindexed = match method {
-            Some(m) => self.inner.reindex_with_method_options(
-                target.inner.labels().to_vec(),
-                m,
-                limit,
-                tolerance.as_deref(),
-            ),
+            Some(m) => {
+                self.inner
+                    .reindex_index_with_method(&target.inner, m, limit, tolerance.as_deref())
+            }
             // An aware target over naive rows, or the reverse, finds none.
             None if zones_mismatch => self
                 .inner
@@ -47470,6 +47956,20 @@ impl PyDataFrame {
         columns: Option<&Bound<'_, PyAny>>,
         dtype: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
+        // pandas' own objects are read as this crate's, a dict's values too
+        // (br-frankenpandas-v6p80).
+        let pandas_data = match data {
+            Some(data) => match pandas_object_as_fp(data)? {
+                Some(converted) => Some(converted),
+                None => pandas_dict_values_as_fp(data)?,
+            },
+            None => None,
+        };
+        let data = pandas_data.as_ref().or(data);
+        let pandas_index = index.map(pandas_object_as_fp).transpose()?.flatten();
+        let index = pandas_index.as_ref().or(index);
+        let pandas_columns = columns.map(pandas_object_as_fp).transpose()?.flatten();
+        let columns = pandas_columns.as_ref().or(columns);
         let mut frame = (|| -> PyResult<Self> {
             // Each list of a dict refuses a masked integer dtype as the Series
             // constructor does (br-frankenpandas-lqss7).
@@ -47599,6 +48099,11 @@ impl PyDataFrame {
                         res = res.reindex(labels).map_err(|e| {
                             PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
                         })?;
+                        // The index given names the result's - a list none
+                        // - as pandas' ensure_index does
+                        // (br-frankenpandas-v6p80).
+                        let named = res.index().rename_index(py_index_arg_name(idx).as_ref());
+                        res = res.with_index(named).map_err(axis_length_error_to_py)?;
                     }
                     return Ok(PyDataFrame { inner: res });
                 }
@@ -48934,6 +49439,9 @@ impl PyDataFrame {
         key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        // pandas' own objects are read as this crate's (br-frankenpandas-v6p80).
+        let pandas_value = pandas_object_as_fp(value)?;
+        let value = pandas_value.as_ref().unwrap_or(value);
         // `df[3] = values`: a typed label names (or adds) the column keyed
         // by its text, labelled by it (it raised TypeError; fvsao.32). So
         // does a tuple over flat columns - one label, as pandas; it was read
@@ -52493,6 +53001,13 @@ impl PyDataFrame {
             ));
         }
         let unused = check_category_keys(py, &df, &by, observed)?;
+        // observed=False over one category key: value_counts answers its every
+        // category (br-frankenpandas-oe9l6).
+        let all_categories = observed != Some(true)
+            && by.len() == 1
+            && df
+                .column(&by[0])
+                .is_some_and(|column| column.categorical().is_some());
         // Repeated column names each keep their own column (47qjv).
         let (df, repeated) = RepeatedColumns::keyed(df, &by)?;
         let gb = PyGroupBy {
@@ -52504,6 +53019,7 @@ impl PyDataFrame {
             dropna,
             group_keys,
             unused,
+            all_categories,
             selection: None,
             repeated,
             layout: Arc::default(),
@@ -53478,26 +53994,31 @@ impl PyDataFrame {
         }
     }
 
-    /// Assign new columns to a DataFrame, returning a new object (pandas `DataFrame.assign`).
+    /// pandas' `DataFrame.assign(**kwargs)`: a copy with each keyword set in
+    /// order as `frame[key] = value` sets it - a callable called with the
+    /// frame so far - so a Series aligns on the index (it was taken by
+    /// position: a reordered Series landed on the wrong rows and a shorter
+    /// one raised; br-frankenpandas-v6p80).
     #[pyo3(signature = (**kwargs))]
     fn assign(&self, py: Python<'_>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<PyDataFrame> {
-        let mut df = self.inner.clone();
+        let frame = Bound::new(
+            py,
+            PyDataFrame {
+                inner: self.inner.clone(),
+            },
+        )?;
         if let Some(kwargs) = kwargs {
-            for (key, val) in kwargs.iter() {
-                let name = key.extract::<String>()?;
-                let col = if val.is_callable() {
-                    let py_df = Py::new(py, PyDataFrame { inner: df.clone() })?;
-                    let res = val.call1((py_df,))?;
-                    py_value_to_column(py, &res, df.len())?
+            for (key, value) in kwargs.iter() {
+                let value = if value.is_callable() {
+                    value.call1((&frame,))?
                 } else {
-                    py_value_to_column(py, &val, df.len())?
+                    value
                 };
-                df = df
-                    .with_column(name, col)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                frame.as_any().set_item(key, value)?;
             }
         }
-        Ok(PyDataFrame { inner: df })
+        let inner = frame.borrow().inner.clone();
+        Ok(PyDataFrame { inner })
     }
 
     /// Query the columns of a DataFrame with a boolean expression; pandas'
@@ -57294,12 +57815,9 @@ impl PyDataFrame {
                     res
                 };
             res = match (method, &fill) {
-                (Some(m), _) => source.reindex_with_method_options(
-                    target.inner.labels().to_vec(),
-                    m,
-                    limit,
-                    tolerance.as_deref(),
-                ),
+                (Some(m), _) => {
+                    source.reindex_index_with_method(&target.inner, m, limit, tolerance.as_deref())
+                }
                 (None, Some(f)) => source.reindex_fill(target.inner.labels().to_vec(), f.clone()),
                 (None, None) => source.reindex_to_index(&target.inner),
             }
@@ -64829,8 +65347,13 @@ impl PySeriesStringAccessor {
     }
 
     /// pandas' `str.translate(table)`: Python's `str.translate` on each
-    /// string (it raised AttributeError).
+    /// string (it raised AttributeError). A table `str.maketrans` makes is
+    /// applied here ([`NativeTranslation`]; each string went out to Python,
+    /// 0.96x pandas; br-frankenpandas-8skmg), any other is Python's.
     fn translate(&self, py: Python<'_>, table: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        if let Some(native) = NativeTranslation::of(table)? {
+            return self.map_strings(|text| Ok(Scalar::Utf8(native.apply(text))));
+        }
         self.map_strings(|text| {
             let translated =
                 pyo3::types::PyString::new(py, text).call_method1("translate", (table,))?;
@@ -74330,6 +74853,10 @@ pub struct PyGroupBy {
     /// A category key's unused categories under observed=False (pandas'
     /// 2.2 default): the reductions add a row for each (fvsao.39).
     unused: Vec<Scalar>,
+    /// observed=False (pandas' 2.2 default) over one category key:
+    /// value_counts answers every (category, value) pair, zeros too
+    /// (br-frankenpandas-oe9l6).
+    all_categories: bool,
     /// The columns a list selection (`gb[['a', 'b']]`) chose: `apply`
     /// hands `func` those alone, a key column only when chosen (the frame
     /// keeps the keys to group by; they reached `func` with a deprecation
@@ -74519,6 +75046,7 @@ impl PyGroupBy {
             dropna: self.dropna,
             group_keys: self.group_keys,
             unused: self.unused.clone(),
+            all_categories: self.all_categories,
             selection: self.selection.clone(),
             repeated: self.repeated.clone(),
             // Every caller hands over the same rows and key columns.
@@ -75234,6 +75762,7 @@ impl PyGroupBy {
                     as_index: self.as_index,
                     groups: Some(groups),
                     unused: Vec::new(),
+                    all_categories: self.all_categories,
                     group_keys: self.group_keys,
                     layout: Arc::default(),
                 });
@@ -75254,6 +75783,7 @@ impl PyGroupBy {
             as_index: self.as_index,
             groups: None,
             unused: self.unused.clone(),
+            all_categories: self.all_categories,
             group_keys: self.group_keys,
             // The key column is the same for every selection.
             layout: Arc::clone(&self.layout),
@@ -77405,6 +77935,7 @@ impl PyGroupBy {
             dropna: self.dropna && dropna,
             group_keys: self.group_keys,
             unused: Vec::new(),
+            all_categories: false,
             selection: None,
             repeated: self.repeated.clone(),
             layout: Arc::default(),
@@ -77519,6 +78050,10 @@ pub struct PySeriesGroupBy {
     /// A category key's unused categories under observed=False (pandas'
     /// 2.2 default): the reductions add a row for each (fvsao.39).
     unused: Vec<Scalar>,
+    /// observed=False (pandas' 2.2 default) over one category key:
+    /// value_counts answers every (category, value) pair, zeros too
+    /// (br-frankenpandas-oe9l6).
+    all_categories: bool,
     /// pandas' `groupby(group_keys=)`: whether `apply` puts its Series
     /// results under the group keys.
     group_keys: bool,
@@ -77694,7 +78229,12 @@ impl PySeriesGroupBy {
     }
 
     fn per_group(&self, op: &str, s: Series) -> PyResult<Series> {
-        let s = with_unused_categories(op, s, &self.unused)?;
+        // value_counts over every category has their rows already (oe9l6).
+        let s = if op == "value_counts" && self.all_categories {
+            s
+        } else {
+            with_unused_categories(op, s, &self.unused)?
+        };
         let s = match (self.sort, self.by.column().categorical()) {
             (false, _) => s,
             // A category key sorts by its categories' order (cut/qcut bins
@@ -77746,7 +78286,7 @@ impl PySeriesGroupBy {
                 None => s.sort_index(true).map_err(frame_error_to_py)?,
             },
         };
-        let s = self.label_groups(s)?;
+        let s = self.label_groups_ordered(s, !(op == "value_counts" && !self.sort))?;
         // One tz-aware key: the groups are its instants, in its zone (they
         // came back naive UTC, fvsao.60).
         Ok(match (&self.groups, column_zone(self.by.column())) {
@@ -77854,6 +78394,14 @@ impl PySeriesGroupBy {
     /// code; relabel it with those groups' labels and MultiIndex levels. A
     /// single-key result passes through.
     fn label_groups(&self, s: Series) -> PyResult<Series> {
+        self.label_groups_ordered(s, true)
+    }
+
+    /// [`Self::label_groups`]; `regroup` false keeps a (group, row) result's
+    /// rows in the order they come - value_counts under groupby(sort=False),
+    /// which pandas stable-sorts by count over the whole result (its rows
+    /// were put back group by group; br-frankenpandas-oe9l6).
+    fn label_groups_ordered(&self, s: Series, regroup: bool) -> PyResult<Series> {
         let Some(groups) = &self.groups else {
             return Ok(s);
         };
@@ -77862,11 +78410,15 @@ impl PySeriesGroupBy {
         // order; they came in first-seen order) with each group's rows in
         // theirs. It was refused over several keys.
         if let Some(levels) = s.index().row_multiindex() {
-            let codes = levels.get_level_values(0).map_err(index_error_to_py)?;
-            let codes = group_code_positions(groups, codes.labels())?;
-            let mut order: Vec<usize> = (0..codes.len()).collect();
-            order.sort_by_key(|&row| codes[row]);
-            let s = s.take(&iloc_positions(&order)).map_err(frame_error_to_py)?;
+            let s = if regroup {
+                let codes = levels.get_level_values(0).map_err(index_error_to_py)?;
+                let codes = group_code_positions(groups, codes.labels())?;
+                let mut order: Vec<usize> = (0..codes.len()).collect();
+                order.sort_by_key(|&row| codes[row]);
+                s.take(&iloc_positions(&order)).map_err(frame_error_to_py)?
+            } else {
+                s
+            };
             let index = coded_levels_index(groups, s.index())?;
             return Series::new(s.name(), index, s.column().clone()).map_err(frame_error_to_py);
         }
@@ -78559,10 +79111,15 @@ impl PySeriesGroupBy {
             (true, None) => fp_frame::ValueCountsOrder::GroupsSorted,
             (true, Some(_)) => fp_frame::ValueCountsOrder::GroupsFirstSeen,
         };
-        let res = self
-            .grouped()?
-            .value_counts_with_options(normalize, sort, ascending, dropna, emission)
-            .map_err(frame_error_to_py)?;
+        // observed=False over a category key: every category is a group,
+        // every value counted in each (br-frankenpandas-oe9l6).
+        let grouped = self.grouped()?;
+        let res = if self.all_categories {
+            grouped.value_counts_over_categories(normalize, sort, ascending, dropna, emission)
+        } else {
+            grouped.value_counts_with_options(normalize, sort, ascending, dropna, emission)
+        }
+        .map_err(frame_error_to_py)?;
         self.wrap_result("value_counts", res)
     }
 
@@ -86481,27 +87038,40 @@ fn to_datetime(
         return Ok(Py::new(py, converted_datetime_index(&res)?)?.into_any());
     }
     if let Ok(list) = arg.cast::<PyList>() {
-        // A date is its midnight (pandas; a list holding one raised).
-        let values: Vec<Scalar> = list
-            .iter()
-            .map(|v| {
-                if v.cast::<pyo3::types::PyDate>().is_ok() && v.cast::<PyDateTime>().is_err() {
-                    let stamp = py.get_type::<PyTimestamp>().call1((&v,))?;
-                    py_to_scalar(py, &stamp)
-                } else {
-                    py_to_scalar(py, &v)
-                }
-            })
-            .collect::<PyResult<Vec<_>>>()?;
-        warn_order(&values)?;
-        let temp_series = Series::from_values(
-            "",
-            (0..values.len())
-                .map(|i| IndexLabel::Int64(i as i64))
-                .collect(),
-            values,
-        )
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        // A list of str (and None) reads as the Series constructor reads it,
+        // its text held as one column (each became a Scalar and the column
+        // was inferred from them: to_datetime(list, format=) 0.85x pandas;
+        // br-frankenpandas-xqa2l); any other list value by value.
+        let text = !list.is_empty()
+            && list.iter().all(|value| {
+                value.is_exact_instance_of::<pyo3::types::PyString>() || value.is_none()
+            });
+        let temp_series = if text {
+            PySeries::from_data(py, Some(list.as_any()), None, None)?.inner
+        } else {
+            // A date is its midnight (pandas; a list holding one raised).
+            let values: Vec<Scalar> = list
+                .iter()
+                .map(|v| {
+                    if v.cast::<pyo3::types::PyDate>().is_ok() && v.cast::<PyDateTime>().is_err() {
+                        let stamp = py.get_type::<PyTimestamp>().call1((&v,))?;
+                        py_to_scalar(py, &stamp)
+                    } else {
+                        py_to_scalar(py, &v)
+                    }
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            let rows = Index::from_range(0, i64::try_from(values.len()).unwrap_or(i64::MAX), 1);
+            Column::from_values(values)
+                .map_err(FrameError::from)
+                .and_then(|column| Series::new("", rows, column))
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
+        };
+        // Only an unformatted, unit-less read warns, as a column's (the
+        // values were read for it under format= too; xqa2l).
+        if format.is_none() && unit.is_none() {
+            warn_order(temp_series.values())?;
+        }
         // A list is read value by value (an overflowing int names its
         // position; br-frankenpandas-39q44).
         let list_opts = fp_frame::ToDatetimeOptions {
@@ -105498,6 +106068,7 @@ mod tests {
             as_index: true,
             groups: None,
             unused: Vec::new(),
+            all_categories: false,
             group_keys: true,
             layout: Arc::default(),
         };
@@ -105560,6 +106131,7 @@ mod tests {
             dropna: true,
             group_keys: true,
             unused: Vec::new(),
+            all_categories: false,
             selection: None,
             repeated: None,
             layout: Arc::default(),

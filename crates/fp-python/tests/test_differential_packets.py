@@ -7482,8 +7482,9 @@ def test_category_groupby_default_observed_warns_and_unused_combinations_refuse(
         "ngroup": lambda g: g.ngroup(),
         "series describe": lambda g: g["v"].describe(),
         "series ngroup": lambda g: g["v"].ngroup(),
-        "series value_counts": lambda g: g["v"].value_counts(),
     }
+    # value_counts over unused categories answers, as pandas' product of the
+    # groupings (br-frankenpandas-oe9l6; test_value_counts_over_every_category_like_pandas_oe9l6).
     for op, call in unmodelled.items():
         with pytest.raises(NotImplementedError):
             call(frame.groupby("bin", observed=False))
@@ -38165,8 +38166,10 @@ def test_two_key_groupby_past_the_dense_cap_like_pandas_cfoxn(keys: str, op: str
 # values factorized and put in value order once) and answers as pandas: by
 # count, ties in value order, the missing values one value last. NEGATIVE:
 # normalize, sort=False, ascending=True, dropna=False, a float column with
-# NaN (labelled nan, not 'NaN'), two keys; an object column holding 1 and
-# 1.0 is br-frankenpandas-bz15u's (skipped).
+# NaN (labelled nan, not 'NaN'), two keys; a categorical column (c: its
+# categories out of label order, one unused) counts every category in every
+# group, zeros too; an object column holding 1 and 1.0 is
+# br-frankenpandas-bz15u's (skipped).
 def _rc14i_frame(m: Any) -> Any:
     import numpy as np
 
@@ -38177,11 +38180,21 @@ def _rc14i_frame(m: Any) -> Any:
     floats = rng.integers(0, 12, n).astype(float)
     floats[::31] = np.nan
     mixed = np.array([1, 1.0, "a", 2, 2.5] * (n // 5), dtype=object)
-    return m.DataFrame({"g": rng.integers(0, 25, n), "h": rng.integers(0, 3, n), "w": words, "f": floats, "o": mixed})
+    categories = [f"w{v}" for v in range(39, -1, -1)] + ["unused"]
+    return m.DataFrame(
+        {
+            "g": rng.integers(0, 25, n),
+            "h": rng.integers(0, 3, n),
+            "w": words,
+            "f": floats,
+            "o": mixed,
+            "c": m.Categorical(words, categories=categories),
+        }
+    )
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.parametrize("column", ["w", "f", "o"])
+@pytest.mark.parametrize("column", ["w", "f", "o", "c"])
 @pytest.mark.parametrize(
     "options",
     [
@@ -38211,6 +38224,8 @@ def test_groupby_value_counts_like_pandas_rc14i(column: str, options: str) -> No
 
     if column == "o":
         pytest.skip("1, 1.0 and True as one object value is br-frankenpandas-bz15u")
+    if column == "c" and options == "two keys":
+        pytest.skip("every (key, key, category) product with zeros is br-frankenpandas-oe9l6")
 
     def answer(m: Any) -> Any:
         frame = _rc14i_frame(m)
@@ -38230,6 +38245,438 @@ def test_groupby_value_counts_like_pandas_rc14i(column: str, options: str) -> No
         except Exception as error:  # noqa: BLE001 - the raised class is the outcome
             return type(error).__name__
         return out.name, list(out.index.names), [repr(x) for x in out.index], repr(out.tolist())
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-rc14i: value_counts(bins=) of each group. Edges cut every group
+# alike and pandas counts each bin of each group, zeros too, a tie in bin
+# order; a bin count cuts each group's own range (Series.value_counts per
+# group), whose ties numpy's unstable quicksort orders per host - so those
+# rows compare with each tie's run put in label order. NEGATIVE: sort=False
+# keeps bin order, ascending, normalize; a group of missing values only is
+# left out under edges and is pandas' ValueError under a count.
+_RC14I_BINS = {
+    "edges": ({"bins": [0, 3, 7, 10]}, False, True),
+    "edges normalize": ({"bins": [0, 3, 7, 10], "normalize": True}, False, True),
+    "edges ascending": ({"bins": [0, 2.5, 5, 7.5, 10], "ascending": True}, False, False),
+    "count": ({"bins": 4}, True, False),
+    "count sort=False": ({"bins": 4, "sort": False}, False, False),
+    "count normalize": ({"bins": 3, "normalize": True}, True, False),
+    "count, a group of missing values": ({"bins": 4}, False, True),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_RC14I_BINS))
+def test_groupby_value_counts_bins_like_pandas_rc14i(case: str) -> None:
+    import numpy as np
+
+    kwargs, ties_unordered, missing_group = _RC14I_BINS[case]
+    rng = np.random.default_rng(41)
+    n = 2_000
+    values = rng.random(n) * 10
+    values[::37] = np.nan
+    keys = rng.integers(0, 12, n)
+    if missing_group:
+        keys[:5] = 99
+        values[:5] = np.nan
+
+    def answer(m: Any) -> Any:
+        try:
+            out = m.DataFrame({"g": keys, "f": values}).groupby("g")["f"].value_counts(**kwargs)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        rows = [(repr(k[0]), repr(k[1]), repr(v)) for k, v in zip(out.index, out.tolist())]
+        if ties_unordered:
+            runs: list = []
+            for row in rows:
+                if runs and runs[-1][0][0] == row[0] and runs[-1][0][2] == row[2]:
+                    runs[-1].append(row)
+                else:
+                    runs.append([row])
+            rows = [row for run in runs for row in sorted(run)]
+        return out.name, list(out.index.names), rows
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-rc14i: Series.value_counts(bins=) under dropna is empty when no value
+# falls in a bin (all missing, all outside, none at all), which leaves such a
+# group out of a grouped one. NEGATIVE: dropna=False keeps the zero rows; one
+# value in a bin keeps them all.
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("values", ["missing", "outside", "one inside", "none"])
+@pytest.mark.parametrize("options", ["default", "dropna=False", "normalize"])
+def test_series_value_counts_empty_bins_like_pandas_rc14i(values: str, options: str) -> None:
+    import numpy as np
+
+    data = {"missing": [np.nan, np.nan], "outside": [10.0, 11.0], "one inside": [1.0, np.nan], "none": []}[values]
+    kwargs = {"default": {}, "dropna=False": {"dropna": False}, "normalize": {"normalize": True}}[options]
+
+    def answer(m: Any) -> Any:
+        out = m.Series(data, dtype=float).value_counts(bins=[0, 3, 7], **kwargs)
+        return out.name, [(str(k), repr(v)) for k, v in out.items()]
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-v6p80: pandas' own objects into this crate's constructors and column
+# setters - a DataFrame (it was 'data format not recognized'), a Series (its
+# index was dropped), an Index, a Categorical (it became object) - each column
+# by its dtype, the axes and names kept, compared with pandas' constructor fed
+# the same objects. assign sets each keyword as frame[key] = value does (a
+# Series aligns; it was taken by position). NEGATIVE: duplicate labels, no
+# columns, no rows, index= / columns= beside a frame (reindexed / selected), a
+# pandas scalar (not an object to convert), the built frame a copy.
+def _v6p80_frame() -> Any:
+    import numpy as np
+
+    return pd.DataFrame(
+        {
+            "i": np.array([1, 2, 3], dtype=np.int64),
+            "i8": np.array([1, -2, 3], dtype=np.int8),
+            "f": [1.5, np.nan, 3.0],
+            "b": [True, False, True],
+            "o": ["x", None, "z"],
+            "d": pd.to_datetime(["2024-01-01", None, "2024-03-01"]),
+            "z": pd.to_datetime(["2024-01-01 05:00", None, "2024-07-01 05:00"]).tz_localize("Europe/Paris"),
+            "t": pd.to_timedelta([1, None, 3], unit="s"),
+            "c": pd.Categorical(["b", None, "a"], categories=["c", "b", "a"], ordered=True),
+            "n": pd.array([1, None, 3], dtype="Int64"),
+            "nb": pd.array([True, None, False], dtype="boolean"),
+            "s": pd.array(["p", None, "q"], dtype="string"),
+            "p": pd.period_range("2024-01", periods=3, freq="M"),
+            "v": pd.interval_range(0, 3),
+        },
+        index=pd.Index(["r0", "r1", "r2"], name="row"),
+    )
+
+
+def _v6p80_axis(axis: Any) -> Any:
+    return (
+        type(axis).__name__,
+        str(axis.dtype),
+        list(axis.names),
+        [repr(label) for label in axis.tolist()],
+        getattr(axis, "freqstr", None),
+    )
+
+
+def _v6p80_values(column: Any) -> Any:
+    out = [str(column.dtype), [repr(v) for v in column.tolist()]]
+    if str(column.dtype) == "category":
+        out.append(([repr(c) for c in column.cat.categories.tolist()], column.cat.ordered))
+    return out
+
+
+def _v6p80_describe(obj: Any) -> Any:
+    if hasattr(obj, "columns"):
+        columns = [_v6p80_values(obj.iloc[:, i]) for i in range(obj.shape[1])]
+        return "frame", _v6p80_axis(obj.index), _v6p80_axis(obj.columns), columns
+    if hasattr(obj, "index"):
+        return "series", _v6p80_axis(obj.index), repr(obj.name), _v6p80_values(obj)
+    out = ["index", _v6p80_axis(obj)]
+    if str(obj.dtype) == "category":
+        out.append(([repr(c) for c in obj.categories.tolist()], obj.ordered))
+    return out
+
+
+def _v6p80_set(m: Any, key: str, value: Any) -> Any:
+    frame = m.DataFrame({"a": [1, 2, 3]}, index=["r0", "r1", "r2"])
+    frame[key] = value
+    return frame
+
+
+_V6P80_CASES = {
+    "frame": lambda m: m.DataFrame(_v6p80_frame()),
+    "frame index= columns=": lambda m: m.DataFrame(_v6p80_frame(), index=["r2", "r0", "zz"], columns=["i", "c", "z"]),
+    "frame duplicate labels": lambda m: m.DataFrame(pd.DataFrame([[1, 2.5, "x"]], columns=["a", "a", "b"])),
+    "frame MultiIndex axes": lambda m: m.DataFrame(
+        pd.DataFrame(
+            [[1, 2.5], [3, 4.5]],
+            index=pd.MultiIndex.from_tuples([("x", 1), ("y", 2)], names=["k", None]),
+            columns=pd.MultiIndex.from_tuples([("a", "p"), ("b", "q")]),
+        )
+    ),
+    "frame no columns": lambda m: m.DataFrame(pd.DataFrame(index=pd.Index(["a", "b"], name="n"))),
+    "frame no rows": lambda m: m.DataFrame(pd.DataFrame({"a": pd.Series([], dtype="int64"), "b": pd.Series([], dtype="float64")})),
+    "frame RangeIndex step": lambda m: m.DataFrame(pd.DataFrame({"a": [1, 2]}, index=pd.RangeIndex(10, 14, 2, name="r"))),
+    "frame DatetimeIndex freq": lambda m: m.DataFrame(
+        pd.DataFrame({"a": [1, 2, 3]}, index=pd.date_range("2024-01-01", periods=3, freq="D", name="d"))
+    ),
+    "series": lambda m: m.Series(_v6p80_frame()["f"]),
+    "series index=": lambda m: m.Series(_v6p80_frame()["f"], index=["r2", "r0", "zz"]),
+    "series dtype=": lambda m: m.Series(_v6p80_frame()["i"], dtype="float64"),
+    "frame dtype=": lambda m: m.DataFrame(_v6p80_frame()[["i", "f"]], dtype="float64"),
+    "series categorical": lambda m: m.Series(_v6p80_frame()["c"]),
+    "series zoned": lambda m: m.Series(_v6p80_frame()["z"]),
+    "series nullable": lambda m: m.Series(_v6p80_frame()["n"]),
+    "series period": lambda m: m.Series(_v6p80_frame()["p"]),
+    "series interval": lambda m: m.Series(_v6p80_frame()["v"]),
+    "series of a Categorical": lambda m: m.Series(pd.Categorical(["b", None, "a"], categories=["c", "b", "a"], ordered=True)),
+    "dict of a Categorical": lambda m: m.DataFrame({"c": pd.Categorical(["b", None, "a"], categories=["c", "b", "a"])}),
+    "index": lambda m: m.Index(pd.Index([1.5, 2.5], name="f")),
+    "index of a Categorical": lambda m: m.Index(pd.Categorical(["b", "a"], categories=["b", "a", "z"])),
+    "index zoned": lambda m: m.Index(pd.date_range("2024-03-30", periods=3, freq="D", tz="Europe/Paris", name="t")),
+    "index period": lambda m: m.Index(pd.period_range("2024-01", periods=3, freq="M")),
+    "index interval": lambda m: m.Index(pd.interval_range(0, 3, closed="left")),
+    "setitem a Categorical": lambda m: _v6p80_set(m, "c", pd.Categorical(["b", None, "a"])),
+    "setitem a reordered Series": lambda m: _v6p80_set(m, "s", pd.Series([10, 20, 30], index=["r2", "r1", "r0"])),
+    "assign a reordered Series": lambda m: m.DataFrame({"a": [1, 2, 3]}, index=["r0", "r1", "r2"]).assign(
+        s=m.Series([10, 20, 30], index=["r2", "r1", "r0"])
+    ),
+    "assign a shorter Series": lambda m: m.DataFrame({"a": [1, 2, 3]}, index=["r0", "r1", "r2"]).assign(
+        s=m.Series([10, 20], index=["r0", "q"])
+    ),
+    "assign a pandas Series": lambda m: m.DataFrame({"a": [1, 2, 3]}, index=["r0", "r1", "r2"]).assign(
+        s=pd.Series([10, 20, 30], index=["r2", "r1", "r0"])
+    ),
+    "assign callables in order": lambda m: m.DataFrame({"a": [1, 2, 3]}).assign(b=lambda f: f["a"] * 2, c=lambda f: f["b"] + 1),
+    "a pandas scalar (NEGATIVE)": lambda m: m.Series(pd.Timestamp("2024-01-02 10:30:00.123456789"), index=[0, 1]),
+    "pandas NaT among instants": lambda m: m.Series([pd.NaT, pd.Timestamp("2024-01-02 10:30:00.123456789")]),
+    "pandas NaT in an index": lambda m: m.Index([pd.Timestamp("2024-01-02 10:30:00.123456789"), pd.NaT]),
+    "pandas durations in an index": lambda m: m.Index([pd.Timedelta(123456789), pd.Timedelta("1 days 00:00:00.000000001")]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_V6P80_CASES))
+def test_pandas_objects_into_constructors_v6p80(case: str) -> None:
+    def answer(m: Any) -> Any:
+        try:
+            return _v6p80_describe(_V6P80_CASES[case](m))
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+
+    assert answer(fpd) == answer(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_frame_from_pandas_is_a_copy_v6p80() -> None:
+    source = pd.DataFrame({"a": [1, 2, 3], "b": [1.5, 2.5, 3.5]})
+    built = fpd.DataFrame(source)
+    series = fpd.Series(source["b"])
+    source.iloc[0, 0] = 99
+    source.iloc[0, 1] = -1.0
+    assert built["a"].tolist() == [1, 2, 3]
+    assert series.tolist() == [1.5, 2.5, 3.5]
+
+
+# br-frankenpandas-nk9mh: rename_categories and add_categories keep the codes as they are,
+# shared with the source column, and the result reads, counts, compares, casts
+# and re-sets as pandas' does. NEGATIVE: a renamed category clashing with
+# another, a length mismatch, adding a category already present (pandas'
+# ValueErrors), the source unchanged after a rename.
+_NK9MH_CASES = {
+    "rename list": lambda c: c.cat.rename_categories(["x", "y", "z"]),
+    "rename dict": lambda c: c.cat.rename_categories({"a": "A"}),
+    "rename callable": lambda c: c.cat.rename_categories(lambda v: v.upper()),
+    "add": lambda c: c.cat.add_categories(["q", "r"]),
+    "rename then value_counts": lambda c: c.cat.rename_categories(["x", "y", "z"]).value_counts(),
+    "rename then codes": lambda c: c.cat.rename_categories(["x", "y", "z"]).cat.codes,
+    "add then set": lambda c: c.cat.add_categories(["q"]).cat.set_categories(["q", "c", "a"]),
+    "rename then eq": lambda c: c.cat.rename_categories(["x", "y", "z"]) == "y",
+    "rename then astype str": lambda c: c.cat.rename_categories(["x", "y", "z"]).astype(str),
+    "clash (NEGATIVE)": lambda c: c.cat.rename_categories(["x", "x", "z"]),
+    "length (NEGATIVE)": lambda c: c.cat.rename_categories(["x", "y"]),
+    "add present (NEGATIVE)": lambda c: c.cat.add_categories(["a"]),
+    "source unchanged (NEGATIVE)": lambda c: (c.cat.rename_categories(["x", "y", "z"]), c)[1],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_NK9MH_CASES))
+def test_category_edits_keep_codes_like_pandas_nk9mh(case: str) -> None:
+    def answer(m: Any) -> Any:
+        source = m.Series(["b", None, "a", "c", "b"]).astype("category")
+        try:
+            out = _NK9MH_CASES[case](source)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        # A str subclass (numpy's str_, pandas' astype(str) of a missing
+        # cell) reads as its text: the values, not numpy's scalar type.
+        values = [repr(str(v)) if isinstance(v, str) else repr(v) for v in out.tolist()]
+        result = [str(out.dtype), values, [repr(x) for x in out.index]]
+        if str(out.dtype) == "category":
+            result.append(([repr(x) for x in out.cat.categories.tolist()], out.cat.ordered, out.cat.codes.tolist()))
+        return result
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-8skmg: str.translate applies a table str.maketrans makes in Rust, any
+# other through Python's str.translate, as pandas. NEGATIVE: deletion, text
+# targets, non-ASCII sources and targets, an empty table, a key no string
+# holds, missing and non-str cells, a str table (Python's sequence lookup), a
+# target past the code points (Python's ValueError), a float key (Python's
+# lookup finds it by its int's hash).
+_8SKMG_TABLES = {
+    "maketrans": lambda: str.maketrans("ab", "AB"),
+    "delete": lambda: str.maketrans("", "", "aeiou"),
+    "text targets": lambda: {ord("a"): "<a>", ord("b"): ""},
+    "non-ASCII": lambda: {ord("é"): "e", ord("a"): "ä", ord("Ω"): None},
+    "empty": lambda: {},
+    "unheld key": lambda: {ord("#"): "!"},
+    "str table": lambda: "abcdefghijklmnopqrstuvwxyz" * 4,
+    "past the code points (NEGATIVE)": lambda: {ord("a"): 0x110000},
+    "float key (NEGATIVE)": lambda: {97.0: "A"},
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_8SKMG_TABLES))
+def test_str_translate_like_pandas_8skmg(case: str) -> None:
+    data = ["alpha beta", None, "café Ωmega", "", "xyz", 5, "aaa"]
+
+    def answer(m: Any) -> Any:
+        try:
+            out = m.Series(data, dtype=object).str.translate(_8SKMG_TABLES[case]())
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return str(out.dtype), [repr(v) for v in out.tolist()]
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-xqa2l: to_datetime(format=) reads a string in the format's fixed-width
+# layout off its bytes and every other through the regex, both as pandas.
+# NEGATIVE: one-digit fields, a day the month lacks, two spaces, leading and
+# trailing spaces, years past the nanosecond range and year 1, hour 24, a
+# leap second, a missing value - under raise and coerce, a Series and a list.
+_XQA2L_TEMPLATE = {
+    "layout": "2024-01-05 10:30",
+    "one-digit fields": "2024-1-5 9:30",
+    "Feb 29 off a leap year": "2023-02-29 10:00",
+    "two spaces": "2024-01-05  10:30",
+    "leading space": " 2024-01-05 10:30",
+    "trailing space": "2024-01-05 10:30 ",
+    "1677": "1677-06-01 00:00",
+    "2262": "2262-06-01 00:00",
+    "year 1": "0001-01-01 00:00",
+    "hour 24": "2024-12-31 24:00",
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_XQA2L_TEMPLATE))
+@pytest.mark.parametrize("errors", ["raise", "coerce"])
+@pytest.mark.parametrize("container", ["Series", "list"])
+def test_to_datetime_fixed_layout_like_pandas_xqa2l(case: str, errors: str, container: str) -> None:
+    data = ["2024-03-04 05:06", _XQA2L_TEMPLATE[case], None]
+
+    def answer(m: Any) -> Any:
+        values = m.Series(data) if container == "Series" else data
+        try:
+            out = m.to_datetime(values, format="%Y-%m-%d %H:%M", errors=errors)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return str(out.dtype), [repr(v) for v in list(out)]
+
+    assert answer(fpd) == answer(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("text", ["2024-06-30T23:59:59", "2024-06-30T23:59:60", "2024-06-30t10:00:00", "2024-06-30T10:00"])
+def test_to_datetime_fixed_layout_seconds_like_pandas_xqa2l(text: str) -> None:
+    def answer(m: Any) -> Any:
+        try:
+            out = m.to_datetime(m.Series([text]), format="%Y-%m-%dT%H:%M:%S")
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return [repr(v) for v in list(out)]
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-oe9l6: value_counts over a categorical key under observed=False (pandas
+# 2.2's default) counts every (category, value) pair - an unused category's
+# zeros, a pair a group lacks - as pandas' product of the groupings; its
+# sort=False keeps the groups first seen, then the unused categories.
+# NEGATIVE: observed=True keeps the pairs held; a missing key under
+# dropna=False; a cut key; categorical values beside the key.
+def _oe9l6_frame(m: Any) -> Any:
+    import numpy as np
+
+    return m.DataFrame(
+        {
+            "k": m.Categorical(["a", "a", "b", "a", None, "b"], categories=["a", "b", "z"]),
+            "v": [1, 2, 1, 1, 2, 3],
+            "w": ["x", None, "x", "y", "y", "x"],
+            "f": [0.5, np.nan, 0.5, 1.5, 0.5, 1.5],
+            "c": m.Categorical(["p", "q", "p", None, "q", "p"], categories=["q", "p", "r"]),
+        }
+    )
+
+
+_OE9L6_CASES = {
+    "default": ({}, {}, "v"),
+    "observed=False": ({"observed": False}, {}, "v"),
+    "observed=True (NEGATIVE)": ({"observed": True}, {}, "v"),
+    "groupby sort=False": ({"observed": False, "sort": False}, {}, "v"),
+    "values dropna=False": ({"observed": False}, {"dropna": False}, "f"),
+    "normalize": ({"observed": False}, {"normalize": True}, "v"),
+    "ascending": ({"observed": False}, {"ascending": True}, "v"),
+    "value_counts sort=False": ({"observed": False}, {"sort": False}, "v"),
+    "text values": ({"observed": False}, {}, "w"),
+    "categorical values": ({"observed": False}, {}, "c"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_OE9L6_CASES))
+def test_value_counts_over_every_category_like_pandas_oe9l6(case: str) -> None:
+    import warnings
+
+    groupby_kwargs, kwargs, column = _OE9L6_CASES[case]
+
+    def answer(m: Any) -> Any:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                out = _oe9l6_frame(m).groupby("k", **groupby_kwargs)[column].value_counts(**kwargs)
+            except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+                return type(error).__name__
+        return out.name, list(out.index.names), [repr(x) for x in out.index], repr(out.tolist())
+
+    assert answer(fpd) == answer(pd)
+
+
+# A missing key under dropna=False beside every category used (the key held as group codes),
+# both sorts; with an unused category the selection is refused, as before (NEGATIVE).
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("sort", [True, False])
+@pytest.mark.parametrize("categories", [["a", "b"], ["a", "b", "z"]])
+def test_value_counts_missing_key_like_pandas_oe9l6(sort: bool, categories: list) -> None:
+    import warnings
+
+    def answer(m: Any) -> Any:
+        frame = m.DataFrame({"k": m.Categorical(["a", "a", "b", None], categories=categories), "v": [1, 2, 1, 2]})
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                out = frame.groupby("k", observed=False, dropna=False, sort=sort)["v"].value_counts()
+            except NotImplementedError:
+                return "refused"
+        return [repr(x) for x in out.index], repr(out.tolist())
+
+    got = answer(fpd)
+    if got == "refused":
+        assert categories == ["a", "b", "z"]
+        return
+    assert got == answer(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_value_counts_over_cut_bins_like_pandas_oe9l6() -> None:
+    import warnings
+
+    def answer(m: Any) -> Any:
+        frame = _oe9l6_frame(m)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            out = frame.groupby(m.cut(frame["v"], [0, 1, 2, 3, 4]))["w"].value_counts()
+        return [repr(x) for x in out.index], repr(out.tolist())
 
     assert answer(fpd) == answer(pd)
 
@@ -38953,6 +39400,119 @@ def test_reindex_method_like_pandas_7krba(case: str) -> None:
             out = s.reindex(target, **kwargs)
         except Exception as error:  # noqa: BLE001 - the raised class is the outcome
             return type(error).__name__
+        return [repr(x) for x in out.index], [repr(x) for x in out.tolist()]
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-7krba: a NaN or NaT orders against nothing - an index holding one is
+# neither increasing nor decreasing, a lone one too - while a lone None is both
+# and one beside another label neither. NEGATIVE: no labels, one label.
+_7KRBA_MONOTONIC = {
+    "lone NaN": [np.nan],
+    "lone None": [None],
+    "two NaN": [np.nan, np.nan],
+    "NaN last": [1.0, 2.0, np.nan],
+    "NaN first": [np.nan, 1.0, 2.0],
+    "None beside text": ["a", None],
+    "lone NaT": np.array(["NaT"], dtype="datetime64[ns]"),
+    "NaT first": np.array(["NaT", "2024-01-01"], dtype="datetime64[ns]"),
+    "pandas NaT in a list": [pd.NaT, pd.Timestamp("2024-01-01")],
+    "one label (NEGATIVE)": ["a"],
+    "no labels (NEGATIVE)": [],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_7KRBA_MONOTONIC))
+def test_index_monotonic_with_missing_like_pandas_7krba(case: str) -> None:
+    def answer(m: Any) -> Any:
+        index = m.Index(_7KRBA_MONOTONIC[case])
+        return str(index.dtype), index.is_monotonic_increasing, index.is_monotonic_decreasing
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-7krba: an index held as typed ints or instants (an array, a date_range)
+# finds a pad / backfill target's row off its values - a merge for ascending
+# targets, a binary search for shuffled ones. NEGATIVE: a repeated label, a
+# decreasing index, a NaT in the index (pandas' errors / the general path).
+_7KRBA_SHUFFLED = np.random.default_rng(73).permutation(np.arange(-3, 45))
+
+
+def _7krba_typed(m: Any, case: str) -> Any:
+    import numpy as np
+
+    ints = np.arange(0, 40, 4)
+    stamps = m.date_range("2024-01-01", periods=10, freq="4h")
+    hourly = m.date_range("2023-12-31 22:00", periods=50, freq="h")
+    values = [float(10 * (i + 1)) for i in range(10)]
+    if case == "int ffill":
+        return m.Series(values, index=ints).reindex(np.arange(-3, 45), method="ffill")
+    if case == "int bfill":
+        return m.Series(values, index=ints).reindex(np.arange(-3, 45), method="bfill")
+    if case == "int shuffled ffill":
+        return m.Series(values, index=ints).reindex(_7KRBA_SHUFFLED, method="ffill")
+    if case == "int shuffled bfill":
+        return m.Series(values, index=ints).reindex(_7KRBA_SHUFFLED, method="bfill")
+    if case == "datetime ffill":
+        return m.Series(values, index=stamps).reindex(hourly, method="ffill")
+    if case == "datetime bfill":
+        return m.Series(values, index=stamps).reindex(hourly, method="bfill")
+    if case == "frame int ffill":
+        return m.DataFrame({"a": values, "b": list(range(10))}, index=ints).reindex(np.arange(-3, 45), method="ffill")
+    if case == "frame datetime bfill":
+        return m.DataFrame({"a": values}, index=stamps).reindex(hourly, method="bfill")
+    if case == "get_indexer int pad":
+        return m.Index(ints).get_indexer(_7KRBA_SHUFFLED, method="pad").tolist()
+    if case == "get_indexer datetime backfill":
+        return stamps.get_indexer(hourly, method="backfill").tolist()
+    if case == "repeated label (NEGATIVE)":
+        return m.Series([1.0, 2.0, 3.0, 4.0], index=np.array([0, 4, 4, 8])).reindex(np.arange(9), method="ffill")
+    if case == "decreasing (NEGATIVE)":
+        return m.Series(values, index=ints[::-1].copy()).reindex(np.arange(-3, 45), method="ffill")
+    if case == "NaT in the index (NEGATIVE)":
+        index = m.DatetimeIndex(np.array(["NaT", "2024-01-01", "2024-01-03"], dtype="datetime64[ns]"))
+        return m.Series([1.0, 2.0, 3.0], index=index).reindex(hourly, method="ffill")
+    if case == "NaN in the index (NEGATIVE)":
+        return m.Series([1.0, 2.0, 3.0], index=m.Index([1.0, 2.0, np.nan])).reindex([1.5], method="ffill")
+    if case == "get_indexer timedelta pad":
+        durations = m.to_timedelta(np.arange(0, 40, 4), unit="s")
+        return m.TimedeltaIndex(durations).get_indexer(m.to_timedelta(np.arange(-3, 45), unit="s"), method="pad").tolist()
+    raise AssertionError(case)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case",
+    [
+        "int ffill",
+        "int bfill",
+        "int shuffled ffill",
+        "int shuffled bfill",
+        "datetime ffill",
+        "datetime bfill",
+        "frame int ffill",
+        "frame datetime bfill",
+        "get_indexer int pad",
+        "get_indexer datetime backfill",
+        "repeated label (NEGATIVE)",
+        "decreasing (NEGATIVE)",
+        "NaT in the index (NEGATIVE)",
+        "NaN in the index (NEGATIVE)",
+        "get_indexer timedelta pad",
+    ],
+)
+def test_typed_reindex_method_like_pandas_7krba(case: str) -> None:
+    def answer(m: Any) -> Any:
+        try:
+            out = _7krba_typed(m, case)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        if isinstance(out, list):
+            return out
+        if hasattr(out, "columns"):
+            return [repr(x) for x in out.index], [repr(x) for x in out.values.tolist()]
         return [repr(x) for x in out.index], [repr(x) for x in out.tolist()]
 
     assert answer(fpd) == answer(pd)

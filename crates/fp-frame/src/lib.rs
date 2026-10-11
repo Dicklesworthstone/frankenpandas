@@ -4766,6 +4766,9 @@ pub fn get_indexer_with_method(
     limit: Option<usize>,
     tolerance: Option<&[f64]>,
 ) -> Result<Vec<Option<usize>>, FrameError> {
+    if let Some(rows) = typed_method_rows_of_index(source, target, method, limit, tolerance) {
+        return Ok(rows);
+    }
     let positions = source.get_indexer(target);
     method_reindex_positions(
         source.labels(),
@@ -4951,6 +4954,130 @@ fn nearest_reindex_positions(
     Ok(out)
 }
 
+/// The direction of a pad / backfill reindex a typed fill answers (none
+/// for 'nearest', a limit or a tolerance: the general path's).
+fn typed_fill_direction(
+    method: &str,
+    limit: Option<usize>,
+    tolerance: Option<&[f64]>,
+) -> Option<bool> {
+    if limit.is_some() || tolerance.is_some() {
+        return None;
+    }
+    match method {
+        "ffill" | "pad" => Some(true),
+        "bfill" | "backfill" => Some(false),
+        _ => None,
+    }
+}
+
+/// The rows of a pad / backfill reindex of int or datetime labels over a
+/// source holding the same kind strictly increasing (so unique and
+/// monotonic) as typed values, read off the values: each target label's
+/// own row, else pad's last row below it / backfill's first above it, none
+/// past the ends - one merge when the targets ascend, else a binary search
+/// each, with no label compared and no hash (s.reindex(np.arange(20_000),
+/// method='ffill') over 10k int labels was 0.38x pandas;
+/// br-frankenpandas-7krba). None where the general path decides (another
+/// kind, a NaT, a source not strictly increasing, a limit or tolerance).
+fn typed_method_rows(
+    source: &Index,
+    target: &[IndexLabel],
+    method: &str,
+    limit: Option<usize>,
+    tolerance: Option<&[f64]>,
+) -> Option<Vec<Option<usize>>> {
+    let forward = typed_fill_direction(method, limit, tolerance)?;
+    let ints = source.int64_label_values();
+    let instants = if ints.is_none() {
+        source.datetime64_label_values()
+    } else {
+        None
+    };
+    let values: &[i64] = match (&ints, &instants) {
+        (Some(ints), _) => ints.as_slice(),
+        (None, Some(instants)) => instants.as_ref(),
+        (None, None) => return None,
+    };
+    let int_kind = ints.is_some();
+    let targets: Vec<i64> = target
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Int64(value) if int_kind => Some(*value),
+            IndexLabel::Datetime64(value) if !int_kind && *value != i64::MIN => Some(*value),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    if !int_kind && values.first() == Some(&i64::MIN) {
+        return None;
+    }
+    sorted_fill_rows(values, &targets, forward)
+}
+
+/// [`typed_method_rows`] for a target held as an index: its ints or
+/// instants read as held, no label made.
+fn typed_method_rows_of_index(
+    source: &Index,
+    target: &Index,
+    method: &str,
+    limit: Option<usize>,
+    tolerance: Option<&[f64]>,
+) -> Option<Vec<Option<usize>>> {
+    let forward = typed_fill_direction(method, limit, tolerance)?;
+    if let Some(values) = source.int64_label_values() {
+        let targets = target.int64_label_values()?;
+        return sorted_fill_rows(&values, &targets, forward);
+    }
+    let values = source.datetime64_label_values()?;
+    let targets = target.datetime64_label_values()?;
+    if values.first() == Some(&i64::MIN) || targets.contains(&i64::MIN) {
+        return None;
+    }
+    sorted_fill_rows(&values, &targets, forward)
+}
+
+/// The rows [`typed_method_rows`] answers, over the source's `values` and
+/// the `targets`: None unless the values strictly increase.
+fn sorted_fill_rows(values: &[i64], targets: &[i64], forward: bool) -> Option<Vec<Option<usize>>> {
+    // A fold, not a search: it vectorizes.
+    let increasing = values
+        .windows(2)
+        .fold(true, |increasing, pair| increasing & (pair[0] < pair[1]));
+    if !increasing {
+        return None;
+    }
+    let n = values.len();
+    let place = |at: usize, value: i64| {
+        if at < n && values[at] == value {
+            Some(at)
+        } else if forward {
+            at.checked_sub(1)
+        } else {
+            (at < n).then_some(at)
+        }
+    };
+    let ascending = targets
+        .windows(2)
+        .fold(true, |ascending, pair| ascending & (pair[0] <= pair[1]));
+    Some(if ascending {
+        let mut at = 0;
+        targets
+            .iter()
+            .map(|&value| {
+                while at < n && values[at] < value {
+                    at += 1;
+                }
+                place(at, value)
+            })
+            .collect()
+    } else {
+        targets
+            .iter()
+            .map(|&value| place(values.partition_point(|&have| have < value), value))
+            .collect()
+    })
+}
+
 /// pandas' `get_indexer(target, method='pad'|'backfill')`
 /// (`_get_fill_indexer_searchsorted`) over a monotonic source index: an exact
 /// label keeps its row; any other target label takes the last source label
@@ -4979,6 +5106,14 @@ fn fill_reindex_positions(
     };
     if let (Some(src), Some(target)) = (ints(src), ints(target)) {
         return fill_positions_by_label_order(&src, &target, positions, forward, |_| false);
+    }
+    // A missing label (NaN, NaT) orders against none, so an index holding one
+    // is not monotonic and pandas' fill raises (it ordered NaT first and
+    // filled; br-frankenpandas-7krba).
+    if src.iter().any(IndexLabel::is_missing) {
+        return Err(FrameError::CompatibilityRejected(
+            "index must be monotonic increasing or decreasing".to_owned(),
+        ));
     }
     fill_positions_by_label_order(src, target, positions, forward, IndexLabel::is_missing)
 }
@@ -15813,6 +15948,27 @@ impl Series {
         self.reindex_with_method_options(new_labels, method, None, None)
     }
 
+    /// [`Self::reindex_with_method_options`] onto `target` as it is held: a
+    /// typed int or datetime target over a typed source takes its rows off
+    /// the values and keeps its backing (making and dropping its labels was
+    /// half of reindex(method='ffill'); br-frankenpandas-7krba).
+    pub fn reindex_index_with_method(
+        &self,
+        target: &Index,
+        method: &str,
+        limit: Option<usize>,
+        tolerance: Option<&[f64]>,
+    ) -> Result<Self, FrameError> {
+        if let Some(filled) =
+            typed_method_rows_of_index(&self.index, target, method, limit, tolerance)
+        {
+            let new_index = target.clone().rename_index(self.index.name());
+            let col = reindex_column_with_invented_gaps(&self.column, &filled)?;
+            return Self::new(self.name.clone(), new_index, col);
+        }
+        self.reindex_with_method_options(target.labels().to_vec(), method, limit, tolerance)
+    }
+
     /// [`Self::reindex_with_method`] with pandas' `limit` and `tolerance`
     /// (one per new label, in the labels' units: nanoseconds for datetimes;
     /// see `method_reindex_positions`).
@@ -15823,28 +15979,38 @@ impl Series {
         limit: Option<usize>,
         tolerance: Option<&[f64]>,
     ) -> Result<Self, FrameError> {
-        if self.index.has_duplicates() {
+        // Typed labels over a strictly increasing source (unique: no
+        // duplicate to refuse) take their rows off the values (7krba).
+        let typed = typed_method_rows(&self.index, &new_labels, method, limit, tolerance);
+        if typed.is_none() && self.index.has_duplicates() {
             return Err(FrameError::CompatibilityRejected(
                 "reindex cannot handle duplicate index labels".to_owned(),
             ));
         }
         // Preserve the index name on a flat label list (mirrors `reindex`).
         let new_index = Index::new(new_labels).rename_index(self.index.name());
-        // Resolve each new label to its source position (`None` = absent),
-        // using the same fast/fallback resolvers as `reindex`.
-        let positions: Vec<Option<usize>> =
-            reindex_positions_int64_direct(self.index.labels(), new_index.labels())
-                .unwrap_or_else(|| self.index.get_indexer(&new_index));
-        // Absent labels inherit a present source position by the method;
-        // present labels (incl. source NaNs) keep their own position.
-        let filled = method_reindex_positions(
-            self.index.labels(),
-            new_index.labels(),
-            &positions,
-            method,
-            limit,
-            tolerance,
-        )?;
+        let filled = match typed {
+            Some(filled) => filled,
+            None => {
+                // Resolve each new label to its source position (`None` =
+                // absent), using the same fast/fallback resolvers as
+                // `reindex`.
+                let positions: Vec<Option<usize>> =
+                    reindex_positions_int64_direct(self.index.labels(), new_index.labels())
+                        .unwrap_or_else(|| self.index.get_indexer(&new_index));
+                // Absent labels inherit a present source position by the
+                // method; present labels (incl. source NaNs) keep their own
+                // position.
+                method_reindex_positions(
+                    self.index.labels(),
+                    new_index.labels(),
+                    &positions,
+                    method,
+                    limit,
+                    tolerance,
+                )?
+            }
+        };
         // A label no row fills is a gap pandas invents, as plain `reindex`'s
         // (an int Series became float64 there but stayed int64 holding a
         // missing value here).
@@ -54325,7 +54491,6 @@ impl SeriesGroupBy<'_> {
     /// one NaN value, last; `normalize` divides by the group's total of what
     /// is counted, as `proportion` (br-frankenpandas-n57tz: the keywords
     /// were unexpected).
-    #[allow(clippy::cast_precision_loss)] // counts stay far below 2^53
     ///
     /// `emission` is the order of the (group, value) rows: see
     /// [`ValueCountsOrder`].
@@ -54337,6 +54502,37 @@ impl SeriesGroupBy<'_> {
         dropna: bool,
         emission: ValueCountsOrder,
     ) -> Result<Series, FrameError> {
+        self.counts_of_values(normalize, sort, ascending, dropna, emission, false)
+    }
+
+    /// [`Self::value_counts_with_options`] under pandas' observed=False over
+    /// a categorical key: every group counts every value, zeros too, as
+    /// pandas reindexes the counts to the product of the groupings - and a
+    /// categorical key's every category is a group, an unused one counting
+    /// nothing (a pair a group lacked, and an unused category, were missing;
+    /// br-frankenpandas-oe9l6). A key held as group codes (the binding's
+    /// dropna=False form) takes its observed groups.
+    pub fn value_counts_over_categories(
+        &self,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+        emission: ValueCountsOrder,
+    ) -> Result<Series, FrameError> {
+        self.counts_of_values(normalize, sort, ascending, dropna, emission, true)
+    }
+
+    #[allow(clippy::cast_precision_loss)] // counts stay far below 2^53
+    fn counts_of_values(
+        &self,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+        emission: ValueCountsOrder,
+        over_categories: bool,
+    ) -> Result<Series, FrameError> {
         let (order, order_keys, groups) = self.build_groups();
         let values = self.series.column.values();
 
@@ -54347,41 +54543,77 @@ impl SeriesGroupBy<'_> {
         // among equals, as a sort of its values). A map, a sort of Scalars
         // and a Scalar clone a group's value made groupby(...)[col]
         // .value_counts() of 300k rows 0.31x pandas (br-frankenpandas-rc14i).
+        // A categorical column's codes are its categories' positions (read as
+        // held when it holds them): pandas groups the values with
+        // observed=False, so every group counts every category, zeros too, in
+        // category order (br-frankenpandas-rc14i).
+        let categories = self
+            .series
+            .column
+            .categorical()
+            .map(|meta| meta.categories.as_slice());
+        let missing_label = Scalar::Null(NullKind::NaN);
         let mut code_of: FxHashMap<ScalarKey<'_>, usize> = FxHashMap::default();
         let mut uniques: Vec<&Scalar> = Vec::new();
+        for category in categories.unwrap_or_default() {
+            if let Some(key) = scalar_key_skip_missing(category) {
+                code_of.entry(key).or_insert_with(|| {
+                    uniques.push(category);
+                    uniques.len() - 1
+                });
+            }
+        }
+        let held = self
+            .series
+            .column
+            .categorical_codes()
+            .filter(|_| categories.is_some_and(|categories| categories.len() == uniques.len()));
         // A missing value's code is usize::MAX: half the bytes of an Option
         // a row, which the groups read in their rows' scattered order
         // (br-frankenpandas-rc14i).
-        let codes: Vec<usize> = values
-            .iter()
-            .map(|value| match scalar_key_skip_missing(value) {
-                Some(key) => *code_of.entry(key).or_insert_with(|| {
-                    uniques.push(value);
-                    uniques.len() - 1
-                }),
-                None => usize::MAX,
-            })
-            .collect();
+        let codes: Vec<usize> = match held {
+            Some(held) => held
+                .iter()
+                .map(|&code| usize::try_from(code).unwrap_or(usize::MAX))
+                .collect(),
+            None => values
+                .iter()
+                .map(|value| match scalar_key_skip_missing(value) {
+                    Some(key) => *code_of.entry(key).or_insert_with(|| {
+                        uniques.push(value);
+                        uniques.len() - 1
+                    }),
+                    None => usize::MAX,
+                })
+                .collect(),
+        };
         drop(code_of);
-        let mut by_value: Vec<usize> = (0..uniques.len()).collect();
-        by_value.sort_by(|&left, &right| {
-            compare_scalars_with_na_position(uniques[left], uniques[right], true, false)
-        });
-        let mut class = vec![0_usize; uniques.len()];
-        for (position, &code) in by_value.iter().enumerate() {
-            class[code] = match position.checked_sub(1) {
-                Some(previous) => {
-                    let previous_code = by_value[previous];
-                    let same = compare_scalars_with_na_position(
-                        uniques[previous_code],
-                        uniques[code],
-                        true,
-                        false,
-                    ) == Ordering::Equal;
-                    class[previous_code] + usize::from(!same)
-                }
-                None => 0,
-            };
+        let classes = if categories.is_some() {
+            0
+        } else {
+            uniques.len()
+        };
+        let mut class = vec![0_usize; classes];
+        if categories.is_none() {
+            let mut by_value: Vec<usize> = (0..uniques.len()).collect();
+            by_value.sort_by(|&left, &right| {
+                compare_scalars_with_na_position(uniques[left], uniques[right], true, false)
+            });
+            for (position, &code) in by_value.iter().enumerate() {
+                class[code] = match position.checked_sub(1) {
+                    Some(previous) => {
+                        let previous_code = by_value[previous];
+                        let same = compare_scalars_with_na_position(
+                            uniques[previous_code],
+                            uniques[code],
+                            true,
+                            false,
+                        ) == Ordering::Equal;
+                        class[previous_code] + usize::from(!same)
+                    }
+                    None => 0,
+                };
+            }
         }
         let mut value_texts: Vec<Option<String>> = vec![None; uniques.len()];
         let mut counts = vec![0_i64; uniques.len()];
@@ -54431,76 +54663,207 @@ impl SeriesGroupBy<'_> {
         if emission == ValueCountsOrder::GroupsSorted {
             emit.sort_by(|&left, &right| order[left].cmp(&order[right]));
         }
-        for group_idx in emit {
-            let key = &order_keys[group_idx];
-            // The missing values count as one value (pandas groups None with
-            // NaN), kept as the first one seen.
-            let mut missing: Option<(&Scalar, i64, usize)> = None;
-            touched.clear();
-            for &row_idx in &groups[key] {
-                match codes[row_idx] {
-                    usize::MAX if !dropna => {
-                        missing.get_or_insert((&values[row_idx], 0, row_idx)).1 += 1;
-                    }
-                    usize::MAX => {}
-                    code => {
-                        if counts[code] == 0 {
-                            touched.push(code);
-                            first_row[code] = row_idx;
+        // observed=False over a categorical key: every category is a group,
+        // in pandas' order - its categories' (groupby sort=True; a group no
+        // category names, a missing key, after them), or the groups first
+        // seen and then the unused categories in category order
+        // (sort=False) - an unused one counting nothing
+        // (br-frankenpandas-oe9l6).
+        let key_categories = self
+            .by
+            .column
+            .categorical()
+            .filter(|_| over_categories)
+            .map(|meta| meta.categories.as_slice());
+        let observed_groups = order.len();
+        let mut group_labels = order;
+        let slots: Vec<usize> = match key_categories {
+            None => emit,
+            Some(key_categories) => {
+                let mut group_of: FxHashMap<IndexLabel, usize> = group_labels
+                    .iter()
+                    .cloned()
+                    .enumerate()
+                    .map(|(group, label)| (label, group))
+                    .collect();
+                let mut named = vec![false; observed_groups];
+                let mut in_order = Vec::with_capacity(key_categories.len());
+                for category in key_categories {
+                    let label = Self::group_label(category);
+                    match group_of.remove(&label) {
+                        Some(group) => {
+                            named[group] = true;
+                            in_order.push(group);
                         }
-                        counts[code] += 1;
+                        None => {
+                            group_labels.push(label);
+                            in_order.push(group_labels.len() - 1);
+                        }
                     }
                 }
+                if emission == ValueCountsOrder::PairsFirstSeen {
+                    let mut slots = emit;
+                    slots.extend(in_order.into_iter().filter(|&slot| slot >= observed_groups));
+                    slots
+                } else {
+                    let unnamed = emit.into_iter().filter(|&group| !named[group]);
+                    in_order.into_iter().chain(unnamed).collect()
+                }
             }
-
-            // pandas counts over (group, value) keys sorted by value, the
-            // missing value last, then stable-sorts by count: a tie keeps
-            // value order.
-            touched.sort_by_key(|&code| class[code]);
-            let start = pending.len();
-            pending.extend(touched.iter().map(|&code| ValueCountRow {
-                group: group_idx,
-                value: Ok(code),
-                count: counts[code],
-                total: 0,
-                first_row: first_row[code],
-            }));
-            if let Some((value, count, row)) = missing {
-                pending.push(ValueCountRow {
-                    group: group_idx,
-                    value: Err(value),
-                    count,
+        };
+        if categories.is_some() || over_categories {
+            // The values in pandas' order - the categories in order, then the
+            // missing value (dropna=False, when one is held); under
+            // groupby(sort=False) in the order each is first held, the
+            // unused categories after in category order - and every group
+            // counting each, as pandas reindexes the counts to every (group,
+            // value) pair with zeros (br-frankenpandas-rc14i).
+            let first_missing = codes
+                .iter()
+                .position(|&code| code == usize::MAX)
+                .map(|row| &values[row]);
+            let mut levels: Vec<Option<usize>> = Vec::with_capacity(uniques.len() + 1);
+            if emission == ValueCountsOrder::PairsFirstSeen {
+                let mut held_at = vec![false; uniques.len()];
+                let mut missing_held = false;
+                for &code in &codes {
+                    if code == usize::MAX {
+                        if !dropna && !missing_held {
+                            missing_held = true;
+                            levels.push(None);
+                        }
+                    } else if !held_at[code] {
+                        held_at[code] = true;
+                        levels.push(Some(code));
+                    }
+                }
+                levels.extend((0..uniques.len()).filter(|&code| !held_at[code]).map(Some));
+            } else {
+                let mut ordered: Vec<usize> = (0..uniques.len()).collect();
+                if categories.is_none() {
+                    // A key's product counts its values in value order.
+                    ordered.sort_by_key(|&code| class[code]);
+                }
+                levels.extend(ordered.into_iter().map(Some));
+                if !dropna && first_missing.is_some() {
+                    levels.push(None);
+                }
+            }
+            let missing_value = first_missing.unwrap_or(&missing_label);
+            pending.reserve(slots.len() * levels.len());
+            for slot in slots {
+                let rows: &[usize] = if slot < observed_groups {
+                    &groups[&order_keys[slot]]
+                } else {
+                    &[]
+                };
+                let mut missing = 0_i64;
+                for &row_idx in rows {
+                    match codes[row_idx] {
+                        usize::MAX => missing += 1,
+                        code => counts[code] += 1,
+                    }
+                }
+                let start = pending.len();
+                pending.extend(levels.iter().map(|&level| ValueCountRow {
+                    group: slot,
+                    value: level.ok_or(missing_value),
+                    count: level.map_or(missing, |code| counts[code]),
                     total: 0,
-                    first_row: row,
-                });
+                    first_row: 0,
+                }));
+                let rows = &mut pending[start..];
+                if sort && emission != ValueCountsOrder::PairsFirstSeen {
+                    rows.sort_by(|left, right| by_count(&left.count, &right.count));
+                }
+                let total: i64 = rows.iter().map(|row| row.count).sum();
+                for row in rows.iter_mut() {
+                    row.total = total;
+                }
+                counts.fill(0);
             }
-            let rows = &mut pending[start..];
-            if sort && emission != ValueCountsOrder::PairsFirstSeen {
-                rows.sort_by(|left, right| by_count(&left.count, &right.count));
+            // groupby(sort=False): the pairs stable-sorted by count over the
+            // whole result.
+            if emission == ValueCountsOrder::PairsFirstSeen && sort {
+                let at: Vec<usize> = (0..pending.len()).collect();
+                pending = stable_order_by_count(&at, |at| pending[at].count, ascending)
+                    .into_iter()
+                    .map(|at| pending[at])
+                    .collect();
             }
-            let total: i64 = rows.iter().map(|row| row.count).sum();
-            for row in rows.iter_mut() {
-                row.total = total;
+        } else {
+            for group_idx in slots {
+                let key = &order_keys[group_idx];
+                // The missing values count as one value (pandas groups None with
+                // NaN), kept as the first one seen.
+                let mut missing: Option<(&Scalar, i64, usize)> = None;
+                touched.clear();
+                for &row_idx in &groups[key] {
+                    match codes[row_idx] {
+                        usize::MAX if !dropna => {
+                            missing.get_or_insert((&values[row_idx], 0, row_idx)).1 += 1;
+                        }
+                        usize::MAX => {}
+                        code => {
+                            if counts[code] == 0 {
+                                touched.push(code);
+                                first_row[code] = row_idx;
+                            }
+                            counts[code] += 1;
+                        }
+                    }
+                }
+
+                // pandas counts over (group, value) keys sorted by value, the
+                // missing value last, then stable-sorts by count: a tie keeps
+                // value order.
+                touched.sort_by_key(|&code| class[code]);
+                let start = pending.len();
+                pending.extend(touched.iter().map(|&code| ValueCountRow {
+                    group: group_idx,
+                    value: Ok(code),
+                    count: counts[code],
+                    total: 0,
+                    first_row: first_row[code],
+                }));
+                if let Some((value, count, row)) = missing {
+                    pending.push(ValueCountRow {
+                        group: group_idx,
+                        value: Err(value),
+                        count,
+                        total: 0,
+                        first_row: row,
+                    });
+                }
+                let rows = &mut pending[start..];
+                if sort && emission != ValueCountsOrder::PairsFirstSeen {
+                    rows.sort_by(|left, right| by_count(&left.count, &right.count));
+                }
+                let total: i64 = rows.iter().map(|row| row.count).sum();
+                for row in rows.iter_mut() {
+                    row.total = total;
+                }
+                for &code in &touched {
+                    counts[code] = 0;
+                }
             }
-            for &code in &touched {
-                counts[code] = 0;
+            // pandas' groupby(sort=False) counts its (group, value) pairs in the
+            // order each is first seen, then stable-sorts the whole result by
+            // count (each group's rows were kept together; br-frankenpandas-rc14i).
+            // Both orders are placements, not sorts: a pair's first row is its
+            // own, and a stable counting sort by count is the stable sort.
+            if emission == ValueCountsOrder::PairsFirstSeen {
+                let mut at_row = vec![usize::MAX; values.len()];
+                for (at, row) in pending.iter().enumerate() {
+                    at_row[row.first_row] = at;
+                }
+                let mut order: Vec<usize> =
+                    at_row.into_iter().filter(|&at| at != usize::MAX).collect();
+                if sort {
+                    order = stable_order_by_count(&order, |at| pending[at].count, ascending);
+                }
+                pending = order.into_iter().map(|at| pending[at]).collect();
             }
-        }
-        // pandas' groupby(sort=False) counts its (group, value) pairs in the
-        // order each is first seen, then stable-sorts the whole result by
-        // count (each group's rows were kept together; br-frankenpandas-rc14i).
-        // Both orders are placements, not sorts: a pair's first row is its
-        // own, and a stable counting sort by count is the stable sort.
-        if emission == ValueCountsOrder::PairsFirstSeen {
-            let mut at_row = vec![usize::MAX; values.len()];
-            for (at, row) in pending.iter().enumerate() {
-                at_row[row.first_row] = at;
-            }
-            let mut order: Vec<usize> = at_row.into_iter().filter(|&at| at != usize::MAX).collect();
-            if sort {
-                order = stable_order_by_count(&order, |at| pending[at].count, ascending);
-            }
-            pending = order.into_iter().map(|at| pending[at]).collect();
         }
 
         // The rows' flat "group, value" labels written into one buffer
@@ -54513,11 +54876,11 @@ impl SeriesGroupBy<'_> {
         flat_offsets.push(0);
         let mut counted: Vec<i64> = Vec::with_capacity(rows);
         let mut shares: Vec<f64> = Vec::with_capacity(if normalize { rows } else { 0 });
-        let mut group_texts: Vec<Option<String>> = vec![None; order.len()];
-        let mut group_identities: Vec<Option<u32>> = vec![None; order.len()];
+        let mut group_texts: Vec<Option<String>> = vec![None; group_labels.len()];
+        let mut group_identities: Vec<Option<u32>> = vec![None; group_labels.len()];
         for row in pending {
             let (group_idx, count, total) = (row.group, row.count, row.total);
-            let group_label = &order[group_idx];
+            let group_label = &group_labels[group_idx];
             let group_text = group_texts[group_idx].get_or_insert_with(|| group_label.to_string());
             flat_text.push_str(group_text);
             flat_text.push_str(", ");
@@ -54553,7 +54916,13 @@ impl SeriesGroupBy<'_> {
             group_codes
                 .push(*group_identities[group_idx].get_or_insert_with(|| identify(0, group_label)));
             if normalize {
-                shares.push(count as f64 / total as f64);
+                // A group holding none of what is counted shares 0.0
+                // (pandas fills its 0 / 0; br-frankenpandas-rc14i).
+                shares.push(if total == 0 {
+                    0.0
+                } else {
+                    count as f64 / total as f64
+                });
             } else {
                 counted.push(count);
             }
@@ -57190,6 +57559,35 @@ impl CategoricalAccessor<'_> {
         )
     }
 
+    /// The column's codes as they are under `categories` - at least as many
+    /// as now (renamed, added to) - shared, not made again
+    /// ([`Column::with_categories_sharing_codes`]); [`Self::recoded`] when
+    /// the column does not hold them (br-frankenpandas-nk9mh).
+    fn with_kept_codes(
+        &self,
+        categories: Vec<Scalar>,
+        ordered: bool,
+    ) -> Result<Series, FrameError> {
+        let meta = CategoricalMetadata {
+            categories: normalize_categories(categories)?,
+            ordered,
+        };
+        match self
+            .series
+            .column
+            .with_categories_sharing_codes(meta.clone())
+        {
+            Some(column) => Ok(Series {
+                name: self.series.name.clone(),
+                index: self.series.index.clone(),
+                column,
+                categorical: Some(meta),
+                sparse: None,
+            }),
+            None => self.recoded(&self.row_codes(), meta.categories, ordered),
+        }
+    }
+
     /// [`Self::recoded`] of codes already the stored width.
     fn recoded_i32(
         &self,
@@ -57235,7 +57633,7 @@ impl CategoricalAccessor<'_> {
                 self.meta.categories.len()
             )));
         }
-        self.recoded(&self.row_codes(), new_categories, self.meta.ordered)
+        self.with_kept_codes(new_categories, self.meta.ordered)
     }
 
     /// Add new categories.
@@ -57244,7 +57642,7 @@ impl CategoricalAccessor<'_> {
     pub fn add_categories(&self, new_categories: Vec<Scalar>) -> Result<Series, FrameError> {
         let mut cats = self.meta.categories.clone();
         cats.extend(new_categories);
-        self.recoded(&self.row_codes(), cats, self.meta.ordered)
+        self.with_kept_codes(cats, self.meta.ordered)
     }
 
     /// Remove unused categories (categories not referenced by any code).
@@ -70606,6 +71004,17 @@ struct PandasStrptime<'a> {
     /// name directive: the regex's match is then decided piece by piece
     /// ([`PandasStrptime::match_linear`]).
     linear: bool,
+    /// A format of `%Y %m %d %H %M %S`, single spaces and other literal
+    /// bytes as each string's fixed-width layout ([`Self::template_nanos`]).
+    template: Option<Vec<TemplateField>>,
+}
+
+/// One position of a fixed-width strptime layout: a field of that many
+/// digits, or a byte.
+#[derive(Clone, Copy)]
+enum TemplateField {
+    Digits(u8, usize),
+    Byte(u8),
 }
 
 impl<'a> PandasStrptime<'a> {
@@ -70658,12 +71067,88 @@ impl<'a> PandasStrptime<'a> {
             StrptimePiece::Space => true,
             StrptimePiece::Name(..) => false,
         });
+        let template = pieces
+            .iter()
+            .map(|piece| match *piece {
+                StrptimePiece::Number(b'Y', _) => Some(TemplateField::Digits(b'Y', 4)),
+                StrptimePiece::Number(directive @ (b'm' | b'd' | b'H' | b'M' | b'S'), _) => {
+                    Some(TemplateField::Digits(directive, 2))
+                }
+                StrptimePiece::Space => Some(TemplateField::Byte(b' ')),
+                StrptimePiece::Literal(byte) if byte.is_ascii() && !byte.is_ascii_digit() => {
+                    Some(TemplateField::Byte(byte))
+                }
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>();
         (pieces.len() <= STRPTIME_MAX_PIECES).then(|| Self {
             format,
             iso: format_is_iso(format),
             pieces,
             linear,
+            template,
         })
+    }
+
+    /// `text`'s instant in nanoseconds when it is the format's fixed-width
+    /// layout - each field its full width of digits, in pandas' range
+    /// (month 1-12, a day the month has, hour 0-23, minute 0-59, second
+    /// 0-61 carried into the next minute as the regex's leap seconds are),
+    /// each literal its byte, one space a run of whitespace, a year
+    /// 1678-2261 - read off its bytes; None for any other string, which
+    /// [`Self::read`] decides. The regex's first alternative takes a full
+    /// field there, so the read is the same (to_datetime(format=
+    /// '%Y-%m-%d %H:%M') 0.65x pandas; br-frankenpandas-xqa2l).
+    fn template_nanos(&self, text: &str) -> Option<i64> {
+        let template = self.template.as_deref()?;
+        let bytes = text.as_bytes();
+        let mut at = 0;
+        let (mut year, mut month, mut day) = (1900_i64, 1_i64, 1_i64);
+        let (mut hour, mut minute, mut second) = (0_i64, 0_i64, 0_i64);
+        for field in template {
+            match *field {
+                TemplateField::Byte(byte) => {
+                    if bytes.get(at) != Some(&byte) {
+                        return None;
+                    }
+                    at += 1;
+                }
+                TemplateField::Digits(directive, width) => {
+                    let mut value = 0_i64;
+                    for &digit in bytes.get(at..at + width)? {
+                        if !digit.is_ascii_digit() {
+                            return None;
+                        }
+                        value = value * 10 + i64::from(digit - b'0');
+                    }
+                    at += width;
+                    match directive {
+                        b'Y' => year = value,
+                        b'm' => month = value,
+                        b'd' => day = value,
+                        b'H' => hour = value,
+                        b'M' => minute = value,
+                        _ => second = value,
+                    }
+                }
+            }
+        }
+        if at != bytes.len()
+            || !(1678..=2261).contains(&year)
+            || !(1..=12).contains(&month)
+            || hour > 23
+            || minute > 59
+            || second > 61
+        {
+            return None;
+        }
+        let date = NaiveDate::from_ymd_opt(
+            i32::try_from(year).ok()?,
+            u32::try_from(month).ok()?,
+            u32::try_from(day).ok()?,
+        )?;
+        let days = i64::from(date.num_days_from_ce()) - 719_163;
+        Some((((days * 24 + hour) * 60 + minute) * 60 + second) * 1_000_000_000)
     }
 
     /// pandas' complaint about `text` (before ", at position N"), or
@@ -70671,7 +71156,11 @@ impl<'a> PandasStrptime<'a> {
     fn complaint(&self, text: &str) -> Option<String> {
         let format = self.format;
         match self.read(text) {
-            StrptimeRead::Instant(_) => None,
+            // An instant past datetime64[ns] is pandas' OutOfBoundsDatetime,
+            // naming the text (it read as no match; br-frankenpandas-xqa2l).
+            StrptimeRead::Instant(clock) => datetime64_scalar_from_naive_datetime(clock)
+                .is_missing()
+                .then(|| format!("Out of bounds nanosecond timestamp: {text}")),
             StrptimeRead::NoMatch => Some(format!(
                 "time data \"{text}\" doesn't match format \"{format}\""
             )),
@@ -70686,6 +71175,9 @@ impl<'a> PandasStrptime<'a> {
 
     /// `text` as a datetime value: its instant, else NaT.
     fn value(&self, text: &str) -> Scalar {
+        if let Some(nanos) = self.template_nanos(text) {
+            return Scalar::Datetime64(nanos);
+        }
         match self.read(text) {
             StrptimeRead::Instant(clock) => datetime64_scalar_from_naive_datetime(clock),
             _ => Scalar::Null(NullKind::NaT),
@@ -96594,6 +97086,47 @@ impl DataFrame {
         self.reindex_with_method_options(new_labels, method, None, None)
     }
 
+    /// [`Self::reindex_with_method_options`] onto `target` as it is held (see
+    /// [`Series::reindex_index_with_method`]; br-frankenpandas-7krba).
+    pub fn reindex_index_with_method(
+        &self,
+        target: &Index,
+        method: &str,
+        limit: Option<usize>,
+        tolerance: Option<&[f64]>,
+    ) -> Result<Self, FrameError> {
+        let Some(filled) =
+            typed_method_rows_of_index(&self.index, target, method, limit, tolerance)
+        else {
+            return self.reindex_with_method_options(
+                target.labels().to_vec(),
+                method,
+                limit,
+                tolerance,
+            );
+        };
+        let new_index = target.clone().rename_index(self.index.name());
+        let mut result_cols = BTreeMap::new();
+        for name in &self.column_order {
+            let col = reindex_column_with_invented_gaps(&self.columns[name], &filled)?;
+            result_cols.insert(name.clone(), col);
+        }
+        Self::validate_duplicate_label_policy(
+            self.allows_duplicate_labels,
+            &new_index,
+            None,
+            "reindex",
+        )?;
+        Ok(Self {
+            columns: result_cols.into(),
+            column_order: self.column_order.clone(),
+            index: new_index,
+            column_multiindex: self.column_multiindex.clone(),
+            row_multiindex: None,
+            allows_duplicate_labels: self.allows_duplicate_labels,
+        })
+    }
+
     /// [`Self::reindex_with_method`] with pandas' `limit` and `tolerance`
     /// (one per new label; see `method_reindex_positions`).
     pub fn reindex_with_method_options(
@@ -96603,45 +97136,55 @@ impl DataFrame {
         limit: Option<usize>,
         tolerance: Option<&[f64]>,
     ) -> Result<Self, FrameError> {
-        if self.index.has_duplicates() {
+        // Typed labels over a strictly increasing source (unique: no
+        // duplicate to refuse) take their rows off the values (7krba).
+        let typed = typed_method_rows(&self.index, &new_labels, method, limit, tolerance);
+        if typed.is_none() && self.index.has_duplicates() {
             return Err(FrameError::CompatibilityRejected(
                 "reindex cannot handle duplicate index labels".to_owned(),
             ));
         }
         // Preserve the index name on a flat label list (mirrors `reindex`).
         let new_index = Index::new(new_labels).rename_index(self.index.name());
-        // Resolve each new label to its source row position (`None` = absent),
-        // using the same unit-range fast path / fallback resolver as `reindex`.
-        let positions: Vec<Option<usize>> =
-            if let Some((start, len)) = self.index.int64_unit_range_labels() {
-                new_index
-                    .labels()
-                    .iter()
-                    .map(|label| match label {
-                        IndexLabel::Int64(v) => {
-                            let off = v.wrapping_sub(start);
-                            if off >= 0 && (off as u64) < len as u64 {
-                                Some(off as usize)
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
-                    })
-                    .collect()
-            } else {
-                self.index.get_indexer(&new_index)
-            };
-        // Absent labels inherit a present source position by the method;
-        // present labels (incl. source NaNs) keep their own position.
-        let filled = method_reindex_positions(
-            self.index.labels(),
-            new_index.labels(),
-            &positions,
-            method,
-            limit,
-            tolerance,
-        )?;
+        let filled = match typed {
+            Some(filled) => filled,
+            None => {
+                // Resolve each new label to its source row position (`None`
+                // = absent), using the same unit-range fast path / fallback
+                // resolver as `reindex`.
+                let positions: Vec<Option<usize>> =
+                    if let Some((start, len)) = self.index.int64_unit_range_labels() {
+                        new_index
+                            .labels()
+                            .iter()
+                            .map(|label| match label {
+                                IndexLabel::Int64(v) => {
+                                    let off = v.wrapping_sub(start);
+                                    if off >= 0 && (off as u64) < len as u64 {
+                                        Some(off as usize)
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            })
+                            .collect()
+                    } else {
+                        self.index.get_indexer(&new_index)
+                    };
+                // Absent labels inherit a present source position by the
+                // method; present labels (incl. source NaNs) keep their own
+                // position.
+                method_reindex_positions(
+                    self.index.labels(),
+                    new_index.labels(),
+                    &positions,
+                    method,
+                    limit,
+                    tolerance,
+                )?
+            }
+        };
         // Gather each column from the carried positions. Remaining `None` slots
         // (leading gap for ffill / trailing gap for bfill, a limit or a
         // tolerance) are gaps pandas invents, as plain `reindex` and the
@@ -199846,6 +200389,482 @@ mod tests {
         }
     }
 
+    /// value_counts over a categorical key's every category (observed=False):
+    /// every category a group, an unused one counting nothing, and every
+    /// group every value, zeros too - in category order, or the groups first
+    /// seen and then the unused categories (the rows are pandas 2.2.3's;
+    /// br-frankenpandas-oe9l6). NEGATIVE: the observed groups alone without
+    /// it; a key held as codes takes its observed groups.
+    #[test]
+    fn value_counts_over_every_category_oe9l6() -> Result<(), FrameError> {
+        use crate::ValueCountsOrder::{GroupsFirstSeen, GroupsSorted, PairsFirstSeen};
+        let text = |value: &str| Scalar::Utf8(value.into());
+        let keys = Series::from_categorical_codes(
+            "k",
+            vec![0, 0, 1],
+            vec![text("a"), text("b"), text("z")],
+            false,
+        )?;
+        let values = Series::new(
+            "v",
+            keys.index().clone(),
+            Column::from_i64_values(vec![1, 2, 1]),
+        )?;
+        let rows = |counts: &Series| -> Vec<(IndexLabel, IndexLabel, Scalar)> {
+            let levels = counts
+                .index()
+                .row_multiindex()
+                .expect("(key, value) levels");
+            let keys = levels.get_level_values(0).expect("keys").labels().to_vec();
+            let values = levels
+                .get_level_values(1)
+                .expect("values")
+                .labels()
+                .to_vec();
+            keys.into_iter()
+                .zip(values)
+                .zip(counts.values().iter().cloned())
+                .map(|((key, value), count)| (key, value, count))
+                .collect()
+        };
+        let row = |key: &str, value: i64, count: i64| {
+            (
+                IndexLabel::Utf8(key.into()),
+                IndexLabel::Int64(value),
+                Scalar::Int64(count),
+            )
+        };
+        let every = [
+            row("a", 1, 1),
+            row("a", 2, 1),
+            row("b", 1, 1),
+            row("b", 2, 0),
+            row("z", 1, 0),
+            row("z", 2, 0),
+        ];
+        let grouped = values.groupby(&keys)?;
+        for emission in [GroupsFirstSeen, GroupsSorted, PairsFirstSeen] {
+            let counts =
+                grouped.value_counts_over_categories(false, true, false, true, emission)?;
+            assert_eq!(rows(&counts), every, "{emission:?}");
+        }
+        // normalize: an unused category's shares are 0.0.
+        let shares =
+            grouped.value_counts_over_categories(true, true, false, true, GroupsFirstSeen)?;
+        assert_eq!(
+            shares.values(),
+            [
+                Scalar::Float64(0.5),
+                Scalar::Float64(0.5),
+                Scalar::Float64(1.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(0.0)
+            ]
+        );
+        // NEGATIVE: the observed groups alone without it.
+        let observed =
+            grouped.value_counts_with_options(false, true, false, true, GroupsFirstSeen)?;
+        assert_eq!(
+            rows(&observed),
+            [row("a", 1, 1), row("a", 2, 1), row("b", 1, 1)]
+        );
+        // A key held as codes (dropna=False's form): its observed groups,
+        // every value in each; NEGATIVE: without it, the pairs held.
+        let plain_keys = Series::new(
+            "k",
+            keys.index().clone(),
+            Column::from_values(vec![text("a"), text("a"), text("b")])?,
+        )?;
+        let plain = values.groupby(&plain_keys)?;
+        assert_eq!(
+            rows(&plain.value_counts_over_categories(false, true, false, true, GroupsSorted)?),
+            [
+                row("a", 1, 1),
+                row("a", 2, 1),
+                row("b", 1, 1),
+                row("b", 2, 0)
+            ]
+        );
+        assert_eq!(
+            rows(&plain.value_counts_with_options(false, true, false, true, GroupsSorted)?),
+            [row("a", 1, 1), row("a", 2, 1), row("b", 1, 1)]
+        );
+        Ok(())
+    }
+
+    /// rename_categories / add_categories over a column held as codes share
+    /// its codes and answer as the codes made again do: the same values,
+    /// codes and categories (br-frankenpandas-nk9mh). NEGATIVE: a clash
+    /// refused, a length mismatch refused, a column holding its categories'
+    /// values (not codes) recoded as before.
+    #[test]
+    fn category_edits_keep_the_codes_nk9mh() -> Result<(), FrameError> {
+        let text = |value: &str| Scalar::Utf8(value.into());
+        let held = Series::from_categorical_codes(
+            "c",
+            vec![1, -1, 0, 2, 1],
+            vec![text("a"), text("b"), text("c")],
+            false,
+        )?;
+        let renamed = held.cat().expect("categorical").rename_categories(vec![
+            text("x"),
+            text("y"),
+            text("z"),
+        ])?;
+        assert_eq!(
+            renamed.values(),
+            [
+                text("y"),
+                Scalar::Null(NullKind::NaN),
+                text("x"),
+                text("z"),
+                text("y")
+            ]
+        );
+        assert_eq!(
+            renamed.column().categorical_codes(),
+            Some(&[1, -1, 0, 2, 1][..])
+        );
+        let added = held
+            .cat()
+            .expect("categorical")
+            .add_categories(vec![text("q")])?;
+        assert_eq!(added.values(), held.values());
+        assert_eq!(
+            added.column().categorical_codes(),
+            Some(&[1, -1, 0, 2, 1][..])
+        );
+        assert_eq!(
+            added
+                .column()
+                .categorical()
+                .map(|meta| meta.categories.len()),
+            Some(4)
+        );
+        // NEGATIVE: a clash and a length mismatch are refused.
+        assert!(
+            held.cat()
+                .expect("categorical")
+                .rename_categories(vec![text("x"), text("x"), text("z")])
+                .is_err()
+        );
+        assert!(
+            held.cat()
+                .expect("categorical")
+                .rename_categories(vec![text("x")])
+                .is_err()
+        );
+        // NEGATIVE: values held as values recode as before, to the same answer.
+        let meta = crate::CategoricalMetadata::new(vec![text("a"), text("b"), text("c")], false);
+        let materialized = Series::new(
+            "c",
+            held.index().clone(),
+            Column::new(DType::Categorical, held.values().to_vec())?.with_categorical(Some(meta)),
+        )?;
+        let recoded = materialized
+            .cat()
+            .expect("categorical")
+            .rename_categories(vec![text("x"), text("y"), text("z")])?;
+        assert_eq!(recoded.values(), renamed.values());
+        Ok(())
+    }
+
+    /// The typed pad / backfill rows are the general path's (a hash of the
+    /// exact labels, then label compares) over int and datetime labels,
+    /// ascending and shuffled targets, labels before, between, on and past
+    /// the source's (br-frankenpandas-7krba). NEGATIVE: a source with a
+    /// repeat, a decreasing one, a NaT, a limit, a tolerance, 'nearest', a
+    /// label of another kind leave it to the general path (None).
+    #[test]
+    fn typed_method_rows_are_the_label_path_7krba() {
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let values: Vec<i64> = (0..300).map(|i| i * 3 + 5).collect();
+        for instants in [false, true] {
+            let label = |value: i64| {
+                if instants {
+                    IndexLabel::Datetime64(value)
+                } else {
+                    IndexLabel::Int64(value)
+                }
+            };
+            let source = if instants {
+                Index::from_datetime64_values(values.clone())
+            } else {
+                Index::from_i64_values(values.clone())
+            };
+            let ascending: Vec<IndexLabel> = (-4..=910).map(label).collect();
+            let shuffled: Vec<IndexLabel> = (0..2_000)
+                .map(|_| label((next() % 1_000) as i64 - 20))
+                .collect();
+            for targets in [ascending, shuffled] {
+                for method in ["ffill", "pad", "bfill", "backfill"] {
+                    let typed = crate::typed_method_rows(&source, &targets, method, None, None)
+                        .expect("typed labels over a strictly increasing source");
+                    let positions = source.get_indexer(&Index::new(targets.clone()));
+                    let general = crate::method_reindex_positions(
+                        source.labels(),
+                        &targets,
+                        &positions,
+                        method,
+                        None,
+                        None,
+                    )
+                    .expect("the label path");
+                    assert_eq!(typed, general, "{method} instants={instants}");
+                    // A target held as an index answers the same, its
+                    // values read as held.
+                    let raw: Vec<i64> = targets
+                        .iter()
+                        .map(|label| match label {
+                            IndexLabel::Int64(value) | IndexLabel::Datetime64(value) => *value,
+                            other => panic!("{other:?}"),
+                        })
+                        .collect();
+                    let held = if instants {
+                        Index::from_datetime64_values(raw)
+                    } else {
+                        Index::from_i64_values(raw)
+                    };
+                    assert_eq!(
+                        crate::typed_method_rows_of_index(&source, &held, method, None, None),
+                        Some(typed),
+                        "{method} instants={instants}"
+                    );
+                }
+            }
+            // NEGATIVE: what the general path decides.
+            let some = vec![label(7), label(100)];
+            assert!(crate::typed_method_rows(&source, &some, "ffill", Some(1), None).is_none());
+            assert!(
+                crate::typed_method_rows(&source, &some, "ffill", None, Some(&[1.0, 1.0]))
+                    .is_none()
+            );
+            assert!(crate::typed_method_rows(&source, &some, "nearest", None, None).is_none());
+            let other = vec![IndexLabel::Utf8("a".into())];
+            assert!(crate::typed_method_rows(&source, &other, "ffill", None, None).is_none());
+            for bad in [vec![5, 8, 8, 11], vec![11, 8, 5]] {
+                let source = if instants {
+                    Index::from_datetime64_values(bad)
+                } else {
+                    Index::from_i64_values(bad)
+                };
+                assert!(crate::typed_method_rows(&source, &some, "ffill", None, None).is_none());
+            }
+        }
+        let with_nat = Index::from_datetime64_values(vec![i64::MIN, 5, 9]);
+        let at = vec![IndexLabel::Datetime64(7)];
+        assert!(crate::typed_method_rows(&with_nat, &at, "ffill", None, None).is_none());
+        let nat_target = vec![IndexLabel::Datetime64(i64::MIN)];
+        let clean = Index::from_datetime64_values(vec![5, 9]);
+        assert!(crate::typed_method_rows(&clean, &nat_target, "ffill", None, None).is_none());
+        let nat_held = Index::from_datetime64_values(vec![i64::MIN]);
+        assert!(
+            crate::typed_method_rows_of_index(&clean, &nat_held, "ffill", None, None).is_none()
+        );
+        // An int source and a datetime target: the general path's.
+        let ints = Index::from_i64_values(vec![5, 9]);
+        assert!(crate::typed_method_rows_of_index(&ints, &clean, "ffill", None, None).is_none());
+    }
+
+    /// A categorical value column counts every category in every group,
+    /// zeros too: in category order (not the labels'), the missing value
+    /// last under dropna=False, each group by count (stable); under
+    /// groupby(sort=False) the values in the order first held, the unused
+    /// categories after, the whole result by count; a group holding nothing
+    /// counted shares 0.0 (br-frankenpandas-rc14i; the rows are pandas
+    /// 2.2.3's). The codes held as codes and the categories materialized
+    /// answer alike. NEGATIVE: a text column of the same cells lists only
+    /// the values each group holds, ties in label order.
+    #[test]
+    fn categorical_values_count_every_category_rc14i() -> Result<(), FrameError> {
+        use crate::ValueCountsOrder::{GroupsSorted, PairsFirstSeen};
+        let text = |value: &str| Scalar::Utf8(value.into());
+        let check = |counts: &Series, expected: &[(i64, Option<&str>, i64)]| {
+            let levels = counts
+                .index()
+                .row_multiindex()
+                .expect("(key, value) levels");
+            let groups = levels.get_level_values(0).expect("keys").labels().to_vec();
+            let values = levels
+                .get_level_values(1)
+                .expect("values")
+                .labels()
+                .to_vec();
+            let want_groups: Vec<IndexLabel> = expected
+                .iter()
+                .map(|&(group, _, _)| IndexLabel::Int64(group))
+                .collect();
+            assert_eq!(groups, want_groups);
+            assert_eq!(values.len(), expected.len());
+            for (label, &(_, value, _)) in values.iter().zip(expected) {
+                match value {
+                    Some(value) => assert_eq!(*label, IndexLabel::Utf8(value.into())),
+                    None => assert!(matches!(label, IndexLabel::Null(_)), "{label:?}"),
+                }
+            }
+            let want_counts: Vec<Scalar> = expected
+                .iter()
+                .map(|&(_, _, count)| Scalar::Int64(count))
+                .collect();
+            assert_eq!(counts.values(), want_counts);
+        };
+        // g: 2, 2, 2, 1, 1, 1, 2, 3; w: b, a, b, NaN, c, a, c, b over the
+        // categories c, z, b, a (z unused).
+        let categories = vec![text("c"), text("z"), text("b"), text("a")];
+        let codes: Vec<i64> = vec![2, 3, 2, -1, 0, 3, 0, 2];
+        let held = Series::from_categorical_codes("w", codes.clone(), categories.clone(), false)?;
+        let cells: Vec<Scalar> = codes
+            .iter()
+            .map(|&code| {
+                usize::try_from(code)
+                    .map_or(Scalar::Null(NullKind::NaN), |code| categories[code].clone())
+            })
+            .collect();
+        let materialized = Series::new(
+            "w",
+            held.index().clone(),
+            Column::new(DType::Categorical, cells.clone())?.with_categorical(Some(
+                crate::CategoricalMetadata::new(categories.clone(), false),
+            )),
+        )?;
+        let keys = Series::new(
+            "g",
+            held.index().clone(),
+            Column::from_i64_values(vec![2, 2, 2, 1, 1, 1, 2, 3]),
+        )?;
+        for series in [&held, &materialized] {
+            let grouped = series.groupby(&keys)?;
+            check(
+                &grouped.value_counts_with_options(false, true, false, true, GroupsSorted)?,
+                &[
+                    (1, Some("c"), 1),
+                    (1, Some("a"), 1),
+                    (1, Some("z"), 0),
+                    (1, Some("b"), 0),
+                    (2, Some("b"), 2),
+                    (2, Some("c"), 1),
+                    (2, Some("a"), 1),
+                    (2, Some("z"), 0),
+                    (3, Some("b"), 1),
+                    (3, Some("c"), 0),
+                    (3, Some("z"), 0),
+                    (3, Some("a"), 0),
+                ],
+            );
+            check(
+                &grouped.value_counts_with_options(false, true, false, false, GroupsSorted)?,
+                &[
+                    (1, Some("c"), 1),
+                    (1, Some("a"), 1),
+                    (1, None, 1),
+                    (1, Some("z"), 0),
+                    (1, Some("b"), 0),
+                    (2, Some("b"), 2),
+                    (2, Some("c"), 1),
+                    (2, Some("a"), 1),
+                    (2, Some("z"), 0),
+                    (2, None, 0),
+                    (3, Some("b"), 1),
+                    (3, Some("c"), 0),
+                    (3, Some("z"), 0),
+                    (3, Some("a"), 0),
+                    (3, None, 0),
+                ],
+            );
+            check(
+                &grouped.value_counts_with_options(false, true, false, true, PairsFirstSeen)?,
+                &[
+                    (2, Some("b"), 2),
+                    (2, Some("a"), 1),
+                    (2, Some("c"), 1),
+                    (1, Some("a"), 1),
+                    (1, Some("c"), 1),
+                    (3, Some("b"), 1),
+                    (2, Some("z"), 0),
+                    (1, Some("b"), 0),
+                    (1, Some("z"), 0),
+                    (3, Some("a"), 0),
+                    (3, Some("c"), 0),
+                    (3, Some("z"), 0),
+                ],
+            );
+            check(
+                &grouped.value_counts_with_options(false, false, false, true, PairsFirstSeen)?,
+                &[
+                    (2, Some("b"), 2),
+                    (2, Some("a"), 1),
+                    (2, Some("c"), 1),
+                    (2, Some("z"), 0),
+                    (1, Some("b"), 0),
+                    (1, Some("a"), 1),
+                    (1, Some("c"), 1),
+                    (1, Some("z"), 0),
+                    (3, Some("b"), 1),
+                    (3, Some("a"), 0),
+                    (3, Some("c"), 0),
+                    (3, Some("z"), 0),
+                ],
+            );
+        }
+
+        // A group of missing values shares 0.0 of each category.
+        let empty_group = Series::from_categorical_codes(
+            "w",
+            vec![-1, -1, 0],
+            vec![text("x"), text("y")],
+            false,
+        )?;
+        let two = Series::new(
+            "g",
+            empty_group.index().clone(),
+            Column::from_i64_values(vec![1, 1, 2]),
+        )?;
+        let shares = empty_group.groupby(&two)?.value_counts_with_options(
+            true,
+            true,
+            false,
+            true,
+            GroupsSorted,
+        )?;
+        assert_eq!(
+            shares.values(),
+            [
+                Scalar::Float64(0.0),
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(0.0)
+            ]
+        );
+
+        // NEGATIVE: the same cells as text count only what each group holds.
+        let words = Series::new("w", held.index().clone(), Column::from_values(cells)?)?;
+        check(
+            &words.groupby(&keys)?.value_counts_with_options(
+                false,
+                true,
+                false,
+                true,
+                GroupsSorted,
+            )?,
+            &[
+                (1, Some("a"), 1),
+                (1, Some("c"), 1),
+                (2, Some("b"), 2),
+                (2, Some("a"), 1),
+                (2, Some("c"), 1),
+                (3, Some("b"), 1),
+            ],
+        );
+        Ok(())
+    }
+
     #[test]
     fn groupby_missing_value_keywords_n57tz() -> Result<(), FrameError> {
         // x: v = 1, 2, 4, NaN and f = 0, 0, 0, NaN; y: v = 1, 2, 4, f = 0s.
@@ -252882,6 +253901,87 @@ mod pandas_strptime_h9cug {
         // NEGATIVE: a directive the reader does not model is left to chrono.
         for format in ["%Y-%m-%d %z", "%j", "%Y-%U", "%Y-%m-%d %"] {
             assert!(PandasStrptime::new(format).is_none(), "{format}");
+        }
+    }
+
+    /// The fixed-width layout's instants are the regex read's over every
+    /// string it takes, and every string it declines is the regex's to
+    /// decide (br-frankenpandas-xqa2l). NEGATIVE: a one-digit field, month
+    /// 13, day 31 of a 30-day month, Feb 29 off a leap year, a leap second,
+    /// two spaces, a lower-case 't', trailing text, a year before 1678, a
+    /// format with %f / %p / %y (no template).
+    #[test]
+    fn template_layout_is_the_regex_read_xqa2l() {
+        // The regex read's value, an instant past datetime64[ns] its NaT.
+        let read_value = |parser: &super::PandasStrptime<'_>, text: &str| match parser.read(text) {
+            super::StrptimeRead::Instant(clock) => {
+                Some(super::datetime64_scalar_from_naive_datetime(clock))
+                    .filter(|value| !value.is_missing())
+            }
+            _ => None,
+        };
+        for format in [
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%dT%H:%M:%S",
+            "%d/%m/%Y",
+            "%Y%m%d",
+            "%H:%M %Y-%m-%d",
+        ] {
+            let parser = super::PandasStrptime::new(format).expect("a modelled format");
+            assert!(parser.template.is_some(), "{format}");
+            let samples = [
+                "2024-01-05 10:30",
+                "2024-02-29 23:59",
+                "2023-02-29 10:00",
+                "2024-13-01 10:00",
+                "2024-04-31 10:00",
+                "2024-1-05 10:30",
+                "2024-01-05  10:30",
+                "2024-01-05 10:30x",
+                "1677-06-01 00:00",
+                "2024-01-05T10:30:00",
+                "2024-01-05t10:30:00",
+                "2024-06-30T23:59:61",
+                "2024-06-30T24:00:00",
+                "05/01/2024",
+                "31/04/2024",
+                "20240105",
+                "10:30 2024-01-05",
+                "",
+            ];
+            for text in samples {
+                if let Some(nanos) = parser.template_nanos(text) {
+                    assert_eq!(
+                        read_value(&parser, text),
+                        Some(Scalar::Datetime64(nanos)),
+                        "{format} {text}"
+                    );
+                }
+            }
+            // value() answers as the regex read does, template or not.
+            for text in samples {
+                assert_eq!(
+                    Some(parser.value(text)).filter(|value| !value.is_missing()),
+                    read_value(&parser, text),
+                    "{format} {text}"
+                );
+            }
+        }
+        let iso = super::PandasStrptime::new("%Y-%m-%d %H:%M").expect("modelled");
+        assert_eq!(
+            iso.template_nanos("2024-01-05 10:30"),
+            Some(1_704_450_600_000_000_000)
+        );
+        assert_eq!(iso.template_nanos("2024-1-05 10:30"), None);
+        assert_eq!(iso.template_nanos("1677-06-01 00:00"), None);
+        let leap = super::PandasStrptime::new("%Y-%m-%dT%H:%M:%S").expect("modelled");
+        assert_eq!(
+            leap.template_nanos("2024-06-30T23:59:61"),
+            Some(1_719_792_001_000_000_000)
+        );
+        for format in ["%Y-%m-%d %H:%M:%S.%f", "%I:%M %p", "%y-%m-%d"] {
+            let parser = super::PandasStrptime::new(format).expect("a modelled format");
+            assert!(parser.template.is_none(), "{format}");
         }
     }
 

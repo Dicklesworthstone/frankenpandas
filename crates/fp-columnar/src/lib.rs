@@ -18912,6 +18912,37 @@ impl Column {
         Self::category_codes_column(DType::Categorical, codes, categories, Some(meta))
     }
 
+    /// This column's codes over `meta`'s categories - at least as many as
+    /// its own, so each code still names its place - its codes and validity
+    /// shared, not copied (a categorical's categories renamed or added to:
+    /// each code was made, checked and packed again, rename_categories
+    /// 0.35x pandas; br-frankenpandas-nk9mh). None unless it is held as
+    /// codes over its metadata's categories.
+    #[must_use]
+    pub fn with_categories_sharing_codes(&self, meta: CategoricalMetadata) -> Option<Self> {
+        let ScalarValues::LazyCategoryCodes {
+            codes, categories, ..
+        } = &self.values
+        else {
+            return None;
+        };
+        if meta.categories.len() < categories.len()
+            || self.categorical.as_ref()?.categories.as_slice() != &categories[..]
+        {
+            return None;
+        }
+        let categories: Arc<[Scalar]> = Arc::from(meta.categories.as_slice());
+        Some(Self {
+            dtype: self.dtype.clone(),
+            values: ScalarValues::lazy_category_codes(Arc::clone(codes), categories),
+            validity: self.validity.clone(),
+            data: None,
+            categorical: Some(meta),
+            width: self.width,
+            pandas_string: self.pandas_string,
+        })
+    }
+
     /// The category codes (-1: missing) of a column held as codes
     /// ([`Self::from_categorical_codes`], a cut's bins) while its categorical
     /// metadata names the categories they index; None for any other column.
