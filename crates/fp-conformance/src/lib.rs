@@ -9994,6 +9994,7 @@ fn run_fixture_operation(
                             errors: fp_frame::DatetimeErrors::Coerce,
                             dayfirst: false,
                             yearfirst: false,
+                            list_input: false,
                         },
                     )
                     .map_err(|err| err.to_string())
@@ -19578,6 +19579,7 @@ fn execute_and_compare_differential(
                             errors: fp_frame::DatetimeErrors::Coerce,
                             dayfirst: false,
                             yearfirst: false,
+                            list_input: false,
                         },
                     )
                     .map_err(|err| err.to_string())

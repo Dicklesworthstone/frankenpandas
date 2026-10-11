@@ -4965,6 +4965,33 @@ fn fill_reindex_positions(
     positions: &[Option<usize>],
     forward: bool,
 ) -> Result<Vec<Option<usize>>, FrameError> {
+    // Int labels on both sides compared as ints (none is missing): an
+    // IndexLabel compare a step of each search was most of
+    // reindex(method='ffill') (0.28x pandas; br-frankenpandas-7krba).
+    let ints = |labels: &[IndexLabel]| -> Option<Vec<i64>> {
+        labels
+            .iter()
+            .map(|label| match label {
+                IndexLabel::Int64(value) => Some(*value),
+                _ => None,
+            })
+            .collect()
+    };
+    if let (Some(src), Some(target)) = (ints(src), ints(target)) {
+        return fill_positions_by_label_order(&src, &target, positions, forward, |_| false);
+    }
+    fill_positions_by_label_order(src, target, positions, forward, IndexLabel::is_missing)
+}
+
+/// [`fill_reindex_positions`] over labels of any order: a target label
+/// `missing` says is absent keeps its (absent) position.
+fn fill_positions_by_label_order<T: Ord>(
+    src: &[T],
+    target: &[T],
+    positions: &[Option<usize>],
+    forward: bool,
+    missing: impl Fn(&T) -> bool,
+) -> Result<Vec<Option<usize>>, FrameError> {
     let increasing = src.windows(2).all(|pair| pair[0] <= pair[1]);
     let decreasing = src.windows(2).all(|pair| pair[0] >= pair[1]);
     if !increasing && !decreasing {
@@ -4977,7 +5004,7 @@ fn fill_reindex_positions(
         .iter()
         .zip(positions)
         .map(|(label, &exact)| {
-            if exact.is_some() || label.is_missing() {
+            if exact.is_some() || missing(label) {
                 return exact;
             }
             if increasing {
@@ -17320,36 +17347,42 @@ impl Series {
                 return Series::new(self.name.clone(), self.index.clone(), column);
             }
 
-            let mut out = vec![0.0_f64; n];
-            let mut out_valid = fp_columnar::ValidityMask::all_valid(n);
-            let mut out_has_nan = false;
-            let mut last: Option<f64> = None;
-            let mut consecutive_fills: usize = 0;
-            for i in 0..n {
-                if validity.get(i) {
-                    let value = data[i];
-                    out[i] = value;
-                    out_has_nan |= value.is_nan();
-                    last = Some(value);
-                    consecutive_fills = 0;
-                } else if let Some(fill) = last {
-                    consecutive_fills += 1;
-                    if limit.is_none_or(|l| consecutive_fills <= l) {
-                        out[i] = fill;
-                        out_has_nan |= fill.is_nan();
-                    } else {
-                        out[i] = data[i];
-                        out_valid.set(i, false);
+            // limit: each run of missing rows after a present one takes its
+            // value for up to `limit` rows, the rest - and a leading run -
+            // staying missing over their own datums; run by run as above,
+            // where a row's validity was read a row (ffill(limit=2) of 200k
+            // 0.39x pandas; br-frankenpandas-7krba).
+            let limit = limit.unwrap_or(usize::MAX);
+            let mut out = data.to_vec();
+            let mut still_missing: Vec<(usize, usize)> = Vec::new();
+            let mut saw_valid_before = false;
+            let mut previous_end = 0usize;
+            validity.for_each_invalid_range(|start, run_len| {
+                if start > previous_end {
+                    saw_valid_before = true;
+                }
+                if saw_valid_before {
+                    let filled = run_len.min(limit);
+                    let fill = out[start - 1];
+                    out[start..start + filled].fill(fill);
+                    if filled < run_len {
+                        still_missing.push((start + filled, run_len - filled));
                     }
                 } else {
-                    out[i] = data[i];
-                    out_valid.set(i, false);
+                    still_missing.push((start, run_len));
                 }
-            }
-            let column = if out_valid.all() && !out_has_nan {
+                previous_end = start + run_len;
+            });
+            let column = if still_missing.is_empty() && !out.iter().any(|value| value.is_nan()) {
                 Column::from_f64_values_all_valid_unchecked(out)
             } else {
-                Column::from_f64_values_with_validity(out, out_valid)
+                Column::from_f64_values_with_validity(
+                    out,
+                    fp_columnar::ValidityMask::from_invalid_ranges(
+                        std::sync::Arc::from(still_missing),
+                        n,
+                    ),
+                )
             }
             .keeping_dtype_of(&self.column);
             return Series::new(self.name.clone(), self.index.clone(), column);
@@ -30907,10 +30940,21 @@ impl Series {
                         "cannot insert {level_name}, already exists"
                     )));
                 }
-                let values =
-                    index_labels_to_column_scalars(levels.get_level_values(level)?.labels());
+                // An int or text level's typed column, a coded level's read
+                // through its codes, as a frame's reset_index makes them (a
+                // Scalar a row, the dtype inferred again: a two-key groupby
+                // sum's reset_index 0.44x pandas; br-frankenpandas-cfoxn).
+                let typed = levels
+                    .made_level_codes(level)
+                    .and_then(|(uniques, codes)| coded_level_column(uniques, codes))
+                    .or_else(|| levels.level_labels(level).and_then(typed_level_column));
+                let column = match typed {
+                    Some(column) => column,
+                    None => Column::from_values(index_labels_to_column_scalars(
+                        levels.get_level_values(level)?.labels(),
+                    ))?,
+                };
                 // A zoned level's column is of its zone (br-frankenpandas-c4v57).
-                let column = Column::from_values(values)?;
                 let column = match levels.level_zone(level) {
                     Some(zone) => column.with_dtype(DType::datetime64_tz(zone)),
                     None => column,
@@ -35715,6 +35759,17 @@ impl Series {
                 })
             })
             .collect::<Result<Vec<i32>, _>>()?;
+        Self::categorical_from_i32_codes(name, index, codes, meta)
+    }
+
+    /// [`Self::categorical_from_code_parts`] of codes already the stored
+    /// width (br-frankenpandas-3jngy).
+    fn categorical_from_i32_codes(
+        name: impl Into<LabelName>,
+        index: Index,
+        codes: Vec<i32>,
+        meta: CategoricalMetadata,
+    ) -> Result<Self, FrameError> {
         // Every constructor and category editor arrives here: their
         // categories as pandas' CategoricalDtype makes them (7zs0a, yrjrc).
         let meta = CategoricalMetadata {
@@ -36259,6 +36314,45 @@ fn typed_level_column(labels: &[IndexLabel]) -> Option<Column> {
             return None;
         };
         bytes.extend_from_slice(text.as_bytes());
+        offsets.push(bytes.len());
+    }
+    Some(Column::from_utf8_contiguous(bytes, offsets))
+}
+
+/// [`typed_level_column`] of a level held as its distinct labels and its
+/// rows' codes, read through the codes: the rows' labels were made (a
+/// String a text row) to be read once (br-frankenpandas-cfoxn). None where the distinct
+/// labels are not all ints or all text, or there are no rows (an empty
+/// level's column is int64, as its rows read).
+fn coded_level_column(uniques: &[IndexLabel], codes: &[u32]) -> Option<Column> {
+    if codes.is_empty() {
+        return None;
+    }
+    let ints: Option<Vec<i64>> = uniques
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Int64(value) => Some(*value),
+            _ => None,
+        })
+        .collect();
+    if let Some(ints) = ints {
+        return Some(Column::from_i64_values_owned(
+            codes.iter().map(|&code| ints[code as usize]).collect(),
+        ));
+    }
+    let texts: Option<Vec<&str>> = uniques
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Utf8(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let texts = texts?;
+    let mut bytes = Vec::new();
+    let mut offsets = Vec::with_capacity(codes.len() + 1);
+    offsets.push(0);
+    for &code in codes {
+        bytes.extend_from_slice(texts[code as usize].as_bytes());
         offsets.push(bytes.len());
     }
     Some(Column::from_utf8_contiguous(bytes, offsets))
@@ -54476,9 +54570,11 @@ impl SeriesGroupBy<'_> {
             Some(by_name)
         };
         let level_name = |name: &str| (!name.is_empty()).then(|| LabelName::from(name));
-        let levels =
-            fp_index::MultiIndex::from_two_coded_levels(level_uniques, [group_codes, value_codes])?
-                .set_names(vec![level_name(by_name), level_name(self.series.name())]);
+        let levels = fp_index::MultiIndex::from_coded_levels(
+            Vec::from(level_uniques),
+            vec![group_codes, value_codes],
+        )?
+        .set_names(vec![level_name(by_name), level_name(self.series.name())]);
         // No rows keep the index and column an empty value_counts had.
         let (flat, column) = if rows == 0 {
             (Index::new(Vec::new()), Column::from_values(Vec::new())?)
@@ -57094,6 +57190,24 @@ impl CategoricalAccessor<'_> {
         )
     }
 
+    /// [`Self::recoded`] of codes already the stored width.
+    fn recoded_i32(
+        &self,
+        codes: Vec<i32>,
+        categories: Vec<Scalar>,
+        ordered: bool,
+    ) -> Result<Series, FrameError> {
+        Series::categorical_from_i32_codes(
+            self.series.name.clone(),
+            self.series.index.clone(),
+            codes,
+            CategoricalMetadata {
+                categories,
+                ordered,
+            },
+        )
+    }
+
     /// Returns the integer codes for this categorical Series.
     ///
     /// Matches `pd.Series.cat.codes`: the codes (-1 where missing), unnamed as
@@ -57238,26 +57352,42 @@ impl CategoricalAccessor<'_> {
             ));
         }
 
-        // Build old-value -> new-code mapping.
-        let mut new_code_map: HashMap<ScalarKey<'_>, i64> = HashMap::new();
-        for (i, cat) in new_order.iter().enumerate() {
-            new_code_map.insert(category_key(cat), i as i64);
-        }
+        let new_codes = self.codes_through(&new_order);
+        self.recoded_i32(new_codes, new_order, self.meta.ordered)
+    }
 
-        // Remap codes.
-        let new_codes: Vec<i64> = self
-            .row_codes()
+    /// The rows' codes into `new_categories`: each old category's new code
+    /// found once (by pandas' equality, 1 == 1.0; br-frankenpandas-1r2sj)
+    /// and the rows remapped through that table, -1 where a row's category
+    /// is gone or the row is missing - each row looked its category up
+    /// (set_categories of 200k rows 0.07x pandas; br-frankenpandas-3jngy).
+    fn codes_through(&self, new_categories: &[Scalar]) -> Vec<i32> {
+        let mut new_code_map: FxHashMap<ScalarKey<'_>, i32> = FxHashMap::default();
+        for (i, cat) in new_categories.iter().enumerate() {
+            new_code_map.insert(category_key(cat), i32::try_from(i).unwrap_or(-1));
+        }
+        let old_to_new: Vec<i32> = self
+            .meta
+            .categories
             .iter()
-            .map(|&code| {
-                usize::try_from(code)
-                    .ok()
-                    .and_then(|c| self.meta.categories.get(c))
-                    .and_then(|cat| new_code_map.get(&category_key(cat)).copied())
-                    .unwrap_or(-1)
-            })
+            .map(|cat| new_code_map.get(&category_key(cat)).copied().unwrap_or(-1))
             .collect();
-        drop(new_code_map);
-        self.recoded(&new_codes, new_order, self.meta.ordered)
+        let through = |code: i32| {
+            usize::try_from(code)
+                .ok()
+                .and_then(|c| old_to_new.get(c).copied())
+                .unwrap_or(-1)
+        };
+        // The stored codes read as they are (they were widened to i64 and
+        // narrowed back a row; br-frankenpandas-3jngy).
+        match self.series.column.categorical_codes() {
+            Some(codes) => codes.iter().map(|&code| through(code)).collect(),
+            None => self
+                .row_codes()
+                .iter()
+                .map(|&code| i32::try_from(code).map_or(-1, through))
+                .collect(),
+        }
     }
 
     /// Set the categories to a new list, remapping codes accordingly.
@@ -57265,29 +57395,11 @@ impl CategoricalAccessor<'_> {
     /// Matches `pd.Series.cat.set_categories(new_categories)`.
     /// Values not in new_categories become missing (-1).
     pub fn set_categories(&self, new_categories: Vec<Scalar>) -> Result<Series, FrameError> {
-        // Build old-value -> new-code mapping, a category matching by pandas'
-        // equality (1 == 1.0): categories made floats by an int / float
-        // mix met int replacements under exact keys and lost their values
-        // (br-frankenpandas-1r2sj).
-        let mut new_code_map: HashMap<ScalarKey<'_>, i64> = HashMap::new();
-        for (i, cat) in new_categories.iter().enumerate() {
-            new_code_map.insert(category_key(cat), i as i64);
-        }
-
-        // Remap each old code through: old_code -> old_category -> new_code.
-        let new_codes: Vec<i64> = self
-            .row_codes()
-            .iter()
-            .map(|&code| {
-                usize::try_from(code)
-                    .ok()
-                    .and_then(|c| self.meta.categories.get(c))
-                    .and_then(|cat| new_code_map.get(&category_key(cat)).copied())
-                    .unwrap_or(-1)
-            })
-            .collect();
-        drop(new_code_map);
-        self.recoded(&new_codes, new_categories, self.meta.ordered)
+        // A category matches by pandas' equality (1 == 1.0): categories made
+        // floats by an int / float mix met int replacements under exact keys
+        // and lost their values (br-frankenpandas-1r2sj).
+        let new_codes = self.codes_through(&new_categories);
+        self.recoded_i32(new_codes, new_categories, self.meta.ordered)
     }
 
     /// Mark this categorical as ordered.
@@ -61201,6 +61313,21 @@ impl StringAccessor<'_> {
 
         self.apply_str(
             |s| {
+                // ASCII text is every form's own (no ASCII character
+                // decomposes or composes), and a string the quick check
+                // calls normalized is too: either is copied as it is, as
+                // CPython's normalize returns it, the rest decomposed - each
+                // string went through the decomposition (NFKD of 200k ASCII
+                // strings 39 ms, pandas 18; br-frankenpandas-7jm5t).
+                let quick = || match form {
+                    NormalizationForm::Nfc => unicode_normalization::is_nfc_quick(s.chars()),
+                    NormalizationForm::Nfkc => unicode_normalization::is_nfkc_quick(s.chars()),
+                    NormalizationForm::Nfd => unicode_normalization::is_nfd_quick(s.chars()),
+                    NormalizationForm::Nfkd => unicode_normalization::is_nfkd_quick(s.chars()),
+                };
+                if s.is_ascii() || quick() == unicode_normalization::IsNormalized::Yes {
+                    return Scalar::Utf8(s.to_owned());
+                }
                 let normalized: String = match form {
                     NormalizationForm::Nfc => s.nfc().collect(),
                     NormalizationForm::Nfkc => s.nfkc().collect(),
@@ -68353,6 +68480,11 @@ pub struct ToDatetimeOptions<'a> {
     /// pandas' `yearfirst=`: dateutil reads an ambiguous all-numeric date
     /// year first (see [`dateutil_date`]).
     pub yearfirst: bool,
+    /// The values came from a Python list, which pandas reads value by
+    /// value: an int past datetime64[ns] under `unit` is its "cannot
+    /// convert input ..., at position n"; an array or a column overflows
+    /// as a whole, naming the instant (br-frankenpandas-39q44).
+    pub list_input: bool,
 }
 
 /// pandas' `to_datetime(errors=)`.
@@ -68374,6 +68506,7 @@ impl Default for ToDatetimeOptions<'_> {
             errors: DatetimeErrors::Coerce,
             dayfirst: false,
             yearfirst: false,
+            list_input: false,
         }
     }
 }
@@ -68429,6 +68562,43 @@ pub fn to_datetime_with_options(
             series.column().clone()
         };
         return Series::new(series.name().to_owned(), series.index().clone(), column);
+    }
+    // An all-valid int column under a unit and the unix origin: each value
+    // times the unit's nanoseconds, one past datetime64[ns] NaT under
+    // errors='coerce' and pandas' OutOfBoundsDatetime text under 'raise' -
+    // as the general loop reads it, which boxed each value and inferred the
+    // column again (to_datetime(int64 array, unit='s') 0.37x pandas;
+    // br-frankenpandas-39q44). No rows keep the general path's column.
+    if let (Some(unit_text), Some(epochs)) = (options.unit, series.column().as_i64_slice())
+        && options.origin.is_none()
+        && !options.utc
+    {
+        let per_unit = DatetimeUnit::parse(unit_text)?.nanos_per_unit_i128();
+        let mut nanos = Vec::with_capacity(epochs.len());
+        for (position, &epoch) in epochs.iter().enumerate() {
+            let instant = i128::from(epoch)
+                .checked_mul(per_unit)
+                .and_then(|total| i64::try_from(total).ok())
+                .filter(|&total| total != fp_types::Timestamp::NAT);
+            match instant {
+                Some(total) => nanos.push(total),
+                None if options.errors == DatetimeErrors::Raise => {
+                    return Err(FrameError::CompatibilityRejected(if options.list_input {
+                        format!(
+                            "cannot convert input {epoch} with the unit '{unit_text}', at position {position}"
+                        )
+                    } else {
+                        epoch_out_of_bounds_message(epoch, per_unit)
+                    }));
+                }
+                None => nanos.push(fp_types::Timestamp::NAT),
+            }
+        }
+        return Series::new(
+            series.name().to_owned(),
+            series.index().clone(),
+            Column::from_temporal_nanos(DType::datetime64_naive(), nanos),
+        );
     }
     // Numbers given with a format are parsed as their text, as pandas does
     // (a float as its integer part, NaN as NaT): 20240229 with '%Y%m%d' is
@@ -69366,6 +69536,26 @@ fn parse_datetime_scalar_with_unit(
         }
         _ => Scalar::Null(NullKind::NaT),
     }
+}
+
+/// pandas' OutOfBoundsDatetime text for an int array's value past
+/// datetime64[ns] under a unit of `per_unit` nanoseconds: the instant it
+/// names, to the second (floored), the year plain and astronomical ("Out of
+/// bounds nanosecond timestamp: 33658-09-27 01:46:40", "-1-12-30 00:00:00";
+/// br-frankenpandas-39q44).
+fn epoch_out_of_bounds_message(epoch: i64, per_unit: i128) -> String {
+    let seconds = (i128::from(epoch) * per_unit).div_euclid(1_000_000_000);
+    let days = seconds
+        .div_euclid(86_400)
+        .clamp(-(1_i128 << 60), 1_i128 << 60);
+    let time = seconds.rem_euclid(86_400);
+    let (year, month, day) = fp_types::civil_from_days(i64::try_from(days).unwrap_or(0));
+    format!(
+        "Out of bounds nanosecond timestamp: {year}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+        time / 3_600,
+        time % 3_600 / 60,
+        time % 60
+    )
 }
 
 fn parse_epoch_i64_with_unit(
@@ -72404,19 +72594,13 @@ pub fn cut_bins_with_precision(
     };
 
     let (first, last) = (edge_vals[0], edge_vals[n_bins]);
-    let bin_indices = series.values().iter().map(|v| {
-        if v.is_missing() {
-            return None;
-        }
-        let Ok(x) = v.to_f64() else {
-            return None;
-        };
-        if x.is_nan() {
-            return None;
-        }
-        // right=true: (e_i, e_{i+1}] — exclude the very first left edge,
-        // but for include_lowest's value AT it.
-        // right=false: [e_i, e_{i+1}) — exclude the very last right edge.
+    // A typed float or int column read off its buffer, each value's bin the
+    // count of inner edges it passes (the edges strictly increase, so the
+    // first bin holding it is that one): the values were boxed and each bin
+    // searched (cut of 200k floats with labels 4.2 ms, pandas 2.7;
+    // br-frankenpandas-w3wnb).
+    let inner = &edge_vals[1..n_bins];
+    let bin_of = |x: f64| -> Option<usize> {
         if right {
             if lowest && x == first {
                 return Some(0);
@@ -72424,13 +72608,31 @@ pub fn cut_bins_with_precision(
             if x <= first || x > last {
                 return None;
             }
-            (0..n_bins).find(|&i| x > edge_vals[i] && x <= edge_vals[i + 1])
+            Some(inner.iter().filter(|&&edge| x > edge).count())
         } else {
             if x < first || x >= last {
                 return None;
             }
-            (0..n_bins).find(|&i| x >= edge_vals[i] && x < edge_vals[i + 1])
+            Some(inner.iter().filter(|&&edge| x >= edge).count())
         }
+    };
+    if let Some(data) = series.column().as_f64_slice() {
+        return binned_categorical(series, data.iter().map(|&x| bin_of(x)), &categories);
+    }
+    if let Some(data) = series.column().as_i64_slice() {
+        return binned_categorical(series, data.iter().map(|&x| bin_of(x as f64)), &categories);
+    }
+    let bin_indices = series.values().iter().map(|v| {
+        if v.is_missing() {
+            return None;
+        }
+        let Ok(x) = v.to_f64() else {
+            return None;
+        };
+        // right=true: (e_i, e_{i+1}] — exclude the very first left edge,
+        // but for include_lowest's value AT it.
+        // right=false: [e_i, e_{i+1}) — exclude the very last right edge.
+        if x.is_nan() { None } else { bin_of(x) }
     });
     binned_categorical(series, bin_indices, &categories)
 }
@@ -75913,6 +76115,20 @@ impl LazyDataFrameColumns {
             self,
             Self::HomogeneousTranspose { materialized, .. } if materialized.get().is_none()
         )
+    }
+
+    /// Whether an unmaterialized homogeneous transpose has built the page
+    /// holding its first column - a reader that went through its columns
+    /// once (br-frankenpandas-e54y6).
+    fn transposed_columns_built(&self) -> bool {
+        match self {
+            Self::HomogeneousTranspose {
+                plan, materialized, ..
+            } if materialized.get().is_none() => {
+                plan.output_columns > 0 && plan.cached_column_if_present(0).is_some()
+            }
+            _ => false,
+        }
     }
 
     /// The plan of an unmaterialized homogeneous transpose.
@@ -83655,6 +83871,16 @@ impl DataFrame {
         self.columns.is_lazy_transpose() && self.column_order.is_lazy_range()
     }
 
+    /// Whether a lazily transposed frame has already built its columns (the
+    /// page of its first): a consumer reading them again finds them made
+    /// (br-frankenpandas-e54y6).
+    #[cfg(feature = "lazy-transpose-view")]
+    #[must_use]
+    #[doc(hidden)]
+    pub fn lazy_transpose_columns_built(&self) -> bool {
+        self.columns.transposed_columns_built()
+    }
+
     /// The source columns of a lazily transposed frame and the dtype its
     /// columns take: row `r` of this frame is source column `r`, column `c`
     /// that column's row `c` - for a consumer that reads the transposed
@@ -86507,8 +86733,13 @@ impl DataFrame {
                 // copied, a Scalar made a label and its dtype inferred again
                 // (br-frankenpandas-e186m).
                 let typed = row_multiindex
-                    .level_labels(level)
-                    .and_then(typed_level_column);
+                    .made_level_codes(level)
+                    .and_then(|(uniques, codes)| coded_level_column(uniques, codes))
+                    .or_else(|| {
+                        row_multiindex
+                            .level_labels(level)
+                            .and_then(typed_level_column)
+                    });
                 let level_column = match typed {
                     Some(column) => column,
                     None => {
@@ -94628,7 +94859,35 @@ impl DataFrame {
                 Some(views)
             };
 
-        if let Some(a_views) = collect_finite_float64_views(self, m) {
+        // A lazily transposed frame's columns are its sources' rows: laid out
+        // once, column by column, in one buffer the views window - reading
+        // the views built a column a source row (wide.T.dot(wide) of a
+        // 20000 x 20 frame 5.1 ms, pandas 1.7; br-frankenpandas-e54y6). The
+        // kernel reads the same operands, so the result is the same. Columns
+        // a reader already built are read as they are.
+        #[cfg(feature = "lazy-transpose-view")]
+        let lazy_views = (!self.lazy_transpose_columns_built())
+            .then(|| self.lazy_transpose_sources())
+            .flatten()
+            .and_then(|(sources, _)| {
+                let sources: Vec<(Arc<[f64]>, usize)> = sources
+                    .iter()
+                    .map(|column| finite_f64_view(column, k))
+                    .collect::<Option<_>>()?;
+                let mut packed = Vec::with_capacity(k.checked_mul(m)?);
+                for row in 0..k {
+                    packed.extend(sources.iter().map(|(data, start)| data[start + row]));
+                }
+                let packed: Arc<[f64]> = Arc::from(packed);
+                Some(
+                    (0..k)
+                        .map(|row| (Arc::clone(&packed), row * m))
+                        .collect::<Vec<_>>(),
+                )
+            });
+        #[cfg(not(feature = "lazy-transpose-view"))]
+        let lazy_views: Option<Vec<(Arc<[f64]>, usize)>> = None;
+        if let Some(a_views) = lazy_views.or_else(|| collect_finite_float64_views(self, m)) {
             let mut result_cols = Vec::with_capacity(n);
             let mut col_order = Vec::with_capacity(n);
             let mut b_values_by_column: Vec<Arc<[f64]>> = Vec::with_capacity(n);
@@ -110718,20 +110977,6 @@ fn mask_groups(
     Ok(Some(masked))
 }
 
-/// A multi-key group's flat label: its key values' text joined by `|`,
-/// written into one String (a String a value and their join made three
-/// allocations a group; br-frankenpandas-cfoxn).
-fn joined_key_label<T: KeyText>(key: &[T]) -> String {
-    let mut label = String::with_capacity(8 * key.len());
-    for (position, value) in key.iter().enumerate() {
-        if position > 0 {
-            label.push('|');
-        }
-        value.push_text(&mut label);
-    }
-    label
-}
-
 /// A multi-key group's key value written onto its flat label as its text
 /// (an int's digits, a string as it is) without the formatter's machinery,
 /// a quarter of groupby([a, b]).size() (br-frankenpandas-cfoxn).
@@ -110756,15 +111001,6 @@ impl KeyText for i64 {
             label.push('-');
         }
         label.extend(digits[at..].iter().map(|&digit| char::from(digit)));
-    }
-}
-
-impl KeyText for MixedKey<'_> {
-    fn push_text(&self, label: &mut String) {
-        match self {
-            MixedKey::Int64(value) => value.push_text(label),
-            MixedKey::Utf8(text) => label.push_str(text),
-        }
     }
 }
 
@@ -110799,7 +111035,14 @@ impl PackedSlots {
             return Some(Self::Dense(vec![usize::MAX; len]));
         }
         usize::try_from(combined).ok()?;
-        Some(Self::Hashed(FxHashMap::default()))
+        // At most a group a row: the map made at that size (to a million
+        // groups) - it grew, rehashing, a fifteenth of a two-key groupby
+        // (br-frankenpandas-cfoxn).
+        let most = usize::try_from(combined).map_or(rows, |slots| slots.min(rows));
+        Some(Self::Hashed(FxHashMap::with_capacity_and_hasher(
+            most.min(1 << 20),
+            Default::default(),
+        )))
     }
 
     /// The group id of `slot`, `next` (and true) when it is new.
@@ -110841,6 +111084,138 @@ struct DenseMultiInt64Grouping {
     /// group was a heap allocation each; br-frankenpandas-cfoxn).
     keys: Vec<i64>,
     ncol: usize,
+    /// Each group's level codes and the levels they name
+    /// (br-frankenpandas-cfoxn).
+    packed: PackedLevels<'static>,
+}
+
+/// A multi-key dense grouping's levels as its packed slots hold them: each
+/// group's code on each level (its offset from an int level's minimum, its
+/// rank among a text level's values), recorded as the group is first seen
+/// (they were read back off the slot, a division a level a group;
+/// br-frankenpandas-cfoxn), and what each level's codes name.
+struct PackedLevels<'a> {
+    /// `ncol` codes a group, in gid order.
+    codes_of_gid: Vec<usize>,
+    /// Each level's code range.
+    ranges: Vec<usize>,
+    levels: Vec<PackedLevel<'a>>,
+}
+
+/// One key level of [`PackedLevels`].
+enum PackedLevel<'a> {
+    /// An int key: its minimum.
+    Int(i64),
+    /// A text key: its distinct values by rank.
+    Text(Vec<&'a str>),
+}
+
+impl PackedLevels<'_> {
+    /// The result labels of the groups `order` emits: their flat labels
+    /// (the levels' text joined by '|', written into one buffer) and the
+    /// row MultiIndex made of each level's codes, numbered as the groups
+    /// are emitted, a level's labels made once a distinct value. Each
+    /// group made a String and a label a level, which the MultiIndex then
+    /// hashed again (groupby(['g', 'k'])['x'].sum() of 300k rows 0.67x
+    /// pandas; br-frankenpandas-cfoxn).
+    fn result_index(
+        &self,
+        order: &[usize],
+        names: Vec<Option<LabelName>>,
+    ) -> Result<(Index, fp_index::MultiIndex), FrameError> {
+        let ncol = self.levels.len();
+        let mut uniques: Vec<Vec<IndexLabel>> = vec![Vec::new(); ncol];
+        // An int level's text a distinct value, written once.
+        let mut texts: Vec<Vec<String>> = vec![Vec::new(); ncol];
+        let mut codes: Vec<Vec<u32>> = (0..ncol).map(|_| Vec::with_capacity(order.len())).collect();
+        let mut numbered: Vec<FirstSeen> = self
+            .ranges
+            .iter()
+            .map(|&range| FirstSeen::new(range, order.len()))
+            .collect();
+        let mut text = String::with_capacity(order.len() * 12);
+        let mut offsets: Vec<usize> = Vec::with_capacity(order.len() + 1);
+        offsets.push(0);
+        for &g in order {
+            for (c, level) in self.levels.iter().enumerate() {
+                let code = self.codes_of_gid[g * ncol + c];
+                if c > 0 {
+                    text.push('|');
+                }
+                let (level_uniques, level_texts) = (&mut uniques[c], &mut texts[c]);
+                let id = numbered[c].number(code, || match level {
+                    PackedLevel::Int(min) => {
+                        let value = min.wrapping_add(code as i64);
+                        let mut digits = String::new();
+                        value.push_text(&mut digits);
+                        level_texts.push(digits);
+                        level_uniques.push(IndexLabel::Int64(value));
+                    }
+                    PackedLevel::Text(values) => {
+                        level_uniques.push(IndexLabel::Utf8(values[code].to_owned()));
+                    }
+                });
+                match level {
+                    PackedLevel::Int(_) => text.push_str(&texts[c][id as usize]),
+                    PackedLevel::Text(values) => text.push_str(values[code]),
+                }
+                codes[c].push(id);
+            }
+            offsets.push(text.len());
+        }
+        let multi = fp_index::MultiIndex::from_coded_levels(uniques, codes)?.set_names(names);
+        let flat = if order.is_empty() {
+            Index::new(Vec::new())
+        } else {
+            Index::from_utf8_contiguous(Arc::from(text.into_bytes()), Arc::from(offsets))
+        };
+        Ok((flat, multi))
+    }
+}
+
+/// A first-seen numbering of codes below a range: a table where the range
+/// is at most a few times the codes numbered, else a map.
+struct FirstSeen {
+    table: Option<Vec<u32>>,
+    map: FxHashMap<usize, u32>,
+    count: u32,
+}
+
+impl FirstSeen {
+    fn new(range: usize, most: usize) -> Self {
+        let table = (range <= most.saturating_mul(4).max(1 << 16)).then(|| vec![u32::MAX; range]);
+        Self {
+            table,
+            map: FxHashMap::default(),
+            count: 0,
+        }
+    }
+
+    /// `code`'s number - the next one, `first` called, when it is new.
+    fn number(&mut self, code: usize, first: impl FnOnce()) -> u32 {
+        let Self { table, map, count } = self;
+        let number = match table {
+            Some(table) => &mut table[code],
+            None => map.entry(code).or_insert(u32::MAX),
+        };
+        if *number == u32::MAX {
+            *number = *count;
+            *count += 1;
+            first();
+        }
+        *number
+    }
+}
+
+/// `slots` (distinct) in ascending order as their positions: the stable
+/// radix permutation of their bits as an int key's (comparing them took a
+/// tenth of a multi-key groupby; br-frankenpandas-cfoxn).
+fn ascending_slot_order(slots: &[usize]) -> Vec<usize> {
+    let keys: Vec<i64> = slots
+        .iter()
+        .map(|&slot| (slot as u64 ^ (1 << 63)) as i64)
+        .collect();
+    fp_columnar::radix_argsort_i64(&keys, true)
 }
 
 impl DenseMultiInt64Grouping {
@@ -110886,28 +111261,18 @@ impl std::fmt::Display for MixedKey<'_> {
 
 /// Dense grouping over ≥2 all-valid key columns where each is bounded-Int64 or
 /// contiguous-Utf8 and at least one is Utf8 — the Utf8/mixed sibling of
-/// [`DenseMultiInt64Grouping`]. [`Self::key`] gives group `g`'s per-level key values;
-/// `order` sorts gids by the key tuple, which equals `composite_key_cmp`, so the
-/// output group order is byte-identical to the generic `build_groups` path.
-///
-/// br-frankenpandas-uza04: the key tuples are ONE FLAT `Vec` of `ngroups * ncol`
-/// borrowed cells, not a `Vec<Vec<_>>`. The nested form allocated once per group on
-/// top of once per Utf8 cell; both allocations are gone and the tuples are still
-/// read the same way, through `key(g)`.
+/// [`DenseMultiInt64Grouping`]. `packed` holds each group's per-level codes and
+/// what they name; `order` sorts gids by the key tuple, which equals
+/// `composite_key_cmp`, so the output group order is byte-identical to the
+/// generic `build_groups` path.
 struct DenseMultiMixedGrouping<'a> {
     gid_per_row: Vec<usize>,
     ngroups: usize,
     order: Vec<usize>,
-    /// `ngroups * ncol` cells, group-major: group `g` occupies `g*ncol..(g+1)*ncol`.
-    key_cells: Vec<MixedKey<'a>>,
-    ncol: usize,
-}
-
-impl<'a> DenseMultiMixedGrouping<'a> {
-    /// Group `g`'s key tuple, one cell per `by` level, in `by` order.
-    fn key(&self, g: usize) -> &[MixedKey<'a>] {
-        &self.key_cells[g * self.ncol..(g + 1) * self.ncol]
-    }
+    /// Each group's level codes and the levels they name (its key tuples
+    /// were kept as borrowed cells beside them, read by nothing since the
+    /// index came from the codes; br-frankenpandas-cfoxn).
+    packed: PackedLevels<'a>,
 }
 
 impl DataFrameGroupBy<'_> {
@@ -114393,30 +114758,17 @@ impl DataFrameGroupBy<'_> {
         func_name: &str,
     ) -> Result<Option<DataFrame>, FrameError> {
         if let Some(grouping) = self.multi_int64_dense_grouping() {
-            let mut labels = Vec::with_capacity(grouping.order.len());
-            let mut level_arrays: Vec<Vec<IndexLabel>> = (0..self.by.len())
-                .map(|_| Vec::with_capacity(grouping.order.len()))
-                .collect();
-            for &g in &grouping.order {
-                let key = grouping.key(g);
-                let parts: Vec<String> = key.iter().map(ToString::to_string).collect();
-                labels.push(IndexLabel::Utf8(parts.join("|")));
-                for (level_idx, &value) in key.iter().enumerate() {
-                    level_arrays[level_idx].push(IndexLabel::Int64(value));
-                }
-            }
-            let names: Vec<Option<LabelName>> = self.key_names.clone();
-            let row_multiindex =
-                Some(fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names));
+            // The result index from the groups' level codes (br-frankenpandas-cfoxn).
+            let (flat, levels) = self.multi_dense_index(&grouping)?;
             let mut frame = self.dense_aggregate_emit(
                 value_cols,
                 &grouping.gid_per_row,
                 grouping.ngroups,
                 &grouping.order,
                 func_name,
-                Index::new(labels),
+                flat,
             )?;
-            frame.row_multiindex = row_multiindex;
+            frame.row_multiindex = Some(levels);
             return Ok(Some(frame));
         }
 
@@ -114823,6 +115175,7 @@ impl DataFrameGroupBy<'_> {
         let mut gid_per_row = vec![0usize; n];
         let mut keys: Vec<i64> = Vec::new();
         let mut slot_of_gid: Vec<usize> = Vec::new();
+        let mut codes_of_gid: Vec<usize> = Vec::new();
         #[allow(clippy::needless_range_loop)] // row indexes every key slice
         for row in 0..n {
             let mut slot = 0usize;
@@ -114833,25 +115186,22 @@ impl DataFrameGroupBy<'_> {
             if new {
                 slot_of_gid.push(slot);
                 keys.extend((0..ncol).map(|c| slices[c][row]));
+                codes_of_gid
+                    .extend((0..ncol).map(|c| (slices[c][row] as i128 - mins[c] as i128) as usize));
             }
             gid_per_row[row] = g;
         }
 
         let ngroups = slot_of_gid.len();
-        let mut order: Vec<usize> = (0..ngroups).collect();
-        if self.sort {
-            // The packed slot orders the key tuples (each level's offset
-            // from its minimum, the first level most significant): an
-            // integer sort where comparing the tuples took a fifth of
-            // groupby([a, b]).size() (br-frankenpandas-cfoxn). The slots are distinct.
-            let mut by_slot: Vec<(usize, usize)> = slot_of_gid
-                .iter()
-                .enumerate()
-                .map(|(g, &slot)| (slot, g))
-                .collect();
-            by_slot.sort_unstable();
-            order = by_slot.into_iter().map(|(_, g)| g).collect();
-        }
+        // The packed slot orders the key tuples (each level's offset from
+        // its minimum, the first level most significant): an integer sort
+        // where comparing the tuples took a fifth of groupby([a, b]).size()
+        // (br-frankenpandas-cfoxn). The slots are distinct.
+        let order: Vec<usize> = if self.sort {
+            ascending_slot_order(&slot_of_gid)
+        } else {
+            (0..ngroups).collect()
+        };
 
         Some(DenseMultiInt64Grouping {
             gid_per_row,
@@ -114859,6 +115209,11 @@ impl DataFrameGroupBy<'_> {
             order,
             keys,
             ncol,
+            packed: PackedLevels {
+                codes_of_gid,
+                ranges,
+                levels: mins.into_iter().map(PackedLevel::Int).collect(),
+            },
         })
     }
 
@@ -114982,7 +115337,7 @@ impl DataFrameGroupBy<'_> {
             strides[c] = strides[c + 1] * ranges[c + 1];
         }
         let mut gid_per_row = vec![0usize; n];
-        let mut key_cells: Vec<MixedKey<'_>> = Vec::new();
+        let mut codes_of_gid: Vec<usize> = Vec::new();
         // Which slot each gid occupies, in gid order. Recorded here because gids are
         // still handed out in FIRST-SEEN order — `gid_per_row` is unchanged by this
         // rewrite — so the slot (= the key tuple's lexicographic rank) has to be
@@ -115001,11 +115356,9 @@ impl DataFrameGroupBy<'_> {
             if new {
                 slot_of_gid.push(slot);
                 for c in 0..ncol {
-                    key_cells.push(match &cols[c] {
-                        ColKey::Int { s, .. } => MixedKey::Int64(s[row]),
-                        ColKey::Str { codes, inverse } => {
-                            MixedKey::Utf8(inverse[codes[row] as usize])
-                        }
+                    codes_of_gid.push(match &cols[c] {
+                        ColKey::Int { s, min } => (s[row] as i128 - *min as i128) as usize,
+                        ColKey::Str { codes, .. } => codes[row] as usize,
                     });
                 }
             }
@@ -115029,18 +115382,27 @@ impl DataFrameGroupBy<'_> {
                 // Sparse table: sorting the gids by their slot is cheaper than
                 // scanning mostly-empty slots. Still an INTEGER sort, and the slots
                 // are distinct, so unstable is safe.
-                order.extend(0..ngroups);
-                order.sort_unstable_by_key(|&g| slot_of_gid[g]);
+                order = ascending_slot_order(&slot_of_gid);
             }
         } else {
             order.extend(0..ngroups);
         }
+        let levels = cols
+            .into_iter()
+            .map(|col| match col {
+                ColKey::Int { min, .. } => PackedLevel::Int(min),
+                ColKey::Str { inverse, .. } => PackedLevel::Text(inverse),
+            })
+            .collect();
         Some(DenseMultiMixedGrouping {
             gid_per_row,
             ngroups,
             order,
-            key_cells,
-            ncol,
+            packed: PackedLevels {
+                codes_of_gid,
+                ranges,
+                levels,
+            },
         })
     }
 
@@ -116331,20 +116693,9 @@ impl DataFrameGroupBy<'_> {
         &self,
         grouping: &DenseMultiInt64Grouping,
     ) -> Result<(Index, fp_index::MultiIndex), FrameError> {
-        let mut labels = Vec::with_capacity(grouping.order.len());
-        let mut level_arrays: Vec<Vec<IndexLabel>> = (0..self.by.len())
-            .map(|_| Vec::with_capacity(grouping.order.len()))
-            .collect();
-        for &g in &grouping.order {
-            let key = grouping.key(g);
-            labels.push(IndexLabel::Utf8(joined_key_label(key)));
-            for (level_idx, &value) in key.iter().enumerate() {
-                level_arrays[level_idx].push(IndexLabel::Int64(value));
-            }
-        }
-        let names: Vec<Option<LabelName>> = self.key_names.clone();
-        let mi = fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names);
-        Ok((Index::new(labels), mi))
+        grouping
+            .packed
+            .result_index(&grouping.order, self.key_names.clone())
     }
 
     /// Utf8/mixed sibling of [`multi_dense_index`]: builds the flat `", "`-joined
@@ -116355,20 +116706,9 @@ impl DataFrameGroupBy<'_> {
         &self,
         grouping: &DenseMultiMixedGrouping<'_>,
     ) -> Result<(Index, fp_index::MultiIndex), FrameError> {
-        let mut labels = Vec::with_capacity(grouping.order.len());
-        let mut level_arrays: Vec<Vec<IndexLabel>> = (0..self.by.len())
-            .map(|_| Vec::with_capacity(grouping.order.len()))
-            .collect();
-        for &g in &grouping.order {
-            let key = grouping.key(g);
-            labels.push(IndexLabel::Utf8(joined_key_label(key)));
-            for (level_idx, value) in key.iter().enumerate() {
-                level_arrays[level_idx].push(value.to_index_label());
-            }
-        }
-        let names: Vec<Option<LabelName>> = self.key_names.clone();
-        let mi = fp_index::MultiIndex::from_arrays(level_arrays)?.set_names(names);
-        Ok((Index::new(labels), mi))
+        grouping
+            .packed
+            .result_index(&grouping.order, self.key_names.clone())
     }
 
     fn try_idx_extreme_dense(&self, want_max: bool) -> Result<Option<DataFrame>, FrameError> {
@@ -210132,7 +210472,20 @@ mod tests {
             errors: super::DatetimeErrors::Raise,
             ..super::ToDatetimeOptions::default()
         };
+        // A column overflows as a whole, naming the instant; a list value
+        // by value, naming its position (pandas 2.2.3, measured;
+        // br-frankenpandas-39q44).
         let err = super::to_datetime_with_options(&s, raising).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Out of bounds nanosecond timestamp: 55969-09-28 00:00:00"),
+            "{err}"
+        );
+        let listed = super::ToDatetimeOptions {
+            list_input: true,
+            ..raising
+        };
+        let err = super::to_datetime_with_options(&s, listed).unwrap_err();
         assert!(
             err.to_string()
                 .contains("cannot convert input 1704067200000 with the unit 's', at position 0"),

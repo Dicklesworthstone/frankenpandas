@@ -10916,8 +10916,10 @@ impl Period {
 
 /// Convert a day count (days since 1970-01-01) to a proleptic-Gregorian
 /// `(year, month, day)`, using Howard Hinnant's civil-from-days algorithm
-/// (same kernel as `Timestamp::isoformat`).
-fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
+/// (same kernel as `Timestamp::isoformat`); the year astronomical (0 is 1
+/// BC).
+#[must_use]
+pub fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
     let days = days_since_epoch + 719_468;
     let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
     let doe = days - era * 146_097;

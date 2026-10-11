@@ -7466,14 +7466,20 @@ fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     // raising and formatting a TypeError on the way (a million floats from a
     // list took ~0.3 s; br-frankenpandas-1ze1o). An int past int64 goes on.
     // A float subclass (numpy's float64 scalar) reads as its float, where the
-    // checks below led it too (a list of them; br-frankenpandas-mf3tj).
-    if obj.is_instance_of::<pyo3::types::PyFloat>() {
+    // checks below led it too (a list of them; br-frankenpandas-mf3tj). The
+    // exact types are read before it: asking whether an int is a float
+    // walked the int's type hierarchy, a tenth of a list of int lists
+    // (br-frankenpandas-250iy).
+    let float_cell = |obj: &Bound<'_, PyAny>| -> PyResult<Scalar> {
         let value = obj.extract::<f64>()?;
-        return Ok(if value.is_nan() {
+        Ok(if value.is_nan() {
             Scalar::Null(fp_types::NullKind::NaN)
         } else {
             Scalar::Float64(value)
-        });
+        })
+    };
+    if obj.is_exact_instance_of::<pyo3::types::PyFloat>() {
+        return float_cell(obj);
     }
     if obj.is_exact_instance_of::<pyo3::types::PyString>() {
         return Ok(Scalar::Utf8(obj.extract::<String>()?));
@@ -7485,6 +7491,9 @@ fn py_to_scalar(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Scalar> {
         && let Ok(value) = obj.extract::<i64>()
     {
         return Ok(Scalar::Int64(value));
+    }
+    if obj.is_instance_of::<pyo3::types::PyFloat>() {
+        return float_cell(obj);
     }
     if obj.is_none() {
         return Ok(Scalar::Null(fp_types::NullKind::Null));
@@ -8176,10 +8185,13 @@ const MAX_LIST_CELL_DEPTH: usize = 128;
 /// A float, str, bool or int - a list's items mostly - which
 /// [`everyday_leaf_cell`] reads.
 fn is_everyday_leaf(obj: &Bound<'_, PyAny>) -> bool {
-    obj.is_instance_of::<pyo3::types::PyFloat>()
+    // The exact types first, a type compare each; a float subclass last
+    // (the hierarchy walk; br-frankenpandas-250iy).
+    obj.is_exact_instance_of::<pyo3::types::PyInt>()
+        || obj.is_exact_instance_of::<pyo3::types::PyFloat>()
         || obj.is_exact_instance_of::<pyo3::types::PyString>()
         || obj.is_exact_instance_of::<pyo3::types::PyBool>()
-        || obj.is_exact_instance_of::<pyo3::types::PyInt>()
+        || obj.is_instance_of::<pyo3::types::PyFloat>()
 }
 
 /// An everyday leaf's cell: py_to_scalar's, as every check on the way
@@ -76030,6 +76042,38 @@ impl PyGroupBy {
                 let (column, function): (String, String) = spec.extract().map_err(|_| missing())?;
                 specs.push((out.extract::<String>()?, column, function));
             }
+            // pandas reads named aggregation as the {column: [functions]}
+            // dict it relabels: the dict's typed group kernels, then its
+            // (column, function) columns picked out under the names -
+            // agg_named reduced each group's boxed values (0.55x pandas;
+            // br-frankenpandas-ddag0). as_index=False keeps agg_named.
+            if self.as_index {
+                let dict = PyDict::new(py);
+                for (_, column, function) in &specs {
+                    let functions = match dict.get_item(column)? {
+                        Some(functions) => functions.cast_into::<PyList>()?,
+                        None => {
+                            let functions = PyList::empty(py);
+                            dict.set_item(column, &functions)?;
+                            functions
+                        }
+                    };
+                    if !functions.contains(function)? {
+                        functions.append(function)?;
+                    }
+                }
+                let wide = self
+                    .agg(py, Some(dict.as_any()), &PyTuple::empty(py), None)?
+                    .into_bound(py);
+                let picked = specs
+                    .iter()
+                    .map(|(_, column, function)| PyTuple::new(py, [column, function]))
+                    .collect::<PyResult<Vec<_>>>()?;
+                let result = wide.get_item(PyList::new(py, picked)?)?;
+                let names = specs.iter().map(|(out, _, _)| out.as_str());
+                result.setattr("columns", PyList::new(py, names)?)?;
+                return Ok(result.unbind());
+            }
             let spec_refs: Vec<(&str, &str, &str)> = specs
                 .iter()
                 .map(|(out, column, function)| (out.as_str(), column.as_str(), function.as_str()))
@@ -86155,9 +86199,11 @@ fn to_datetime_error(err: fp_frame::FrameError) -> PyErr {
         {
             DateParseError::new_err(message)
         }
-        // An epoch past the nanosecond range in its unit.
+        // An epoch past the nanosecond range in its unit (an array's names
+        // the instant; br-frankenpandas-39q44).
         fp_frame::FrameError::CompatibilityRejected(message)
-            if message.starts_with("cannot convert input ") =>
+            if message.starts_with("cannot convert input ")
+                || message.starts_with("Out of bounds nanosecond timestamp: ") =>
         {
             OutOfBoundsDatetime::new_err(message)
         }
@@ -86384,7 +86430,12 @@ fn to_datetime(
         }
         // A column of dates (s.dt.date) is its midnights (it became NaT).
         let series = object_instants(py, &s.inner)?;
-        warn_order(series.values())?;
+        // Only an unformatted, unit-less read warns: its values are read
+        // for that alone (an int column under unit= had every value boxed;
+        // br-frankenpandas-39q44).
+        if format.is_none() && unit.is_none() {
+            warn_order(series.values())?;
+        }
         let res = fp_frame::to_datetime_with_options(&series, opts).map_err(to_datetime_error)?;
         if let Some(stamps) = mixed_zone_timestamps(py, &res, format == Some("mixed"))?
             && let Some(column) = mixed_zone_cells(py, stamps.as_any())?
@@ -86451,8 +86502,14 @@ fn to_datetime(
             values,
         )
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        let res =
-            fp_frame::to_datetime_with_options(&temp_series, opts).map_err(to_datetime_error)?;
+        // A list is read value by value (an overflowing int names its
+        // position; br-frankenpandas-39q44).
+        let list_opts = fp_frame::ToDatetimeOptions {
+            list_input: true,
+            ..opts
+        };
+        let res = fp_frame::to_datetime_with_options(&temp_series, list_opts)
+            .map_err(to_datetime_error)?;
         if let Some(stamps) = mixed_zone_timestamps(py, &res, format == Some("mixed"))? {
             let index = mixed_zone_index(stamps, format == Some("mixed"))?;
             return Ok(Py::new(py, index)?.into_any());
@@ -86473,7 +86530,9 @@ fn to_datetime(
         if let Some(column) = py_array_like_column(py, arg)? {
             let temp_series = Series::new("", Index::default_range(column.len()), column)
                 .map_err(frame_error_to_py)?;
-            warn_order(temp_series.values())?;
+            if format.is_none() && unit.is_none() {
+                warn_order(temp_series.values())?;
+            }
             let res = fp_frame::to_datetime_with_options(&temp_series, opts)
                 .map_err(to_datetime_error)?;
             if let Some(stamps) = mixed_zone_timestamps(py, &res, format == Some("mixed"))? {

@@ -38092,9 +38092,11 @@ def test_frame_resample_ohlc_like_pandas_jinml() -> None:
 
 # br-frankenpandas-cfoxn: a two-key groupby whose packed key slots pass the direct-address
 # cap (here 200 x 300 slots over 2,000 rows) hashes the slots instead of
-# falling to the generic per-row keys; every result answers as pandas.
-# NEGATIVE: a small product (the direct table), sort=False's first-seen
-# order, as_index=False, three keys, a missing key (dropna both ways).
+# falling to the generic per-row keys; every result answers as pandas, its
+# index made from the groups' level codes. NEGATIVE: a small product (the
+# direct table), sort=False's first-seen order, as_index=False, three keys
+# (mixed too), a missing key (dropna both ways), an int key over a range far
+# past its groups (numbered through a map), negative ints, reset_index.
 def _cfoxn_frame(m: Any, keys: str) -> Any:
     import numpy as np
 
@@ -38104,8 +38106,9 @@ def _cfoxn_frame(m: Any, keys: str) -> Any:
     i = rng.integers(-150, 150, n)
     k = np.array([f"k{v}" for v in rng.integers(0, 300, n)], dtype=object)
     small = rng.integers(0, 3, n)
+    wide = rng.integers(0, 10**9, n)
     x = rng.normal(size=n).round(3)
-    frame = {"g": g, "i": i, "k": k, "small": small, "x": x}
+    frame = {"g": g, "i": i, "k": k, "small": small, "w": wide, "x": x}
     if keys == "missing key":
         kk = k.copy()
         kk[::37] = None
@@ -38120,6 +38123,9 @@ _CFOXN_KEYS = {
     "small product (NEGATIVE)": ["small", "g"],
     "three keys (NEGATIVE)": ["g", "i", "small"],
     "missing key": ["g", "k"],
+    "three mixed keys": ["g", "k", "i"],
+    "wide int, str": ["w", "k"],
+    "negative, wide": ["i", "w"],
 }
 _CFOXN_OPS = {
     "size": lambda gb: gb.size(),
@@ -38129,6 +38135,8 @@ _CFOXN_OPS = {
     "first": lambda gb: gb["x"].first(),
     "nunique": lambda gb: gb["x"].nunique(),
     "idxmax": lambda gb: gb["x"].idxmax(),
+    "sum reset_index": lambda gb: gb["x"].sum().reset_index(),
+    "frame sum": lambda gb: gb[["x"]].sum(),
 }
 
 
@@ -38663,3 +38671,288 @@ def test_to_datetime_linear_formats_like_pandas_xqa2l(format: str) -> None:
     assert coerced(fpd) == coerced(pd)
     for text in strings[:60]:
         assert raised(fpd, text) == raised(pd, text), text
+
+
+# br-frankenpandas-7jm5t: str.normalize copies ASCII text and strings the quick check calls
+# normalized as they are, and decomposes the rest; every form answers as
+# pandas. NEGATIVE: composed and decomposed accents, compatibility characters
+# (the ligature fi, a circled one, a fullwidth A), Hangul, a quick-check
+# "maybe" string (a combining mark after a base), empty and missing cells.
+_7JM5T_TEXT = [
+    "Alpha 97 beta-13",
+    "caf\u00e9",
+    "cafe\u0301",
+    "\ufb01ne",
+    "\u2460\uff21",
+    "\ud55c\uad6d\uc5b4",
+    "\u1112\u1161\u11ab",
+    "a\u0308\u0301",
+    "",
+    None,
+    "Ω\u2126",
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("form", ["NFC", "NFD", "NFKC", "NFKD"])
+def test_str_normalize_like_pandas_7jm5t(form: str) -> None:
+    def answer(m: Any) -> Any:
+        return [repr(x) for x in m.Series(_7JM5T_TEXT).str.normalize(form).tolist()]
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-ddag0: named aggregation runs as pandas reads it - the {column:
+# [functions]} dict, its columns picked out under the names - and answers as
+# pandas. NEGATIVE: the same column twice, the same (column, function) under
+# two names, size, count over NaN, a text column's min, two keys, sort=False,
+# dropna=False over a missing key, as_index=False (its own path), a missing
+# column (pandas' error).
+def _ddag0_frame(m: Any) -> Any:
+    import numpy as np
+
+    rng = np.random.default_rng(9)
+    n = 400
+    x = rng.normal(size=n).round(3)
+    x[::17] = np.nan
+    k = rng.integers(0, 7, n).astype(float)
+    k[::23] = np.nan
+    return m.DataFrame(
+        {
+            "g": rng.integers(0, 9, n),
+            "k": k,
+            "x": x,
+            "y": rng.integers(0, 50, n),
+            "t": np.array([f"w{v}" for v in rng.integers(0, 30, n)], dtype=object),
+        }
+    )
+
+
+_DDAG0_CASES = {
+    "two columns": ("g", {}, {"total": ("x", "sum"), "top": ("y", "max")}),
+    "same column twice": ("g", {}, {"lo": ("x", "min"), "hi": ("x", "max"), "avg": ("x", "mean")}),
+    "same pair twice": ("g", {}, {"a": ("x", "sum"), "b": ("x", "sum")}),
+    "size and count": ("g", {}, {"n": ("x", "size"), "c": ("x", "count")}),
+    "text min": ("g", {}, {"first_word": ("t", "min"), "last_word": ("t", "max")}),
+    "two keys": (["g", "y"], {}, {"total": ("x", "sum")}),
+    "sort=False": ("g", {"sort": False}, {"total": ("x", "sum"), "n": ("y", "count")}),
+    "dropna=False": ("k", {"dropna": False}, {"total": ("x", "sum")}),
+    "as_index=False (NEGATIVE)": ("g", {"as_index": False}, {"total": ("x", "sum"), "top": ("y", "max")}),
+    "missing column (NEGATIVE)": ("g", {}, {"total": ("nope", "sum")}),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_DDAG0_CASES))
+def test_named_aggregation_like_pandas_ddag0(case: str) -> None:
+    keys, options, named = _DDAG0_CASES[case]
+
+    def answer(m: Any) -> Any:
+        try:
+            out = _ddag0_frame(m).groupby(keys, **options).agg(**named)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return [repr(c) for c in out.columns], [repr(x) for x in out.index], repr(out.values.tolist()), [str(d) for d in out.dtypes]
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-e54y6: dot of a lazily transposed frame reads its sources' rows laid
+# out once, and answers as pandas: values (BLAS order aside), the result's
+# labels. NEGATIVE: int columns, int beside float, a NaN (the general path),
+# a non-square other, the @ operator, a Series other.
+def _e54y6_frame(m: Any, kind: str) -> Any:
+    import numpy as np
+
+    rng = np.random.default_rng(54)
+    n = 3_000
+    cols = {f"c{j}": rng.normal(size=n) for j in range(6)}
+    if kind == "ints":
+        cols = {f"c{j}": rng.integers(-50, 50, n) for j in range(6)}
+    if kind == "int beside float":
+        cols["c0"] = rng.integers(-50, 50, n)
+    if kind == "NaN (NEGATIVE)":
+        cols["c2"][17] = np.nan
+    return m.DataFrame(cols, index=[f"r{i}" for i in range(n)])
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", ["floats", "ints", "int beside float", "NaN (NEGATIVE)"])
+@pytest.mark.parametrize("op", ["T.dot(self)", "T.dot(half)", "T @ self", "T.dot(series)"])
+def test_transposed_dot_like_pandas_e54y6(kind: str, op: str) -> None:
+    import numpy as np
+
+    def answer(m: Any) -> Any:
+        frame = _e54y6_frame(m, kind)
+        if op == "T.dot(self)":
+            out = frame.T.dot(frame)
+        elif op == "T.dot(half)":
+            out = frame.T.dot(frame[["c1", "c3", "c4"]])
+        elif op == "T @ self":
+            out = frame.T @ frame
+        else:
+            out = frame.T.dot(frame["c5"])
+        if hasattr(out, "columns"):
+            return list(out.index), list(out.columns), np.asarray(out.values, dtype=float)
+        return list(out.index), [], np.asarray(out.values, dtype=float)
+
+    fp_index, fp_columns, fp_values = answer(fpd)
+    pd_index, pd_columns, pd_values = answer(pd)
+    assert (fp_index, fp_columns) == (pd_index, pd_columns)
+    assert fp_values.shape == pd_values.shape
+    assert np.allclose(fp_values, pd_values, equal_nan=True, rtol=1e-12, atol=1e-9)
+
+
+# br-frankenpandas-w3wnb: pd.cut of a typed float or int column bins each value by the inner
+# edges it passes and answers as pandas: values on every edge, below the first
+# and past the last, labels or intervals. NEGATIVE: right=False,
+# include_lowest (a value on the first edge), a NaN (the general path), an
+# int column, a value exactly at the first edge without include_lowest.
+def _w3wnb_values(kind: str) -> Any:
+    import numpy as np
+
+    rng = np.random.default_rng(3)
+    if kind == "ints":
+        return rng.integers(-2, 13, 400)
+    values = np.concatenate([rng.uniform(-0.5, 1.5, 400), [0.0, 0.25, 0.5, 0.75, 1.0, -0.0]])
+    if kind == "with NaN (NEGATIVE)":
+        values[5] = np.nan
+    return values
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", ["floats", "ints", "with NaN (NEGATIVE)"])
+@pytest.mark.parametrize("options", ["labels", "intervals", "right=False", "include_lowest"])
+def test_cut_typed_columns_like_pandas_w3wnb(kind: str, options: str) -> None:
+    bins = [0, 3, 6, 9, 12] if kind == "ints" else [0, 0.25, 0.5, 0.75, 1.0]
+    kwargs = {
+        "labels": {"labels": ["a", "b", "c", "d"]},
+        "intervals": {},
+        "right=False": {"right": False, "labels": ["a", "b", "c", "d"]},
+        "include_lowest": {"include_lowest": True},
+    }[options]
+
+    def answer(m: Any) -> Any:
+        out = m.cut(m.Series(_w3wnb_values(kind)), bins=bins, **kwargs)
+        return str(out.dtype), [repr(x) for x in out.tolist()], [repr(c) for c in out.cat.categories]
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-3jngy: cat.set_categories / reorder_categories remap the codes through a
+# table of each old category's new code and answer as pandas. NEGATIVE: a
+# category the new list drops (its rows NaN), NaN rows, the new categories in
+# another order, ints matched by 1.0 (pandas' equality), ordered=True.
+_3JNGY_CASES = {
+    "drop some": (["b", "a", "c", None, "d", "a"], ["a", "c", "z"], {}),
+    "reorder all": (["b", "a", "c", None, "d", "a"], ["d", "c", "b", "a"], {}),
+    "ints by floats": ([1, 2, 3, 2, None], [3.0, 1.0], {}),
+    "ordered": (["b", "a", "c", "a"], ["c", "a"], {"ordered": True}),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_3JNGY_CASES))
+@pytest.mark.parametrize("op", ["set_categories", "reorder_categories"])
+def test_cat_set_and_reorder_categories_like_pandas_3jngy(case: str, op: str) -> None:
+    values, new, kwargs = _3JNGY_CASES[case]
+
+    def answer(m: Any) -> Any:
+        cat = m.Series(values).astype("category")
+        try:
+            if op == "set_categories":
+                out = cat.cat.set_categories(new, **kwargs)
+            else:
+                out = cat.cat.reorder_categories(list(reversed(list(cat.cat.categories))), **kwargs)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return [repr(x) for x in out.tolist()], [repr(c) for c in out.cat.categories], bool(out.cat.ordered), out.cat.codes.tolist()
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-39q44: to_datetime of an int column under unit= multiplies each value by
+# the unit's nanoseconds and answers as pandas, overflow included. NEGATIVE:
+# negative epochs, every unit, an int64 ndarray, an int Series and a list, a
+# value past datetime64[ns] under raise (pandas' OutOfBoundsDatetime: an array
+# names the instant, a list the value and its position) and coerce (NaT), an
+# empty array, utc=True (the general path).
+_39Q44_CASES = {
+    "seconds": ([0, 1, -86_400, 1_700_000_000], {"unit": "s"}),
+    "milliseconds": ([1_700_000_000_123, -5], {"unit": "ms"}),
+    "microseconds": ([1_700_000_000_123_456], {"unit": "us"}),
+    "nanoseconds": ([1_700_000_000_123_456_789, 0], {"unit": "ns"}),
+    "days": ([0, 19_000, -365], {"unit": "D"}),
+    "overflow raise (NEGATIVE)": ([1, 10**12], {"unit": "s"}),
+    "overflow coerce (NEGATIVE)": ([1, 10**12, -(10**12)], {"unit": "s", "errors": "coerce"}),
+    "utc (NEGATIVE)": ([0, 60], {"unit": "s", "utc": True}),
+    "empty (NEGATIVE)": ([], {"unit": "s"}),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_39Q44_CASES))
+@pytest.mark.parametrize("container", ["ndarray", "Series", "list"])
+def test_to_datetime_int_unit_like_pandas_39q44(case: str, container: str) -> None:
+    import numpy as np
+
+    values, kwargs = _39Q44_CASES[case]
+
+    def answer(m: Any) -> Any:
+        data = np.array(values, dtype=np.int64)
+        arg = {"ndarray": data, "Series": m.Series(data), "list": [int(v) for v in values]}[container]
+        try:
+            out = m.to_datetime(arg, **kwargs)
+        except Exception as error:  # noqa: BLE001 - the raised class and text are the outcome
+            return type(error).__name__, str(error)
+        return str(out.dtype), [str(x) for x in out]
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-7krba: ffill(limit=) fills run by run and reindex(method=) over int labels
+# compares ints; both answer as pandas. NEGATIVE: a leading run, runs longer
+# and shorter than the limit, limits 1 / 2 / 5, a float32 column; bfill and
+# nearest, limit= and tolerance=, a decreasing index, float labels (the
+# general path), a target below the first label, a non-monotonic index
+# (pandas' error).
+_7KRBA_VALUES = [None, 1.5, None, None, None, 2.0, None, 3.25, None, None, 4.0, None]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("limit", [1, 2, 5])
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
+def test_ffill_limit_like_pandas_7krba(limit: int, dtype: str) -> None:
+    def answer(m: Any) -> Any:
+        out = m.Series(_7KRBA_VALUES, dtype=dtype).ffill(limit=limit)
+        return str(out.dtype), [repr(x) for x in out.tolist()]
+
+    assert answer(fpd) == answer(pd)
+
+
+_7KRBA_REINDEX = {
+    "ffill": ([0, 2, 4, 6], [-1, 0, 1, 2, 3, 7], {"method": "ffill"}),
+    "bfill": ([0, 2, 4, 6], [-1, 0, 1, 2, 3, 7], {"method": "bfill"}),
+    "nearest": ([0, 2, 4, 6], [-1, 1, 3, 5, 7], {"method": "nearest"}),
+    "ffill limit": ([0, 10], list(range(12)), {"method": "ffill", "limit": 2}),
+    "ffill tolerance": ([0, 10], list(range(12)), {"method": "ffill", "tolerance": 3}),
+    "decreasing": ([6, 4, 2, 0], [7, 5, 3, 1, -1], {"method": "ffill"}),
+    "float labels (NEGATIVE)": ([0.0, 2.5, 5.0], [1.0, 2.5, 4.0, 6.0], {"method": "ffill"}),
+    "non-monotonic (NEGATIVE)": ([0, 4, 2], [1, 3], {"method": "ffill"}),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_7KRBA_REINDEX))
+def test_reindex_method_like_pandas_7krba(case: str) -> None:
+    labels, target, kwargs = _7KRBA_REINDEX[case]
+
+    def answer(m: Any) -> Any:
+        s = m.Series([float(10 * (i + 1)) for i in range(len(labels))], index=labels)
+        try:
+            out = s.reindex(target, **kwargs)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return [repr(x) for x in out.index], [repr(x) for x in out.tolist()]
+
+    assert answer(fpd) == answer(pd)
