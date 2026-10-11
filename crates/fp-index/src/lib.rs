@@ -4916,9 +4916,12 @@ impl Index {
                     }
                     return out;
                 }
+                // Each target from where the labels' line puts it: a binary
+                // search was ~20 dependent probes a target (get_indexer of
+                // 100k on a million 15 ms, pandas 3; br-frankenpandas-cs4fd).
                 return targets
                     .iter()
-                    .map(|target| labels.binary_search(target).ok())
+                    .map(|&target| ascending_i64_position(&labels, target))
                     .collect();
             }
             let labels = self.labels();
@@ -9837,6 +9840,75 @@ fn freq_unique_deltas(values: &[i64]) -> Vec<i64> {
     deltas
 }
 
+/// Whether `index` holds exactly one label, a present datetime - the one
+/// case pandas' `tz_localize` keeps a non-UTC index's freq (br-frankenpandas-6pqf3).
+fn one_present_datetime(index: &Index) -> bool {
+    index.len() == 1
+        && matches!(
+            index.labels().first(),
+            Some(IndexLabel::Datetime64(nanos)) if *nanos != i64::MIN
+        )
+}
+
+/// The position of `target` in the strictly ascending `labels`: the place
+/// the line through the first and last label puts it, then a gallop from
+/// there to a window that holds it and a binary search of that window -
+/// a few probes near the guess for evenly spread labels (ids, steps,
+/// instants), at most about twice a binary search's for skewed ones
+/// (br-frankenpandas-cs4fd).
+fn ascending_i64_position(labels: &[i64], target: i64) -> Option<usize> {
+    let (&first, &last) = (labels.first()?, labels.last()?);
+    if target < first || target > last {
+        return None;
+    }
+    let top = labels.len() - 1;
+    let span = i128::from(last) - i128::from(first);
+    let guess = if span == 0 {
+        0
+    } else {
+        let offset = (i128::from(target) - i128::from(first)) * top as i128 / span;
+        usize::try_from(offset).map_or(top, |offset| offset.min(top))
+    };
+    let (low, high) = match labels[guess].cmp(&target) {
+        std::cmp::Ordering::Equal => return Some(guess),
+        std::cmp::Ordering::Less => {
+            // labels[guess] < target: double the step until a label reaches it.
+            let mut low = guess + 1;
+            let mut step = 1;
+            loop {
+                let probe = guess.saturating_add(step);
+                if probe > top {
+                    break (low, top + 1);
+                }
+                if labels[probe] >= target {
+                    break (low, probe + 1);
+                }
+                low = probe + 1;
+                step *= 2;
+            }
+        }
+        std::cmp::Ordering::Greater => {
+            // labels[guess] > target: double the step back until one is below.
+            let mut high = guess;
+            let mut step = 1;
+            loop {
+                let Some(probe) = guess.checked_sub(step) else {
+                    break (0, high);
+                };
+                if labels[probe] <= target {
+                    break (probe, high);
+                }
+                high = probe;
+                step *= 2;
+            }
+        }
+    };
+    labels[low..high]
+        .binary_search(&target)
+        .ok()
+        .map(|position| position + low)
+}
+
 /// pandas' frequency inference (`inferred_freq`): `wall` is each label's
 /// wall clock (a calendar rule reads it) and `instants` the UTC instants (a
 /// sub-day step reads them, as a DST change moves the wall clock). Needs
@@ -10652,6 +10724,11 @@ impl DatetimeIndex {
     #[must_use]
     pub fn isin(&self, values: &[i64]) -> Vec<bool> {
         let needle: FxHashSet<i64> = values.iter().copied().collect();
+        // Held instants read in place, NaT as i64::MIN (a million labels
+        // were made; br-frankenpandas-cs4fd).
+        if let Some(held) = self.index.datetime64_label_values() {
+            return held.iter().map(|nanos| needle.contains(nanos)).collect();
+        }
         self.index
             .labels()
             .iter()
@@ -11483,6 +11560,22 @@ impl DatetimeIndex {
     /// aware index's wall clock kept without its zone (`None`). Localizing
     /// an aware index to a zone is pandas' TypeError.
     pub fn tz_localize(&self, tz: Option<&str>) -> Result<Self, IndexError> {
+        self.tz_localize_with(
+            tz,
+            fp_types::AmbiguousTime::Raise,
+            fp_types::NonexistentTime::Raise,
+        )
+    }
+
+    /// [`Self::tz_localize`] under pandas' `ambiguous` / `nonexistent`
+    /// policies, one for every value (each wall time was made a text and
+    /// placed alone; br-frankenpandas-6pqf3).
+    pub fn tz_localize_with(
+        &self,
+        tz: Option<&str>,
+        ambiguous: fp_types::AmbiguousTime,
+        nonexistent: fp_types::NonexistentTime,
+    ) -> Result<Self, IndexError> {
         match (tz, self.index.tz()) {
             (Some(_), Some(_)) => Err(IndexError::TimeZoneMismatch(
                 "Already tz-aware, use tz_convert to convert.".to_owned(),
@@ -11490,7 +11583,8 @@ impl DatetimeIndex {
             (None, None) => Ok(self.clone()),
             (None, Some(_)) => Ok(self.wall_index()),
             (Some(zone), None) => {
-                // pandas keeps the freq only for UTC, where no wall time moves.
+                // pandas keeps the freq for UTC, where no wall time moves,
+                // and for one label it places.
                 let freq = self.index.freq.clone().filter(|_| zone == "UTC");
                 // UTC wall times are their instants: this index under the
                 // zone, its instants shared (they were rebuilt a label at a
@@ -11500,23 +11594,33 @@ impl DatetimeIndex {
                         index: self.index.clone().with_tz(Some(zone))?.with_freq(freq),
                     });
                 }
+                // The zone parsed once, a DST-free hour's offset reused
+                // (br-frankenpandas-6pqf3).
                 let nanos = match self.index.datetime64_label_values() {
-                    Some(held) => held
-                        .iter()
-                        .map(|&nanos| fp_types::tz_wall_to_utc_nanos(zone, nanos))
-                        .collect::<Result<Vec<_>, _>>()?,
+                    Some(held) => {
+                        fp_types::tz_wall_to_utc_nanos_all(zone, &held, ambiguous, nonexistent)?
+                    }
                     None => self
                         .index
                         .labels()
                         .iter()
                         .map(|label| match label {
-                            IndexLabel::Datetime64(nanos) => {
-                                fp_types::tz_wall_to_utc_nanos(zone, *nanos)
-                            }
+                            IndexLabel::Datetime64(nanos) => fp_types::tz_wall_to_utc_nanos_with(
+                                zone,
+                                *nanos,
+                                ambiguous,
+                                nonexistent,
+                            ),
                             _ => Ok(i64::MIN),
                         })
                         .collect::<Result<Vec<_>, _>>()?,
                 };
+                let freq = freq.or_else(|| {
+                    self.index
+                        .freq
+                        .clone()
+                        .filter(|_| nanos.len() == 1 && nanos[0] != i64::MIN)
+                });
                 let localized = Self::new(nanos).rename_index(self.name());
                 Ok(Self {
                     index: localized.index.with_tz(Some(zone))?.with_freq(freq),
@@ -11588,11 +11692,46 @@ impl DatetimeIndex {
         )
     }
 
+    /// The wall-clock nanoseconds of an index held as instants (NaT as
+    /// i64::MIN): a zoned one's converted in one pass, the zone parsed once,
+    /// where each label was made and converted, parsing the zone's name
+    /// each time (br-frankenpandas-6pqf3). None for any other backing (or an unknown zone).
+    fn wall_nanos(&self) -> Option<Cow<'_, [i64]>> {
+        let held = self.index.datetime64_label_values()?;
+        match self.index.tz() {
+            None => Some(held),
+            Some(zone) => fp_types::tz_utc_to_wall_nanos_all(zone, &held)
+                .ok()
+                .map(Cow::Owned),
+        }
+    }
+
     /// The wall-clock times as a naive index (`tz_localize(None)`), the
-    /// name kept.
+    /// name kept, the freq too for one present label (pandas drops it
+    /// otherwise).
     fn wall_index(&self) -> Self {
+        let freq = self
+            .index
+            .freq
+            .clone()
+            .filter(|_| one_present_datetime(&self.index));
+        // UTC wall times are the instants: shared, not copied (br-frankenpandas-6pqf3).
+        if self.index.tz() == Some("UTC")
+            && let Ok(index) = self.index.clone().with_tz(None)
+        {
+            return Self {
+                index: index.with_freq(freq),
+            };
+        }
+        if let Some(nanos) = self.wall_nanos() {
+            return Self::new(nanos.into_owned())
+                .rename_index(self.name())
+                .with_freq(freq);
+        }
         Self {
-            index: Index::new(self.wall_labels().into_owned()).rename_index(self.name()),
+            index: Index::new(self.wall_labels().into_owned())
+                .rename_index(self.name())
+                .with_freq(freq),
         }
     }
 
@@ -11647,6 +11786,18 @@ impl DatetimeIndex {
     /// (it was always None).
     #[must_use]
     pub fn inferred_freq(&self) -> Option<String> {
+        // Off the held instants: every label was made, twice (8 ms a read
+        // of a million; br-frankenpandas-6pqf3).
+        if let Some(wall) = self.wall_nanos() {
+            if wall.contains(&i64::MIN) {
+                return None;
+            }
+            if self.index.tz().is_none() {
+                return infer_datetime_freq(&wall, &wall);
+            }
+            let instants = self.index.datetime64_label_values()?;
+            return infer_datetime_freq(&wall, &instants);
+        }
         let mut wall = Vec::with_capacity(self.len());
         for label in self.wall_labels().iter() {
             match label {
@@ -12261,18 +12412,32 @@ impl DatetimeIndex {
     /// in its zone (a midnight a DST change skips is an error, as pandas).
     /// NAT labels propagate.
     pub fn normalize(&self) -> Result<Self, IndexError> {
-        let nanos: Vec<i64> = self
-            .wall_labels()
-            .iter()
-            .map(|label| match label {
-                IndexLabel::Datetime64(nanos) if *nanos != i64::MIN => {
-                    let secs_per_day: i64 = 86_400;
-                    let nanos_per_day: i64 = secs_per_day * 1_000_000_000;
-                    nanos.div_euclid(nanos_per_day) * nanos_per_day
-                }
-                _ => i64::MIN,
-            })
-            .collect();
+        let nanos_per_day: i64 = 86_400 * 1_000_000_000;
+        let midnight = |nanos: i64| nanos.div_euclid(nanos_per_day) * nanos_per_day;
+        // Instants held as instants: each wall clock floored straight off the
+        // buffer (a zoned one's converted first), NaT kept - every label was
+        // made, a zoned index's twice (d.normalize() of a million 20 ms,
+        // pandas 12; br-frankenpandas-6pqf3).
+        let nanos: Vec<i64> = match self.wall_nanos() {
+            Some(wall) => wall
+                .iter()
+                .map(|&nanos| {
+                    if nanos == i64::MIN {
+                        i64::MIN
+                    } else {
+                        midnight(nanos)
+                    }
+                })
+                .collect(),
+            None => self
+                .wall_labels()
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Datetime64(nanos) if *nanos != i64::MIN => midnight(*nanos),
+                    _ => i64::MIN,
+                })
+                .collect(),
+        };
         let mut normalized = Self::new(nanos);
         if let Some(name) = self.name() {
             normalized = normalized.set_name(name);
@@ -12288,6 +12453,13 @@ impl DatetimeIndex {
     #[must_use]
     pub fn is_normalized(&self) -> bool {
         let nanos_per_day: i64 = 86_400 * 1_000_000_000;
+        // The wall clocks of held instants in one pass, no label made
+        // (br-frankenpandas-6pqf3).
+        if let Some(wall) = self.wall_nanos() {
+            return wall
+                .iter()
+                .all(|&nanos| nanos == i64::MIN || nanos.rem_euclid(nanos_per_day) == 0);
+        }
         self.wall_labels().iter().all(|label| match label {
             IndexLabel::Datetime64(nanos) => {
                 *nanos == i64::MIN || nanos.rem_euclid(nanos_per_day) == 0
@@ -22169,6 +22341,10 @@ struct Level {
     len: usize,
     rows: Arc<OnceLock<Arc<Vec<IndexLabel>>>>,
     codes: Arc<OnceLock<Option<LevelCodes>>>,
+    /// The time zone of a level of tz-aware instants (its labels their UTC
+    /// nanoseconds, as a zoned DatetimeIndex holds them); None for any other
+    /// level. A zoned column's level was its text (br-frankenpandas-c4v57).
+    zone: Option<Arc<str>>,
 }
 
 /// A level's distinct labels in first-seen order and each row's code into
@@ -22237,6 +22413,7 @@ impl Level {
             len: rows.len(),
             rows: Arc::new(OnceLock::from(Arc::new(rows))),
             codes: Arc::default(),
+            zone: None,
         }
     }
 
@@ -22245,7 +22422,14 @@ impl Level {
             len: codes.len(),
             rows: Arc::default(),
             codes: Arc::new(OnceLock::from(Some(LevelCodes { uniques, codes }))),
+            zone: None,
         }
+    }
+
+    /// This level in `zone` (see [`Level::zone`]).
+    fn zoned(mut self, zone: Option<Arc<str>>) -> Self {
+        self.zone = zone;
+        self
     }
 
     /// `rows` with their first-seen `codes` (a caller's own, checked for
@@ -22329,6 +22513,7 @@ impl Level {
             }
             None => Self::from_rows(take_level_labels(self.rows(), positions)),
         }
+        .zoned(self.zone.clone())
     }
 
     /// Rows `start..start + len` (within the length): a window of the codes,
@@ -22341,6 +22526,15 @@ impl Level {
             }
             None => Self::from_rows(self.rows()[start..start + len].to_vec()),
         }
+        .zoned(self.zone.clone())
+    }
+}
+
+/// `index` - a level's labels - in the level's zone when it has one (br-frankenpandas-c4v57).
+fn zoned_level_index(index: Index, level: &Level) -> Index {
+    match level.zone.as_deref() {
+        Some(zone) => index.clone().with_tz(Some(zone)).unwrap_or(index),
+        None => index,
     }
 }
 
@@ -23125,9 +23319,26 @@ impl MultiIndex {
                 if let Some(name) = self.names.get(level_idx).and_then(|name| name.as_ref()) {
                     index = index.set_name(name);
                 }
-                index
+                zoned_level_index(index, level)
             })
             .collect()
+    }
+
+    /// The time zone of level `level` when it holds tz-aware instants (its
+    /// labels their UTC nanoseconds); None for any other level (br-frankenpandas-c4v57).
+    #[must_use]
+    pub fn level_zone(&self, level: usize) -> Option<&str> {
+        self.levels.get(level)?.zone.as_deref()
+    }
+
+    /// `self` with level `level` holding tz-aware instants in `zone` (its
+    /// labels their UTC nanoseconds), or naive ones for None (br-frankenpandas-c4v57).
+    #[must_use]
+    pub fn with_level_zone(mut self, level: usize, zone: Option<&str>) -> Self {
+        if let Some(target) = self.levels.get_mut(level) {
+            target.zone = zone.map(Arc::from);
+        }
+        self
     }
 
     /// Integer level codes for each row, matching `pd.MultiIndex.codes`.
@@ -23667,7 +23878,7 @@ impl MultiIndex {
         if let Some(name) = self.names.get(level).and_then(|n| n.as_ref()) {
             idx = idx.set_name(name);
         }
-        Ok(idx)
+        Ok(zoned_level_index(idx, &self.levels[level]))
     }
 
     /// One level's labels, row by row, borrowed - [`Self::get_level_values`]
@@ -25628,7 +25839,11 @@ impl MultiIndex {
             if let Some(ref name) = new_names[0] {
                 idx = idx.set_name(name);
             }
-            Ok(MultiIndexOrIndex::Index(idx))
+            // A zoned level is a zoned index (br-frankenpandas-c4v57).
+            Ok(MultiIndexOrIndex::Index(zoned_level_index(
+                idx,
+                &new_levels[0],
+            )))
         } else {
             Ok(MultiIndexOrIndex::Multi(
                 Self::from_shared_levels_and_names(new_levels, new_names),
@@ -27256,6 +27471,144 @@ mod tests {
         let with_nan = Index::from_f64_values(vec![1.5, f64::NAN]).astype_int();
         assert_eq!(with_nan.labels()[0], IndexLabel::Int64(1));
         assert!(with_nan.labels()[1].is_missing());
+    }
+
+    #[test]
+    fn zoned_level_keeps_its_zone_c4v57() {
+        // A level of tz-aware instants (their UTC nanoseconds) in its zone:
+        // its values, its catalog, a take, a row slice and the level a
+        // droplevel leaves are all zoned (br-frankenpandas-c4v57).
+        let utc = |day: i64| IndexLabel::Datetime64(day * 86_400_000_000_000);
+        let multi = MultiIndex::from_arrays(vec![
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("a"),
+            ],
+            vec![utc(1), utc(2), utc(3)],
+        ])
+        .unwrap()
+        .with_level_zone(1, Some("UTC"));
+        assert_eq!(multi.level_zone(1), Some("UTC"));
+        assert_eq!(multi.get_level_values(1).unwrap().tz(), Some("UTC"));
+        assert_eq!(multi.levels()[1].tz(), Some("UTC"));
+        assert_eq!(multi.take(&[2, 0]).unwrap().level_zone(1), Some("UTC"));
+        assert_eq!(multi.slice_rows(1, 2).unwrap().level_zone(1), Some("UTC"));
+        match multi.droplevel(0).unwrap() {
+            crate::MultiIndexOrIndex::Index(index) => assert_eq!(index.tz(), Some("UTC")),
+            crate::MultiIndexOrIndex::Multi(_) => unreachable!("one level left"),
+        }
+        // NEGATIVE: the other level, and a naive level, have no zone; a zone
+        // of None makes the level naive again.
+        assert_eq!(multi.level_zone(0), None);
+        assert_eq!(multi.get_level_values(0).unwrap().tz(), None);
+        assert_eq!(multi.clone().with_level_zone(1, None).level_zone(1), None);
+        assert_eq!(multi.level_zone(5), None);
+    }
+
+    #[test]
+    fn wall_clock_paths_keep_pandas_freq_6pqf3() {
+        // tz_localize / tz_localize(None) off the held instants keep pandas'
+        // freq rules - UTC, or one present label - and inferred_freq reads
+        // the held instants as the labels did (br-frankenpandas-6pqf3).
+        const HOUR: i64 = 3_600_000_000_000;
+        let hours = |count: i64| {
+            DatetimeIndex::new(
+                (0..count)
+                    .map(|step| 19_723 * 24 * HOUR + step * HOUR)
+                    .collect(),
+            )
+            .with_freq(Some("h".to_owned()))
+        };
+        let utc = hours(3).tz_localize(Some("UTC")).unwrap();
+        assert_eq!(utc.freq(), Some("h".to_owned()));
+        let one = hours(1).tz_localize(Some("US/Eastern")).unwrap();
+        assert_eq!(one.freq(), Some("h".to_owned()));
+        assert_eq!(one.tz_localize(None).unwrap().freq(), Some("h".to_owned()));
+        let naive = utc.tz_localize(None).unwrap();
+        assert_eq!(naive.as_index().tz(), None);
+        assert_eq!(naive.values(), hours(3).values());
+        assert_eq!(hours(3).inferred_freq(), Some("h".to_owned()));
+        let eastern = hours(30).tz_localize(Some("US/Eastern")).unwrap();
+        assert_eq!(eastern.inferred_freq(), Some("h".to_owned()));
+        assert!(!eastern.is_normalized());
+        assert!(hours(30).normalize().unwrap().is_normalized());
+        // NEGATIVE: three labels lose the freq out of UTC and back to naive;
+        // one label made NaT by a policy keeps none; a NaT label infers no
+        // freq.
+        assert_eq!(utc.tz_localize(None).unwrap().freq(), None);
+        assert_eq!(
+            hours(3).tz_localize(Some("US/Eastern")).unwrap().freq(),
+            None
+        );
+        let skipped = DatetimeIndex::new(vec![19_792 * 24 * HOUR + 2 * HOUR + 1_800_000_000_000])
+            .with_freq(Some("h".to_owned()));
+        let nat = skipped
+            .tz_localize_with(
+                Some("US/Eastern"),
+                fp_types::AmbiguousTime::Raise,
+                fp_types::NonexistentTime::NaT,
+            )
+            .unwrap();
+        assert_eq!(nat.freq(), None);
+        let mut gappy = hours(3).values();
+        gappy[1] = None;
+        let gappy: Vec<i64> = gappy
+            .into_iter()
+            .map(|nanos| nanos.unwrap_or(i64::MIN))
+            .collect();
+        assert_eq!(DatetimeIndex::new(gappy).inferred_freq(), None);
+    }
+
+    #[test]
+    fn ascending_position_matches_binary_search_cs4fd() {
+        use super::ascending_i64_position;
+
+        // The guess-and-gallop search answers as a binary search on evenly
+        // spread, skewed, clustered and tiny ascending labels, for every
+        // label and for targets between, below and above them (br-frankenpandas-cs4fd).
+        let mut shapes: Vec<Vec<i64>> = vec![
+            (0..10_000).map(|i| i * 3).collect(),
+            (0..3_000_i64).map(|i| i * i).collect(),
+            (0..62).map(|i| 1_i64 << i).collect(),
+            (0..1_000).chain(1_000_000..1_001_000).collect(),
+            vec![i64::MIN + 1, -5, 0, 7, i64::MAX],
+            vec![42],
+            vec![-1, 1],
+        ];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut random: Vec<i64> = (0..5_000)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                i64::try_from(state >> 34).unwrap()
+            })
+            .collect();
+        random.sort_unstable();
+        random.dedup();
+        shapes.push(random);
+        for labels in &shapes {
+            let mut targets: Vec<i64> = Vec::new();
+            for &label in labels {
+                targets.extend([label, label.saturating_sub(1), label.saturating_add(1)]);
+            }
+            targets.extend([i64::MIN, i64::MAX, 0, -1, 1]);
+            for target in targets {
+                assert_eq!(
+                    ascending_i64_position(labels, target),
+                    labels.binary_search(&target).ok(),
+                    "{target} in {} labels",
+                    labels.len()
+                );
+            }
+        }
+        // NEGATIVE: an empty index finds nothing; a target between two
+        // labels, below the first or above the last is None.
+        assert_eq!(ascending_i64_position(&[], 3), None);
+        assert_eq!(ascending_i64_position(&[0, 3, 6], 4), None);
+        assert_eq!(ascending_i64_position(&[0, 3, 6], -1), None);
+        assert_eq!(ascending_i64_position(&[0, 3, 6], 7), None);
     }
 
     #[test]

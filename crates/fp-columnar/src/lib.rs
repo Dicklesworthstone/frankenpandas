@@ -13372,28 +13372,35 @@ impl Column {
                     data,
                 )))
             }
-            // A timedelta column has no lazy backing over the shared buffer:
-            // its values clone as they are (an Arc) and the clone keeps the
-            // buffer beside them. Rebuilding the same Scalars here cost every
-            // clone - every .iloc / .loc of a frame - 12 ms a million rows
-            // (br-frankenpandas-rrulv).
-            (Some(ColumnData::Period(data, freq)), DType::Period)
-                if data.len() == self.values.len() =>
-            {
-                let freq = *freq;
-                Some(ScalarValues::from_vec(
-                    data.iter()
-                        .copied()
-                        .map(|ord| Scalar::Period(Period::new(ord, freq)))
-                        .collect(),
-                ))
-            }
+            // A timedelta or period column has no lazy backing over the
+            // shared buffer: its values clone as they are (an Arc) and the
+            // clone keeps the buffer beside them. Rebuilding the same Scalars
+            // here cost every clone - every .iloc / .loc of a frame or Series
+            // - 12 ms a million rows (br-frankenpandas-rrulv; periods
+            // br-frankenpandas-h4bak, now that a period cache holds one freq).
             _ => None,
         }
     }
 
+    /// Whether every Period among `values` (NaT aside) has one freq: the
+    /// column's Period cache holds one (br-frankenpandas-h4bak).
+    fn one_period_freq(values: &[Scalar]) -> bool {
+        let mut freqs = values.iter().filter_map(|value| match value {
+            Scalar::Period(period) if period.ordinal != i64::MIN => Some(period.freq),
+            _ => None,
+        });
+        let Some(first) = freqs.next() else {
+            return true;
+        };
+        freqs.all(|freq| freq == first)
+    }
+
     fn cached_data_for_values(dtype: DType, values: &[Scalar]) -> Option<ColumnData> {
         match &dtype {
+            // A Period cache holds one freq for the column: periods of several
+            // keep none, each value its own (the cache read them all in the
+            // first freq; br-frankenpandas-h4bak).
+            DType::Period if !Self::one_period_freq(values) => None,
             DType::Bool
             | DType::BoolNullable
             | DType::Int64
@@ -38373,6 +38380,46 @@ mod tests {
             assert_eq!(gathered.values(), expected.values());
             assert_eq!(gathered.validity(), expected.validity());
         }
+    }
+
+    #[test]
+    fn period_clone_keeps_each_value_h4bak() {
+        // One freq: the clone is the column's own values, and its cache
+        // holds that freq (br-frankenpandas-h4bak).
+        let monthly = Column::new(
+            DType::Period,
+            vec![
+                Scalar::Period(Period::new(648, PeriodFreq::Monthly)),
+                Scalar::Period(Period::new(650, PeriodFreq::Monthly)),
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            monthly.data,
+            Some(ColumnData::Period(_, PeriodFreq::Monthly))
+        ));
+        assert_eq!(monthly.clone().values(), monthly.values());
+        // Two freqs: no single-freq cache, so a clone cannot read the
+        // monthly period in the quarterly freq (it came back 648 Q, 2132Q1).
+        let mixed = vec![
+            Scalar::Period(Period::new(216, PeriodFreq::QUARTERLY)),
+            Scalar::Period(Period::new(648, PeriodFreq::Monthly)),
+        ];
+        let forced = Column::new(DType::Period, mixed.clone()).unwrap();
+        assert!(forced.data.is_none());
+        assert_eq!(forced.clone().values(), mixed.as_slice());
+        // Inferred, two freqs are an object column of the periods as they are.
+        let inferred = Column::from_values(mixed.clone()).unwrap();
+        assert_eq!(inferred.dtype(), DType::Utf8);
+        assert_eq!(inferred.clone().values(), mixed.as_slice());
+        // NEGATIVE: a NaT beside periods of one freq keeps the period dtype.
+        let with_nat = Column::from_values(vec![
+            Scalar::Period(Period::new(1, PeriodFreq::Daily)),
+            Scalar::Null(NullKind::NaT),
+            Scalar::Period(Period::new(3, PeriodFreq::Daily)),
+        ])
+        .unwrap();
+        assert_eq!(with_nat.dtype(), DType::Period);
     }
 
     #[test]

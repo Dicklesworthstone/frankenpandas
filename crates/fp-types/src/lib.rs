@@ -3666,6 +3666,11 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
     // below (DISC-005); bool+numeric joins them.
     let mut saw_bool = false;
     let mut saw_numeric = false;
+    // A PeriodArray holds one freq: periods of two are incompatible, pandas'
+    // object column of the periods as they are (their column held the first
+    // freq, and a copy read the others in it - 2024-01 came back 2132Q1;
+    // br-frankenpandas-h4bak).
+    let mut period_freq: Option<PeriodFreq> = None;
 
     // NOTE (br-frankenpandas-nywa8): inferring Float64 from a NaN-KIND missing
     // looks like the right central fix for pandas' int64 -> float64 promotion,
@@ -3681,6 +3686,20 @@ pub fn infer_dtype(values: &[Scalar]) -> Result<DType, TypeError> {
     // promotes locally. Do not move it back here without first giving
     // "pandas-introduced gap" a marker distinct from generic missingness.
     for value in values {
+        if let Scalar::Period(period) = value
+            && period.ordinal != i64::MIN
+        {
+            match period_freq {
+                None => period_freq = Some(period.freq),
+                Some(freq) if freq != period.freq => {
+                    return Err(TypeError::IncompatibleDtypes {
+                        left: DType::Period,
+                        right: DType::Period,
+                    });
+                }
+                Some(_) => {}
+            }
+        }
         match value.dtype() {
             DType::Null => {}
             DType::Utf8 => saw_utf8 = true,
@@ -5883,13 +5902,212 @@ pub fn tz_wall_to_utc_nanos_with(
     ambiguous: AmbiguousTime,
     nonexistent: NonexistentTime,
 ) -> Result<i64, TimeZoneError> {
-    use chrono::{LocalResult, TimeZone};
     if wall_nanos == i64::MIN {
         return Ok(wall_nanos);
     }
+    wall_to_utc_in(&Zone::parse(tz)?, wall_nanos, ambiguous, nonexistent)
+}
+
+const NANOS_PER_HOUR: i64 = 3_600_000_000_000;
+const NANOS_PER_SECOND: i64 = 1_000_000_000;
+
+/// Each of `utc`'s instants' wall clock in `tz` (NaT stays NaT), as
+/// [`tz_utc_to_wall_nanos`] makes one: the zone parsed once, and an hour's
+/// offset reused while the instants stay in an hour holding one offset -
+/// the per-instant call parsed the zone's name and looked its offset up for
+/// every instant (a zoned index's tz_localize(None) of a million 44 ms,
+/// pandas 11; br-frankenpandas-6pqf3).
+///
+/// # Errors
+/// An unknown zone.
+pub fn tz_utc_to_wall_nanos_all(tz: &str, utc: &[i64]) -> Result<Vec<i64>, TimeZoneError> {
     let zone = Zone::parse(tz)?;
+    let mut offsets = HourOffsets::new(&zone);
+    Ok(utc
+        .iter()
+        .map(|&nanos| {
+            if nanos == i64::MIN {
+                nanos
+            } else {
+                nanos.saturating_add(i64::from(offsets.at(nanos)) * NANOS_PER_SECOND)
+            }
+        })
+        .collect())
+}
+
+/// Each of `walls`' wall-clock times placed in `tz` as
+/// [`tz_wall_to_utc_nanos_with`] places one (the same `ambiguous` /
+/// `nonexistent` rules; NaT stays NaT): the zone parsed once, and a local
+/// hour holding no DST change mapped with its one offset while the times
+/// stay in it (br-frankenpandas-6pqf3).
+///
+/// # Errors
+/// An unknown zone, or a wall time the rules refuse.
+pub fn tz_wall_to_utc_nanos_all(
+    tz: &str,
+    walls: &[i64],
+    ambiguous: AmbiguousTime,
+    nonexistent: NonexistentTime,
+) -> Result<Vec<i64>, TimeZoneError> {
+    let zone = Zone::parse(tz)?;
+    let mut hour = i64::MIN;
+    let mut checked = false;
+    let mut simple: Option<i32> = None;
+    walls
+        .iter()
+        .map(|&wall| {
+            if wall == i64::MIN {
+                return Ok(wall);
+            }
+            let at = wall.div_euclid(NANOS_PER_HOUR);
+            if at == hour {
+                if !checked {
+                    checked = true;
+                    simple = simple_local_hour(&zone, at);
+                }
+                if let Some(offset) = simple
+                    && let Some(utc) = wall.checked_sub(i64::from(offset) * NANOS_PER_SECOND)
+                {
+                    return Ok(utc);
+                }
+            } else {
+                hour = at;
+                checked = false;
+                simple = None;
+            }
+            wall_to_utc_in(&zone, wall, ambiguous, nonexistent)
+        })
+        .collect()
+}
+
+/// The UTC offsets of a run of instants in one zone: the offset of the hour
+/// the last instant fell in, kept while the next ones fall in it too and
+/// the hour holds that one offset (checked once, at its first and last
+/// nanosecond - a DST change inside makes them differ); any other instant's
+/// looked up (br-frankenpandas-6pqf3). An instant run with no locality pays one lookup each,
+/// as before.
+struct HourOffsets<'a> {
+    zone: &'a Zone,
+    hour: i64,
+    offset: i32,
+    /// Whether `hour` holds `offset` throughout, once known.
+    uniform: Option<bool>,
+}
+
+impl<'a> HourOffsets<'a> {
+    fn new(zone: &'a Zone) -> Self {
+        Self {
+            zone,
+            hour: i64::MIN,
+            offset: 0,
+            uniform: None,
+        }
+    }
+
+    fn at(&mut self, utc: i64) -> i32 {
+        if let Zone::Fixed(fixed) = self.zone {
+            return fixed.local_minus_utc();
+        }
+        let hour = utc.div_euclid(NANOS_PER_HOUR);
+        if hour != self.hour {
+            self.hour = hour;
+            self.uniform = None;
+            self.offset = self.zone.offset_seconds(utc);
+            return self.offset;
+        }
+        let uniform = *self.uniform.get_or_insert_with(|| {
+            hour.checked_mul(NANOS_PER_HOUR).is_some_and(|start| {
+                self.zone.offset_seconds(start) == self.offset
+                    && start
+                        .checked_add(NANOS_PER_HOUR - 1)
+                        .is_some_and(|end| self.zone.offset_seconds(end) == self.offset)
+            })
+        });
+        if uniform {
+            self.offset
+        } else {
+            self.zone.offset_seconds(utc)
+        }
+    }
+}
+
+/// The offset every wall time of local hour `hour` maps to UTC with, when
+/// the hour holds no DST change: its first and last nanosecond each map to
+/// one instant, at one offset (a gap or an overlap inside makes one of them
+/// map otherwise or the offsets differ); None otherwise (br-frankenpandas-6pqf3).
+fn simple_local_hour(zone: &Zone, hour: i64) -> Option<i32> {
+    let start = hour.checked_mul(NANOS_PER_HOUR)?;
+    let end = start.checked_add(NANOS_PER_HOUR - 1)?;
+    let first = single_local_offset(zone, start)?;
+    (single_local_offset(zone, end)? == first).then_some(first)
+}
+
+/// The offset the wall time `wall_nanos` maps to UTC with when it maps to
+/// exactly one instant.
+fn single_local_offset(zone: &Zone, wall_nanos: i64) -> Option<i32> {
+    use chrono::{LocalResult, Offset, TimeZone};
     let naive = chrono::DateTime::from_timestamp_nanos(wall_nanos).naive_utc();
-    let local = match &zone {
+    match zone {
+        Zone::Fixed(offset) => Some(offset.local_minus_utc()),
+        Zone::Named(zone) => match zone.from_local_datetime(&naive) {
+            LocalResult::Single(at) => Some(at.offset().fix().local_minus_utc()),
+            _ => None,
+        },
+    }
+}
+
+/// A wall time as pandas names one it refuses to place: seconds, then the
+/// microseconds as six digits when it has any and the nanoseconds as nine
+/// when finer (chrono's text trimmed '.500000' to '.500'; br-frankenpandas-6pqf3).
+fn wall_text(wall_nanos: i64) -> String {
+    let naive = chrono::DateTime::from_timestamp_nanos(wall_nanos).naive_utc();
+    let seconds = naive.format("%Y-%m-%d %H:%M:%S");
+    let nanos = wall_nanos.rem_euclid(NANOS_PER_SECOND);
+    if nanos == 0 {
+        format!("{seconds}")
+    } else if nanos % 1_000 == 0 {
+        format!("{seconds}.{:06}", nanos / 1_000)
+    } else {
+        format!("{seconds}.{nanos:09}")
+    }
+}
+
+/// The offset pandas places a moved skipped wall time with: pytz's table
+/// bisected at `moved` read as a UTC instant - the offset in force there
+/// when moving forward onto an offset at or east of UTC, or when the zone's
+/// first (local mean time) offset lies east and the move is forward or west
+/// and it is backward; else the one after the next change (br-frankenpandas-6pqf3).
+fn pandas_shift_offset(zone: &Zone, moved: i64, forward: bool) -> i32 {
+    const DAY: i64 = 86_400 * NANOS_PER_SECOND;
+    let here = zone.offset_seconds(moved);
+    let first = zone.offset_seconds(i64::MIN + 1);
+    let in_force = if forward {
+        here >= 0 || first > 0
+    } else {
+        first < 0
+    };
+    if in_force {
+        return here;
+    }
+    // The next change: the first day on whose offset differs (changes are
+    // months apart), within three years.
+    (1..=1_100_i64)
+        .filter_map(|day| moved.checked_add(day * DAY))
+        .map(|at| zone.offset_seconds(at))
+        .find(|&offset| offset != here)
+        .unwrap_or(here)
+}
+
+/// [`tz_wall_to_utc_nanos_with`] in a zone already parsed.
+fn wall_to_utc_in(
+    zone: &Zone,
+    wall_nanos: i64,
+    ambiguous: AmbiguousTime,
+    nonexistent: NonexistentTime,
+) -> Result<i64, TimeZoneError> {
+    use chrono::{LocalResult, TimeZone};
+    let naive = chrono::DateTime::from_timestamp_nanos(wall_nanos).naive_utc();
+    let local = match zone {
         Zone::Fixed(offset) => offset
             .from_local_datetime(&naive)
             .map(|at| at.fixed_offset()),
@@ -5897,51 +6115,50 @@ pub fn tz_wall_to_utc_nanos_with(
     };
     let nanos_of = |at: chrono::DateTime<chrono::FixedOffset>| {
         at.timestamp_nanos_opt()
-            .ok_or_else(|| TimeZoneError::NonExistent(naive.to_string()))
+            .ok_or_else(|| TimeZoneError::NonExistent(wall_text(wall_nanos)))
     };
     match local {
         LocalResult::Single(at) => nanos_of(at),
         LocalResult::Ambiguous(earliest, latest) => match ambiguous {
-            AmbiguousTime::Raise => Err(TimeZoneError::Ambiguous(naive.to_string())),
+            AmbiguousTime::Raise => Err(TimeZoneError::Ambiguous(wall_text(wall_nanos))),
             AmbiguousTime::Earliest => nanos_of(earliest),
             AmbiguousTime::Latest => nanos_of(latest),
             AmbiguousTime::NaT => Ok(i64::MIN),
         },
         LocalResult::None => match nonexistent {
-            NonexistentTime::Raise => Err(TimeZoneError::NonExistent(naive.to_string())),
+            NonexistentTime::Raise => Err(TimeZoneError::NonExistent(wall_text(wall_nanos))),
             NonexistentTime::NaT => Ok(i64::MIN),
             NonexistentTime::Shift(delta) => {
                 let shifted = wall_nanos
                     .checked_add(delta)
-                    .ok_or_else(|| TimeZoneError::NonExistent(naive.to_string()))?;
-                tz_wall_to_utc_nanos_with(tz, shifted, ambiguous, NonexistentTime::Raise)
+                    .ok_or_else(|| TimeZoneError::NonExistent(wall_text(wall_nanos)))?;
+                if shifted == i64::MIN {
+                    return Ok(shifted);
+                }
+                wall_to_utc_in(zone, shifted, ambiguous, NonexistentTime::Raise)
             }
             NonexistentTime::ShiftForward | NonexistentTime::ShiftBackward => {
-                // The gap's UTC transition: the wall time read with the
-                // offset in force before the change lands after it, read
-                // with the offset after the change lands before it; the
-                // first instant between them carrying the later offset is
-                // the transition (exact to the nanosecond - pandas'
-                // shift_backward is one nanosecond before it).
-                const DAY: i64 = 86_400_000_000_000;
-                let offset_at = |utc: i64| i64::from(zone.offset_seconds(utc)) * 1_000_000_000;
-                let before = wall_nanos.saturating_sub(offset_at(wall_nanos.saturating_sub(DAY)));
-                let after = wall_nanos.saturating_sub(offset_at(wall_nanos.saturating_add(DAY)));
-                let (mut low, mut high) = (before.min(after), before.max(after));
-                let later = offset_at(high);
-                while high - low > 1 {
-                    let middle = low + (high - low) / 2;
-                    if offset_at(middle) == later {
-                        high = middle;
-                    } else {
-                        low = middle;
-                    }
-                }
-                Ok(if nonexistent == NonexistentTime::ShiftForward {
-                    high
+                // pandas (pytz's tz_localize_to_utc) moves a skipped wall
+                // time up to the next whole hour (shift_forward) or to a
+                // nanosecond before its own hour (shift_backward), then
+                // places that with the offset its table answers (see
+                // [`pandas_shift_offset`]): the change's own instant for a
+                // change on the hour, 03:00 (+11:00) where Lord Howe's
+                // half-hour gap ends at 02:30 - this placed the gap's end
+                // (br-frankenpandas-6pqf3).
+                let forward = nonexistent == NonexistentTime::ShiftForward;
+                let into_hour = wall_nanos.rem_euclid(NANOS_PER_HOUR);
+                let moved = if forward {
+                    wall_nanos.checked_add(NANOS_PER_HOUR - into_hour)
                 } else {
-                    high - 1
-                })
+                    wall_nanos.checked_sub(into_hour + 1)
+                };
+                moved
+                    .and_then(|moved| {
+                        let offset = pandas_shift_offset(zone, moved, forward);
+                        moved.checked_sub(i64::from(offset) * NANOS_PER_SECOND)
+                    })
+                    .ok_or_else(|| TimeZoneError::NonExistent(wall_text(wall_nanos)))
             }
         },
     }
@@ -19467,6 +19684,126 @@ mod tests {
             at(zone, repeated, A::Raise, N::NaT),
             Err(TimeZoneError::Ambiguous("2024-11-03 01:30:00".to_owned()))
         );
+    }
+
+    /// The batch conversions answer as the per-value ones, value for value:
+    /// whole-hour DST changes, Lord Howe's half hour, a fixed offset and UTC,
+    /// over sorted minutes through each change, every hour's edges, random
+    /// instants and NaT, under each policy (br-frankenpandas-6pqf3). NEGATIVE: 'raise' still
+    /// refuses the first skipped wall time, a skipped one under 'NaT' is NaT
+    /// (a reused hour's offset would place it), and a refused time's text
+    /// keeps pandas' six or nine digits.
+    #[test]
+    fn batch_tz_conversions_match_each_value_6pqf3() {
+        use super::{
+            AmbiguousTime as A, NonexistentTime as N, TimeZoneError, tz_utc_to_wall_nanos,
+            tz_utc_to_wall_nanos_all, tz_wall_to_utc_nanos_all, tz_wall_to_utc_nanos_with,
+        };
+        const HOUR: i64 = 3_600_000_000_000;
+        const MINUTE: i64 = 60_000_000_000;
+        const DAY: i64 = 24 * HOUR;
+        let (year_start, year_end) = (19_723 * DAY, 20_089 * DAY);
+        let mut values: Vec<i64> = (year_start..year_end)
+            .step_by(usize::try_from(37 * MINUTE).unwrap())
+            .collect();
+        for hour in (year_start..year_end).step_by(usize::try_from(HOUR).unwrap()) {
+            values.extend([hour - 1, hour, hour + 1]);
+        }
+        for change_day in [19_792, 20_030, 19_813, 20_023, 19_820, 20_002] {
+            values.extend((0..2 * 24 * 60).map(|minute| (change_day - 1) * DAY + minute * MINUTE));
+        }
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        for _ in 0..3_000 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            values.push(i64::try_from(state >> 2).unwrap() - 2_000_000_000_000_000_000);
+        }
+        values.extend([i64::MIN, 19_792 * DAY, i64::MIN]);
+        let policies = [
+            (A::NaT, N::NaT),
+            (A::Earliest, N::ShiftForward),
+            (A::Latest, N::ShiftBackward),
+            (A::NaT, N::Shift(30 * MINUTE)),
+        ];
+        for zone in [
+            "US/Eastern",
+            "Europe/London",
+            "Australia/Lord_Howe",
+            "+05:30",
+            "UTC",
+        ] {
+            let one_by_one: Result<Vec<i64>, TimeZoneError> = values
+                .iter()
+                .map(|&nanos| tz_utc_to_wall_nanos(zone, nanos))
+                .collect();
+            assert_eq!(
+                tz_utc_to_wall_nanos_all(zone, &values),
+                one_by_one,
+                "{zone}"
+            );
+            for (ambiguous, nonexistent) in policies {
+                let one_by_one: Result<Vec<i64>, TimeZoneError> = values
+                    .iter()
+                    .map(|&wall| tz_wall_to_utc_nanos_with(zone, wall, ambiguous, nonexistent))
+                    .collect();
+                assert_eq!(
+                    tz_wall_to_utc_nanos_all(zone, &values, ambiguous, nonexistent),
+                    one_by_one,
+                    "{zone} {ambiguous:?} {nonexistent:?}"
+                );
+            }
+            let one_by_one: Result<Vec<i64>, TimeZoneError> = values
+                .iter()
+                .map(|&wall| tz_wall_to_utc_nanos_with(zone, wall, A::Raise, N::Raise))
+                .collect();
+            assert_eq!(
+                tz_wall_to_utc_nanos_all(zone, &values, A::Raise, N::Raise),
+                one_by_one,
+                "{zone} raise"
+            );
+        }
+        let skipped = 19_792 * DAY + 2 * HOUR + 30 * MINUTE;
+        // 01:10 to 03:30 by 20 minutes: 02:00-03:00 is skipped.
+        let run: Vec<i64> = (0..8)
+            .map(|step| 19_792 * DAY + HOUR + 10 * MINUTE + step * 20 * MINUTE)
+            .collect();
+        assert_eq!(
+            tz_wall_to_utc_nanos_all("US/Eastern", &run, A::Raise, N::Raise),
+            Err(TimeZoneError::NonExistent("2024-03-10 02:10:00".to_owned()))
+        );
+        let placed = tz_wall_to_utc_nanos_all("US/Eastern", &run, A::Raise, N::NaT).unwrap();
+        let expected: Vec<i64> = run
+            .iter()
+            .enumerate()
+            .map(|(step, &wall)| match step {
+                0..3 => wall + 5 * HOUR,
+                3..6 => i64::MIN,
+                _ => wall + 4 * HOUR,
+            })
+            .collect();
+        assert_eq!(placed, expected);
+        // Lord Howe's half-hour gap (02:00 -> 02:30 on 2024-10-06): pandas
+        // moves 02:10 up to 03:00 (+11:00) or back to 01:59:59.999999999
+        // (+10:30), not to the gap's end.
+        let howe = 20_002 * DAY + 2 * HOUR + 10 * MINUTE;
+        assert_eq!(
+            tz_wall_to_utc_nanos_all("Australia/Lord_Howe", &[howe], A::Raise, N::ShiftForward),
+            Ok(vec![20_002 * DAY - 8 * HOUR])
+        );
+        assert_eq!(
+            tz_wall_to_utc_nanos_all("Australia/Lord_Howe", &[howe], A::Raise, N::ShiftBackward),
+            Ok(vec![20_002 * DAY - 8 * HOUR - 30 * MINUTE - 1])
+        );
+        for (wall, text) in [
+            (skipped + 500_000_000, "2024-03-10 02:30:00.500000"),
+            (skipped + 1, "2024-03-10 02:30:00.000000001"),
+        ] {
+            assert_eq!(
+                tz_wall_to_utc_nanos_all("US/Eastern", &[wall], A::Raise, N::Raise),
+                Err(TimeZoneError::NonExistent(text.to_owned()))
+            );
+        }
     }
 
     #[test]

@@ -30946,7 +30946,13 @@ impl Series {
                 }
                 let values =
                     index_labels_to_column_scalars(levels.get_level_values(level)?.labels());
-                columns.push((level_name.clone(), Column::from_values(values)?));
+                // A zoned level's column is of its zone (br-frankenpandas-c4v57).
+                let column = Column::from_values(values)?;
+                let column = match levels.level_zone(level) {
+                    Some(zone) => column.with_dtype(DType::datetime64_tz(zone)),
+                    None => column,
+                };
+                columns.push((level_name.clone(), column));
                 order.push(level_name);
                 labels.push(level_label);
             }
@@ -31905,11 +31911,22 @@ impl Series {
             of.iter().map(|&level| names[level].clone()).collect()
         };
         let row_labels = side_labels(&kept, &row_combos);
+        // A zoned level keeps its zone on either axis (they came back naive;
+        // br-frankenpandas-c4v57).
+        let zoned = |multi: fp_index::MultiIndex, of: &[usize]| {
+            of.iter().enumerate().fold(multi, |multi, (at, &level)| {
+                multi.with_level_zone(at, levels.level_zone(level))
+            })
+        };
         let index = if let [only] = kept.as_slice() {
             Index::new(row_labels.into_iter().next().unwrap_or_default())
                 .rename_index(names[*only].clone())
+                .with_tz(levels.level_zone(*only))?
         } else {
-            let multi = fp_index::MultiIndex::from_arrays(row_labels)?.set_names(name_of(&kept));
+            let multi = zoned(
+                fp_index::MultiIndex::from_arrays(row_labels)?.set_names(name_of(&kept)),
+                &kept,
+            );
             multi.to_flat_index("|").with_row_multiindex(multi)?
         };
         let col_labels = side_labels(moved, &col_combos);
@@ -31961,10 +31978,13 @@ impl Series {
         Ok(match col_labels.len() {
             1 => frame
                 .with_recorded_column_labels(col_labels.into_iter().flatten())
-                .with_columns_name(names[moved[0]].clone()),
+                .with_columns_name(names[moved[0]].clone())
+                .with_columns_tz(levels.level_zone(moved[0]).map(str::to_owned)),
             _ => {
-                let multi =
-                    fp_index::MultiIndex::from_arrays(col_labels)?.set_names(name_of(moved));
+                let multi = zoned(
+                    fp_index::MultiIndex::from_arrays(col_labels)?.set_names(name_of(moved)),
+                    moved,
+                );
                 frame.with_columns_multiindex(Some(multi))?
             }
         })
@@ -62078,6 +62098,34 @@ impl Default for TzLocalizeOptions {
     }
 }
 
+impl TzLocalizeOptions {
+    /// These options as fp-types' policies when each value's answer is its
+    /// own: None for `ambiguous` 'infer' or an array (they read neighbours
+    /// or positions) and a timedelta `nonexistent` (its refusal is pandas'
+    /// ValueError, not a NonExistentTimeError; br-frankenpandas-6pqf3).
+    #[must_use]
+    pub fn per_value_policies(
+        &self,
+    ) -> Option<(fp_types::AmbiguousTime, fp_types::NonexistentTime)> {
+        use fp_types::{AmbiguousTime, NonexistentTime};
+        let ambiguous = match self.ambiguous {
+            TzAmbiguousPolicy::Raise => AmbiguousTime::Raise,
+            TzAmbiguousPolicy::Earliest => AmbiguousTime::Earliest,
+            TzAmbiguousPolicy::Latest => AmbiguousTime::Latest,
+            TzAmbiguousPolicy::NaT => AmbiguousTime::NaT,
+            TzAmbiguousPolicy::Infer | TzAmbiguousPolicy::Mask(_) => return None,
+        };
+        let nonexistent = match self.nonexistent {
+            TzNonexistentPolicy::Raise => NonexistentTime::Raise,
+            TzNonexistentPolicy::ShiftForward => NonexistentTime::ShiftForward,
+            TzNonexistentPolicy::ShiftBackward => NonexistentTime::ShiftBackward,
+            TzNonexistentPolicy::NaT => NonexistentTime::NaT,
+            TzNonexistentPolicy::ShiftBy(_) => return None,
+        };
+        Some((ambiguous, nonexistent))
+    }
+}
+
 pub struct DatetimeAccessor<'a> {
     series: &'a Series,
 }
@@ -65859,6 +65907,26 @@ impl DatetimeAccessor<'_> {
                             column,
                         );
                     }
+                    // A named zone under a policy for every value: the wall
+                    // times placed straight off the buffer, the zone parsed
+                    // once and a DST-free hour's offset reused (it built a
+                    // chrono value, resolved it alone and made a Scalar a
+                    // row; br-frankenpandas-6pqf3).
+                    if let TimeZoneSpec::Named { name, .. } = &tz_spec
+                        && let Some(walls) = self.series.column().as_datetime64_slice()
+                        && let Some((ambiguous, nonexistent)) = options.per_value_policies()
+                    {
+                        let utc =
+                            fp_types::tz_wall_to_utc_nanos_all(name, walls, ambiguous, nonexistent)
+                                .map_err(|err| {
+                                    FrameError::from(fp_index::IndexError::TimeZone(err))
+                                })?;
+                        return Series::new(
+                            self.series.name().to_owned(),
+                            self.series.index().clone(),
+                            Column::from_temporal_nanos(target_dtype, utc),
+                        );
+                    }
                     let inputs = self
                         .series
                         .column()
@@ -67549,9 +67617,11 @@ fn resolve_nonexistent_local_datetime(
                     latest,
                     ambiguous_policy,
                 ),
-                LocalResult::None => Err(FrameError::CompatibilityRejected(
-                    "The provided timedelta will relocalize on a nonexistent time".to_owned(),
-                )),
+                // pandas names the timedelta (br-frankenpandas-6pqf3).
+                LocalResult::None => Err(FrameError::CompatibilityRejected(format!(
+                    "The provided timedelta will relocalize on a nonexistent time: {}",
+                    fp_types::Timedelta::format(shift.num_nanoseconds().unwrap_or(i64::MAX))
+                ))),
             }
         }
     }
@@ -85773,7 +85843,19 @@ impl DataFrame {
             arrays.push(keys.get_level_values(level)?.labels().to_vec());
         }
         names.extend(keys.names().iter().cloned());
-        let row_multiindex = fp_index::MultiIndex::from_arrays(arrays)?.set_names(names);
+        // Each level's zone: the current levels' (or the index's own), then
+        // the keys' (br-frankenpandas-c4v57).
+        let mut zones: Vec<Option<String>> = match &self.row_multiindex {
+            Some(current) => (0..current.nlevels())
+                .map(|level| current.level_zone(level).map(str::to_owned))
+                .collect(),
+            None => vec![self.index.tz().map(str::to_owned)],
+        };
+        zones.extend((0..keys.nlevels()).map(|level| keys.level_zone(level).map(str::to_owned)));
+        let row_multiindex = zones.iter().enumerate().fold(
+            fp_index::MultiIndex::from_arrays(arrays)?.set_names(names),
+            |multi, (level, zone)| multi.with_level_zone(level, zone.as_deref()),
+        );
         self.install_row_multiindex(row_multiindex, columns, drop, sep)
     }
 
@@ -85904,21 +85986,19 @@ impl DataFrame {
                                 // A naive datetime / a duration level is a
                                 // DatetimeIndex / TimedeltaIndex in pandas; they
                                 // were their text, so unstack gave string columns
-                                // (br-frankenpandas-stofr). A zoned one keeps its
-                                // text: a typed label carries no zone.
+                                // (br-frankenpandas-stofr). A zoned one too, its
+                                // labels the UTC instants and the level its zone
+                                // (it kept its text; br-frankenpandas-c4v57).
                                 Scalar::Null(NullKind::NaT) => match col.dtype() {
                                     DType::Timedelta64 => IndexLabel::Timedelta64(Timedelta::NAT),
-                                    DType::Datetime64 { .. } if col.timezone().is_none() => {
+                                    DType::Datetime64 { .. } => {
                                         IndexLabel::Datetime64(Timestamp::NAT)
                                     }
                                     _ => IndexLabel::Utf8("NaT".to_owned()),
                                 },
                                 Scalar::Null(_) => IndexLabel::Null(NullKind::NaN),
                                 Scalar::Timedelta64(v) => IndexLabel::Timedelta64(*v),
-                                Scalar::Datetime64(v) if col.timezone().is_none() => {
-                                    IndexLabel::Datetime64(*v)
-                                }
-                                Scalar::Datetime64(v) => IndexLabel::Utf8(format_datetime_ns(*v)),
+                                Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
                                 Scalar::Period(v) => IndexLabel::Period(*v),
                                 Scalar::Interval(interval) => {
                                     IndexLabel::Utf8(format!("{interval}"))
@@ -85939,8 +86019,24 @@ impl DataFrame {
             .map(|&c| Some(self.column_series_name(c)))
             .collect();
 
+        let zones: Vec<Option<String>> = columns
+            .iter()
+            .map(|&c| {
+                self.columns
+                    .get(c)
+                    .and_then(Column::timezone)
+                    .map(str::to_owned)
+            })
+            .collect();
         fp_index::MultiIndex::from_arrays(levels)
-            .map(|mi| mi.set_names(names))
+            .map(|mi| {
+                zones
+                    .iter()
+                    .enumerate()
+                    .fold(mi.set_names(names), |mi, (level, zone)| {
+                        mi.with_level_zone(level, zone.as_deref())
+                    })
+            })
             .map_err(FrameError::Index)
     }
 
@@ -85998,6 +86094,12 @@ impl DataFrame {
                         let level_index = row_multiindex.get_level_values(level)?;
                         Column::from_values(index_labels_to_column_scalars(level_index.labels()))?
                     }
+                };
+                // A zoned level's column is of its zone (it came back naive;
+                // br-frankenpandas-c4v57).
+                let level_column = match row_multiindex.level_zone(level) {
+                    Some(zone) => level_column.with_dtype(DType::datetime64_tz(zone)),
+                    None => level_column,
                 };
                 level_columns.push((column_name.clone(), level_column));
             }
@@ -111089,12 +111191,18 @@ impl DataFrameGroupBy<'_> {
         }
         let names: Vec<Option<LabelName>> = self.key_names.clone();
         // dropna=False keys hold a missing label as a value of its level, as
-        // pandas' groupby levels do (an unstack sorts it last).
-        Ok(Some(
-            fp_index::MultiIndex::from_arrays(level_arrays)?
-                .set_names(names)
-                .with_missing_as_level(!self.dropna),
-        ))
+        // pandas' groupby levels do (an unstack sorts it last). A zoned key's
+        // level keeps its zone (it came back naive; br-frankenpandas-c4v57).
+        let multi = fp_index::MultiIndex::from_arrays(level_arrays)?
+            .set_names(names)
+            .with_missing_as_level(!self.dropna);
+        Ok(Some(self.by.iter().enumerate().fold(
+            multi,
+            |multi, (level, name)| {
+                let zone = self.df.columns[name].timezone().map(str::to_owned);
+                multi.with_level_zone(level, zone.as_deref())
+            },
+        )))
     }
 
     /// Helper to format the final aggregated DataFrame respecting `as_index`.
@@ -111132,15 +111240,13 @@ impl DataFrameGroupBy<'_> {
             let mut full_cols = BTreeMap::new();
             let mut full_order = Vec::new();
 
-            // Add group key columns first.
+            // Add group key columns first: each group's first row of its key
+            // column, the column's dtype kept - a zoned key's zone too (it
+            // was rebuilt from the values, naive; br-frankenpandas-c4v57).
+            let first_rows: Vec<usize> = group_order.iter().map(|gkey| groups[gkey][0]).collect();
             for col_name in &self.by {
                 let src_col = &self.df.columns[col_name];
-                let mut key_vals = Vec::with_capacity(n_groups);
-                for gkey in group_order {
-                    let first_row = groups[gkey][0];
-                    key_vals.push(src_col.values()[first_row].clone());
-                }
-                full_cols.insert(col_name.clone(), Column::from_values(key_vals)?);
+                full_cols.insert(col_name.clone(), src_col.take_positions(&first_rows));
                 full_order.push(col_name.clone());
             }
 
@@ -189923,11 +190029,14 @@ mod tests {
                 Scalar::Datetime64(Timedelta::NAT),
             ]
         );
+        // TEST-CHANGE (br-frankenpandas-h4bak): a column of two freqs keeps each period as
+        // read - 2024-01 stays monthly (648 M); its quarterly reading here
+        // (648 Q, year 2132) was the cache's single freq applied to it.
         assert_eq!(
             df.columns()["period"].values(),
             &[
                 Scalar::Period(Period::new(216, PeriodFreq::QUARTERLY)),
-                Scalar::Period(Period::new(648, PeriodFreq::QUARTERLY)),
+                Scalar::Period(Period::new(648, PeriodFreq::Monthly)),
             ]
         );
         assert_eq!(

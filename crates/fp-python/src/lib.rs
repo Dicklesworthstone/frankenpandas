@@ -5210,6 +5210,13 @@ fn localize_datetime_index(
     }) else {
         return dti.tz_localize(zone).map_err(index_error_to_py);
     };
+    // A policy for every value is placed off the held wall times in one
+    // pass (each was made a text and placed alone; br-frankenpandas-6pqf3).
+    if let Some((ambiguous, nonexistent)) = options.per_value_policies() {
+        return dti
+            .tz_localize_with(Some(zone), ambiguous, nonexistent)
+            .map_err(index_error_to_py);
+    }
     let wall: Vec<i64> = dti
         .values()
         .into_iter()
@@ -11200,16 +11207,61 @@ fn json_tuple_keyed_index(py: Python<'_>, levels: &MultiIndex) -> PyResult<Index
 /// A tuple of `levels`' labels per row.
 fn multiindex_row_keys(py: Python<'_>, levels: &MultiIndex) -> PyResult<Vec<Py<PyAny>>> {
     (0..levels.len())
-        .map(|row| {
-            let parts = levels
-                .get_tuple(row)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|label| index_label_to_py(py, label))
-                .collect::<PyResult<Vec<_>>>()?;
-            Ok(pyo3::types::PyTuple::new(py, parts)?.into_any().unbind())
-        })
+        .map(|row| Ok(multiindex_tuple_to_py(py, levels, row)?.into_any().unbind()))
         .collect()
+}
+
+/// The zone of an array of aware instants of one zone - a zoned
+/// DatetimeIndex, a Series of a zoned dtype, a list or tuple of aware
+/// datetimes - for a MultiIndex level made of it (br-frankenpandas-c4v57).
+fn array_zone(array: &Bound<'_, PyAny>) -> Option<String> {
+    if let Ok(instants) = array.extract::<PyRef<'_, PyDatetimeIndex>>() {
+        return instants.inner.tz();
+    }
+    if let Ok(series) = array.extract::<PyRef<'_, PySeries>>() {
+        return series.inner.column().timezone().map(str::to_owned);
+    }
+    sequence_zone(array)
+}
+
+/// A MultiIndex level's `label` as Python holds it: an instant of a zoned
+/// level a Timestamp in its zone (it was naive; br-frankenpandas-c4v57), any other as
+/// [`index_label_to_py`] makes it.
+fn level_label_to_py(
+    py: Python<'_>,
+    multi: &MultiIndex,
+    level: usize,
+    label: &IndexLabel,
+) -> PyResult<Py<PyAny>> {
+    if let (Some(zone), IndexLabel::Datetime64(nanos)) = (multi.level_zone(level), label)
+        && *nanos != Timestamp::NAT
+    {
+        return PyTimestamp {
+            inner: Timestamp {
+                nanos: *nanos,
+                tz: Some(zone.to_owned()),
+            },
+            unit: StampUnit::Ns,
+        }
+        .into_py_any(py);
+    }
+    index_label_to_py(py, label)
+}
+
+/// Row `position`'s tuple of `multi`, a zoned level's instant in its zone.
+fn multiindex_tuple_to_py<'py>(
+    py: Python<'py>,
+    multi: &MultiIndex,
+    position: usize,
+) -> PyResult<Bound<'py, PyTuple>> {
+    let parts = multi
+        .get_tuple(position)
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(level, label)| level_label_to_py(py, multi, level, label))
+        .collect::<PyResult<Vec<_>>>()?;
+    PyTuple::new(py, parts)
 }
 
 /// `index` as the pandas object: a MultiIndex when its labels carry row
@@ -14663,10 +14715,35 @@ impl PyIndex {
         if let Some(level) = level.filter(|level| !level.is_none()) {
             axis_level_values(&self.inner, None, level)?;
         }
-        let labels = isin_values(values)?
-            .iter()
-            .map(py_to_index_label)
-            .collect::<PyResult<Vec<_>>>()?;
+        // An int64 array's values read in place, each the Int64 label its
+        // numpy scalar reads as: every one was a scalar made and read back
+        // (isin of 100k against a million 27 ms, pandas 15;
+        // br-frankenpandas-cs4fd).
+        let labels = if let Some(buffer) = native_int64_buffer(values)? {
+            buffer
+                .to_vec(values.py())?
+                .into_iter()
+                .map(IndexLabel::Int64)
+                .collect()
+        } else {
+            isin_values(values)?
+                .iter()
+                .map(py_to_index_label)
+                .collect::<PyResult<Vec<_>>>()?
+        };
+        // A bool index holds True == 1 and False == 0, as numpy compares
+        // them (a number matched no bool; br-frankenpandas-cs4fd).
+        if self.inner.dtype() == "bool" {
+            let as_bool = |label: IndexLabel| match label {
+                IndexLabel::Int64(value @ (0 | 1)) => IndexLabel::Bool(value == 1),
+                IndexLabel::Float64(value) if value.0 == 1.0 || value.0 == 0.0 => {
+                    IndexLabel::Bool(value.0 == 1.0)
+                }
+                other => other,
+            };
+            let labels: Vec<IndexLabel> = labels.into_iter().map(as_bool).collect();
+            return Ok(self.inner.isin(&labels).into());
+        }
         Ok(self.inner.isin(&labels).into())
     }
 
@@ -17132,13 +17209,27 @@ impl PyDatetimeIndex {
     }
 
     /// Membership of each instant in `values` - Timestamps (an aware one by
-    /// its instant), datetimes, date strings or nanosecond ints, as pandas
-    /// (it took only ints, so a Timestamp raised TypeError).
+    /// its instant), datetimes or date strings, as pandas (it took only ints,
+    /// so a Timestamp raised TypeError). A number matches nothing, as pandas
+    /// 2.2.3's datetime-like isin answers numbers (an int matched its
+    /// nanoseconds), and values all bools are its TypeError (br-frankenpandas-cs4fd).
     fn isin(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<BoolArray> {
         let mut nanos = Vec::new();
+        let (mut items, mut bools) = (0_usize, 0_usize);
         for value in values.try_iter()? {
-            match py_to_scalar(py, &value?)? {
-                Scalar::Datetime64(instant) | Scalar::Int64(instant) => nanos.push(instant),
+            let value = value?;
+            items += 1;
+            if value.is_instance_of::<pyo3::types::PyBool>()
+                || value
+                    .get_type()
+                    .name()
+                    .is_ok_and(|name| name == "bool" || name == "bool_")
+            {
+                bools += 1;
+                continue;
+            }
+            match py_to_scalar(py, &value)? {
+                Scalar::Datetime64(instant) => nanos.push(instant),
                 Scalar::Utf8(text) => {
                     if let Ok(ts) = Timestamp::parse(&text) {
                         nanos.push(ts.nanos);
@@ -17149,6 +17240,11 @@ impl PyDatetimeIndex {
                 Scalar::Null(NullKind::NaT) => nanos.push(Timestamp::NAT),
                 _ => {}
             }
+        }
+        if items > 0 && bools == items {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "dtype bool cannot be converted to datetime64[ns]",
+            ));
         }
         Ok(self.inner.isin(&nanos).into())
     }
@@ -18893,11 +18989,15 @@ impl PyMultiIndex {
     ) -> PyResult<Self> {
         let _ = sortorder;
         let mut parsed_arrays: Vec<Vec<IndexLabel>> = Vec::new();
+        // Each array's zone when it holds aware instants of one: its level's
+        // (br-frankenpandas-c4v57).
+        let mut zones: Vec<Option<String>> = Vec::new();
         if let Ok(seq) = arrays.cast::<pyo3::types::PySequence>() {
             let len = seq.len()?;
             parsed_arrays.reserve(len);
             for i in 0..len {
                 let arr = seq.get_item(i)?;
+                zones.push(array_zone(&arr));
                 if let Ok(subseq) = arr.cast::<pyo3::types::PySequence>() {
                     let sublen = subseq.len()?;
                     let mut col = Vec::with_capacity(sublen);
@@ -18922,6 +19022,7 @@ impl PyMultiIndex {
         } else if let Ok(iter) = arrays.try_iter() {
             for arr in iter {
                 let arr = arr?;
+                zones.push(array_zone(&arr));
                 if let Ok(subseq) = arr.cast::<pyo3::types::PySequence>() {
                     let sublen = subseq.len()?;
                     let mut col = Vec::with_capacity(sublen);
@@ -18950,6 +19051,11 @@ impl PyMultiIndex {
         }
         let mut inner = MultiIndex::from_arrays(parsed_arrays)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        for (level, zone) in zones.iter().enumerate() {
+            if zone.is_some() {
+                inner = inner.with_level_zone(level, zone.as_deref());
+            }
+        }
         if let Some(ns) = extract_index_names_flexible(names)? {
             inner = inner.set_names(ns);
         }
@@ -18965,11 +19071,14 @@ impl PyMultiIndex {
     ) -> PyResult<Self> {
         let _ = sortorder;
         let mut parsed_iterables: Vec<Vec<IndexLabel>> = Vec::new();
+        // Each iterable's zone when it holds aware instants of one (br-frankenpandas-c4v57).
+        let mut zones: Vec<Option<String>> = Vec::new();
         if let Ok(seq) = iterables.cast::<pyo3::types::PySequence>() {
             let len = seq.len()?;
             parsed_iterables.reserve(len);
             for i in 0..len {
                 let it = seq.get_item(i)?;
+                zones.push(array_zone(&it));
                 if let Ok(subseq) = it.cast::<pyo3::types::PySequence>() {
                     let sublen = subseq.len()?;
                     let mut row = Vec::with_capacity(sublen);
@@ -18994,6 +19103,7 @@ impl PyMultiIndex {
         } else if let Ok(iter) = iterables.try_iter() {
             for it in iter {
                 let it = it?;
+                zones.push(array_zone(&it));
                 if let Ok(subseq) = it.cast::<pyo3::types::PySequence>() {
                     let sublen = subseq.len()?;
                     let mut row = Vec::with_capacity(sublen);
@@ -19022,6 +19132,11 @@ impl PyMultiIndex {
         }
         let mut inner = MultiIndex::from_product(parsed_iterables)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        for (level, zone) in zones.iter().enumerate() {
+            if zone.is_some() {
+                inner = inner.with_level_zone(level, zone.as_deref());
+            }
+        }
         if let Some(ns) = extract_index_names_flexible(names)? {
             inner = inner.set_names(ns);
         }
@@ -19134,14 +19249,7 @@ impl PyMultiIndex {
     fn to_flat_index(&self, py: Python<'_>) -> PyResult<PyIndex> {
         let labels = (0..self.inner.len())
             .map(|position| {
-                let levels = self
-                    .inner
-                    .get_tuple(position)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|label| index_label_to_py(py, label))
-                    .collect::<PyResult<Vec<_>>>()?;
-                py_to_index_label(PyTuple::new(py, levels)?.as_any())
+                py_to_index_label(multiindex_tuple_to_py(py, &self.inner, position)?.as_any())
             })
             .collect::<PyResult<Vec<_>>>()?;
         Ok(PyIndex {
@@ -19152,13 +19260,11 @@ impl PyMultiIndex {
     fn to_list(&self, py: Python<'_>) -> PyResult<Py<PyList>> {
         let mut rows = Vec::with_capacity(self.inner.len());
         for i in 0..self.inner.len() {
-            let tuple_labels = self.inner.get_tuple(i).unwrap_or_default();
-            let tuple_objs = tuple_labels
-                .into_iter()
-                .map(|l| index_label_to_py(py, l))
-                .collect::<PyResult<Vec<_>>>()?;
-            let py_tuple = pyo3::types::PyTuple::new(py, tuple_objs)?;
-            rows.push(py_tuple.into_any().unbind());
+            rows.push(
+                multiindex_tuple_to_py(py, &self.inner, i)?
+                    .into_any()
+                    .unbind(),
+            );
         }
         Ok(PyList::new(py, rows)?.unbind())
     }
@@ -19358,12 +19464,7 @@ impl PyMultiIndex {
                 "index out of bounds",
             ));
         }
-        let tuple_labels = self.inner.get_tuple(pos).unwrap_or_default();
-        let tuple_objs = tuple_labels
-            .into_iter()
-            .map(|l| index_label_to_py(py, l))
-            .collect::<PyResult<Vec<_>>>()?;
-        Ok(pyo3::types::PyTuple::new(py, tuple_objs)?
+        Ok(multiindex_tuple_to_py(py, &self.inner, pos)?
             .into_any()
             .unbind())
     }
@@ -19677,6 +19778,11 @@ impl PyMultiIndex {
                 .collect();
             let col = Column::from_values(vals)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+            // A zoned level's column is of its zone (br-frankenpandas-c4v57).
+            let col = match self.inner.level_zone(level_idx) {
+                Some(zone) => col.with_dtype(DType::datetime64_tz(zone)),
+                None => col,
+            };
             col_map.insert(col_name.clone(), col);
             col_names.push(col_name);
         }
@@ -20046,6 +20152,17 @@ impl PyMultiIndex {
                 column_data.push((Some((*col_name).clone()), labels));
             }
             let mut mi = MultiIndex::from_frame(column_data).map_err(index_error_to_py)?;
+            // A zoned column's level keeps its zone (br-frankenpandas-c4v57).
+            for (level, col_name) in cols.iter().enumerate() {
+                let zone = pdf
+                    .inner
+                    .column(col_name)
+                    .and_then(Column::timezone)
+                    .map(str::to_owned);
+                if zone.is_some() {
+                    mi = mi.with_level_zone(level, zone.as_deref());
+                }
+            }
             if let Some(ns) = extract_index_names_flexible(names)? {
                 mi = mi.set_names(ns);
             }
@@ -25749,7 +25866,9 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || msg.starts_with("Invalid comparison between dtype=category and ")
                 // pandas' CategoricalDtype.validate_categories (7zs0a).
                 || msg == "Categorical categories must be unique"
-                || msg == "Categorical categories cannot be null";
+                || msg == "Categorical categories cannot be null"
+                // pandas' refusal of a tz_localize shift onto a DST gap (br-frankenpandas-6pqf3).
+                || msg.starts_with("The provided timedelta will relocalize on a nonexistent time: ");
             let text = if pandas_verbatim {
                 msg.clone()
             } else {
@@ -28245,6 +28364,28 @@ fn plain_number_operand(like: &Series, other: &Bound<'_, PyAny>) -> Option<Scala
 /// Python int's OverflowError (fp typed them as numpy's strong scalars;
 /// br-frankenpandas-yxqee). Comparisons keep the numpy scalar: pandas
 /// compares s > np.float64(0.1) in float64.
+/// pandas' OverflowError for an int, bool or Int64 column meeting a Python
+/// int past int64 in arithmetic other than true division (an unsigned
+/// width takes up to 2**64 - 1): numpy cannot hold the operand - the
+/// column took it as a float, silently (br-frankenpandas-p5tih).
+fn refuse_int_overflow(column: &Column, other: &Bound<'_, PyAny>) -> PyResult<()> {
+    if !other.is_exact_instance_of::<pyo3::types::PyInt>() || other.extract::<i64>().is_ok() {
+        return Ok(());
+    }
+    if column.width().is_some_and(NumericWidth::is_unsigned) && other.extract::<u64>().is_ok() {
+        return Ok(());
+    }
+    if matches!(
+        column.dtype(),
+        DType::Int64 | DType::Int64Nullable | DType::Bool | DType::BoolNullable
+    ) {
+        return Err(PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+            "Python int too large to convert to C long",
+        ));
+    }
+    Ok(())
+}
+
 fn arith_operand<'py>(other: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     let kind_of = |other: &Bound<'py, PyAny>| -> Option<String> {
         let kind = other.get_type();
@@ -34002,6 +34143,7 @@ impl PySeries {
     // `__eq__`/`__ne__` deliberately do not return a Python bool.
     fn __add__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        refuse_int_overflow(self.inner.column(), other)?;
         timedelta_operand_check(&self.inner, other, "add", false)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "add", false)? {
             return Ok(res);
@@ -34021,6 +34163,7 @@ impl PySeries {
     }
     fn __radd__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        refuse_int_overflow(self.inner.column(), other)?;
         timedelta_operand_check(&self.inner, other, "add", true)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "add", true)? {
             return Ok(res);
@@ -34040,6 +34183,7 @@ impl PySeries {
     }
     fn __sub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        refuse_int_overflow(self.inner.column(), other)?;
         timedelta_operand_check(&self.inner, other, "sub", false)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "sub", false)? {
             return Ok(res);
@@ -34059,6 +34203,7 @@ impl PySeries {
     }
     fn __rsub__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        refuse_int_overflow(self.inner.column(), other)?;
         timedelta_operand_check(&self.inner, other, "sub", true)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "sub", true)? {
             return Ok(res);
@@ -34071,6 +34216,7 @@ impl PySeries {
     }
     fn __mul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        refuse_int_overflow(self.inner.column(), other)?;
         timedelta_operand_check(&self.inner, other, "mul", false)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "mul", false)? {
             return Ok(res);
@@ -34083,6 +34229,7 @@ impl PySeries {
     }
     fn __rmul__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        refuse_int_overflow(self.inner.column(), other)?;
         timedelta_operand_check(&self.inner, other, "mul", true)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "mul", true)? {
             return Ok(res);
@@ -34119,6 +34266,7 @@ impl PySeries {
     }
     fn __floordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        refuse_int_overflow(self.inner.column(), other)?;
         timedelta_operand_check(&self.inner, other, "floordiv", false)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "floordiv", false)? {
             return Ok(res);
@@ -34133,6 +34281,7 @@ impl PySeries {
     }
     fn __rfloordiv__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        refuse_int_overflow(self.inner.column(), other)?;
         timedelta_operand_check(&self.inner, other, "floordiv", true)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "floordiv", true)? {
             return Ok(res);
@@ -34145,6 +34294,7 @@ impl PySeries {
     }
     fn __mod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        refuse_int_overflow(self.inner.column(), other)?;
         timedelta_operand_check(&self.inner, other, "mod", false)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "mod", false)? {
             return Ok(res);
@@ -34159,6 +34309,7 @@ impl PySeries {
     }
     fn __rmod__(&self, py: Python<'_>, other: &Bound<'_, PyAny>) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        refuse_int_overflow(self.inner.column(), other)?;
         timedelta_operand_check(&self.inner, other, "mod", true)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "mod", true)? {
             return Ok(res);
@@ -34194,6 +34345,7 @@ impl PySeries {
         _modulo: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        refuse_int_overflow(self.inner.column(), other)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "pow", false)? {
             return Ok(res);
         }
@@ -34219,6 +34371,7 @@ impl PySeries {
         _modulo: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
         let other = &arith_operand(other)?;
+        refuse_int_overflow(self.inner.column(), other)?;
         if let Some(res) = host_object_arith(py, &self.inner, other, "pow", true)? {
             return Ok(res);
         }
@@ -37188,6 +37341,20 @@ impl PySeries {
     }
 
     fn isin(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<PySeries> {
+        // An int64 array's values read in place against a plain numeric
+        // column, each the Int64 cell its numpy scalar reads as: every one
+        // was a scalar made and read back (s.isin of 100k against a million
+        // 43-66 ms, pandas 19; br-frankenpandas-cs4fd). Such a column has no
+        // missing row and no zoned cell for the passes below.
+        if matches!(
+            self.inner.column().dtype(),
+            DType::Int64 | DType::Float64 | DType::Bool
+        ) && let Some(buffer) = native_int64_buffer(values)?
+        {
+            let needles: Vec<Scalar> = buffer.to_vec(py)?.into_iter().map(Scalar::Int64).collect();
+            let inner = self.inner.isin(&needles).map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner });
+        }
         // A date needle is an object cell (it raised; fvsao.67).
         let needles = isin_values(values)?;
         let scalars = needles
@@ -44107,6 +44274,15 @@ impl PyDataFrame {
         // A numpy number is the Python number of its value (see
         // [`arith_operand`]; br-frankenpandas-par0y).
         let other = &arith_operand(other)?;
+        // An int column meeting a Python int past int64 is pandas'
+        // OverflowError, but in a true division (br-frankenpandas-p5tih).
+        if !matches!(op, ArithmeticOp::Div) {
+            for position in 0..self.inner.num_columns() {
+                if let Some(column) = self.inner.column_at(position) {
+                    refuse_int_overflow(column, other)?;
+                }
+            }
+        }
         // Columns of Python-object cells against a scalar run the cells' own
         // operators, as a Series of them does (they were NaN / a coercion
         // error; br-frankenpandas-8dqrn); the other columns their kernels.
@@ -63187,7 +63363,7 @@ fn row_label_to_py(py: Python<'_>, index: &Index, label: &IndexLabel) -> PyResul
             .position(|candidate| candidate == label)
     {
         let parts = (0..multi.nlevels())
-            .map(|level| index_label_to_py(py, &level_labels(multi, level)?[row]))
+            .map(|level| level_label_to_py(py, multi, level, &level_labels(multi, level)?[row]))
             .collect::<PyResult<Vec<_>>>()?;
         return Ok(PyTuple::new(py, parts)?.into_any().unbind());
     }
@@ -73264,8 +73440,13 @@ fn level_key_column(multi: &fp_index::MultiIndex, position: usize) -> PyResult<C
     {
         return Ok(Column::from_i64_values_owned(ints));
     }
-    Column::from_values(labels.iter().map(index_label_to_scalar).collect())
-        .map_err(column_error_to_py)
+    let column = Column::from_values(labels.iter().map(index_label_to_scalar).collect())
+        .map_err(column_error_to_py)?;
+    // A zoned level's key is of its zone (br-frankenpandas-c4v57).
+    Ok(match multi.level_zone(position) {
+        Some(zone) => column.with_dtype(DType::datetime64_tz(zone)),
+        None => column,
+    })
 }
 
 /// `DataFrame.groupby(level=...)` over a flat index: the index labels as the
@@ -73395,8 +73576,28 @@ fn concat_row_multiindexes<'a>(
                 .flatten()
         })
         .collect();
+    // A level every piece holds in one zone keeps it (br-frankenpandas-c4v57).
+    let zones: Vec<Option<String>> = (0..nlevels)
+        .map(|level| {
+            let zone = first.level_zone(level);
+            multis
+                .iter()
+                .all(|multi| multi.level_zone(level) == zone)
+                .then(|| zone.map(str::to_owned))
+                .flatten()
+        })
+        .collect();
     fp_index::MultiIndex::from_arrays(arrays)
-        .map(|multi| Some(multi.set_names(names)))
+        .map(|multi| {
+            Some(
+                zones
+                    .iter()
+                    .enumerate()
+                    .fold(multi.set_names(names), |multi, (level, zone)| {
+                        multi.with_level_zone(level, zone.as_deref())
+                    }),
+            )
+        })
         .map_err(index_error_to_py)
 }
 
@@ -104098,8 +104299,15 @@ mod tests {
         assert_eq!(dti.isna().0, vec![false, false]);
         assert_eq!(dti.notna().0, vec![true, true]);
         Python::initialize();
+        // TEST-CHANGE (br-frankenpandas-cs4fd): pandas 2.2.3's
+        // DatetimeIndex.isin matches no number - DatetimeIndex([...]).isin([0])
+        // is all False, measured live - where an int matched its nanoseconds;
+        // a date string still matches its instant.
         Python::attach(|py| {
             let values = PyList::new(py, [nanos1]).expect("list");
+            let found = dti.isin(py, values.as_any()).expect("isin");
+            assert_eq!(found.0, vec![false, false]);
+            let values = PyList::new(py, ["2024-01-01"]).expect("list");
             let found = dti.isin(py, values.as_any()).expect("isin");
             assert_eq!(found.0, vec![true, false]);
         });

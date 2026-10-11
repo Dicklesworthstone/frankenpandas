@@ -37619,3 +37619,362 @@ def test_set_index_multiindex_like_pandas_eeywy(case: str) -> None:
         return (type(out.index).__name__, [repr(label) for label in out.index.tolist()], list(out.index.names), [repr(column) for column in out.columns], repr(out.values.tolist()))
 
     assert outcome(fpd) == outcome(pd)
+
+
+# br-frankenpandas-h4bak: a period column's copies keep its values (a Series' iloc over a
+# million periods rebuilt them all); periods of two freqs are pandas' object
+# column of the periods as they are (a copy read them in the first freq).
+# NEGATIVE: one freq with a NaT keeps the period dtype; a frame's rows of
+# periods read as pandas'.
+def _h4bak_periods(m: Any) -> Any:
+    return m.Series(m.period_range("2000-01-01", periods=40, freq="D"))
+
+
+def _h4bak_mixed(m: Any) -> Any:
+    return m.Series([m.Period("2024Q1", freq="Q"), m.Period("2024-01", freq="M"), m.Period("2024Q3", freq="Q")])
+
+
+_H4BAK_CASES = {
+    "iloc slice": lambda m: _h4bak_periods(m).iloc[10:20],
+    "head": lambda m: _h4bak_periods(m).head(3),
+    "take": lambda m: _h4bak_periods(m).take([5, 1, 30]),
+    "frame iloc": lambda m: m.DataFrame({"p": _h4bak_periods(m), "x": range(40)}).iloc[3:6]["p"],
+    "two freqs": lambda m: _h4bak_mixed(m),
+    "two freqs iloc": lambda m: _h4bak_mixed(m).iloc[1:3],
+    "two freqs copy": lambda m: _h4bak_mixed(m).copy(),
+    "one freq and NaT (NEGATIVE)": lambda m: m.Series([m.Period("2024-01", freq="M"), m.NaT, m.Period("2024-03", freq="M")]).iloc[0:3],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_H4BAK_CASES))
+def test_period_copies_like_pandas_h4bak(case: str) -> None:
+    def outcome(m: Any) -> Any:
+        out = _H4BAK_CASES[case](m)
+        return str(out.dtype), [repr(value) for value in out.tolist()], [repr(label) for label in out.index.tolist()]
+
+    assert outcome(fpd) == outcome(pd)
+
+
+# br-frankenpandas-c4v57: a tz-aware column's MultiIndex level holds its instants in its zone
+# - set_index (and append), groupby keys (as_index both ways), from_arrays /
+# from_product / from_frame, reset_index, droplevel, unstack either way, a
+# Timestamp key, tuples. NEGATIVE: a naive datetime level stays naive; a text
+# level is untouched.
+def _zoned_c4v57_frame(m: Any) -> Any:
+    return m.DataFrame({"k": ["a", "b", "a", "b"], "t": m.date_range("2024-01-01", periods=4, freq="D", tz="UTC"), "v": [1, 2, 3, 4]})
+
+
+def _zoned_c4v57_axis(index: Any) -> Any:
+    if hasattr(index, "levels"):
+        return [str(level.dtype) for level in index.levels], [repr(label) for label in index.tolist()]
+    return str(index.dtype), [repr(label) for label in index.tolist()]
+
+
+_ZONED_C4V57_CASES = {
+    "set_index": lambda m: _zoned_c4v57_axis(_zoned_c4v57_frame(m).set_index(["k", "t"]).index),
+    "set_index append": lambda m: _zoned_c4v57_axis(_zoned_c4v57_frame(m).set_index("k").set_index("t", append=True).index),
+    "reset_index": lambda m: str(_zoned_c4v57_frame(m).set_index(["k", "t"]).reset_index()["t"].dtype),
+    "groupby keys": lambda m: _zoned_c4v57_axis(_zoned_c4v57_frame(m).groupby(["k", "t"]).sum().index),
+    "groupby as_index False": lambda m: str(_zoned_c4v57_frame(m).groupby(["k", "t"], as_index=False).sum()["t"].dtype),
+    "from_arrays": lambda m: _zoned_c4v57_axis(m.MultiIndex.from_arrays([["a", "b"], m.date_range("2024-01-01", periods=2, tz="US/Eastern")])),
+    "from_product": lambda m: _zoned_c4v57_axis(m.MultiIndex.from_product([["a"], m.date_range("2024-01-01", periods=2, tz="Asia/Tokyo")])),
+    "from_frame": lambda m: _zoned_c4v57_axis(m.MultiIndex.from_frame(_zoned_c4v57_frame(m)[["k", "t"]])),
+    "get_level_values": lambda m: _zoned_c4v57_axis(_zoned_c4v57_frame(m).set_index(["k", "t"]).index.get_level_values(1)),
+    "droplevel": lambda m: _zoned_c4v57_axis(_zoned_c4v57_frame(m).set_index(["k", "t"]).droplevel(0).index),
+    "unstack zoned level": lambda m: _zoned_c4v57_axis(_zoned_c4v57_frame(m).set_index(["k", "t"])["v"].unstack(1).columns),
+    "unstack key level": lambda m: _zoned_c4v57_axis(_zoned_c4v57_frame(m).set_index(["k", "t"])["v"].unstack(0).index),
+    "Timestamp key": lambda m: repr(_zoned_c4v57_frame(m).set_index(["k", "t"]).loc[("a", m.Timestamp("2024-01-01", tz="UTC"))].tolist()),
+    "with NaT": lambda m: _zoned_c4v57_axis(m.DataFrame({"k": ["a", "b"], "t": [m.Timestamp("2024-01-01", tz="UTC"), m.NaT], "v": [1, 2]}).set_index(["k", "t"]).index),
+    "concat": lambda m: _zoned_c4v57_axis(m.concat([_zoned_c4v57_frame(m).set_index(["k", "t"])] * 2).index),
+    "groupby a level": lambda m: _zoned_c4v57_axis(_zoned_c4v57_frame(m).set_index(["k", "t"]).groupby(level="t").sum().index),
+    "groupby both levels": lambda m: _zoned_c4v57_axis(_zoned_c4v57_frame(m).set_index(["k", "t"])["v"].groupby(level=[0, 1]).sum().index),
+    "to_frame": lambda m: str(_zoned_c4v57_frame(m).set_index(["k", "t"]).index.to_frame()["t"].dtype),
+    "naive level (NEGATIVE)": lambda m: _zoned_c4v57_axis(_zoned_c4v57_frame(m).assign(t=m.date_range("2024-01-01", periods=4, freq="D")).set_index(["k", "t"]).index),
+    "text level untouched (NEGATIVE)": lambda m: _zoned_c4v57_axis(_zoned_c4v57_frame(m).set_index(["k", "t"]).index.get_level_values(0)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_ZONED_C4V57_CASES))
+def test_zoned_multiindex_levels_like_pandas_c4v57(case: str) -> None:
+    assert _ZONED_C4V57_CASES[case](fpd) == _ZONED_C4V57_CASES[case](pd)
+
+
+# br-frankenpandas-p5tih: an int, bool or Int64 column meeting a Python int past int64 in
+# arithmetic other than true division is pandas' OverflowError (fp took the
+# operand as a float). NEGATIVE: a float column, a true division, an int64
+# sum that wraps at 2**63 - 1, a uint64 column with an int in its range and a
+# comparison answer as pandas (a uint64 value past 2**63 is
+# br-frankenpandas-gatk1's).
+_P5TIH_CASES = {
+    "add": lambda m: m.Series([1, 2]) + 2**70,
+    "radd": lambda m: 2**70 + m.Series([1, 2]),
+    "mul": lambda m: m.Series([1, 2]) * 2**63,
+    "sub negative": lambda m: m.Series([1, 2]) - (-(2**64)),
+    "floordiv": lambda m: m.Series([1, 2]) // 2**70,
+    "mod": lambda m: m.Series([1, 2]) % 2**70,
+    "pow": lambda m: m.Series([1, 2]) ** 2**70,
+    "int32": lambda m: m.Series([1, 2], dtype="int32") + 2**70,
+    "Int64": lambda m: m.Series([1, 2], dtype="Int64") + 2**70,
+    "bool": lambda m: m.Series([True, False]) + 2**70,
+    "frame": lambda m: m.DataFrame({"a": [1, 2]}) + 2**70,
+    "add method": lambda m: m.Series([1, 2]).add(2**70),
+    "float column (NEGATIVE)": lambda m: m.Series([1.5, 2.5]) + 2**70,
+    "true division (NEGATIVE)": lambda m: m.Series([1, 2]) / 2**70,
+    "wraps at int64 (NEGATIVE)": lambda m: m.Series([1, 2]) + (2**63 - 1),
+    "uint64 within range (NEGATIVE)": lambda m: m.Series([1, 2], dtype="uint64") + 2**40,
+    "comparison (NEGATIVE)": lambda m: m.Series([1, 2]) == 2**70,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_P5TIH_CASES))
+def test_int_overflow_operand_like_pandas_p5tih(case: str) -> None:
+    def outcome(m: Any) -> Any:
+        import warnings as _warnings
+
+        try:
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore")
+                out = _P5TIH_CASES[case](m)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__, str(error)
+        values = out.values.tolist() if hasattr(out, "columns") else out.tolist()
+        dtype = str(out.dtypes.tolist()) if hasattr(out, "columns") else str(out.dtype)
+        return dtype, repr(values)
+
+    assert outcome(fpd) == outcome(pd)
+
+
+# br-frankenpandas-6pqf3: time-zone conversions run over the held nanoseconds with the zone
+# parsed once and a DST-free hour's offset reused. Each zone's wall times
+# cross both of its 2024 DST changes (Lord Howe's is half an hour) every 20
+# minutes, sorted and shuffled; localize under each policy, the wall clock
+# back, normalize, the Series forms, a daily resample and inferred_freq
+# answer as pandas. NEGATIVE: 'raise' refuses the first skipped or repeated
+# wall time with pandas' text (a sub-second one keeps six digits), and a
+# timedelta 'nonexistent' keeps its own path.
+_6PQF3_CHANGES = {
+    "US/Eastern": ("2024-03-10", "2024-11-03"),
+    "Europe/London": ("2024-03-31", "2024-10-27"),
+    "Australia/Lord_Howe": ("2024-04-07", "2024-10-06"),
+    "+05:30": ("2024-03-10", "2024-11-03"),
+    "UTC": ("2024-03-10", "2024-11-03"),
+}
+_6PQF3_POLICIES = {
+    "NaT NaT": {"ambiguous": "NaT", "nonexistent": "NaT"},
+    "True forward": {"ambiguous": True, "nonexistent": "shift_forward"},
+    "False backward": {"ambiguous": False, "nonexistent": "shift_backward"},
+    "raise": {},
+    "NaT raise": {"ambiguous": "NaT"},
+}
+
+
+def _6pqf3_walls(zone: str, shuffled: bool) -> Any:
+    import numpy as np
+
+    days = [
+        np.arange(
+            np.datetime64(day) - np.timedelta64(1, "D"),
+            np.datetime64(day) + np.timedelta64(1, "D"),
+            np.timedelta64(20, "m"),
+        ).astype("datetime64[ns]")
+        for day in _6PQF3_CHANGES[zone]
+    ]
+    walls = np.concatenate(days)
+    if shuffled:
+        walls = walls[np.random.default_rng(6).permutation(len(walls))]
+    return walls
+
+
+def _6pqf3_outcome(make: Any) -> Any:
+    try:
+        out = make()
+    except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+        return type(error).__name__, str(error)
+    if isinstance(out, str) or out is None:
+        return out
+    if hasattr(out, "columns"):
+        return [str(x) for x in out.index], out.values.tolist()
+    freq = getattr(out, "freq", None) if not hasattr(out, "dt") else None
+    return [str(x) for x in out], str(out.dtype), str(freq)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("zone", list(_6PQF3_CHANGES))
+@pytest.mark.parametrize("policy", list(_6PQF3_POLICIES))
+@pytest.mark.parametrize("shuffled", [False, True])
+def test_tz_conversions_like_pandas_6pqf3(zone: str, policy: str, shuffled: bool) -> None:
+    walls = _6pqf3_walls(zone, shuffled)
+    kwargs = _6PQF3_POLICIES[policy]
+
+    def answers(m: Any) -> Any:
+        index = m.DatetimeIndex(walls)
+        series = m.Series(walls)
+        steps = {
+            "localize": lambda: index.tz_localize(zone, **kwargs),
+            "wall": lambda: index.tz_localize(zone, **kwargs).tz_localize(None),
+            "normalize": lambda: index.tz_localize(zone, **kwargs).normalize(),
+            "series localize": lambda: series.dt.tz_localize(zone, **kwargs),
+            "series wall": lambda: series.dt.tz_localize(zone, **kwargs).dt.tz_localize(None),
+            "series normalize": lambda: series.dt.tz_localize(zone, **kwargs).dt.normalize(),
+            "inferred": lambda: index.tz_localize(zone, **kwargs).inferred_freq,
+        }
+        if not shuffled and policy == "True forward":
+            steps["resample"] = lambda: (
+                m.DataFrame({"v": range(len(walls))}, index=index.tz_localize(zone, **kwargs))
+                .resample("D")
+                .sum()
+            )
+        return {name: _6pqf3_outcome(make) for name, make in steps.items()}
+
+    assert answers(fpd) == answers(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case",
+    [
+        "skipped micro",
+        "skipped nanos",
+        "repeated micro",
+        "timedelta onto a gap (NEGATIVE)",
+        "timedelta past a gap",
+        "utc keeps freq",
+        "regular inferred",
+        "naive inferred",
+    ],
+)
+def test_tz_localize_edges_like_pandas_6pqf3(case: str) -> None:
+    def answer(m: Any) -> Any:
+        stamps = {
+            "skipped micro": (["2024-03-10 02:30:00.5"], {}),
+            "skipped nanos": (["2024-03-10 02:30:00.000000001"], {}),
+            "repeated micro": (["2024-11-03 01:30:00.25"], {"nonexistent": "NaT"}),
+            "timedelta onto a gap (NEGATIVE)": (
+                ["2024-03-10 02:10:00"],
+                {"nonexistent": pd.Timedelta("10min")},
+            ),
+            "timedelta past a gap": (
+                ["2024-03-10 02:10:00", "2024-03-12 00:00:00"],
+                {"nonexistent": pd.Timedelta("1h")},
+            ),
+        }
+        if case in stamps:
+            values, kwargs = stamps[case]
+            index = m.DatetimeIndex(pd.to_datetime(values).values)
+            return _6pqf3_outcome(lambda: index.tz_localize("US/Eastern", **kwargs))
+        if case == "utc keeps freq":
+            index = m.date_range("2024-01-01", periods=5, freq="h")
+            return _6pqf3_outcome(lambda: index.tz_localize("UTC", ambiguous="NaT"))
+        index = m.date_range("2024-01-09", periods=100, freq="h")
+        if case == "regular inferred":
+            return index.tz_localize("US/Eastern").inferred_freq
+        return index.inferred_freq
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-cs4fd: Index.isin of an int64 ndarray reads the array in place, and
+# get_indexer on a sorted unique int index starts each target where the
+# labels' line puts it. Both answer as pandas over index dtypes and label
+# shapes. NEGATIVE: a float, bool, object or datetime index against ints, a
+# byte-swapped or float array, targets between, below and above the labels
+# and a skewed sorted index keep pandas' answers.
+def _cs4fd_index(m: Any, kind: str) -> Any:
+    import numpy as np
+
+    return {
+        "int": lambda: m.Index(np.array([5, -3, 7, 2**40, 0])),
+        "float": lambda: m.Index([1.0, 2.5, 3.0, float("nan")]),
+        "bool": lambda: m.Index([True, False, True]),
+        "object": lambda: m.Index(["a", 1, 2.0, None], dtype=object),
+        "datetime": lambda: m.DatetimeIndex(np.array([0, 3], dtype="datetime64[ns]")),
+        "range": lambda: m.RangeIndex(0, 20, 3),
+    }[kind]()
+
+
+_CS4FD_NEEDLES = {
+    "ints": lambda np: np.array([1, 3, 5, 0, 2**40, -3], dtype="int64"),
+    "empty": lambda np: np.array([], dtype="int64"),
+    "extremes": lambda np: np.array([np.iinfo("int64").min, np.iinfo("int64").max]),
+    "byte-swapped (NEGATIVE)": lambda np: np.array([1, 5, 3], dtype=">i8"),
+    "floats (NEGATIVE)": lambda np: np.array([1.0, 2.5, 3.0]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("kind", ["int", "float", "bool", "object", "datetime", "range"])
+@pytest.mark.parametrize("needles", list(_CS4FD_NEEDLES))
+def test_index_isin_int_array_like_pandas_cs4fd(kind: str, needles: str) -> None:
+    import numpy as np
+
+    def answer(m: Any) -> Any:
+        try:
+            return list(_cs4fd_index(m, kind).isin(_CS4FD_NEEDLES[needles](np)))
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+
+    assert answer(fpd) == answer(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("shape", ["evenly spread", "squares (NEGATIVE)", "powers (NEGATIVE)", "clustered", "one label"])
+def test_sorted_int_get_indexer_like_pandas_cs4fd(shape: str) -> None:
+    import numpy as np
+
+    labels = {
+        "evenly spread": np.arange(5_000) * 3,
+        "squares (NEGATIVE)": np.arange(2_000) ** 2,
+        "powers (NEGATIVE)": 2 ** np.arange(62),
+        "clustered": np.concatenate([np.arange(1_000), np.arange(10**9, 10**9 + 1_000)]),
+        "one label": np.array([42]),
+    }[shape]
+    rng = np.random.default_rng(4)
+    picks = rng.choice(labels, size=min(len(labels), 300))
+    targets = np.concatenate([picks, picks + 1, picks - 1, [labels.min() - 5, labels.max() + 5]])
+    rng.shuffle(targets)
+
+    def answer(m: Any) -> Any:
+        return list(m.Index(labels).get_indexer(targets))
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-cs4fd: list-like needles of every kind against a DatetimeIndex and a bool
+# Index answer as pandas 2.2.3: numbers never match datetimes (an int matched
+# its nanoseconds), values all bools are its TypeError, a Timestamp or date
+# string still matches; a bool index reads 1 / 0 (and 1.0 / 0.0) as True /
+# False. NEGATIVE: a Timestamp, a date string, NaT, strings against bools.
+_CS4FD_LISTS = {
+    "datetime list of ints": ("datetime", lambda m: [0, 3]),
+    "datetime floats": ("datetime", lambda m: [0.0]),
+    "datetime mixed": ("datetime", lambda m: [0, m.Timestamp(3)]),
+    "datetime bools": ("datetime", lambda m: [True]),
+    "datetime Timestamp (NEGATIVE)": ("datetime", lambda m: [m.Timestamp(0)]),
+    "datetime NaT (NEGATIVE)": ("datetime", lambda m: [m.NaT]),
+    "bool ints": ("bool", lambda m: [1]),
+    "bool floats": ("bool", lambda m: [1.0, 7.5]),
+    "bool zero float array": ("bool", lambda m: __import__("numpy").array([0.0])),
+    "bool strings (NEGATIVE)": ("bool", lambda m: ["True"]),
+    "bool bools (NEGATIVE)": ("bool", lambda m: [False]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_CS4FD_LISTS))
+def test_index_isin_needle_kinds_like_pandas_cs4fd(case: str) -> None:
+    import warnings as _warnings
+
+    kind, needles = _CS4FD_LISTS[case]
+
+    def answer(m: Any) -> Any:
+        try:
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore")
+                return list(_cs4fd_index(m, kind).isin(needles(m)))
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__, str(error)
+
+    assert answer(fpd) == answer(pd)
