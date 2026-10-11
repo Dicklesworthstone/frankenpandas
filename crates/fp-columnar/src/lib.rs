@@ -2441,6 +2441,28 @@ fn divided_by_number_arc(data: &[f64], s: f64, number_first: bool) -> Arc<[f64]>
     }
 }
 
+/// `data[i] / data[i - periods] - 1.0` for every row with a row `periods`
+/// back, the first `periods` rows 0.0 (a caller's mask clears them):
+/// fp-dot-kernel's 4-lane kernel where the CPU has AVX2 - the guard is not
+/// optional, that crate emits AVX2 unconditionally - else the baseline
+/// 2-lane map, the same bits either way (br-frankenpandas-faizi).
+#[must_use]
+pub fn pct_change_values(data: &[f64], periods: usize) -> Vec<f64> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        return fp_dot_kernel::pct_change_f64(data, periods);
+    }
+    let lead = periods.min(data.len());
+    std::iter::repeat_n(0.0, lead)
+        .chain(
+            data[lead..]
+                .iter()
+                .zip(data)
+                .map(|(&current, &previous)| current / previous - 1.0),
+        )
+        .collect()
+}
+
 /// [`sqrt_values`] collected straight into the `Arc<[f64]>` a NaN-exact
 /// column keeps - not a Vec copied into one, nor a zero-filled Arc written
 /// over (its fill was larger than the roots; br-frankenpandas-cmgnp).
@@ -12796,6 +12818,9 @@ pub fn radix_argsort_multi_u64(keys_by_col: &[Vec<u64>]) -> Vec<usize> {
     {
         return order;
     }
+    if let Some(order) = combined_counting_argsort(keys_by_col, n) {
+        return order;
+    }
     let mut scratch: Vec<usize> = vec![0; n];
     for keys in keys_by_col.iter().rev() {
         // Only the bytes some key holds: a column of small ranks counted
@@ -12826,6 +12851,50 @@ pub fn radix_argsort_multi_u64(keys_by_col: &[Vec<u64>]) -> Vec<usize> {
         }
     }
     idx
+}
+
+/// [`radix_argsort_multi_u64`] for keys whose ranges multiply to a small
+/// span: each row's keys combined into one code (the first column most
+/// significant) and counted in one stable pass - a pass a key column read
+/// the running permutation's keys out of order (a two-level MultiIndex
+/// sort_index of 200k rows 0.85x pandas). None for a span past
+/// `max(4 * n, 2^16)` or `2^24`.
+fn combined_counting_argsort(keys_by_col: &[Vec<u64>], n: usize) -> Option<Vec<usize>> {
+    if keys_by_col.iter().any(|keys| keys.len() != n) {
+        return None;
+    }
+    let cap = n.saturating_mul(4).clamp(1 << 16, 1 << 24) as u64;
+    let mut span = 1_u64;
+    let mut radices = Vec::with_capacity(keys_by_col.len());
+    for keys in keys_by_col {
+        let radix = keys.iter().copied().max().unwrap_or(0).checked_add(1)?;
+        span = span.checked_mul(radix).filter(|&span| span <= cap)?;
+        radices.push(radix);
+    }
+    let mut codes = vec![0_u32; n];
+    for (keys, &radix) in keys_by_col.iter().zip(&radices) {
+        // The span fits in u32, so each partial code does too.
+        let radix = radix as u32;
+        for (code, &key) in codes.iter_mut().zip(keys) {
+            *code = *code * radix + key as u32;
+        }
+    }
+    let mut start = vec![0_usize; span as usize + 1];
+    for &code in &codes {
+        start[code as usize + 1] += 1;
+    }
+    let mut running = 0_usize;
+    for slot in &mut start {
+        running += *slot;
+        *slot = running;
+    }
+    let mut order = vec![0_usize; n];
+    for (row, &code) in codes.iter().enumerate() {
+        let slot = &mut start[code as usize];
+        order[*slot] = row;
+        *slot += 1;
+    }
+    Some(order)
 }
 
 /// Stable MSD byte-radix argsort over UTF-8 strings.
@@ -19227,7 +19296,11 @@ impl Column {
         Some(Self::from_f64_values_with_validity(rounded, validity))
     }
 
-    fn with_width_dropped(mut self) -> Self {
+    /// This column with no numpy width: its values and storage the same,
+    /// read as int64 / float64 (a caller running a float64 kernel whose
+    /// result it narrows back, as pandas computes a float32 std in float64).
+    #[must_use]
+    pub fn with_width_dropped(mut self) -> Self {
         self.width = None;
         self
     }
@@ -43043,6 +43116,66 @@ mod tests {
     /// time (br-frankenpandas-5olp1). NEGATIVE: odd and word-straddling
     /// starts, lengths off a word boundary, one bit, the last bits of the
     /// mask, a mask of invalid ranges, steps of 3, 5, 7, 64 and 65.
+    #[test]
+    fn combined_counting_argsort_is_the_stable_lexsort() {
+        // Small-range key columns sort as one combined key, the first column
+        // most significant, equal rows in their order - the stable sort_by's
+        // permutation. NEGATIVE: ties across both columns (stability), a
+        // column of one value, a key range past the cap (the radix passes,
+        // same answer), one column.
+        let n = 5000_usize;
+        let a: Vec<u64> = (0..n).map(|i| ((i * 7919) % 13) as u64).collect();
+        let b: Vec<u64> = (0..n).map(|i| ((i * 104_729) % 5) as u64).collect();
+        let constant: Vec<u64> = vec![3; n];
+        let wide: Vec<u64> = (0..n)
+            .map(|i| ((i * 2_654_435_761) % 1_000_003) as u64 * 97)
+            .collect();
+        let cases: [&[&Vec<u64>]; 4] = [&[&a, &b], &[&b, &a, &constant], &[&a, &wide], &[&b]];
+        for (case, columns) in cases.iter().enumerate() {
+            let keys: Vec<Vec<u64>> = columns.iter().map(|column| (*column).clone()).collect();
+            let mut want: Vec<usize> = (0..n).collect();
+            want.sort_by(|&x, &y| {
+                keys.iter()
+                    .map(|column| column[x].cmp(&column[y]))
+                    .find(|ordering| ordering.is_ne())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            assert_eq!(crate::radix_argsort_multi_u64(&keys), want, "case {case}");
+        }
+        assert!(crate::combined_counting_argsort(&[a.clone(), b.clone()], n).is_some());
+        assert!(crate::combined_counting_argsort(&[a, wide], n).is_none());
+    }
+
+    #[test]
+    fn pct_change_values_are_the_row_rule_faizi() {
+        // The kernel's ratios are the row loop's bits - 4 lanes where the
+        // CPU has AVX2, the baseline map else - and the first `periods` rows
+        // (all of them past the length) are 0.0. NEGATIVE: a 0.0 previous
+        // (inf / NaN), an infinite previous (-1.0, not NaN), NaN data, a
+        // length off the lane width, periods 0, past and at the length.
+        let data: Vec<f64> = (0..103)
+            .map(|i| match i % 11 {
+                0 => 0.0,
+                1 => f64::NAN,
+                2 => f64::INFINITY,
+                3 => -0.0,
+                _ => (i as f64 * 0.37).sin() * 1e3,
+            })
+            .collect();
+        for periods in [0_usize, 1, 2, 5, 64, 102, 103, 140] {
+            let got = crate::pct_change_values(&data, periods);
+            assert_eq!(got.len(), data.len(), "{periods}");
+            for (i, value) in got.iter().enumerate() {
+                let want = if i < periods {
+                    0.0
+                } else {
+                    data[i] / data[i - periods] - 1.0
+                };
+                assert_eq!(value.to_bits(), want.to_bits(), "{periods} {i}");
+            }
+        }
+    }
+
     #[test]
     fn forward_strided_validity_is_the_bit_gather_5olp1() {
         let len = 1_000;

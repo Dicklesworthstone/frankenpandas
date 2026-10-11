@@ -31440,8 +31440,11 @@ impl Series {
         // gets a cleared bit, exactly mirroring `Column::from_values`, which
         // marks a `Float64(NaN)` Scalar missing while `LazyNullableFloat64`
         // still materializes the `Float64(NaN)` value for it. A non-NaN ratio
-        // (incl. +/-inf) stays a present `Float64`.
-        if let Some(data) = self.column.as_f64_slice() {
+        // (incl. +/-inf) stays a present `Float64`. Forward periods take
+        // the mask path below, over the all-valid mask's words.
+        if periods <= 0
+            && let Some(data) = self.column.as_f64_slice()
+        {
             let mut out = vec![0.0_f64; len];
             let mut validity = fp_columnar::ValidityMask::all_valid(len);
             for i in 0..len {
@@ -31478,27 +31481,26 @@ impl Series {
             // time (1.7 ms a 300k rows, pandas 0.6).
             let words = present.packed_words_for_scan();
             let bit = |row: usize| (words[row / 64] >> (row % 64)) & 1 == 1;
-            let mut out = vec![0.0_f64; len];
+            let forward = usize::try_from(periods).ok().filter(|&p| p > 0);
+            // A float64 column's forward ratios collected by fp-columnar's
+            // 4-lane kernel (the baseline 2-lane divide and a zeroed buffer
+            // were 0.34 ms a 300k rows, pandas 0.27; br-frankenpandas-faizi).
+            let mut out = match forward {
+                Some(p) if !float32 => fp_columnar::pct_change_values(data, p),
+                _ => vec![0.0_f64; len],
+            };
             let mut valid = vec![0_u64; len.div_ceil(64)];
-            if let Ok(p) = usize::try_from(periods)
-                && p > 0
-            {
+            if let Some(p) = forward {
                 // Forward periods: every row with a row `p` back changed in one
                 // loop the compiler vectorizes, then 64 rows at a time the rows
                 // present on both sides kept (a NaN ratio missing, its datum
                 // NaN as above) and the rest cleared to a 0.0 gap - a row's
                 // bit tests and branches were 0.55 ms a 300k rows, pandas'
                 // division 0.27 (br-frankenpandas-faizi).
-                if p < len {
+                if float32 && p < len {
                     let pairs = out[p..].iter_mut().zip(&data[p..]).zip(&data[..len - p]);
-                    if float32 {
-                        for ((slot, &cur), &prev) in pairs {
-                            *slot = change(cur, prev);
-                        }
-                    } else {
-                        for ((slot, &cur), &prev) in pairs {
-                            *slot = cur / prev - 1.0;
-                        }
+                    for ((slot, &cur), &prev) in pairs {
+                        *slot = change(cur, prev);
                     }
                 }
                 // The 64 mask bits from row `at` on, zeros past the mask.
@@ -37093,17 +37095,21 @@ impl RollingVarianceState {
         self.m2 -= (value - prev_mean) * (value - self.mean);
     }
 
-    fn output(&self, min_periods: usize, ddof: usize, kind: VarOutputKind) -> Scalar {
+    /// The window's reduction, `None` below `min_periods` (a missing row).
+    /// A float, not a `Scalar`: the caller writes it into a typed column, and
+    /// a `Scalar` a row was built and dropped out of line (expanding().std()
+    /// 0.78x pandas at 200k rows).
+    fn output(&self, min_periods: usize, ddof: usize, kind: VarOutputKind) -> Option<f64> {
         if self.nobs < min_periods {
-            return Scalar::Null(NullKind::NaN);
+            return None;
         }
         if self.nobs <= ddof {
-            return Scalar::Float64(f64::NAN);
+            return Some(f64::NAN);
         }
         if self.nobs == 1 || self.consecutive_same >= self.nobs {
             // Constant window (or single obs): zero variance ⇒ zero std ⇒ zero
             // standard error, all exactly 0.0.
-            return Scalar::Float64(0.0);
+            return Some(0.0);
         }
 
         let variance = self.m2 / (self.nobs - ddof) as f64;
@@ -37120,7 +37126,7 @@ impl RollingVarianceState {
             // `nobs > ddof` is guaranteed by the early return above.
             VarOutputKind::Sem => clamped.sqrt() / ((self.nobs - ddof) as f64).sqrt(),
         };
-        Scalar::Float64(result)
+        Some(result)
     }
 }
 
@@ -37357,11 +37363,29 @@ fn pairwise_floats(column: &Column) -> Vec<f64> {
         return data.to_vec();
     }
     if let Some((data, validity)) = column.as_f64_slice_with_validity() {
-        return data
-            .iter()
-            .enumerate()
-            .map(|(i, &value)| if validity.get(i) { value } else { f64::NAN })
-            .collect();
+        // The values copied whole, then each mask word's cleared rows made
+        // NaN: `get` a row re-decided the mask's shape each time (8% of
+        // rolling(50).corr(), whose five window outputs come through here).
+        let mut out = data.to_vec();
+        let len = out.len();
+        for (word_at, &word) in validity.packed_words_for_scan().iter().enumerate() {
+            let base = word_at * 64;
+            if base >= len {
+                break;
+            }
+            let rows = (len - base).min(64);
+            let in_block = if rows == 64 {
+                u64::MAX
+            } else {
+                (1_u64 << rows) - 1
+            };
+            let mut cleared = !word & in_block;
+            while cleared != 0 {
+                out[base + cleared.trailing_zeros() as usize] = f64::NAN;
+                cleared &= cleared - 1;
+            }
+        }
+        return out;
     }
     column
         .values()
@@ -38210,12 +38234,12 @@ impl Rolling<'_> {
             if v.is_nan() { None } else { Some(v) }
         };
 
-        // Typed nullable f64 output: convert each `state.output(..)` Scalar to
-        // (datum, valid-bit). `Null(NullKind::NaN)` (nobs<min_periods) stores 0.0
-        // with the bit CLEARED -> reads back `Null(NullKind::NaN)`; every
-        // `Float64(v)` (incl. the nobs<=ddof `Float64(NaN)` and the 0.0/variance
-        // cases) stores v with the bit SET -> reads back `Float64(v)`. Identical
-        // to `from_values` over the Scalars, but skips the boxing + re-scan.
+        // Typed nullable f64 output: each `state.output(..)` as (datum,
+        // valid-bit). `None` (nobs<min_periods) stores 0.0 with the bit CLEARED
+        // -> reads back `Null(NullKind::NaN)`; every `Some(v)` (incl. the
+        // nobs<=ddof NaN and the 0.0/variance cases) stores v with the bit SET
+        // -> reads back `Float64(v)`. Identical to `from_values` over the
+        // Scalars, but skips the boxing + re-scan.
         let mut data: Vec<f64> = Vec::with_capacity(len);
         let mut words: Vec<u64> = vec![0_u64; len.div_ceil(64)];
         let mut state = RollingVarianceState::default();
@@ -38246,11 +38270,11 @@ impl Rolling<'_> {
                 r += 1;
             }
             match state.output(self.min_periods, ddof, kind) {
-                Scalar::Float64(v) => {
+                Some(v) => {
                     words[i / 64] |= 1_u64 << (i % 64);
                     data.push(v);
                 }
-                _ => data.push(0.0),
+                None => data.push(0.0),
             }
         }
 
@@ -43009,6 +43033,136 @@ impl ResampleBin for BinProd {
     }
 }
 
+/// pandas' group_sum over float32 values: the Kahan fold with every step
+/// rounded to float32 (`y = v - comp; t = sum + y; comp = t - sum - y`,
+/// `comp` reset where it is NaN), an empty bin 0.0
+/// (br-frankenpandas-kma8x).
+#[derive(Clone, Copy, Default)]
+struct BinSum32 {
+    sum: f32,
+    compensation: f32,
+}
+
+impl ResampleBin for BinSum32 {
+    const SINGLETON_IS_VALUE: bool = true;
+
+    #[allow(clippy::cast_possible_truncation)] // a float32 column's values, exact
+    fn add(&mut self, value: f64) {
+        let y = value as f32 - self.compensation;
+        let t = self.sum + y;
+        self.compensation = t - self.sum - y;
+        if self.compensation.is_nan() {
+            self.compensation = 0.0;
+        }
+        self.sum = t;
+    }
+
+    fn value(&self) -> f64 {
+        f64::from(self.sum)
+    }
+}
+
+/// pandas' group_mean over float32 values: the float32 Kahan sum over the
+/// count, divided in float32; an empty bin NaN (br-frankenpandas-kma8x).
+#[derive(Clone, Copy, Default)]
+struct BinMean32 {
+    sum: BinSum32,
+    count: usize,
+}
+
+impl ResampleBin for BinMean32 {
+    const SINGLETON_IS_VALUE: bool = true;
+
+    fn add(&mut self, value: f64) {
+        self.sum.add(value);
+        self.count += 1;
+    }
+
+    #[allow(clippy::cast_precision_loss)] // pandas' count, converted to float32
+    fn value(&self) -> f64 {
+        if self.count == 0 {
+            f64::NAN
+        } else {
+            f64::from(self.sum.sum / self.count as f32)
+        }
+    }
+}
+
+/// pandas' group_var over float32 values: Welford in float32 (`mean += (v -
+/// old) / n; m2 += (v - mean) * (v - old)`, the count converted to float32),
+/// `m2 / (n - ddof)`; NaN while `n <= ddof` (ddof 1 by default;
+/// br-frankenpandas-kma8x).
+#[derive(Clone, Copy)]
+struct BinVar32 {
+    count: usize,
+    mean: f32,
+    m2: f32,
+    ddof: usize,
+}
+
+impl Default for BinVar32 {
+    fn default() -> Self {
+        Self::with_ddof(1)
+    }
+}
+
+impl BinVar32 {
+    const fn with_ddof(ddof: usize) -> Self {
+        Self {
+            count: 0,
+            mean: 0.0,
+            m2: 0.0,
+            ddof,
+        }
+    }
+}
+
+impl ResampleBin for BinVar32 {
+    const SINGLETON_IS_VALUE: bool = false;
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn add(&mut self, value: f64) {
+        let value = value as f32;
+        self.count += 1;
+        let old = self.mean;
+        self.mean += (value - old) / self.count as f32;
+        self.m2 += (value - self.mean) * (value - old);
+    }
+
+    #[allow(clippy::cast_precision_loss)] // pandas' count, converted to float32
+    fn value(&self) -> f64 {
+        if self.count <= self.ddof {
+            f64::NAN
+        } else {
+            f64::from(self.m2 / (self.count - self.ddof) as f32)
+        }
+    }
+}
+
+/// pandas' group_prod over float32 values: the product from 1.0 in float32,
+/// an empty bin 1.0 (br-frankenpandas-kma8x).
+#[derive(Clone, Copy)]
+struct BinProd32(f32);
+
+impl Default for BinProd32 {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+impl ResampleBin for BinProd32 {
+    const SINGLETON_IS_VALUE: bool = true;
+
+    #[allow(clippy::cast_possible_truncation)] // a float32 column's values, exact
+    fn add(&mut self, value: f64) {
+        self.0 *= value as f32;
+    }
+
+    fn value(&self) -> f64 {
+        f64::from(self.0)
+    }
+}
+
 /// pandas' group_median: the median of a bin's present values (a NaN
 /// skipped) - the middle one, or the mean of the middle two - by the
 /// selection the build_groups path makes; an empty or all-NaN bin NaN
@@ -43413,6 +43567,9 @@ impl Resample<'_> {
         if let Some(result) = self.non_numeric_reduction("sum") {
             return result;
         }
+        if let Some(result) = self.float32_fold(BinSum32::default()) {
+            return result;
+        }
         // Typed-f64 fast path: skip aggregate_scalar's column.values() Scalar
         // materialization (O(n) Scalar) AND the per-bucket Vec<Scalar> clone.
         // Gated on an all-valid no-NaN f64 column so nansum == plain typed sum,
@@ -43514,6 +43671,9 @@ impl Resample<'_> {
         if let Some(result) = self.non_numeric_reduction("mean") {
             return result;
         }
+        if let Some(result) = self.float32_fold(BinMean32::default()) {
+            return result;
+        }
         // Typed-f64 fast path: skip the column.values() Scalar materialization
         // AND the per-bucket Vec<Scalar> clone. Gated on an all-valid (no
         // validity-null) f64 column with NO NaN, so nanmean == plain sum/count
@@ -43598,6 +43758,97 @@ impl Resample<'_> {
     /// reductions skip a NaN); None for any other column. Such a column went
     /// through aggregate_scalar's Scalar per row: resample('h').max() 0.29x
     /// pandas at 1M rows (br-frankenpandas-8ycr8).
+    /// Whether the Series is numpy float32 (a Float64 storage under the
+    /// float32 width), whose reductions pandas answers in float32
+    /// (br-frankenpandas-kma8x).
+    fn float32_source(&self) -> bool {
+        self.series.column().width() == Some(NumericWidth::Float32)
+    }
+
+    /// `op` over this resampler's Series read as float64 - its width
+    /// dropped, its values and bins the same - for a float32 Series whose
+    /// pandas result is a float64 kernel's narrowed (std, sem, median) or a
+    /// value a bin selected (min, max, first, last, ohlc).
+    fn on_float64<R>(
+        &self,
+        op: impl FnOnce(&Resample<'_>) -> Result<R, FrameError>,
+    ) -> Result<R, FrameError> {
+        let widened = Series::new(
+            self.series.name().clone(),
+            self.series.index().clone(),
+            self.series.column().clone().with_width_dropped(),
+        )?;
+        op(&Resample {
+            series: &widened,
+            freq: self.freq.clone(),
+            closed: self.closed.clone(),
+            label: self.label.clone(),
+            origin: self.origin.clone(),
+            layout: self.layout.clone(),
+        })
+    }
+
+    /// `result` with its column in `source`'s width, rounded to it.
+    fn narrowed_to(result: &Series, source: &Column) -> Result<Series, FrameError> {
+        Series::new(
+            result.name().clone(),
+            result.index().clone(),
+            result.column().clone().narrowed_like(source),
+        )
+    }
+
+    /// A float32 Series' `op` as pandas answers it: the float64 result in
+    /// float32 (`None` for any other Series; br-frankenpandas-kma8x).
+    fn in_source_width(
+        &self,
+        op: impl FnOnce(&Resample<'_>) -> Result<Series, FrameError>,
+    ) -> Option<Result<Series, FrameError>> {
+        if !self.float32_source() {
+            return None;
+        }
+        let source = self.series.column();
+        Some(
+            self.on_float64(op)
+                .and_then(|result| Self::narrowed_to(&result, source)),
+        )
+    }
+
+    /// A float32 Series' sum / mean / var / prod as pandas' float32 group
+    /// kernels fold it - each bin's present values into `empty` in float32,
+    /// a NaN or a gap skipped - in the one pass or over the hashed bins;
+    /// `None` for any other Series. A float64 fold narrowed afterwards
+    /// differs in the last float32 bit (a mean measured against pandas
+    /// 2.2.3; br-frankenpandas-kma8x).
+    fn float32_fold<B: ResampleBin>(&self, empty: B) -> Option<Result<Series, FrameError>> {
+        if !self.float32_source() {
+            return None;
+        }
+        Some((|| -> Result<Series, FrameError> {
+            self.validate()?;
+            let source = self.series.column();
+            let vals = pairwise_floats(source);
+            let result = match self.resample_reduce_single_pass(&vals, SkipNan(empty.clone())) {
+                Some(result) => result?,
+                None => {
+                    let (order, groups) = self.build_groups()?;
+                    let mut labels = Vec::with_capacity(order.len());
+                    let mut out = Vec::with_capacity(order.len());
+                    for key in &order {
+                        let mut bin = SkipNan(empty.clone());
+                        for &row in &groups[key] {
+                            bin.add(vals[row]);
+                        }
+                        labels.push(resample_bin_label(key));
+                        out.push(bin.value());
+                    }
+                    let index = Index::new(labels).rename_index(self.series.index().name());
+                    Series::new(self.series.name(), index, Column::from_f64_values(out))?
+                }
+            };
+            Self::narrowed_to(&result, source)
+        })())
+    }
+
     fn nan_holding_f64(&self) -> Option<&[f64]> {
         let column = self.series.column();
         let (data, validity) = column.as_f64_slice_with_validity()?;
@@ -44165,6 +44416,9 @@ impl Resample<'_> {
         if let Some(result) = self.non_numeric_reduction("min") {
             return result;
         }
+        if let Some(result) = self.in_source_width(|view| view.min()) {
+            return result;
+        }
         if let Some(r) = self.resample_extremum_typed(false) {
             return r;
         }
@@ -44177,6 +44431,9 @@ impl Resample<'_> {
     /// Resample max.
     pub fn max(&self) -> Result<Series, FrameError> {
         if let Some(result) = self.non_numeric_reduction("max") {
+            return result;
+        }
+        if let Some(result) = self.in_source_width(|view| view.max()) {
             return result;
         }
         if let Some(r) = self.resample_extremum_typed(true) {
@@ -44360,6 +44617,9 @@ impl Resample<'_> {
         if let Some(result) = self.non_numeric_reduction("first") {
             return result;
         }
+        if let Some(result) = self.in_source_width(|view| view.first()) {
+            return result;
+        }
         if let Some(r) = self.resample_first_last_typed_i64(false) {
             return r;
         }
@@ -44377,6 +44637,9 @@ impl Resample<'_> {
     /// Resample last non-null value.
     pub fn last(&self) -> Result<Series, FrameError> {
         if let Some(result) = self.non_numeric_reduction("last") {
+            return result;
+        }
+        if let Some(result) = self.in_source_width(|view| view.last()) {
             return result;
         }
         if let Some(r) = self.resample_first_last_typed_i64(true) {
@@ -44439,6 +44702,9 @@ impl Resample<'_> {
         if let Some(result) = self.non_numeric_reduction("std") {
             return result;
         }
+        if let Some(result) = self.in_source_width(|view| view.std()) {
+            return result;
+        }
         if let Some(r) = self.resample_var_typed(true) {
             return r;
         }
@@ -44448,6 +44714,9 @@ impl Resample<'_> {
     /// Resample variance.
     pub fn var(&self) -> Result<Series, FrameError> {
         if let Some(result) = self.non_numeric_reduction("var") {
+            return result;
+        }
+        if let Some(result) = self.float32_fold(BinVar32::default()) {
             return result;
         }
         if let Some(r) = self.resample_var_typed(false) {
@@ -44526,6 +44795,9 @@ impl Resample<'_> {
         if let Some(result) = self.non_numeric_reduction("median") {
             return result;
         }
+        if let Some(result) = self.in_source_width(|view| view.median()) {
+            return result;
+        }
         // An all-valid or NaN-as-missing float column in the one pass, each
         // bin's present values selected: a NaN or an empty bin sent it to
         // aggregate_scalar (resample('h').median() 24.8 ms a 300k rows,
@@ -44598,6 +44870,9 @@ impl Resample<'_> {
     /// Resample product.
     pub fn prod(&self) -> Result<Series, FrameError> {
         if let Some(result) = self.non_numeric_reduction("prod") {
+            return result;
+        }
+        if let Some(result) = self.float32_fold(BinProd32::default()) {
             return result;
         }
         // An all-valid or NaN-as-missing float column in the one pass, a NaN
@@ -44708,6 +44983,7 @@ impl Resample<'_> {
         const BUCKET_FUNCS: &[&str] = &["sum", "mean", "min", "max", "std", "var", "prod"];
         if !funcs.is_empty()
             && funcs.iter().all(|f| BUCKET_FUNCS.contains(f))
+            && !self.float32_source()
             && let Some(vals) = self.series.column().as_f64_slice()
             && !vals.iter().any(|x| x.is_nan())
             && order.iter().all(|k| !groups[k].is_empty())
@@ -45132,6 +45408,9 @@ impl Resample<'_> {
         if let Some(result) = self.non_numeric_reduction("sem") {
             return result;
         }
+        if let Some(result) = self.in_source_width(|view| view.sem()) {
+            return result;
+        }
         // Typed path (f64 borrows its slice rejecting any NaN; all-valid Int64 builds
         // the `v as f64` view once): `nansem_grouped(_, 1)` returns
         // `sqrt(nanvar_grouped(_, 1) / n)` (Float64) and `Null(NaN)` when `n <= 1`, so
@@ -45292,6 +45571,27 @@ impl Resample<'_> {
     pub fn ohlc(&self) -> Result<DataFrame, FrameError> {
         // Per br-frankenpandas-7bc60.
         self.validate()?;
+        // A float32 Series' prices are its own values, in float32 as pandas
+        // answers them (br-frankenpandas-kma8x).
+        if self.float32_source() {
+            let source = self.series.column();
+            let prices = self.on_float64(|view| view.ohlc())?;
+            let names: Vec<String> = prices
+                .column_names()
+                .into_iter()
+                .map(String::from)
+                .collect();
+            let columns: BTreeMap<String, Column> = names
+                .iter()
+                .map(|name| -> Result<(String, Column), FrameError> {
+                    let column = prices.column(name).ok_or_else(|| {
+                        FrameError::CompatibilityRejected(format!("ohlc column {name}"))
+                    })?;
+                    Ok((name.clone(), column.clone().narrowed_like(source)))
+                })
+                .collect::<Result<_, _>>()?;
+            return DataFrame::new_with_column_order(prices.index().clone(), columns, names);
+        }
         // A float column's prices in one fold over the bins (kept, or
         // binned now and kept), as pandas' group_ohlc: build_groups' keyed
         // buckets and a Scalar a row took resample('1h').ohlc() of 300k rows
@@ -47147,6 +47447,23 @@ fn running(step: impl Fn(f64, f64) -> f64) -> impl Fn(f64, f64) -> (f64, f64) {
 
 /// pandas' group_cumsum step: the compensated sum, its running total the
 /// output (br-frankenpandas-xhogl).
+/// Each cell's host number when `column` holds only present host objects
+/// that all carry one (a `datetime.date`'s day; see
+/// `fp_types::HostObject::host_number`); `None` for any other column.
+fn host_numbered_keys(column: &Column) -> Option<Vec<i64>> {
+    if column.dtype() != DType::Utf8 || !column.validity().all() || column.is_empty() {
+        return None;
+    }
+    column
+        .values()
+        .iter()
+        .map(|value| match value {
+            Scalar::Object(fp_types::ObjectValue::Host(host)) => host.number(),
+            _ => None,
+        })
+        .collect()
+}
+
 fn kahan_running(mut sum: fp_types::KahanSum, value: f64) -> (fp_types::KahanSum, f64) {
     sum.add(value);
     (sum, sum.sum())
@@ -49424,6 +49741,24 @@ impl SeriesGroupBy<'_> {
             return Some((gid_per_row, ngroups));
         }
 
+        // Object keys whose every cell carries its host's number (a
+        // datetime.date's day; HostObject::host_number - cells are equal
+        // exactly when their numbers are) numbered by those numbers, first
+        // seen: each row's cell was hashed and compared through its host,
+        // most of s.groupby(ts.index.date) (0.62x pandas;
+        // br-frankenpandas-errn5).
+        if let Some(numbers) = host_numbered_keys(&self.by.column) {
+            let mut gid_of: FxHashMap<i64, usize> = FxHashMap::default();
+            let gids = numbers
+                .iter()
+                .map(|&number| {
+                    let next = gid_of.len();
+                    *gid_of.entry(number).or_insert(next)
+                })
+                .collect();
+            return Some((gids, gid_of.len()));
+        }
+
         // Wide / high-cardinality all-valid Int64 key (the dense-histogram arm
         // above bailed: span > 2^24 or too sparse). The generic build_groups
         // tail materializes n Scalars + SipHashes each into an
@@ -49628,6 +49963,9 @@ impl SeriesGroupBy<'_> {
                 if g == order.len() {
                     match &vals[i] {
                         Scalar::Utf8(s) => order.push(IndexLabel::Utf8(s.as_str().to_owned())),
+                        // A host-numbered object key (see host_numbered_keys)
+                        // labels its group as itself, as build_groups does.
+                        Scalar::Object(object) => order.push(IndexLabel::Object(object.clone())),
                         _ => return None,
                     }
                 }
@@ -51230,6 +51568,9 @@ impl SeriesGroupBy<'_> {
                 }
             });
         }
+        if self.float32_values() {
+            return self.float32_group_fold(BinMean32::default());
+        }
         // Dense single-fold fast path (no per-group Vec<f64> buckets) — see
         // dense_group_fold. Both are pandas' group_mean: the compensated sum
         // over the count (br-frankenpandas-xhogl).
@@ -51247,6 +51588,72 @@ impl SeriesGroupBy<'_> {
             |nums| kahan_sum(nums) / nums.len() as f64,
             self.series.name(),
         )
+    }
+
+    /// Whether the grouped values are numpy float32, whose mean / var /
+    /// cumsum / cumprod pandas' group kernels fold in float32 (a float64
+    /// fold narrowed differs in the last bit; br-frankenpandas-kajoj).
+    fn float32_values(&self) -> bool {
+        self.series.column.width() == Some(NumericWidth::Float32)
+    }
+
+    /// Each group's present values folded into `empty` (one of the float32
+    /// resample bins), as pandas' float32 group kernel folds them; the
+    /// caller narrows the result to float32, which it already is.
+    fn float32_group_fold<B: ResampleBin + Copy>(&self, empty: B) -> Result<Series, FrameError> {
+        if let Some(result) = self.dense_group_fold(
+            empty,
+            |mut bin, value| {
+                bin.add(value);
+                bin
+            },
+            |bin, _| Scalar::Float64(bin.value()),
+        ) {
+            return result;
+        }
+        self.agg_numeric(
+            |values| {
+                let mut bin = empty;
+                for &value in values {
+                    bin.add(value);
+                }
+                bin.value()
+            },
+            self.series.name(),
+        )
+    }
+
+    /// A float32 column's running fold of `empty` (BinSum32 / BinProd32) per
+    /// group, a missing row missing and skipped, as pandas' float32
+    /// group_cumsum / group_cumprod (br-frankenpandas-kajoj); `nan_aware`
+    /// as the float64 paths pass it.
+    fn float32_running<B: ResampleBin + Copy>(
+        &self,
+        empty: B,
+        nan_aware: bool,
+    ) -> Result<Series, FrameError> {
+        let step = |mut bin: B, value: f64| {
+            bin.add(value);
+            (bin, bin.value())
+        };
+        if let Some(series) = self.try_cum_dense(empty, nan_aware, step) {
+            return Ok(series);
+        }
+        if let Some(series) = self.try_cum_dense_nullable(empty, step) {
+            return Ok(series);
+        }
+        self.transform_groups(|vals| {
+            let mut bin = empty;
+            vals.iter()
+                .map(|value| match value.to_f64() {
+                    Ok(v) if !value.is_missing() => {
+                        bin.add(v);
+                        Scalar::Float64(bin.value())
+                    }
+                    _ => Scalar::Null(NullKind::NaN),
+                })
+                .collect()
+        })
     }
 
     /// Whether the grouped column is datetime64 (any timezone).
@@ -53264,6 +53671,9 @@ impl SeriesGroupBy<'_> {
             return self.var();
         }
         self.refuse_text("var")?;
+        if self.float32_values() {
+            return self.float32_group_fold(BinVar32::with_ddof(ddof));
+        }
         self.agg_values_scalar(self.series.name(), |vals| {
             fp_types::nanvar_grouped(vals, ddof)
         })
@@ -53796,6 +54206,9 @@ impl SeriesGroupBy<'_> {
                 var_ns.clamp(i64::MIN as f64, i64::MAX as f64) as i64
             });
         }
+        if self.float32_values() {
+            return self.float32_group_fold(BinVar32::default());
+        }
         // Dense fast path (shared with std / sem + nullable via
         // dense_group_moments): one pass over the dense gids, no per-group
         // buckets. Both are pandas' group_var: Welford (br-frankenpandas-xhogl).
@@ -54060,6 +54473,9 @@ impl SeriesGroupBy<'_> {
         if let Some(r) = self.integral_by_row(i64::wrapping_add, false, false) {
             return r;
         }
+        if self.float32_values() {
+            return self.float32_running(BinSum32::default(), false);
+        }
         // Compensated, as pandas' group_cumsum (br-frankenpandas-xhogl).
         if let Some(s) = self.try_cum_dense(fp_types::KahanSum::default(), false, kahan_running) {
             return Ok(s);
@@ -54099,6 +54515,9 @@ impl SeriesGroupBy<'_> {
         }
         if let Some(r) = self.integral_by_row(i64::wrapping_mul, false, false) {
             return r;
+        }
+        if self.float32_values() {
+            return self.float32_running(BinProd32::default(), true);
         }
         if let Some(s) = self.try_cum_dense(1.0, true, running(|a, v| a * v)) {
             return Ok(s);
@@ -190951,6 +191370,348 @@ mod tests {
         assert_eq!(ints(zeros.resample("h").nunique()), [1, 1, 0, 2, 1]);
         let counted = series(Column::from_i64_values(vec![1, 2, 3, 4, 5, 6, 7]));
         assert_eq!(ints(counted.resample("h").size()), [2, 2, 0, 2, 1]);
+    }
+
+    #[test]
+    fn pairwise_floats_reads_the_mask_by_words() {
+        // A gapped float column's pairwise values are its data with every
+        // cleared row NaN, read a mask word at a time. NEGATIVE: a gap holds
+        // a 0.0 datum (a plain copy keeps 0.0), a present NaN stays NaN, the
+        // last word partial (130 rows) and whole (128), a gap at a word's
+        // last row.
+        for n in [128_usize, 130] {
+            let gap = |r: usize| r % 9 == 4 || r == 63 || r == n - 1;
+            let data: Vec<f64> = (0..n)
+                .map(|r| {
+                    if gap(r) {
+                        0.0
+                    } else if r % 17 == 0 {
+                        f64::NAN
+                    } else {
+                        r as f64 + 0.5
+                    }
+                })
+                .collect();
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for r in (0..n).filter(|&r| !gap(r)) {
+                words[r / 64] |= 1 << (r % 64);
+            }
+            let column = Column::from_f64_values_with_validity(
+                data.clone(),
+                fp_columnar::ValidityMask::from_words(words, n),
+            );
+            assert!(column.as_f64_slice_with_validity().is_some());
+            let got = super::pairwise_floats(&column);
+            assert_eq!(got.len(), n);
+            for (r, value) in got.iter().enumerate() {
+                if gap(r) || r % 17 == 0 {
+                    assert!(value.is_nan(), "{n} {r}");
+                } else {
+                    assert_eq!(*value, data[r], "{n} {r}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn float32_resample_folds_in_float32_kma8x() {
+        // A float32 Series' resample sum / mean / var / prod fold each bin
+        // in float32 (pandas' float32 group kernels: the Kahan sum, its mean
+        // over the count, Welford, the product), the result float32, and the
+        // selections (min, first) keep their values in float32. NEGATIVE:
+        // the float64 fold narrowed differs from the float32 fold in some
+        // bin (asserted below, so the data separates them), and a float64
+        // source keeps float64.
+        use fp_types::NumericWidth;
+        let base = 1_577_836_800_000_000_000_i64;
+        let minute = 60_000_000_000_i64;
+        let rows = 4000_usize;
+        let stamps: Vec<i64> = (0..rows as i64).map(|i| base + i * 7 * minute).collect();
+        let values: Vec<f64> = (0..rows)
+            .map(|i| f64::from(((i as f32) * 0.37).sin() * 0.05 + 1.0 + i as f32 * 1e-5))
+            .collect();
+        let narrow = Column::from_f64_values(values.clone())
+            .cast_to_width(NumericWidth::Float32, false)
+            .unwrap();
+        let series = Series::new("x", Index::from_datetime64(stamps.clone()), narrow).unwrap();
+        let wide = Series::new(
+            "x",
+            Index::from_datetime64(stamps),
+            Column::from_f64_values(values.clone()),
+        )
+        .unwrap();
+        // Daily bins: 7-minute stamps from midnight, a bin's rows those whose
+        // stamp falls in its day (about 205 a bin).
+        let mut bins: Vec<Vec<f32>> = Vec::new();
+        for (i, &value) in values.iter().enumerate() {
+            let bin = i * 7 / 1440;
+            if bins.len() <= bin {
+                bins.resize(bin + 1, Vec::new());
+            }
+            bins[bin].push(value as f32);
+        }
+        let kahan = |bin: &[f32]| {
+            let (mut sum, mut comp) = (0.0_f32, 0.0_f32);
+            for &v in bin {
+                let y = v - comp;
+                let t = sum + y;
+                comp = t - sum - y;
+                sum = t;
+            }
+            sum
+        };
+        let welford = |bin: &[f32]| {
+            let (mut mean, mut m2) = (0.0_f32, 0.0_f32);
+            for (n, &v) in bin.iter().enumerate() {
+                let old = mean;
+                mean += (v - old) / (n + 1) as f32;
+                m2 += (v - mean) * (v - old);
+            }
+            m2 / (bin.len() - 1) as f32
+        };
+        let want_sum: Vec<f32> = bins.iter().map(|bin| kahan(bin)).collect();
+        let want_mean: Vec<f32> = bins
+            .iter()
+            .map(|bin| kahan(bin) / bin.len() as f32)
+            .collect();
+        let want_var: Vec<f32> = bins.iter().map(|bin| welford(bin)).collect();
+        let want_prod: Vec<f32> = bins.iter().map(|bin| bin.iter().product()).collect();
+        let want_min: Vec<f32> = bins
+            .iter()
+            .map(|bin| bin.iter().copied().fold(f32::INFINITY, f32::min))
+            .collect();
+        let floats = |result: Series| -> Vec<f32> {
+            assert_eq!(result.column().width(), Some(NumericWidth::Float32));
+            result
+                .column()
+                .as_f64_slice()
+                .unwrap()
+                .iter()
+                .map(|&v| v as f32)
+                .collect()
+        };
+        let resample = || series.resample("D");
+        assert_eq!(floats(resample().sum().unwrap()), want_sum);
+        assert_eq!(floats(resample().mean().unwrap()), want_mean);
+        assert_eq!(floats(resample().var().unwrap()), want_var);
+        assert_eq!(floats(resample().prod().unwrap()), want_prod);
+        assert_eq!(floats(resample().min().unwrap()), want_min);
+        let firsts: Vec<f32> = bins.iter().map(|bin| bin[0]).collect();
+        assert_eq!(floats(resample().first().unwrap()), firsts);
+        // The data separates the models: the float64 folds narrowed are not
+        // the float32 folds in some bin.
+        let narrowed = |result: Series| -> Vec<f32> {
+            assert_eq!(result.column().width(), None);
+            result
+                .column()
+                .as_f64_slice()
+                .unwrap()
+                .iter()
+                .map(|&v| v as f32)
+                .collect()
+        };
+        let wide_mean = narrowed(wide.resample("D").mean().unwrap());
+        let wide_var = narrowed(wide.resample("D").var().unwrap());
+        assert!(wide_mean != want_mean || wide_var != want_var);
+    }
+
+    #[test]
+    fn host_numbered_keys_group_by_their_numbers_errn5() {
+        // Object keys whose cells carry host numbers (a date's day) group by
+        // those numbers on the dense ids, each group labelled by its first
+        // cell, and sum / mean / size / first answer as the hashed groups
+        // do. NEGATIVE: a key holding one unnumbered cell takes the hashed
+        // path (no numbers), and the hashed path's answers are the same.
+        #[derive(Debug)]
+        struct Day(i64, bool);
+        impl fp_types::HostObject for Day {
+            fn host_eq(&self, other: &dyn fp_types::HostObject) -> bool {
+                other
+                    .as_any()
+                    .downcast_ref::<Day>()
+                    .is_some_and(|other| other.0 == self.0)
+            }
+            fn host_repr(&self) -> String {
+                format!("day{}", self.0)
+            }
+            fn host_str(&self) -> String {
+                self.host_repr()
+            }
+            fn host_hash(&self) -> Option<u64> {
+                Some(self.0 as u64)
+            }
+            fn host_cmp(&self, other: &dyn fp_types::HostObject) -> Option<std::cmp::Ordering> {
+                other
+                    .as_any()
+                    .downcast_ref::<Day>()
+                    .map(|other| self.0.cmp(&other.0))
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+            fn host_number(&self) -> Option<i64> {
+                self.1.then_some(self.0)
+            }
+        }
+        let day = |n: i64, numbered: bool| {
+            Scalar::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(Day(
+                n, numbered,
+            ))))
+        };
+        let days = [3_i64, 1, 3, 2, 1, 3, 2, 2];
+        let values: Vec<f64> = (0..days.len()).map(|i| i as f64 + 0.5).collect();
+        let series = Series::new(
+            "x",
+            Index::default_range(days.len()),
+            Column::from_f64_values(values),
+        )
+        .unwrap();
+        let keys = |numbered: bool| {
+            let cells: Vec<Scalar> = days.iter().map(|&n| day(n, numbered)).collect();
+            Series::new(
+                "k",
+                Index::default_range(days.len()),
+                Column::from_values(cells).unwrap(),
+            )
+            .unwrap()
+        };
+        let numbered = keys(true);
+        assert_eq!(
+            super::host_numbered_keys(numbered.column()),
+            Some(days.to_vec())
+        );
+        let plain = keys(false);
+        assert_eq!(super::host_numbered_keys(plain.column()), None);
+        let answers = |key: &Series| {
+            let grouped = series.groupby(key).unwrap();
+            [
+                grouped.sum().unwrap(),
+                grouped.mean().unwrap(),
+                grouped.size().unwrap(),
+                grouped.first().unwrap(),
+            ]
+            .map(|result| {
+                (
+                    result
+                        .index()
+                        .labels()
+                        .iter()
+                        .map(|label| format!("{label:?}"))
+                        .collect::<Vec<_>>(),
+                    format!("{:?}", result.values()),
+                )
+            })
+        };
+        let dense = answers(&numbered);
+        assert_eq!(dense, answers(&plain));
+        // Groups 3, 1, 2 first seen; sums 0.5+2.5+5.5, 1.5+4.5, 3.5+6.5+7.5.
+        assert_eq!(
+            dense[0].1,
+            format!("{:?}", [8.5, 6.0, 17.5].map(Scalar::Float64))
+        );
+    }
+
+    #[test]
+    fn float32_groupby_folds_in_float32_kajoj() {
+        // A float32 Series' groupby mean / var (ddof 1 and 0) fold each group
+        // in float32 and cumsum / cumprod run in float32, as pandas' float32
+        // group kernels (the Kahan sum over the count, Welford, the running
+        // Kahan sum, the running product). NEGATIVE: the float64 folds of the
+        // same values differ from the float32 ones in some group (asserted,
+        // so the data separates them).
+        use fp_types::NumericWidth;
+        let rows = 3000_usize;
+        let values: Vec<f64> = (0..rows)
+            .map(|i| f64::from(((i as f32) * 0.37).sin() * 0.05 + 1.0 + i as f32 * 1e-5))
+            .collect();
+        let keys: Vec<i64> = (0..rows).map(|i| (i * 7 % 5) as i64).collect();
+        let key_series = Series::new(
+            "k",
+            Index::default_range(rows),
+            Column::from_i64_values(keys.clone()),
+        )
+        .unwrap();
+        let narrow = Series::new(
+            "v",
+            Index::default_range(rows),
+            Column::from_f64_values(values.clone())
+                .cast_to_width(NumericWidth::Float32, false)
+                .unwrap(),
+        )
+        .unwrap();
+        let wide = Series::new(
+            "v",
+            Index::default_range(rows),
+            Column::from_f64_values(values.clone()),
+        )
+        .unwrap();
+        // The groups in their first-seen order (keys 0, 2, 4, 1, 3), the order
+        // the Rust groupby answers in (the binding sorts them).
+        let mut first_seen: Vec<usize> = Vec::new();
+        let mut by_key: Vec<Vec<f32>> = vec![Vec::new(); 5];
+        for (row, &key) in keys.iter().enumerate() {
+            let key = key as usize;
+            if !first_seen.contains(&key) {
+                first_seen.push(key);
+            }
+            by_key[key].push(values[row] as f32);
+        }
+        let groups: Vec<&Vec<f32>> = first_seen.iter().map(|&key| &by_key[key]).collect();
+        let kahan_step = |(sum, comp): (f32, f32), v: f32| {
+            let y = v - comp;
+            let t = sum + y;
+            (t, t - sum - y)
+        };
+        let kahan = |group: &[f32]| {
+            group
+                .iter()
+                .fold((0.0_f32, 0.0_f32), |s, &v| kahan_step(s, v))
+                .0
+        };
+        let welford = |group: &[f32], ddof: usize| {
+            let (mut mean, mut m2) = (0.0_f32, 0.0_f32);
+            for (n, &v) in group.iter().enumerate() {
+                let old = mean;
+                mean += (v - old) / (n + 1) as f32;
+                m2 += (v - mean) * (v - old);
+            }
+            m2 / (group.len() - ddof) as f32
+        };
+        let want_mean: Vec<f32> = groups
+            .iter()
+            .map(|group| kahan(group) / group.len() as f32)
+            .collect();
+        let want_var: Vec<f32> = groups.iter().map(|group| welford(group, 1)).collect();
+        let want_var0: Vec<f32> = groups.iter().map(|group| welford(group, 0)).collect();
+        let mut sums = [(0.0_f32, 0.0_f32); 5];
+        let mut products = [1.0_f32; 5];
+        let mut want_cumsum = Vec::with_capacity(rows);
+        let mut want_cumprod = Vec::with_capacity(rows);
+        for (row, &key) in keys.iter().enumerate() {
+            let (key, value) = (key as usize, values[row] as f32);
+            sums[key] = kahan_step(sums[key], value);
+            want_cumsum.push(sums[key].0);
+            products[key] *= value;
+            want_cumprod.push(products[key]);
+        }
+        let as_f32 = |result: Result<Series, FrameError>| -> Vec<f32> {
+            result
+                .unwrap()
+                .column()
+                .as_f64_slice()
+                .unwrap()
+                .iter()
+                .map(|&v| v as f32)
+                .collect()
+        };
+        let grouped = narrow.groupby(&key_series).unwrap();
+        assert_eq!(as_f32(grouped.mean()), want_mean);
+        assert_eq!(as_f32(grouped.var()), want_var);
+        assert_eq!(as_f32(grouped.var_ddof(0)), want_var0);
+        assert_eq!(as_f32(grouped.cumsum()), want_cumsum);
+        assert_eq!(as_f32(grouped.cumprod()), want_cumprod);
+        let wide_grouped = wide.groupby(&key_series).unwrap();
+        assert!(as_f32(wide_grouped.mean()) != want_mean || as_f32(wide_grouped.var()) != want_var);
     }
 
     #[test]

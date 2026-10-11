@@ -40362,3 +40362,414 @@ def test_text_and_int_key_merge_like_pandas_j4657(case: str) -> None:
         )
 
     assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-kma8x: a float32 Series' resample reductions answer float32 as pandas'
+# group kernels do - sum / mean / var / prod folded in float32 (a mean of the float64
+# fold narrowed differs in the last bit), min / max / first / last / ohlc the values
+# selected, std / sem / median pandas' float64 kernels narrowed. NEGATIVE: float64
+# and int64 sources keep their dtypes, count / size / nunique stay int64, quantile
+# float64, closed='right' (the hashed bins), a frame mixing float32 and float64, the
+# nullable Float32 dtype (its results Float32, br-frankenpandas-oxkfp).
+def _kma8x_series(m: Any, kind: str) -> Any:
+    import numpy as np
+
+    rng = np.random.default_rng(29)
+    stamps = m.date_range("2024-03-01", periods=900, freq="7min")
+    values = (rng.normal(size=900) * 50 + 1e3).astype("float32")
+    if kind == "float32 with NaN":
+        values[::11] = np.nan
+        values[200:260] = np.nan
+    if kind == "float64 (NEGATIVE)":
+        return m.Series(values.astype("float64"), index=stamps)
+    if kind == "int64 (NEGATIVE)":
+        return m.Series(np.arange(900) % 17, index=stamps)
+    if kind == "Float32 nullable":
+        return m.Series(values, index=stamps).astype("Float32")
+    return m.Series(values, index=stamps)
+
+
+_KMA8X_OPS = [
+    "sum", "mean", "var", "prod", "min", "max", "first", "last", "median", "std", "sem", "ohlc",
+    "count", "size", "nunique", "quantile", "agg list", "frame mean", "frame sum",
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", _KMA8X_OPS)
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "float32",
+        "float32 with NaN",
+        "float64 (NEGATIVE)",
+        "int64 (NEGATIVE)",
+        "Float32 nullable",
+    ],
+)
+@pytest.mark.parametrize("rule", ["1h", "D", "closed right"])
+def test_float32_resample_like_pandas_kma8x(op: str, kind: str, rule: str) -> None:
+    def answer(m: Any) -> Any:
+        s = _kma8x_series(m, kind)
+        if op.startswith("frame"):
+            s = m.DataFrame({"a": s, "b": s.astype("float64") * 2})
+        r = s.resample("1h", closed="right") if rule == "closed right" else s.resample(rule)
+        try:
+            if op == "quantile":
+                out = r.quantile(0.3)
+            elif op == "agg list":
+                out = r.agg(["sum", "mean", "first", "std"])
+            elif op.startswith("frame"):
+                out = getattr(r, op.split()[1])()
+            else:
+                out = getattr(r, op)()
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        if hasattr(out, "columns"):
+            return (
+                [str(label) for label in out.index],
+                [str(c) for c in out.columns],
+                [str(d) for d in out.dtypes],
+                repr(out.values.tolist()),
+            )
+        return [str(label) for label in out.index], str(out.dtype), repr(out.tolist())
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-kajoj: a float32 column's groupby mean / var fold in float32 (a float64
+# fold narrowed differs in the last bit) and cumsum / cumprod / cummin / cummax answer
+# float32, as pandas' float32 group kernels. NEGATIVE: float64 keeps float64; sum / std /
+# min / first were already right; a text key (the hashed groups); NaN rows (skipped,
+# missing in the running results); a frame's groupby of a float32 and a float64 column.
+def _kajoj_frame(m: Any, kind: str) -> Any:
+    import numpy as np
+
+    rng = np.random.default_rng(31)
+    n = 4000
+    values = (rng.normal(size=n) * 0.05 + 1.0).astype("float32")
+    if kind == "float32 with NaN":
+        values[::13] = np.nan
+    if kind == "float64 (NEGATIVE)":
+        values = values.astype("float64")
+    keys = rng.integers(0, 9, n)
+    return m.DataFrame({"k": keys, "t": [f"g{key}" for key in keys], "v": values, "w": values.astype("float64") * 3})
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "op",
+    [
+        "mean", "var", "sum", "std", "sem", "min", "first", "cumsum", "cumprod", "cummin", "cummax",
+        "frame mean", "frame var", "frame mean flat", "frame var two keys", "frame var ddof 0",
+        "frame cumsum", "frame cumprod",
+    ],
+)
+@pytest.mark.parametrize("kind", ["float32", "float32 with NaN", "float64 (NEGATIVE)"])
+@pytest.mark.parametrize("key", ["k", "t"])
+def test_float32_groupby_like_pandas_kajoj(op: str, kind: str, key: str) -> None:
+    def answer(m: Any) -> Any:
+        frame = _kajoj_frame(m, kind)
+        try:
+            if op == "frame mean flat":
+                out = frame[[key, "v", "w"]].groupby(key, as_index=False).mean()
+                return [str(d) for d in out.dtypes], repr(out.values.tolist())
+            if op == "frame var two keys":
+                out = frame[["k", "t", "v", "w"]].assign(k=frame["k"] % 3).groupby(["k", "t"]).var()
+                return [str(d) for d in out.dtypes], repr(out.values.tolist())
+            if op == "frame var ddof 0":
+                out = frame[[key, "v", "w"]].groupby(key).var(ddof=0)
+                return [str(d) for d in out.dtypes], repr(out.values.tolist())
+            if op.startswith("frame"):
+                out = getattr(frame[[key, "v", "w"]].groupby(key), op.split()[1])()
+                return [str(d) for d in out.dtypes], repr(out.values.tolist())
+            out = getattr(frame.groupby(key)["v"], op)()
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return str(out.dtype), repr(out.tolist())
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-oxkfp: a masked column's resample reductions answer pandas' masked dtypes -
+# Int64 sum / prod / min / max / first / last Int64, mean / median / std / var / sem /
+# quantile Float64, count / size Int64, a narrow Int8 sum Int8 while it holds, boolean min
+# boolean and sum Int64, Float32 everything Float32 (but count / size Int64) - they were
+# numpy dtypes; and br-frankenpandas-05cm6's running groupby results (cumsum / cumprod /
+# cummin / cummax) keep the masked dtype. NEGATIVE: numpy int64 / float64 sources unchanged,
+# nunique int64, ohlc (already right), a frame mixing a masked and a numpy column.
+def _oxkfp_series(m: Any, kind: str) -> Any:
+    import numpy as np
+
+    rng = np.random.default_rng(37)
+    stamps = m.date_range("2024-03-01", periods=300, freq="11min")
+    ints = rng.integers(-5, 9, 300)
+    if kind == "boolean":
+        values = [None if i % 7 == 0 else bool(v % 2) for i, v in enumerate(ints)]
+    elif kind in ("Float64", "Float32"):
+        values = [None if i % 7 == 0 else float(v) / 4 for i, v in enumerate(ints)]
+    elif kind in ("int64 (NEGATIVE)", "float64 (NEGATIVE)"):
+        values = [float(v) / 4 if "float" in kind else int(v) for v in ints]
+        return m.Series(np.array(values), index=stamps)
+    else:
+        values = [None if i % 7 == 0 else int(v) for i, v in enumerate(ints)]
+    return m.Series(values, index=stamps, dtype=object).astype(kind)
+
+
+_OXKFP_OPS = [
+    "sum", "mean", "min", "max", "first", "last", "prod", "median", "std", "var", "sem", "count",
+    "size", "nunique", "quantile", "ohlc", "agg list", "frame sum", "frame mean",
+]
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", _OXKFP_OPS)
+@pytest.mark.parametrize(
+    "kind", ["Int64", "Float64", "boolean", "Int8", "Float32", "int64 (NEGATIVE)", "float64 (NEGATIVE)"]
+)
+def test_masked_resample_dtypes_like_pandas_oxkfp(op: str, kind: str) -> None:
+    def answer(m: Any) -> Any:
+        s = _oxkfp_series(m, kind)
+        if op.startswith("frame"):
+            s = m.DataFrame({"a": s, "b": [1.5] * len(s)}, index=s.index)
+        r = s.resample("2h")
+        try:
+            if op == "quantile":
+                out = r.quantile(0.3)
+            elif op == "agg list":
+                out = r.agg(["sum", "mean", "first"])
+            elif op.startswith("frame"):
+                out = getattr(r, op.split()[1])()
+            else:
+                out = getattr(r, op)()
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        if hasattr(out, "columns"):
+            return [str(d) for d in out.dtypes], repr(out.astype(object).values.tolist())
+        return str(out.dtype), repr(out.astype(object).tolist())
+
+    assert answer(fpd) == answer(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("op", ["cumsum", "cumprod", "cummin", "cummax"])
+@pytest.mark.parametrize("kind", ["Int64", "Float64", "boolean", "Float32", "float64 (NEGATIVE)"])
+def test_masked_groupby_running_dtypes_like_pandas_05cm6(op: str, kind: str) -> None:
+    def answer(m: Any) -> Any:
+        s = _oxkfp_series(m, kind)
+        keys = [i % 4 for i in range(len(s))]
+        frame = m.DataFrame({"k": keys, "v": s.reset_index(drop=True)})
+        try:
+            out = getattr(frame.groupby("k")["v"], op)()
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return str(out.dtype), repr(out.astype(object).tolist())
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-errn5: a groupby over datetime.date objects (ts.index.date) numbers its
+# groups by the dates' days on the dense ids; every result answers as pandas, the groups
+# labelled by the date objects, sorted. NEGATIVE: sort=False's first-seen order, datetimes
+# (not dates), a frame's groupby by the dates, size / count / nunique, an unsorted index, a
+# key mixing dates with a string (the hashed path; br-frankenpandas-bq4h8).
+def _errn5_frame(m: Any, shuffled: bool) -> Any:
+    import numpy as np
+
+    rng = np.random.default_rng(41)
+    stamps = m.date_range("2024-02-27", periods=900, freq="97min")
+    values = rng.random(900).round(4)
+    frame = m.DataFrame({"x": values, "y": np.arange(900) % 11}, index=stamps)
+    if shuffled:
+        frame = frame.iloc[rng.permutation(900)]
+    return frame
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case",
+    [
+        "sum", "mean", "max", "first", "last", "size", "count", "nunique", "std", "agg list",
+        "sort=False", "shuffled", "frame mean", "datetimes (NEGATIVE)", "mixed key (NEGATIVE)",
+    ],
+)
+def test_date_object_groupby_like_pandas_errn5(case: str) -> None:
+    def answer(m: Any) -> Any:
+        frame = _errn5_frame(m, case == "shuffled")
+        dates = frame.index.date
+        try:
+            if case == "sort=False":
+                out = frame.groupby(dates, sort=False)["x"].sum()
+            elif case == "frame mean":
+                out = frame.groupby(dates).mean()
+            elif case == "mixed key (NEGATIVE)":
+                key = list(dates)
+                key[5] = "zz"
+                out = frame.groupby(key, sort=False)["x"].sum()
+            elif case == "datetimes (NEGATIVE)":
+                out = frame.groupby(list(frame.index.to_pydatetime()))["y"].sum()
+            elif case == "agg list":
+                out = frame.groupby(dates)["x"].agg(["sum", "max"])
+            elif case == "shuffled":
+                out = frame.groupby(dates)["x"].sum()
+            else:
+                out = getattr(frame.groupby(dates)["x"], case)()
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        if hasattr(out, "columns"):
+            return [repr(label) for label in out.index], [str(d) for d in out.dtypes], repr(out.values.tolist())
+        return [repr(label) for label in out.index], str(out.dtype), repr(out.tolist())
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-bq4h8: a groupby key list mixing dates with other values reads each value
+# as a cell (a date raised 'Cannot convert date to Scalar'), and a list as long as the frame
+# is one key of its values unless every item is a column (['x', 'q', 'x'] was a KeyError);
+# a mixed key's groups in pandas' safe_sort order (non-strings, then strings). A list of
+# dates only and a callable returning dates raised the same way. NEGATIVE: a list of
+# column names, a frame-length list of plain values.
+def _bq4h8_case(m: Any, case: str) -> Any:
+    import datetime as dt
+
+    frame = m.DataFrame({"x": [1, 2, 3, 4], "y": [4.5, 5.5, 6.5, 7.5]})
+    if case == "dates and a string":
+        return frame.groupby([dt.date(2024, 1, 2), "zz", dt.date(2024, 1, 1), "zz"])["y"].sum()
+    if case == "dates and a string, sort=False":
+        return frame.groupby([dt.date(2024, 1, 2), "zz", dt.date(2024, 1, 1), "zz"], sort=False)["y"].sum()
+    if case == "a column among values":
+        return frame.groupby(["x", "q", "x", "q"])["y"].sum()
+    if case == "column names (NEGATIVE)":
+        return frame.groupby(["x"])["y"].sum()
+    if case == "plain values (NEGATIVE)":
+        return frame.groupby([1, 2, 1, 2])["y"].sum()
+    if case == "dates only":
+        return frame.groupby([dt.date(2024, 1, 2), dt.date(2024, 1, 1)] * 2)["y"].sum()
+    if case == "callable dates":
+        stamped = frame.set_index(m.date_range("2024-01-01 20:00", periods=4, freq="3h"))
+        return stamped.groupby(lambda stamp: stamp.date())["y"].sum()
+    raise AssertionError(case)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case",
+    [
+        "dates and a string", "dates and a string, sort=False", "a column among values",
+        "column names (NEGATIVE)", "plain values (NEGATIVE)", "dates only", "callable dates",
+    ],
+)
+def test_mixed_groupby_key_lists_like_pandas_bq4h8(case: str) -> None:
+    def answer(m: Any) -> Any:
+        try:
+            out = _bq4h8_case(m, case)
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return [repr(label) for label in out.index], str(out.dtype), repr(out.tolist())
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-644hx: a bare pandas extension array given to a constructor, a setter or
+# as an operand is read as the array it is - positional, in its dtype - where it was an
+# object column of pd.NA: Series(arr), Series(arr, index=...), DataFrame({'a': arr}) with
+# and without index=, Index(arr), df['n'] = arr (a PeriodIndex value raised), s + arr.
+# NEGATIVE: a numpy array, a Categorical (already read), dtype= given (pandas casts). An
+# Index of a string array is object (br-frankenpandas-qbg9d's, a strict xfail).
+def _644hx_array(m: Any, kind: str) -> Any:
+    import numpy as np
+
+    if kind == "numpy (NEGATIVE)":
+        return np.array([1, 2, 3])
+    if kind == "categorical (NEGATIVE)":
+        return pd.Categorical(["b", "a", "b"])
+    if kind == "period":
+        return pd.array([pd.Period("2024-01", "M"), None, pd.Period("2024-03", "M")])
+    if kind == "datetime tz":
+        return pd.array(pd.to_datetime(["2024-01-01", None, "2024-01-03"]).tz_localize("UTC"))
+    if kind == "interval":
+        return pd.arrays.IntervalArray.from_breaks([0, 1, 2, 3])
+    values = {
+        "Int64": [1, None, 3], "UInt8": [1, None, 3], "Float32": [1.5, None, 3.25],
+        "boolean": [True, None, False], "string": ["a", None, "c"],
+    }[kind]
+    return pd.array(values, dtype=kind)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "use", ["Series", "Series index", "frame", "frame index", "Index", "setitem", "add", "Series dtype"]
+)
+@pytest.mark.parametrize(
+    "kind",
+    ["Int64", "UInt8", "Float32", "boolean", "string", "period", "datetime tz", "interval",
+     "numpy (NEGATIVE)", "categorical (NEGATIVE)"],
+)
+def test_pandas_arrays_read_like_pandas_644hx(use: str, kind: str, request: Any) -> None:
+    if use == "Index" and kind == "string":
+        # An Index of pandas' string dtype does not exist; it is object
+        # (br-frankenpandas-qbg9d).
+        request.applymarker(pytest.mark.xfail(strict=True, reason="br-frankenpandas-qbg9d"))
+
+    def answer(m: Any) -> Any:
+        arr = _644hx_array(m, kind)
+        try:
+            if use == "Series":
+                out = m.Series(arr)
+            elif use == "Series index":
+                out = m.Series(arr, index=["x", "y", "z"])
+            elif use == "frame":
+                out = m.DataFrame({"a": arr})["a"]
+            elif use == "frame index":
+                out = m.DataFrame({"a": arr}, index=[7, 8, 9])["a"]
+            elif use == "Index":
+                out = m.Series(m.Index(arr))
+            elif use == "setitem":
+                frame = m.DataFrame({"b": [1, 2, 3]}, index=[5, 6, 7])
+                frame["n"] = arr
+                out = frame["n"]
+            elif use == "add":
+                if kind not in ("Int64", "UInt8", "Float32", "numpy (NEGATIVE)"):
+                    return "skip"
+                out = m.Series([10, 20, 30], index=[3, 1, 2]) + arr
+            else:
+                out = m.Series(arr, dtype="object")
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            return type(error).__name__
+        return str(out.dtype), [repr(label) for label in out.index], repr(out.astype(object).tolist())
+
+    assert answer(fpd) == answer(pd)
+
+
+# br-frankenpandas-qbg9d: an Index of a masked fp array or Series (Int64, UInt8, Float32,
+# Float64, boolean) keeps its masked dtype with no dtype= given, as pandas' (it was float64 /
+# object): repr, dtype, .array's dtype, get_loc of a value, a Series of it (int64 holding
+# None before). NEGATIVE: Index([1, None]) stays
+# float64; dtype= given wins; a numpy-dtype Series stays numpy.
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case",
+    ["Int64 array", "UInt8 array", "Float32 array", "Float64 series", "boolean series",
+     "list (NEGATIVE)", "dtype given (NEGATIVE)", "numpy series (NEGATIVE)"],
+)
+def test_index_of_masked_data_like_pandas_qbg9d(case: str) -> None:
+    def answer(m: Any) -> Any:
+        kind, source = case.split()[0], case.split()[1]
+        if case == "list (NEGATIVE)":
+            index = m.Index([1, None, 3])
+        elif case == "dtype given (NEGATIVE)":
+            index = m.Index(m.array([1, None, 3], dtype="Int64"), dtype="float64")
+        elif case == "numpy series (NEGATIVE)":
+            index = m.Index(m.Series([1.5, 2.5]))
+        else:
+            values = [True, None, False] if kind == "boolean" else [1, None, 3]
+            data = m.array(values, dtype=kind) if source == "array" else m.Series(values, dtype=kind)
+            index = m.Index(data)
+        try:
+            located = index.get_loc(index[0])
+        except Exception as error:  # noqa: BLE001 - the raised class is the outcome
+            located = type(error).__name__
+        series = m.Series(index)
+        return repr(index), str(index.dtype), str(index.array.dtype), located, str(series.dtype), repr(series.tolist())
+
+    assert answer(fpd) == answer(pd)

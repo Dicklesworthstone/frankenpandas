@@ -9304,10 +9304,14 @@ fn categorical_index_column(index: &CategoricalIndex) -> PyResult<Column> {
 /// those.
 fn contiguous_text_column<'py>(
     items: impl IntoIterator<Item = Bound<'py, PyAny>>,
+    len_hint: usize,
 ) -> Option<Column> {
-    let mut bytes = Vec::new();
-    let mut offsets = vec![0];
-    let mut words: Vec<u64> = Vec::new();
+    // Sized from the item count (they grew from empty, each regrowth a copy
+    // of what was read; br-frankenpandas-5olp1).
+    let mut bytes = Vec::with_capacity(len_hint.saturating_mul(8));
+    let mut offsets = Vec::with_capacity(len_hint + 1);
+    offsets.push(0);
+    let mut words: Vec<u64> = Vec::with_capacity(len_hint.div_ceil(64));
     let (mut texts, mut missing) = (0_usize, 0_usize);
     for (row, item) in items.into_iter().enumerate() {
         if row % 64 == 0 {
@@ -9943,10 +9947,24 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
     if let Ok(tdi) = obj.extract::<PyRef<'_, PyTimedeltaIndex>>() {
         return Ok(Some(nanos_column(tdi.inner.asi8(), false)));
     }
+    // A PeriodIndex is its period column (df['n'] = PeriodIndex, a pandas
+    // period array too, raised "Cannot convert PeriodIndex to Scalar";
+    // br-frankenpandas-644hx).
+    if let Ok(periods) = obj.extract::<PyRef<'_, PyPeriodIndex>>() {
+        return periods.series_column().map(Some);
+    }
     // An index of ints is their column - every label an Int64, as the
     // labels' column below infers (an empty one infers no dtype) - read off
     // its int view, where a Scalar a label was built and read back
     // (s.groupby(idx.hour) 0.38x pandas at 1M; br-frankenpandas-lsn8d).
+    // A masked index (Int64 / Float64 / boolean, the narrow widths) is its
+    // masked column (a Series of one was int64 holding None;
+    // br-frankenpandas-qbg9d).
+    if let Ok(index) = plain_index_ref(obj)
+        && let Some(column) = fp_frame::masked_index_column(&index.inner)
+    {
+        return column.map(Some).map_err(column_error_to_py);
+    }
     if let Ok(index) = plain_index_ref(obj)
         && let Some(values) = index.inner.int64_label_values()
         && !values.is_empty()
@@ -10058,6 +10076,20 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
                 .collect(),
         ),
         _ => {
+            // An object array of strs read straight off its iterator: no
+            // Python list of every element, no Vec of them (tolist and its
+            // teardown were a fifth of factorize over 300k strs, 10.4 ms,
+            // pandas 8.4; br-frankenpandas-5olp1). A numpy str_ (the unicode
+            // kind) is no exact str; any other array takes the list below.
+            if kind == "O" {
+                let len = obj.len()?;
+                if let Some(column) =
+                    contiguous_text_column(obj.try_iter()?.map_while(Result::ok), len)
+                        .filter(|column| column.len() == len)
+                {
+                    return Ok(Some(column));
+                }
+            }
             // A list's items collect into a Vec of its length (an iterator
             // of unknown length grew it, copying; br-frankenpandas-jq8qb).
             let listed = obj.call_method0("tolist")?;
@@ -10068,7 +10100,7 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
             // Text (numpy's unicode kind, or an object array holding only
             // str; br-frankenpandas-djbjt) laid out contiguously.
             let text = matches!(kind.as_str(), "U" | "O")
-                .then(|| contiguous_text_column(items.iter().cloned()));
+                .then(|| contiguous_text_column(items.iter().cloned(), items.len()));
             match text.flatten() {
                 Some(column) => column,
                 None if kind == "O" => object_array_column(py, &items)?,
@@ -10837,7 +10869,16 @@ fn py_index_arg_name(obj: &Bound<'_, PyAny>) -> Option<LabelName> {
 fn pandas_object_as_fp<'py>(data: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
     let py = data.py();
     Ok(
-        match pandas_class(data, &["DataFrame", "Series", "Index", "Categorical"])? {
+        match pandas_class(
+            data,
+            &[
+                "DataFrame",
+                "Series",
+                "Index",
+                "Categorical",
+                "ExtensionArray",
+            ],
+        )? {
             Some("DataFrame") => Some(pandas_frame_as_fp(data)?),
             Some("Series") => {
                 let (values, dtype) = pandas_values_as_fp(data)?;
@@ -10850,10 +10891,59 @@ fn pandas_object_as_fp<'py>(data: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'
                 Some(py.get_type::<PySeries>().call((values,), Some(&kwargs))?)
             }
             Some("Index") => Some(pandas_index_as_fp(data)?),
+            Some("ExtensionArray") => pandas_array_as_fp(data)?,
             Some(_) => Some(pandas_categorical_as_fp(data)?),
             None => None,
         },
     )
+}
+
+/// The dtype of a masked fp array or Series (Int64, the narrow masked ints,
+/// Float32, Float64, boolean) as its name; None for any other data.
+fn masked_dtype_of<'py>(data: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let column = if let Ok(array) = data.extract::<PyRef<'_, PyExtensionArray>>() {
+        array.inner.column().dtype()
+    } else if let Ok(series) = data.extract::<PyRef<'_, PySeries>>() {
+        series.inner.column().dtype()
+    } else {
+        return Ok(None);
+    };
+    if !column.is_nullable() {
+        return Ok(None);
+    }
+    Ok(Some(data.getattr("dtype")?.str()?.into_any()))
+}
+
+/// A bare pandas extension array (`pd.array(...)`, `Series.array`) as this
+/// crate's own array of its values - positional, as pandas reads an array
+/// (a RangeIndex Series would align by label): a masked or string array its
+/// values (a missing one None) under its dtype's name, a numpy-backed one
+/// its numpy array, a zoned / period / interval one this crate's Index of
+/// them. None for a dtype this crate cannot read, whose objects are then
+/// read as before; such an array was read as object
+/// (br-frankenpandas-644hx).
+fn pandas_array_as_fp<'py>(data: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let py = data.py();
+    let dtype = data.getattr("dtype")?;
+    if dtype.is_instance(&py.import("numpy")?.getattr("dtype")?)?
+        || pandas_class(&dtype, &["NumpyEADtype"])?.is_some()
+    {
+        return Ok(Some(data.call_method0("to_numpy")?));
+    }
+    if let Some(kind) = pandas_class(&dtype, &["DatetimeTZDtype", "PeriodDtype", "IntervalDtype"])?
+    {
+        return pandas_dated_as_fp(data, kind, &py.None().into_bound(py)).map(Some);
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "object")?;
+    kwargs.set_item("na_value", py.None())?;
+    let values = data
+        .call_method("to_numpy", (), Some(&kwargs))?
+        .call_method0("tolist")?;
+    let name = dtype.str()?.into_any();
+    Ok(array(py, &values, Some(&name), true)
+        .ok()
+        .map(|array| array.into_bound(py)))
 }
 
 /// The first of `names` that `obj` is an instance of: a class of a
@@ -13399,6 +13489,76 @@ fn masked_reduction(source: &DType, op: &str, result: Series) -> PyResult<Series
     Series::new(result.name(), result.index().clone(), column).map_err(frame_error_to_py)
 }
 
+/// `s`, a groupby result over one key, in pandas' group order: by label,
+/// but a key mixing strings with other values as pandas' safe_sort falls
+/// back to (`_sort_mixed`) - every non-string sorted, then the strings
+/// sorted, then the missing; sort_index put strings ahead of dates
+/// (br-frankenpandas-bq4h8).
+fn sort_groups_like_safe_sort(s: Series) -> PyResult<Series> {
+    let labels = s.index().labels();
+    let text = |label: &IndexLabel| matches!(label, IndexLabel::Utf8(_));
+    let missing = |label: &IndexLabel| matches!(label, IndexLabel::Null(_));
+    let mixed =
+        labels.iter().any(text) && labels.iter().any(|label| !text(label) && !missing(label));
+    if !mixed {
+        return s.sort_index(true).map_err(frame_error_to_py);
+    }
+    let block = |label: &IndexLabel| u8::from(text(label)) + 2 * u8::from(missing(label));
+    let mut positions: Vec<usize> = (0..labels.len()).collect();
+    positions.sort_by(|&a, &b| {
+        block(&labels[a])
+            .cmp(&block(&labels[b]))
+            .then_with(|| labels[a].cmp(&labels[b]))
+    });
+    let positions: Vec<i64> = positions.into_iter().map(|p| p as i64).collect();
+    s.take(&positions).map_err(frame_error_to_py)
+}
+
+/// A resample reduction `how` of a masked `source` (Int64 / Float64 /
+/// boolean, the narrow masked widths) in pandas' masked result dtype - the
+/// groupby kernels' (see [`masked_reduction_dtype`]), a narrow width as a
+/// groupby keeps it, quantile typed as median. They came back in numpy
+/// dtypes (br-frankenpandas-oxkfp). Any other source as it is.
+fn resample_result_dtype(source: &Column, how: &str, result: Series) -> PyResult<Series> {
+    if !source.dtype().is_nullable() {
+        return Ok(result);
+    }
+    let how = if how == "quantile" { "median" } else { how };
+    let result = masked_reduction(&source.dtype(), how, result)?;
+    match source.width() {
+        Some(width) => {
+            let target = groupby_reduction_width(width, how, result.column());
+            narrowed_to(result, target)
+        }
+        None => Ok(result),
+    }
+}
+
+/// [`resample_result_dtype`] over each of a frame resample's columns, its
+/// source the frame's column of the same name.
+fn resample_frame_dtypes(
+    source: &DataFrame,
+    how: &str,
+    mut result: DataFrame,
+) -> PyResult<DataFrame> {
+    let names: Vec<String> = result.column_names().into_iter().cloned().collect();
+    for name in names {
+        let (Some(from), Some(column)) = (source.column(&name), result.column(&name)) else {
+            continue;
+        };
+        if !from.dtype().is_nullable() {
+            continue;
+        }
+        let series = Series::new(name.clone(), result.index().clone(), column.clone())
+            .map_err(frame_error_to_py)?;
+        let typed = resample_result_dtype(from, how, series)?;
+        result = result
+            .with_column(name, typed.column().clone())
+            .map_err(frame_error_to_py)?;
+    }
+    Ok(result)
+}
+
 /// pandas' `limit_area=` of ffill / bfill: Some(true) for 'inside' (fill only
 /// between a column's first and last values), Some(false) for 'outside'
 /// (only before the first or after the last), None for every gap.
@@ -14870,6 +15030,15 @@ impl PyIndex {
         // CategoricalIndex (br-frankenpandas-v6p80).
         let pandas_data = data.map(pandas_object_as_fp).transpose()?.flatten();
         let data = pandas_data.as_ref().or(data);
+        // A masked array or Series (Int64, the narrow masked ints, Float32,
+        // Float64, boolean) gives its dtype when none is given, as pandas'
+        // Index keeps it (it was float64 / object; br-frankenpandas-qbg9d).
+        let inherited = if dtype.is_none_or(|dtype| dtype.is_none()) {
+            data.map(masked_dtype_of).transpose()?.flatten()
+        } else {
+            None
+        };
+        let dtype = inherited.as_ref().or(dtype);
         if dtype.is_none_or(|dtype| dtype.is_none())
             && let Some(categorical) = data.filter(|data| data.is_instance_of::<PyCategorical>())
         {
@@ -34460,7 +34629,7 @@ impl PySeries {
             // a list of one narrow numpy scalar type keeps its width (mwuhp).
             let typed = match narrow_numpy_list_column(py, list)? {
                 Some(column) => Some(column),
-                None => contiguous_text_column(list.iter()),
+                None => contiguous_text_column(list.iter(), list.len()),
             };
             if let Some(column) = typed {
                 let rows = match index {
@@ -48636,7 +48805,7 @@ impl PyDataFrame {
                             // numpy scalar type keeps its width (mwuhp).
                             let typed = match narrow_numpy_list_column(py, list)? {
                                 Some(column) => Some(column),
-                                None => contiguous_text_column(list.iter()),
+                                None => contiguous_text_column(list.iter(), list.len()),
                             };
                             match typed {
                                 Some(column) => column,
@@ -74371,7 +74540,11 @@ fn resolve_groupby_keys(
     };
     let keys: Vec<Bound<'_, PyAny>> = if let Ok(list) = by.cast::<PyList>() {
         let items: Vec<_> = list.iter().collect();
-        let plain_values = !items.iter().any(|item| is_column(item) || is_array(item));
+        // pandas' get_grouper: a list as long as the frame, holding no array
+        // or callable, is one key of its values unless every item is a
+        // column (['x', 'q', 'x'] over three rows groups by those values; it
+        // was a KeyError for 'q'; br-frankenpandas-bq4h8).
+        let plain_values = !items.iter().any(is_array) && !items.iter().all(is_column);
         if plain_values && !items.is_empty() && items.len() == frame.len() {
             vec![by.clone()]
         } else {
@@ -74444,7 +74617,7 @@ fn groupby_key_column(
             .iter()
             .map(|label| {
                 let mapped = key.call1((index_label_to_py(py, label)?,))?;
-                py_to_scalar(py, &mapped)
+                py_to_cell(py, &mapped)
             })
             .collect::<PyResult<Vec<_>>>()?;
         return Ok((
@@ -74456,9 +74629,11 @@ fn groupby_key_column(
         return Ok((column, py_index_arg_name(key)));
     }
     if let Ok(list) = key.cast::<PyList>() {
+        // Each value a cell, a date a host cell (py_to_scalar refused a date:
+        // groupby([date, 'x', ...]) raised; br-frankenpandas-bq4h8).
         let values = list
             .iter()
-            .map(|value| py_to_scalar(py, &value))
+            .map(|value| py_to_cell(py, &value))
             .collect::<PyResult<Vec<_>>>()?;
         return Ok((
             Column::from_values(values).map_err(column_error_to_py)?,
@@ -75670,6 +75845,66 @@ impl PyGroupBy {
         })
     }
 
+    /// The frame's float32 value columns' mean / var (`ddof`) / cumsum /
+    /// cumprod as each column's own groupby answers them - folded in float32, as pandas'
+    /// float32 group kernels; the frame's kernels fold float64, which
+    /// narrowed differs in the last bit (br-frankenpandas-kajoj). pandas'
+    /// `gb.mean()[c]` is `gb[c].mean()`, row for row; a column whose rows
+    /// do not line up is left as the frame answered it.
+    fn float32_columns_folded(
+        &self,
+        py: Python<'_>,
+        op: &str,
+        ddof: i64,
+        mut frame: PyDataFrame,
+    ) -> PyResult<PyDataFrame> {
+        let names: Vec<String> = frame.inner.column_names().into_iter().cloned().collect();
+        for name in names {
+            if self.by.contains(&name)
+                || self
+                    .df
+                    .column(&name)
+                    .is_none_or(|source| source.width() != Some(NumericWidth::Float32))
+            {
+                continue;
+            }
+            let column_groupby = self.column_groupby(&name)?;
+            let folded = match op {
+                "mean" => column_groupby.mean(false, None, None)?,
+                "cumsum" => {
+                    Py::new(py, column_groupby.cumsum(py, Passed(None), false)?)?.into_any()
+                }
+                "cumprod" => {
+                    Py::new(py, column_groupby.cumprod(py, Passed(None), false)?)?.into_any()
+                }
+                _ => column_groupby.var(ddof, None, None, false)?,
+            };
+            // A Series, or under as_index=False pandas' frame of the keys and
+            // the column.
+            let folded = folded.bind(py);
+            let (index, column) = if let Ok(series) = folded.extract::<PyRef<'_, PySeries>>() {
+                (series.inner.index().clone(), series.inner.column().clone())
+            } else if let Ok(answer) = folded.extract::<PyRef<'_, PyDataFrame>>()
+                && let Some(column) = answer.inner.column(&name)
+            {
+                (answer.inner.index().clone(), column.clone())
+            } else {
+                continue;
+            };
+            // A running result has the frame's rows, whatever as_index says.
+            let running = matches!(op, "cumsum" | "cumprod");
+            let aligned = column.len() == frame.inner.len()
+                && ((!running && !self.as_index) || &index == frame.inner.index());
+            if aligned {
+                frame.inner = frame
+                    .inner
+                    .with_column(name, column)
+                    .map_err(frame_error_to_py)?;
+            }
+        }
+        Ok(frame)
+    }
+
     fn finish(&self, op: &str, result: Result<DataFrame, FrameError>) -> PyResult<PyDataFrame> {
         let mut inner = self.empty_reduced(
             op,
@@ -76292,13 +76527,15 @@ impl PyGroupBy {
     #[pyo3(signature = (numeric_only=false, engine=None, engine_kwargs=None))]
     fn mean(
         &self,
+        py: Python<'_>,
         numeric_only: bool,
         engine: Option<&str>,
         engine_kwargs: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         let _ = engine_kwargs;
         groupby_engine("DataFrameGroupBy.mean", engine)?;
-        self.finish("mean", self.reduce(numeric_only, |gb| gb.mean()))
+        let frame = self.finish("mean", self.reduce(numeric_only, |gb| gb.mean()))?;
+        self.float32_columns_folded(py, "mean", 1, frame)
     }
 
     fn count(&self) -> PyResult<PyDataFrame> {
@@ -76354,6 +76591,7 @@ impl PyGroupBy {
     #[pyo3(signature = (ddof=1, engine=None, engine_kwargs=None, numeric_only=false))]
     fn var(
         &self,
+        py: Python<'_>,
         ddof: i64,
         engine: Option<&str>,
         engine_kwargs: Option<&Bound<'_, PyAny>>,
@@ -76362,7 +76600,8 @@ impl PyGroupBy {
         let _ = engine_kwargs;
         groupby_engine("DataFrameGroupBy.var", engine)?;
         let ddof = groupby_ddof("DataFrameGroupBy.var", ddof)?;
-        self.finish("var", self.reduce(numeric_only, |gb| gb.var_ddof(ddof)))
+        let frame = self.finish("var", self.reduce(numeric_only, |gb| gb.var_ddof(ddof)))?;
+        self.float32_columns_folded(py, "var", ddof as i64, frame)
     }
 
     #[pyo3(signature = (ddof=1, engine=None, engine_kwargs=None, numeric_only=false))]
@@ -76526,7 +76765,8 @@ impl PyGroupBy {
         let result = self
             .reduce(numeric_only, |gb| gb.cumsum())
             .map_err(frame_error_to_py)?;
-        self.out(self.narrowed_frame("cumsum", result)?)
+        let frame = self.out(self.narrowed_frame("cumsum", result)?)?;
+        self.float32_columns_folded(py, "cumsum", 1, frame)
     }
 
     /// pandas' `cumprod(axis=<no_default>, numeric_only=False)` (see
@@ -76542,7 +76782,8 @@ impl PyGroupBy {
         let result = self
             .reduce(numeric_only, |gb| gb.cumprod())
             .map_err(frame_error_to_py)?;
-        self.out(self.narrowed_frame("cumprod", result)?)
+        let frame = self.out(self.narrowed_frame("cumprod", result)?)?;
+        self.float32_columns_folded(py, "cumprod", 1, frame)
     }
 
     /// pandas' `cummin(axis=<no_default>, numeric_only=False)` (see
@@ -77026,11 +77267,11 @@ impl PyGroupBy {
         if let Ok(name) = func.extract::<String>() {
             let res = match name.as_str() {
                 "sum" => self.sum(false, 0, None, None)?,
-                "mean" => self.mean(false, None, None)?,
+                "mean" => self.mean(py, false, None, None)?,
                 "count" => self.count()?,
                 "min" => self.min(false, -1, None, None)?,
                 "max" => self.max(false, -1, None, None)?,
-                "var" => self.var(1, None, None, false)?,
+                "var" => self.var(py, 1, None, None, false)?,
                 "std" => self.std(1, None, None, false)?,
                 "sem" => self.sem(1, false)?,
                 "median" => self.median(false)?,
@@ -78691,7 +78932,7 @@ impl PySeriesGroupBy {
                         s.take(&positions).map_err(frame_error_to_py)?
                     }
                 }
-                None => s.sort_index(true).map_err(frame_error_to_py)?,
+                None => sort_groups_like_safe_sort(s)?,
             },
         };
         let s = self.label_groups_ordered(s, !(op == "value_counts" && !self.sort))?;
@@ -78988,6 +79229,17 @@ impl PySeriesGroupBy {
 
     /// A reduction's result: sorted by key when `sort`, and with
     /// as_index=False the keys moved into a column beside it, as pandas does.
+    /// A float32 column's running result (cumsum / cumprod / cummin /
+    /// cummax) in float32, as pandas' group kernels keep it: the values are
+    /// the source's or folded in float32 (they came back float64;
+    /// br-frankenpandas-kajoj).
+    fn in_float32(&self, result: Series) -> PyResult<Series> {
+        match self.series.column().width() {
+            Some(NumericWidth::Float32) => narrowed_to(result, Some(NumericWidth::Float32)),
+            _ => Ok(result),
+        }
+    }
+
     fn wrap_result(&self, op: &str, s: Series) -> PyResult<Py<PyAny>> {
         let res = masked_reduction(&self.series.column().dtype(), op, self.per_group(op, s)?)?;
         // No groups: pandas' dtype for `op` (see `empty_group_reduction`).
@@ -79638,7 +79890,12 @@ impl PySeriesGroupBy {
         let _ = numeric_only;
         groupby_axis(py, "SeriesGroupBy", "cumsum", &axis, false)?;
         let res = self.grouped()?.cumsum().map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        // A masked column's running result in its masked dtype (they were
+        // float64; br-frankenpandas-05cm6).
+        let res = masked_reduction(&self.series.column().dtype(), "cumsum", res)?;
+        Ok(PySeries {
+            inner: self.in_float32(res)?,
+        })
     }
 
     /// pandas' `cumprod(axis=<no_default>, numeric_only=False)` (see
@@ -79648,7 +79905,12 @@ impl PySeriesGroupBy {
         let _ = numeric_only;
         groupby_axis(py, "SeriesGroupBy", "cumprod", &axis, false)?;
         let res = self.grouped()?.cumprod().map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        // A masked column's running result in its masked dtype (they were
+        // float64; br-frankenpandas-05cm6).
+        let res = masked_reduction(&self.series.column().dtype(), "cumprod", res)?;
+        Ok(PySeries {
+            inner: self.in_float32(res)?,
+        })
     }
 
     /// pandas' `cummin(axis=<no_default>, numeric_only=False)` (see
@@ -79658,7 +79920,12 @@ impl PySeriesGroupBy {
         let _ = numeric_only;
         groupby_axis(py, "SeriesGroupBy", "cummin", &axis, false)?;
         let res = self.grouped()?.cummin().map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        // A masked column's running result in its masked dtype (they were
+        // float64; br-frankenpandas-05cm6).
+        let res = masked_reduction(&self.series.column().dtype(), "cummin", res)?;
+        Ok(PySeries {
+            inner: self.in_float32(res)?,
+        })
     }
 
     /// pandas' `cummax(axis=<no_default>, numeric_only=False)` (see
@@ -79668,7 +79935,12 @@ impl PySeriesGroupBy {
         let _ = numeric_only;
         groupby_axis(py, "SeriesGroupBy", "cummax", &axis, false)?;
         let res = self.grouped()?.cummax().map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        // A masked column's running result in its masked dtype (they were
+        // float64; br-frankenpandas-05cm6).
+        let res = masked_reduction(&self.series.column().dtype(), "cummax", res)?;
+        Ok(PySeries {
+            inner: self.in_float32(res)?,
+        })
     }
 
     /// pandas' `gb.ngroups` property (it was a method).
@@ -81459,6 +81731,7 @@ impl PyResampler {
                     )
                     .sharing(&self.layout);
                 let res = self.zoned_series(series_op(&resampler).map_err(to_py)?)?;
+                let res = resample_result_dtype(s.column(), how, res)?;
                 Ok(Py::new(py, PySeries { inner: res })?.into_any())
             }
             ResampleTarget::DataFrame(df) => {
@@ -81472,6 +81745,7 @@ impl PyResampler {
                     .sharing(&self.layout)
                     .numeric_only(numeric_only);
                 let res = self.zoned_frame(frame_op(&resampler).map_err(to_py)?)?;
+                let res = resample_frame_dtypes(df, how, res)?;
                 Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
             }
         }
@@ -81579,7 +81853,7 @@ impl PyResampler {
                     .sharing(&self.layout)
                     .count()
                     .map_err(frame_error_to_py)?;
-                let res = self.zoned_series(res)?;
+                let res = resample_result_dtype(s.column(), "count", self.zoned_series(res)?)?;
                 Ok(Py::new(py, PySeries { inner: res })?.into_any())
             }
             ResampleTarget::DataFrame(df) => {
@@ -81593,7 +81867,7 @@ impl PyResampler {
                     .sharing(&self.layout)
                     .count()
                     .map_err(frame_error_to_py)?;
-                let res = self.zoned_frame(res)?;
+                let res = resample_frame_dtypes(df, "count", self.zoned_frame(res)?)?;
                 Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
             }
         }
@@ -81641,7 +81915,7 @@ impl PyResampler {
                     )
                     .size()
                     .map_err(frame_error_to_py)?;
-                let res = self.zoned_series(res)?;
+                let res = resample_result_dtype(s.column(), "size", self.zoned_series(res)?)?;
                 Ok(Py::new(py, PySeries { inner: res })?.into_any())
             }
             ResampleTarget::DataFrame(df) => {
@@ -81672,7 +81946,24 @@ impl PyResampler {
                     )
                     .ohlc()
                     .map_err(frame_error_to_py)?;
-                let res = self.zoned_frame(res)?;
+                let mut res = self.zoned_frame(res)?;
+                // A masked source's prices in its masked dtype and width, typed
+                // as min types them (an Int8 Series' were Int64;
+                // br-frankenpandas-oxkfp).
+                if s.column().dtype().is_nullable() {
+                    let names: Vec<String> = res.column_names().into_iter().cloned().collect();
+                    for name in names {
+                        let Some(column) = res.column(&name) else {
+                            continue;
+                        };
+                        let prices = Series::new(name.clone(), res.index().clone(), column.clone())
+                            .map_err(frame_error_to_py)?;
+                        let typed = resample_result_dtype(s.column(), "min", prices)?;
+                        res = res
+                            .with_column(name, typed.column().clone())
+                            .map_err(frame_error_to_py)?;
+                    }
+                }
                 Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
             }
             ResampleTarget::DataFrame(df) => {
@@ -81712,7 +82003,7 @@ impl PyResampler {
                     )
                     .quantile(q)
                     .map_err(frame_error_to_py)?;
-                let res = self.zoned_series(res)?;
+                let res = resample_result_dtype(s.column(), "quantile", self.zoned_series(res)?)?;
                 Ok(Py::new(py, PySeries { inner: res })?.into_any())
             }
             ResampleTarget::DataFrame(df) => {
@@ -81725,7 +82016,7 @@ impl PyResampler {
                     )
                     .quantile(q)
                     .map_err(frame_error_to_py)?;
-                let res = self.zoned_frame(res)?;
+                let res = resample_frame_dtypes(df, "quantile", self.zoned_frame(res)?)?;
                 Ok(Py::new(py, PyDataFrame { inner: res })?.into_any())
             }
         }

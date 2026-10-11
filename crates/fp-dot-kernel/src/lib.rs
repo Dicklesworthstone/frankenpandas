@@ -777,6 +777,31 @@ pub fn div_by_number_f64_arc(a: &[f64], s: f64, number_first: bool) -> std::sync
     }
 }
 
+/// pandas' `pct_change(periods)` of a float column - `data[i] / data[i -
+/// periods] - 1.0` - four lanes wide, the first `periods` rows (every row
+/// when `periods` reaches the length) 0.0 for the caller's mask. Collected,
+/// not a zeroed buffer written over: 300k rows took 0.34 ms against pandas'
+/// 0.27, half of it the baseline 2-lane `divpd`, 8% the zeroing
+/// (br-frankenpandas-faizi). IEEE's quotient and difference, the baseline
+/// loop's bits: a quotient feeds a subtraction, never an `a*b+c` for `+fma`
+/// to contract.
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn pct_change_f64(data: &[f64], periods: usize) -> Vec<f64> {
+    let lead = periods.min(data.len());
+    std::iter::repeat_n(0.0, lead)
+        .chain(
+            data[lead..]
+                .iter()
+                .zip(data)
+                .map(|(&current, &previous)| current / previous - 1.0),
+        )
+        .collect()
+}
+
 /// The `+`, `-` and `*` siblings of [`div_f64_into`], generated from one body.
 ///
 /// br-frankenpandas-uza04. `div` was given this crate's 4-lane width because
