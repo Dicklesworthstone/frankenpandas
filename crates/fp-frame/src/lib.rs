@@ -9852,6 +9852,9 @@ fn where_gather_df_col(
     let mut out = vec![0.0_f64; n];
     let mut valid = fp_columnar::ValidityMask::all_valid(n);
     for i in 0..n {
+        // A row the condition lacks is no selection - `other`, under where
+        // and mask alike, as pandas' condition reindexed with False (it was
+        // NaN; br-frankenpandas-vzml7).
         let take_self = match cond_pos[i].map(|p| cb[p]) {
             Some(b) => {
                 if mask_mode {
@@ -9860,10 +9863,7 @@ fn where_gather_df_col(
                     b
                 }
             }
-            None => {
-                valid.set(i, false);
-                continue;
-            }
+            None => false,
         };
         if take_self {
             out[i] = sx[i];
@@ -99386,6 +99386,80 @@ impl DataFrame {
         sorted.head(n as i64)
     }
 
+    /// pandas' nlargest / nsmallest (`largest`) of `n` rows over several
+    /// `columns` under `keep` 'last' or 'all' (its SelectNFrame): each
+    /// column but the last takes its `n` extreme rows keeping every tie;
+    /// the rows past the border value are in, the border's ties go on to
+    /// the next column for the rest of the count; the last column applies
+    /// `keep`; the rows taken are sorted by the columns, stable. The
+    /// several-column calls ignored `keep` (br-frankenpandas-tjcru).
+    ///
+    /// # Errors
+    /// A column not in the frame, or an unknown `keep`.
+    pub fn n_extreme_multi_keep(
+        &self,
+        n: usize,
+        columns: &[&str],
+        keep: &str,
+        largest: bool,
+    ) -> Result<Self, FrameError> {
+        const POSITION: &str = "\u{0}fp_n_extreme_position";
+        if n == 0 {
+            return self.take_rows(&[]);
+        }
+        let positions = (0..self.len())
+            .map(|position| i64::try_from(position).unwrap_or(i64::MAX))
+            .collect();
+        let mut current = self
+            .select_columns(columns)?
+            .reset_index(true)?
+            .with_column(POSITION, Column::from_i64_values(positions))?;
+        let mut chosen: Vec<usize> = Vec::new();
+        let mut wanted = n;
+        for (step, column) in columns.iter().enumerate() {
+            let last = step + 1 == columns.len();
+            let step_keep = if last { keep } else { "all" };
+            let picked = if largest {
+                current.nlargest_keep(wanted, column, step_keep)?
+            } else {
+                current.nsmallest_keep(wanted, column, step_keep)?
+            };
+            let rows: Vec<usize> = picked
+                .column(POSITION)
+                .and_then(Column::as_i64_slice)
+                .ok_or_else(|| {
+                    FrameError::CompatibilityRejected("nlargest: row positions lost".to_owned())
+                })?
+                .iter()
+                .map(|&position| usize::try_from(position).unwrap_or(usize::MAX))
+                .collect();
+            if last || picked.len() <= wanted {
+                chosen.extend(rows);
+                break;
+            }
+            let values = picked.column(column).map(Column::values).ok_or_else(|| {
+                FrameError::CompatibilityRejected(format!("column '{column}' not found"))
+            })?;
+            let border = values
+                .last()
+                .cloned()
+                .unwrap_or(Scalar::Null(NullKind::NaN));
+            let mut tied = Vec::new();
+            for (at, (value, &row)) in values.iter().zip(&rows).enumerate() {
+                if *value == border {
+                    tied.push(at);
+                } else {
+                    chosen.push(row);
+                }
+            }
+            current = picked.take_rows(&tied)?;
+            wanted = n.saturating_sub(chosen.len());
+        }
+        let ascending: Vec<bool> = columns.iter().map(|_| !largest).collect();
+        self.take_rows(&chosen)?
+            .sort_values_multi(columns, &ascending, "last")
+    }
+
     /// The first `n` rows of the stable multi-key radix order of `columns`
     /// (each an all-valid int64 or NaN-free float64 one), as sort_values_multi
     /// orders them, only those rows gathered: every row of every column was
@@ -104769,6 +104843,21 @@ impl DataFrame {
                     }
                 }
                 return Ok(Scalar::Int64(distinct as i64));
+            }
+            // An all-valid one-buffer text column holds no number: its cached
+            // factorize's distinct count, or a window's distinct spans - the
+            // object-bucket check below made a String Scalar a row to ask,
+            // then hashed each as a ScalarKey (df[[int, text]].nunique() 0.87x
+            // pandas; br-frankenpandas-4kv4v).
+            if let Some((_, uniques)) = col.utf8_default_factorize_columns() {
+                return Ok(Scalar::Int64(uniques.len() as i64));
+            }
+            if let Some((bytes, offsets)) = col.as_utf8_window() {
+                let distinct: FxHashSet<&[u8]> = offsets
+                    .windows(2)
+                    .map(|bounds| &bytes[bounds[0]..bounds[1]])
+                    .collect();
+                return Ok(Scalar::Int64(distinct.len() as i64));
             }
             // br-frankenpandas-rh1od: an OBJECT bucket holding only numeric
             // scalars (the bool+numeric constructor mix) dedups under PYTHON
@@ -125982,13 +126071,20 @@ impl DataFrameGroupBy<'_> {
         if self.by.len() != 1 {
             return Ok(None);
         }
-        let Some(keys) = self.df.columns[&self.by[0]].as_i64_slice() else {
+        // A text key's dense grouping too: it went through build_groups, a
+        // Scalar a row out (groupby(text).ngroup() 0.79x pandas;
+        // br-frankenpandas-ezot5).
+        let key_col = &self.df.columns[&self.by[0]];
+        let (gid_per_row, ng, order, _out_index) = if let Some(keys) = key_col.as_i64_slice() {
+            let Some((min, range)) = i64_dense_histogram_range(keys) else {
+                return Ok(None);
+            };
+            self.int64_dense_grouping(keys, min, range)
+        } else if is_text_key_column(key_col) {
+            self.single_utf8_key_dense_grouping(key_col)
+        } else {
             return Ok(None);
         };
-        let Some((min, range)) = i64_dense_histogram_range(keys) else {
-            return Ok(None);
-        };
-        let (gid_per_row, ng, order, _out_index) = self.int64_dense_grouping(keys, min, range);
         let mut pos_of_gid = vec![0_i64; ng];
         for (pos, &g) in order.iter().enumerate() {
             pos_of_gid[g] = pos as i64;

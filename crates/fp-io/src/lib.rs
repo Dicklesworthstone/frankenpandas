@@ -6829,6 +6829,28 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     if csv_read_options_match_default_fast_path(options) {
         return read_csv_str(input);
     }
+    // usecols over the default shape: the default parser's frame, the named
+    // columns kept in file order - the generic parser read every cell for
+    // them (read_csv(usecols=) 0.71x pandas, 8x this parser's own full read;
+    // br-frankenpandas-5zn70). Repeated headers take the generic parser.
+    if let Some(usecols) = &options.usecols {
+        let mut plain = options.clone();
+        plain.usecols = None;
+        if csv_read_options_match_default_fast_path(&plain) {
+            let frame = read_csv_str(input)?;
+            let headers: Vec<String> = frame.column_names().into_iter().cloned().collect();
+            let distinct: std::collections::BTreeSet<&String> = headers.iter().collect();
+            if distinct.len() == headers.len() {
+                validate_usecols(&headers, usecols)?;
+                let kept: Vec<&str> = headers
+                    .iter()
+                    .filter(|header| usecols.contains(header))
+                    .map(String::as_str)
+                    .collect();
+                return Ok(frame.select_columns(&kept)?);
+            }
+        }
+    }
     if let Some(frame) = try_read_csv_typed_route(input, options)? {
         return Ok(frame);
     }
@@ -25709,6 +25731,47 @@ mod tests {
         assert!(
             matches!(err, IoError::MissingUsecols(missing) if missing == vec!["c".to_string()])
         );
+    }
+
+    #[test]
+    fn csv_usecols_reads_the_default_parse_5zn70() {
+        // br-frankenpandas-5zn70: usecols over the default shape keeps the
+        // named columns of the default parse, in file order, as the generic
+        // parser's filter did.
+        let input = "k,g,v,s\n1,x,1.5,a\n2,y,,bb\n3,x,2.5,\n";
+        let used = |names: &[&str]| CsvReadOptions {
+            usecols: Some(names.iter().map(|name| (*name).to_owned()).collect()),
+            ..Default::default()
+        };
+        let frame = read_csv_with_options(input, &used(&["v", "k"])).unwrap();
+        let full = read_csv_str(input).unwrap();
+        assert_eq!(frame.column_names(), vec!["k", "v"]);
+        assert_eq!(frame.len(), 3);
+        // Debug text: a NaN cell is never == itself.
+        for name in ["k", "v"] {
+            assert_eq!(
+                format!("{:?}", frame.column(name)),
+                format!("{:?}", full.column(name)),
+                "{name}"
+            );
+        }
+        let text = read_csv_with_options(input, &used(&["s"])).unwrap();
+        assert_eq!(
+            format!("{:?}", text.column("s")),
+            format!("{:?}", full.column("s"))
+        );
+        // A repeated header is named as mangled (a, a.1), as pandas.
+        let repeated = read_csv_with_options("a,a,b\n1,2,3\n", &used(&["a.1", "b"])).unwrap();
+        assert_eq!(repeated.column_names(), vec!["a.1", "b"]);
+        assert_eq!(
+            repeated.column("a.1").unwrap().values()[0],
+            Scalar::Int64(2)
+        );
+        // NEGATIVE: a missing name is refused.
+        assert!(matches!(
+            read_csv_with_options(input, &used(&["k", "zz"])),
+            Err(IoError::MissingUsecols(missing)) if missing == vec!["zz".to_owned()]
+        ));
     }
 
     #[test]
