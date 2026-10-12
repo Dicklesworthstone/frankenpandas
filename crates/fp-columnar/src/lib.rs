@@ -234,6 +234,34 @@ fn pack_fixed_width_utf8_span(span: &[u8]) -> u128 {
     packed
 }
 
+/// Each text span's first-seen code (`offsets` its rows' bounds into
+/// `bytes`; a row not `present` is -1) and the distinct spans as one
+/// buffer, in first-seen order.
+fn text_spans_factorized(
+    bytes: &[u8],
+    offsets: &[usize],
+    present: impl Fn(usize) -> bool,
+) -> (Vec<i64>, Vec<u8>, Vec<usize>) {
+    let mut idx_map: FxHashMap<&[u8], i64> = FxHashMap::default();
+    let mut codes: Vec<i64> = Vec::with_capacity(offsets.len().saturating_sub(1));
+    let mut uniq_bytes: Vec<u8> = Vec::new();
+    let mut uniq_offsets: Vec<usize> = vec![0];
+    for (row, bounds) in offsets.windows(2).enumerate() {
+        if !present(row) {
+            codes.push(-1);
+            continue;
+        }
+        let span = &bytes[bounds[0]..bounds[1]];
+        let code = *idx_map.entry(span).or_insert_with(|| {
+            uniq_bytes.extend_from_slice(span);
+            uniq_offsets.push(uniq_bytes.len());
+            (uniq_offsets.len() - 2) as i64
+        });
+        codes.push(code);
+    }
+    (codes, uniq_bytes, uniq_offsets)
+}
+
 fn build_utf8_factorize_default_witness(
     bytes: &[u8],
     offsets: &[usize],
@@ -11124,7 +11152,11 @@ fn f64_radix_key(value: f64) -> u64 {
 /// arithmetic vectorizes. Same PAR_MIN and worker cap as the index form, so the
 /// parallel arm is unchanged for large inputs.
 fn par_map_slice_f64<F: Fn(f64) -> f64 + Sync>(data: &[f64], f: F) -> Vec<f64> {
-    const PAR_MIN: usize = 200_000;
+    // A bandwidth-bound map pays for its thread spawns and zeroed output
+    // only past millions of rows: at 200k the spawns and the memset were the
+    // whole of a NaN-holding column's abs (df.diff().abs() 0.16x pandas;
+    // br-frankenpandas-ljtm0).
+    const PAR_MIN: usize = 2_000_000;
     let n = data.len();
     let workers = cached_available_parallelism().min(8);
     if workers <= 1 || n < PAR_MIN {
@@ -16634,6 +16666,28 @@ impl Column {
         }
     }
 
+    /// A masked `Int64` column's ints and mask, read from the backings
+    /// [`Self::as_i64_slice_with_validity`] reads for int64 (a missing row's
+    /// datum is arbitrary): `astype("Int64")` retags an int64 buffer, and its
+    /// reductions went through a Scalar a row (s.astype("Int64").sum() 0.5x
+    /// pandas; br-frankenpandas-pg40q). `None` for any other dtype or backing.
+    #[must_use]
+    pub fn as_masked_i64_slice(&self) -> Option<(&[i64], &ValidityMask)> {
+        if self.dtype != DType::Int64Nullable || self.categorical.is_some() {
+            return None;
+        }
+        let data: &[i64] = match &self.values {
+            ScalarValues::LazyAllValidInt64 { data, .. } => data.as_ref(),
+            ScalarValues::LazyAllValidInt64Vec { data, .. } => data.as_slice(),
+            ScalarValues::LazyNullableInt64 { data, .. } => data.as_slice(),
+            _ => match &self.data {
+                Some(ColumnData::Int64(data)) => data.as_ref(),
+                _ => return None,
+            },
+        };
+        (data.len() == self.validity.len()).then_some((data, &self.validity))
+    }
+
     /// Raw packed `&[bool]` backing + validity of a NULLABLE Bool column
     /// (`LazyNullableBool` — a boolean column WITH missing rows). A present row
     /// `r` (`validity.get(r)`) is `data[r]`; a missing row's datum is arbitrary
@@ -17514,13 +17568,28 @@ impl Column {
                     .iter()
                     .map(|&pos| offsets[pos + 1] - offsets[pos])
                     .sum();
-                let mut new_bytes = Vec::with_capacity(total);
+                // Each span copied as a WINDOW-byte window of the source where
+                // one fits - a constant-length copy, the next span writing over
+                // the excess, the buffer cut to `total` after: a memmove call a
+                // row was most of a gather of short strings (df.iloc[::2] over
+                // a text column 0.01x pandas; br-frankenpandas-99g91).
+                const WINDOW: usize = 16;
+                let mut new_bytes = vec![0_u8; total + WINDOW];
                 let mut new_offsets = Vec::with_capacity(n + 1);
                 new_offsets.push(0);
+                let mut at = 0;
                 for &pos in positions {
-                    new_bytes.extend_from_slice(&bytes[offsets[pos]..offsets[pos + 1]]);
-                    new_offsets.push(new_bytes.len());
+                    let (start, end) = (offsets[pos], offsets[pos + 1]);
+                    let len = end - start;
+                    if len <= WINDOW && start + WINDOW <= bytes.len() {
+                        new_bytes[at..at + WINDOW].copy_from_slice(&bytes[start..start + WINDOW]);
+                    } else {
+                        new_bytes[at..at + len].copy_from_slice(&bytes[start..end]);
+                    }
+                    at += len;
+                    new_offsets.push(at);
                 }
+                new_bytes.truncate(total);
                 return Self {
                     dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_contiguous_utf8(new_bytes, new_offsets),
@@ -19574,7 +19643,15 @@ impl Column {
         let refuse = |value: i64| ColumnError::UInt64OutOfRange {
             value: value as u64,
         };
-        if let Some(values) = base.as_i64_slice() {
+        // A masked base with no gap (Int64 -> UInt32 of isocalendar) reads
+        // its ints through the masked slice: the plain slice declines the
+        // masked dtype, and each value went through a Scalar
+        // (ts.dt.isocalendar() 0.27x pandas; br-frankenpandas-zk7ay).
+        if let Some(values) = base.as_i64_slice().or_else(|| {
+            base.as_masked_i64_slice()
+                .filter(|(_, validity)| validity.all())
+                .map(|(values, _)| values)
+        }) {
             let wrapped = if let Some((mask, sign)) = int_wrap_masks(width) {
                 let wrap = |value: i64| ((value & mask) ^ sign).wrapping_sub(sign);
                 // Ints the width already holds are their own wrap: the cast
@@ -19898,15 +19975,22 @@ impl Column {
     /// missing value seen.
     #[must_use]
     pub fn has_any_missing(&self) -> bool {
+        // A gap is the validity words' to answer, a NaN datum a block fold's
+        // (it vectorizes; `any` stopped a value at a time and read each
+        // row's bit: 19% of s.add(t, fill_value=0); br-frankenpandas-ni1zf).
+        let has_nan = |data: &[f64]| {
+            data.chunks(256).any(|block| {
+                block
+                    .iter()
+                    .fold(false, |seen, value| seen | value.is_nan())
+            })
+        };
         if self.dtype == DType::Float64 {
             if let Some((data, validity)) = self.as_f64_slice_with_validity() {
-                return data
-                    .iter()
-                    .enumerate()
-                    .any(|(idx, value)| !validity.get(idx) || value.is_nan());
+                return !validity.all() || has_nan(data);
             }
             if let Some(data) = self.as_f64_slice() {
-                return data.iter().any(|value| value.is_nan());
+                return has_nan(data);
             }
         }
 
@@ -30664,6 +30748,54 @@ impl Column {
                 return Self::new(DType::Utf8, strings);
             }
         }
+        // A plain int64 / float64 column to bool, numpy's truth of each value
+        // (a float NaN - a gap too, pandas' NaN - is True): each value was
+        // cast as a Scalar (s.astype(bool) 0.01x pandas;
+        // br-frankenpandas-ib5cw).
+        if target == DType::Bool && self.categorical.is_none() {
+            if self.dtype == DType::Int64
+                && let Some(values) = self.as_i64_slice()
+            {
+                return Ok(Self::from_bool_values(
+                    values.iter().map(|&value| value != 0).collect(),
+                ));
+            }
+            if self.dtype == DType::Float64
+                && let Some((values, valid)) = self.as_f64_slice_with_validity()
+            {
+                let truth: Vec<bool> = if valid.all() {
+                    values.iter().map(|&value| value != 0.0).collect()
+                } else {
+                    let words = valid.packed_words_for_scan();
+                    values
+                        .iter()
+                        .enumerate()
+                        .map(|(row, &value)| {
+                            (words[row / 64] >> (row % 64)) & 1 == 0 || value != 0.0
+                        })
+                        .collect()
+                };
+                return Ok(Self::from_bool_values(truth));
+            }
+        }
+        // int64 -> Int64: the same buffer and mask under the masked dtype, as
+        // promote_to_nullable holds it, the width dropped ("Int64" is 64-bit)
+        // - each value was cast as a Scalar and the column rebuilt
+        // (s.astype("Int64") 0.01x pandas; br-frankenpandas-pg40q).
+        if target == DType::Int64Nullable
+            && self.dtype == DType::Int64
+            && self.categorical.is_none()
+        {
+            return Ok(Self {
+                dtype: DType::Int64Nullable,
+                values: self.values.clone(),
+                validity: self.validity.clone(),
+                data: self.data.clone(),
+                categorical: None,
+                width: None,
+                pandas_string: false,
+            });
+        }
         // astype('category'): the values stay, and the categories are the
         // sorted distinct values `Column::new` infers for a categorical column
         // (it tried to cast each value to "Categorical" and failed;
@@ -32545,27 +32677,22 @@ impl Column {
             } = &self.values
             && values.get().is_none()
         {
-            let n = offsets.len().saturating_sub(1);
-            let mut idx_map: FxHashMap<&[u8], i64> = FxHashMap::default();
-            let mut codes: Vec<i64> = Vec::with_capacity(n);
-            let mut uniq_bytes: Vec<u8> = Vec::new();
-            let mut uniq_offsets: Vec<usize> = vec![0];
-            for (i, w) in offsets.windows(2).enumerate() {
-                if !validity.get(i) {
-                    codes.push(-1);
-                    continue;
-                }
-                let span = &bytes[w[0]..w[1]];
-                if let Some(&c) = idx_map.get(span) {
-                    codes.push(c);
-                } else {
-                    let c = (uniq_offsets.len() - 1) as i64; // # uniques so far
-                    idx_map.insert(span, c);
-                    uniq_bytes.extend_from_slice(span);
-                    uniq_offsets.push(uniq_bytes.len());
-                    codes.push(c);
-                }
-            }
+            let (codes, uniq_bytes, uniq_offsets) =
+                text_spans_factorized(bytes, offsets, |row| validity.get(row));
+            return Ok((
+                Self::from_i64_values_owned(codes),
+                Self::from_utf8_contiguous(uniq_bytes, uniq_offsets),
+            ));
+        }
+
+        // An all-valid window of a one-buffer text column (a head, a slice):
+        // the same codes over its spans - it went through a Scalar a row
+        // (pd.factorize of a 50k head 0.80x pandas; br-frankenpandas-u4bmw).
+        if !sort
+            && use_na_sentinel
+            && let Some((bytes, offsets)) = self.as_utf8_window()
+        {
+            let (codes, uniq_bytes, uniq_offsets) = text_spans_factorized(bytes, offsets, |_| true);
             return Ok((
                 Self::from_i64_values_owned(codes),
                 Self::from_utf8_contiguous(uniq_bytes, uniq_offsets),
@@ -43879,6 +44006,95 @@ mod tests {
             Some(5.0_f64.to_bits()),
         ];
         assert_eq!(shown(mixed.values()), mixed_want);
+    }
+
+    #[test]
+    fn masked_int64_from_int64_keeps_the_buffer_pg40q() {
+        // br-frankenpandas-pg40q: int64 -> Int64 is the same ints under the
+        // masked dtype, the width dropped; the masked slice reads them, a
+        // gap's mask too, and a UInt32 cast of them stays typed; NEGATIVE:
+        // a plain int64 column has no masked slice.
+        let ints = Column::from_i64_values(vec![1, 70_000, -2]);
+        assert!(ints.as_masked_i64_slice().is_none());
+        let masked = ints.astype(DType::Int64Nullable).unwrap();
+        assert_eq!(masked.dtype(), DType::Int64Nullable);
+        assert_eq!(masked.width(), None);
+        let (data, validity) = masked.as_masked_i64_slice().unwrap();
+        assert_eq!(data, [1, 70_000, -2]);
+        assert!(validity.all());
+        let narrow = ints
+            .cast_to_width(fp_types::NumericWidth::Int32, false)
+            .unwrap()
+            .astype(DType::Int64Nullable)
+            .unwrap();
+        assert_eq!(narrow.width(), None);
+        let unsigned = Column::from_i64_values(vec![1, 70_000])
+            .cast_to_width(fp_types::NumericWidth::UInt32, true)
+            .unwrap();
+        assert_eq!(unsigned.dtype(), DType::Int64Nullable);
+        assert_eq!(unsigned.width(), Some(fp_types::NumericWidth::UInt32));
+        assert_eq!(
+            unsigned.values(),
+            [Scalar::Int64(1), Scalar::Int64(70_000)].as_slice()
+        );
+        let gapped = Column::new(
+            DType::Int64Nullable,
+            vec![
+                Scalar::Int64(4),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(6),
+            ],
+        )
+        .unwrap();
+        if let Some((data, validity)) = gapped.as_masked_i64_slice() {
+            assert_eq!((data[0], data[2]), (4, 6));
+            assert!(!validity.get(1));
+        }
+    }
+
+    #[test]
+    fn text_gather_copies_windows_99g91() {
+        // br-frankenpandas-99g91: a gather of one-buffer text copies each
+        // short span as a 16-byte window - an empty span, one of exactly 16,
+        // one past 16, and spans within 16 bytes of the buffer's end read
+        // the same; repeated and reversed positions too, and a window (a
+        // head) of the column.
+        let cells = [
+            "",
+            "a",
+            "abcdefghijklmnopq",
+            "0123456789abcdef",
+            "xyz",
+            "tail",
+            "end",
+        ];
+        let mut bytes = Vec::new();
+        let mut offsets = vec![0];
+        for cell in cells {
+            bytes.extend_from_slice(cell.as_bytes());
+            offsets.push(bytes.len());
+        }
+        let column = Column::from_utf8_contiguous(bytes, offsets);
+        let text = |column: &Column| -> Vec<String> {
+            column
+                .values()
+                .iter()
+                .map(|cell| match cell {
+                    Scalar::Utf8(text) => text.clone(),
+                    other => panic!("{other:?}"),
+                })
+                .collect()
+        };
+        let positions = [6, 0, 2, 3, 2, 5, 1, 4, 6, 0];
+        assert_eq!(
+            text(&column.take_positions(&positions)),
+            positions.map(|position| cells[position].to_owned())
+        );
+        let head = column.take_contiguous_range(1, 5);
+        assert_eq!(
+            text(&head.take_positions(&[4, 1, 0])),
+            ["tail", "abcdefghijklmnopq", "a"]
+        );
     }
 
     #[test]

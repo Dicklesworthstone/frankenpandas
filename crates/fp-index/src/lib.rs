@@ -1835,6 +1835,16 @@ impl IndexLabels {
             .as_slice()
     }
 
+    /// The labels' shared buffer, made on first read: none for a window of
+    /// another index's labels.
+    fn shared_vec(&self) -> Option<Arc<Vec<IndexLabel>>> {
+        if self.materialized_slice.is_some() {
+            return None;
+        }
+        self.as_slice();
+        self.materialized.get().cloned()
+    }
+
     fn to_owned_labels(&self) -> Vec<IndexLabel> {
         if let Some(slice) = &self.materialized_slice {
             return slice.as_slice().to_vec();
@@ -2210,6 +2220,20 @@ impl IndexLabels {
     fn affine_int64_indexer(&self, source: Int64AffineLabels) -> Vec<Option<usize>> {
         let mut out = Vec::with_capacity(self.len());
         let mut push_affine = |range: Int64AffineLabels| {
+            // Two unit ranges (a RangeIndex against a slice of one): misses,
+            // one run of positions, misses - each target was placed by its own
+            // division into the source (df.update(df.head(1000)) over 200k
+            // rows; br-frankenpandas-f9iqc).
+            if range.step == 1 && source.step == 1 {
+                let (start, source_start) = (i128::from(range.start), i128::from(source.start));
+                let (len, source_len) = (range.len as i128, source.len as i128);
+                let first = (source_start - start).clamp(0, len);
+                let end = (source_start + source_len - start).clamp(first, len);
+                out.extend(std::iter::repeat_n(None, first as usize));
+                out.extend((first..end).map(|k| Some((start + k - source_start) as usize)));
+                out.extend(std::iter::repeat_n(None, (len - end) as usize));
+                return;
+            }
             for position in 0..range.len {
                 out.push(source.position(range.value_at(position)));
             }
@@ -7793,11 +7817,11 @@ impl Index {
             return self.clone();
         }
         if let Some(values) = self.labels.int64_view() {
+            // A run written a value at a time (each push checked the
+            // capacity; br-frankenpandas-a2izv).
             let mut out = Vec::with_capacity(repeat_output_capacity(values.len(), repeats));
             for &value in values.iter() {
-                for _ in 0..repeats {
-                    out.push(value);
-                }
+                out.extend(std::iter::repeat_n(value, repeats));
             }
             return self.propagate_name(Self::from_i64_values(out));
         }
@@ -24129,6 +24153,30 @@ impl MultiIndex {
         Some(Self::from_shared_levels_and_names(levels, names))
     }
 
+    /// [`Self::stacked_cells`] of a flat index's rows, the row level in the
+    /// index's zone: a unique index (a RangeIndex; any whose labels are each
+    /// first seen) shares its labels as the level's, where a stack copied
+    /// them in and dropped the copy after (df.stack(dropna=False) 0.26x
+    /// pandas; br-frankenpandas-nmk6p). Unnamed; None past u32 codes.
+    #[must_use]
+    pub fn stacked_index(index: &Index, columns: &[IndexLabel]) -> Option<Self> {
+        let labels = index.labels();
+        let codes = first_seen_label_codes(labels)?;
+        let unique = codes
+            .last()
+            .is_some_and(|&last| last as usize + 1 == labels.len());
+        let uniques = match index.labels.shared_vec() {
+            Some(shared) if unique => shared,
+            _ => Arc::new(first_seen_uniques(labels, &codes)),
+        };
+        let levels = vec![
+            Self::stacked_row_level(uniques, &codes, columns.len())
+                .zoned(index.tz().map(Arc::from)),
+            Self::stacked_column_level(columns, labels.len())?,
+        ];
+        Some(Self::from_shared_levels_and_names(levels, vec![None; 2]))
+    }
+
     /// [`Self::stacked_cells`] of this MultiIndex's rows: each level's codes
     /// repeated a column at a time, its uniques shared, no label read - a
     /// stack of a MultiIndex frame made each level's labels from its codes
@@ -24160,20 +24208,25 @@ impl MultiIndex {
         codes: &[u32],
         column_count: usize,
     ) -> Level {
-        let cells: Vec<u32> = codes
-            .iter()
-            .flat_map(|&code| std::iter::repeat_n(code, column_count))
-            .collect();
+        // A sized run a row: one flat_map over every cell pushed each code
+        // past a capacity check (br-frankenpandas-nmk6p).
+        let mut cells = Vec::with_capacity(codes.len() * column_count);
+        for &code in codes {
+            cells.extend(std::iter::repeat_n(code, column_count));
+        }
         Level::from_codes(uniques, CodesWindow::from(cells))
     }
 
     /// The stacked column level: the columns' codes cycled `row_count`
-    /// times; None past u32 codes.
+    /// times (copied by doubling, where a flat_map pushed each); None past
+    /// u32 codes.
     fn stacked_column_level(columns: &[IndexLabel], row_count: usize) -> Option<Level> {
         let codes = first_seen_label_codes(columns)?;
         let uniques = Arc::new(first_seen_uniques(columns, &codes));
-        let cells: Vec<u32> = (0..row_count).flat_map(|_| codes.iter().copied()).collect();
-        Some(Level::from_codes(uniques, CodesWindow::from(cells)))
+        Some(Level::from_codes(
+            uniques,
+            CodesWindow::from(codes.repeat(row_count)),
+        ))
     }
 
     /// Rows `start..start + len`: each level a window of its codes, the
@@ -27953,6 +28006,48 @@ mod tests {
     }
 
     #[test]
+    fn stacked_index_shares_unique_rows_nmk6p() {
+        // br-frankenpandas-nmk6p: a unique flat index stacked shares its
+        // labels as the row level's, and gives the cells stacked_cells gives.
+        let utf8 = |s: &str| IndexLabel::Utf8(s.to_owned());
+        let columns = [utf8("a"), utf8("b"), utf8("c")];
+        let range = Index::from_range(10, 14, 1);
+        let multi = MultiIndex::stacked_index(&range, &columns).unwrap();
+        let expected = MultiIndex::stacked_cells(&[range.labels()], &columns).unwrap();
+        assert_eq!(multi.len(), 12);
+        for row in 0..12 {
+            assert_eq!(multi.get_tuple(row), expected.get_tuple(row));
+        }
+        let (uniques, codes) = multi.level_codes(0).unwrap();
+        assert!(std::ptr::eq(uniques.as_ptr(), range.labels().as_ptr()));
+        assert_eq!(codes, [0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3]);
+        assert_eq!(
+            multi.level_codes(1).unwrap().1,
+            [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2]
+        );
+        // The row level keeps the index's zone.
+        let day = 86_400_000_000_000;
+        let zoned = Index::from_datetime64(vec![0, day])
+            .with_tz(Some("US/Eastern"))
+            .unwrap();
+        let multi = MultiIndex::stacked_index(&zoned, &columns).unwrap();
+        assert_eq!(multi.level_zone(0), Some("US/Eastern"));
+        assert_eq!(multi.level_zone(1), None);
+        // NEGATIVE: a repeated index numbers its labels first seen, a level
+        // of its own; a window of another index's labels is copied; no
+        // column makes no cell.
+        let repeated = Index::new(vec![utf8("y"), utf8("x"), utf8("y")]);
+        let multi = MultiIndex::stacked_index(&repeated, &columns[..2]).unwrap();
+        let (uniques, codes) = multi.level_codes(0).unwrap();
+        assert_eq!(uniques, [utf8("y"), utf8("x")]);
+        assert_eq!(codes, [0, 0, 1, 1, 0, 0]);
+        let window = Index::new(vec![utf8("p"), utf8("q"), utf8("r")]).slice(1, 2);
+        let multi = MultiIndex::stacked_index(&window, &columns[..1]).unwrap();
+        assert_eq!(multi.level_codes(0).unwrap().0, [utf8("q"), utf8("r")]);
+        assert_eq!(MultiIndex::stacked_index(&range, &[]).unwrap().len(), 0);
+    }
+
+    #[test]
     fn stacked_levels_stack_the_codes_srwyq() {
         // br-frankenpandas-srwyq: a MultiIndex's rows stacked off its
         // levels' codes - a window of coded levels (their uniques shared,
@@ -28009,6 +28104,26 @@ mod tests {
         // NEGATIVE: no level.
         let empty = MultiIndex::from_arrays(Vec::new()).unwrap();
         assert!(empty.stacked_levels(&columns).is_none());
+    }
+
+    #[test]
+    fn unit_range_indexer_is_one_run_f9iqc() {
+        // br-frankenpandas-f9iqc: a unit range looked up in a unit range is
+        // misses, one run, misses - each target where its value puts it;
+        // NEGATIVE: a stepped source keeps the per-target placement.
+        let source = Index::from_range(5, 15, 1);
+        for (start, stop) in [(0, 20), (7, 9), (-3, 2), (14, 30), (20, 25), (5, 15)] {
+            let target = Index::from_range(start, stop, 1);
+            let expected: Vec<Option<usize>> = (start..stop)
+                .map(|value| (5..15).contains(&value).then_some((value - 5) as usize))
+                .collect();
+            assert_eq!(source.get_indexer(&target), expected, "{start}..{stop}");
+        }
+        let stepped = Index::from_range(0, 20, 2);
+        assert_eq!(
+            stepped.get_indexer(&Index::from_range(3, 9, 1)),
+            [None, Some(2), None, Some(3), None, Some(4)]
+        );
     }
 
     #[test]
