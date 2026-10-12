@@ -11334,6 +11334,86 @@ fn text_first_seen_codes(bytes: &[u8], offsets: &[usize]) -> Vec<i64> {
         .collect()
 }
 
+/// A key column as a coded MultiIndex level: its distinct labels in
+/// first-seen order and each row's code into them - an all-valid text
+/// column's from its cached factorize or its bytes, an all-valid int64
+/// column's from its values (strictly increasing ones each their own).
+/// None for any other column, or past u32 codes.
+fn coded_key_level(column: &Column) -> Option<(Vec<IndexLabel>, Vec<u32>)> {
+    if column.categorical().is_some() || !column.validity().all() {
+        return None;
+    }
+    let len = u32::try_from(column.len()).ok()?;
+    let mut uniques: Vec<IndexLabel> = Vec::new();
+    if column.dtype() == DType::Int64 {
+        let data = column.as_i64_slice()?;
+        if data.windows(2).all(|pair| pair[0] < pair[1]) {
+            return Some((
+                data.iter().map(|&v| IndexLabel::Int64(v)).collect(),
+                (0..len).collect(),
+            ));
+        }
+        let mut code = |slot: &mut u32, value: i64| {
+            if *slot == u32::MAX {
+                *slot = uniques.len() as u32;
+                uniques.push(IndexLabel::Int64(value));
+            }
+            *slot
+        };
+        let codes = match i64_dense_histogram_range(data) {
+            Some((min, range)) => {
+                let mut code_of = vec![u32::MAX; range];
+                data.iter()
+                    .map(|&v| code(&mut code_of[(i128::from(v) - i128::from(min)) as usize], v))
+                    .collect()
+            }
+            None => {
+                let mut code_of = FxHashMap::<i64, u32>::default();
+                data.iter()
+                    .map(|&v| code(code_of.entry(v).or_insert(u32::MAX), v))
+                    .collect()
+            }
+        };
+        return Some((uniques, codes));
+    }
+    if column.dtype() != DType::Utf8 {
+        return None;
+    }
+    let text = |span: &[u8]| {
+        std::str::from_utf8(span)
+            .ok()
+            .map(|s| IndexLabel::Utf8(s.to_owned()))
+    };
+    if let Some((codes, distinct)) = column.utf8_default_factorize_columns() {
+        let (bytes, offsets) = distinct.as_utf8_contiguous()?;
+        let uniques = offsets
+            .windows(2)
+            .map(|bounds| text(&bytes[bounds[0]..bounds[1]]))
+            .collect::<Option<Vec<_>>>()?;
+        let codes = codes
+            .as_i64_slice()?
+            .iter()
+            .map(|&code| u32::try_from(code).ok())
+            .collect::<Option<Vec<_>>>()?;
+        return Some((uniques, codes));
+    }
+    let (bytes, offsets) = column.as_utf8_window()?;
+    let mut code_of: FxHashMap<&[u8], u32> = FxHashMap::default();
+    let codes = offsets
+        .windows(2)
+        .map(|bounds| {
+            let span = &bytes[bounds[0]..bounds[1]];
+            let next = code_of.len() as u32;
+            let code = *code_of.entry(span).or_insert(next);
+            if code == next {
+                uniques.push(text(span)?);
+            }
+            Some(code)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((uniques, codes))
+}
+
 /// One exact int key per row of several all-valid int64 columns: each
 /// column's offset from its minimum weighted by the product of the ranges
 /// before it (mixed radix), so two rows share a key exactly when they share
@@ -51250,9 +51330,34 @@ impl SeriesGroupBy<'_> {
         order
     }
 
+    /// Each group's label and rows, ascending, in first-seen order when the
+    /// key has dense ids: the rows counted per group, then placed in one
+    /// pass, each group labelled from its first row - build_groups hashed
+    /// every key as a Scalar, most of a callable agg / apply over a text key
+    /// (br-frankenpandas-g390a). None for a key without dense ids or labels.
+    fn dense_group_rows(&self) -> Option<Vec<(IndexLabel, Vec<usize>)>> {
+        let (gids, ngroups) = self.dense_group_ids()?;
+        let labels = self.dense_group_labels(&gids, ngroups)?;
+        if labels.len() != ngroups {
+            return None;
+        }
+        let mut counts = vec![0_usize; ngroups];
+        for &gid in gids.iter() {
+            *counts.get_mut(gid)? += 1;
+        }
+        let mut rows: Vec<Vec<usize>> = counts.into_iter().map(Vec::with_capacity).collect();
+        for (row, &gid) in gids.iter().enumerate() {
+            rows[gid].push(row);
+        }
+        Some(labels.into_iter().zip(rows).collect())
+    }
+
     /// Mapping from group labels to source row positions.
     #[must_use]
     pub fn indices(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        if let Some(groups) = self.dense_group_rows() {
+            return groups.into_iter().collect();
+        }
         let (order, order_keys, groups) = self.build_groups();
         order
             .into_iter()
@@ -54712,6 +54817,66 @@ impl SeriesGroupBy<'_> {
         self.rank_with_pct(method, ascending, na_option, false)
     }
 
+    /// Each row's rank within its group (na_option='keep') when the values
+    /// are a float64 column, NaN-as-missing or all-valid, and the groups have
+    /// dense ids: the rows bucketed by group in row order, a group's present
+    /// values ranked by the radix tie walk, a NaN row NaN - a NaN-holding
+    /// column went through Scalar keys, a comparison sort a group and
+    /// Scalar ranks, after every key was hashed as a Scalar
+    /// (br-frankenpandas-0ixw3). None for any other column or a key with a
+    /// missing value.
+    fn dense_float_ranks(&self, method: &str, ascending: bool, pct: bool) -> Option<Vec<f64>> {
+        let column = &self.series.column;
+        if column.dtype() != DType::Float64 || column.width().is_some() {
+            return None;
+        }
+        let data = match column.as_f64_slice() {
+            Some(data) => data,
+            None if column.nan_missing_exact() => column.as_f64_slice_with_validity()?.0,
+            None => return None,
+        };
+        let (gids, ngroups) = self.dense_group_ids()?;
+        if gids.len() != data.len() || gids.iter().any(|&gid| gid >= ngroups) {
+            return None;
+        }
+        // Each group's present rows, in row order.
+        let mut starts = vec![0_usize; ngroups + 1];
+        for (&gid, value) in gids.iter().zip(data) {
+            if !value.is_nan() {
+                starts[gid + 1] += 1;
+            }
+        }
+        for group in 0..ngroups {
+            starts[group + 1] += starts[group];
+        }
+        let mut fill = starts.clone();
+        let mut rows = vec![0_usize; starts[ngroups]];
+        for (row, (&gid, value)) in gids.iter().zip(data).enumerate() {
+            if !value.is_nan() {
+                rows[fill[gid]] = row;
+                fill[gid] += 1;
+            }
+        }
+        let mut ranks = vec![f64::NAN; data.len()];
+        let mut values = Vec::new();
+        for group in 0..ngroups {
+            let members = &rows[starts[group]..starts[group + 1]];
+            if members.is_empty() {
+                continue;
+            }
+            values.clear();
+            // -0.0 is 0.0 to pandas' rank (+ 0.0 makes it so, every other
+            // value as it is): the radix declined it, and the comparator
+            // path ordered a -0.0 before an equal 0.0 under method='first'.
+            values.extend(members.iter().map(|&row| data[row] + 0.0));
+            let group_ranks = rank_f64_slice_radix(&values, method, ascending, pct)?;
+            for (&row, rank) in members.iter().zip(group_ranks) {
+                ranks[row] = rank;
+            }
+        }
+        Some(ranks)
+    }
+
     /// Rank values within each group and optionally scale them to percentile ranks.
     pub fn rank_with_pct(
         &self,
@@ -54729,6 +54894,13 @@ impl SeriesGroupBy<'_> {
             .categorical
             .as_ref()
             .or_else(|| self.series.column.categorical());
+        if categories.is_none()
+            && na_option == "keep"
+            && let Some(ranks) = self.dense_float_ranks(method, ascending, pct)
+        {
+            let index = self.series.index.clone();
+            return Series::new(self.series.name(), index, Column::from_f64_values(ranks));
+        }
         let (_order, order_keys, groups) = self.build_groups();
 
         // Counting-sort fast path (br-frankenpandas-pd7ie): an all-valid
@@ -75940,24 +76112,54 @@ fn same_cells(left: &Column, right: &Column) -> bool {
             .as_f64_slice_with_validity()
             .zip(right.as_f64_slice_with_validity())
     {
+        // Equal or NaN on both sides, a block's rows folded without an exit
+        // so the compares vectorize (an exit a row did not).
+        let same = |mine: &[f64], theirs: &[f64]| {
+            mine.iter().zip(theirs).fold(true, |all, (&x, &y)| {
+                all & ((x == y) | (x.is_nan() & y.is_nan()))
+            })
+        };
+        let data_same = || {
+            own.chunks(4096)
+                .zip(others.chunks(4096))
+                .all(|(mine, theirs)| same(mine, theirs))
+        };
         if own_valid.all() && others_valid.all() {
-            return own
-                .iter()
-                .zip(others)
-                .all(|(&mine, &theirs)| mine == theirs || (mine.is_nan() && theirs.is_nan()));
+            return data_same();
         }
-        let missing =
-            |data: &[f64], valid: &ValidityMask, row: usize| !valid.get(row) || data[row].is_nan();
-        return (0..own.len()).all(|row| {
-            match (
-                missing(own, own_valid, row),
-                missing(others, others_valid, row),
-            ) {
-                (true, true) => true,
-                (false, false) => own[row] == others[row],
-                _ => false,
-            }
-        });
+        // The same rows invalid on both sides: the data settles the rest,
+        // unless a gap's datum differs (0.0 against a NaN). Otherwise 64
+        // rows a step against their validity words: a row is missing when
+        // invalid or NaN, and a step agrees when its rows are missing in
+        // both or present and equal in both. A gap sent the rows through
+        // one ValidityMask::get a side each (s.equals of a NaN-holding
+        // column 0.08x pandas; br-frankenpandas-gue9b).
+        let words = |valid: &ValidityMask| (!valid.all()).then(|| valid.packed_words_for_scan());
+        let (own_words, others_words) = (words(own_valid), words(others_valid));
+        if own_words == others_words && data_same() {
+            return true;
+        }
+        let word_at = |words: &Option<Vec<u64>>, at: usize| {
+            words
+                .as_ref()
+                .map_or(u64::MAX, |words| words.get(at).copied().unwrap_or(0))
+        };
+        return own
+            .chunks(64)
+            .zip(others.chunks(64))
+            .enumerate()
+            .all(|(at, (mine, theirs))| {
+                let (mut nan_mine, mut nan_theirs, mut differ) = (0_u64, 0_u64, 0_u64);
+                for (bit, (&x, &y)) in mine.iter().zip(theirs).enumerate() {
+                    nan_mine |= u64::from(x.is_nan()) << bit;
+                    nan_theirs |= u64::from(y.is_nan()) << bit;
+                    differ |= u64::from(x != y) << bit;
+                }
+                let rows = u64::MAX >> (64 - mine.len());
+                let missing_mine = !word_at(&own_words, at) | nan_mine;
+                let missing_theirs = !word_at(&others_words, at) | nan_theirs;
+                ((missing_mine ^ missing_theirs) | (!missing_mine & differ)) & rows == 0
+            });
     }
     left.values()
         .iter()
@@ -76322,6 +76524,17 @@ pub fn reindex_fill_column(
             let column = Column::from_values(values)?;
             if matches!(column.dtype(), DType::Int64 | DType::Null) {
                 Ok(column.astype(DType::Float64)?)
+            } else {
+                Ok(column)
+            }
+        }
+        // A nullable source keeps its dtype under a fill it holds (an Int64
+        // filled with an int is Int64 with its NA, as pandas' maybe_promote;
+        // it came back int64; br-frankenpandas-ex4op).
+        nullable if nullable.is_nullable() => {
+            let column = Column::from_values(values)?;
+            if column.dtype().to_nullable() == *nullable {
+                Ok(column.astype(nullable.clone())?)
             } else {
                 Ok(column)
             }
@@ -77026,6 +77239,15 @@ fn concat_dataframes_axis1(
                 .all(|window| window[0].index() == window[1].index());
             if all_indexes_equal {
                 frames[0].index().clone()
+            } else if let Some(ints) = frames
+                .iter()
+                .map(|frame| frame.index().int64_label_values())
+                .collect::<Option<Vec<_>>>()
+            {
+                // Int indexes unite by their values in first-seen order: a
+                // label was cloned into a BTreeSet a row (concat(axis=1) of
+                // two 50k Series 0.13x pandas; br-frankenpandas-jwjo7).
+                Index::from_i64_values(first_seen_int_union(&ints)).rename_index(shared_axis_name)
             } else {
                 // Match pandas union behavior for non-identical indexes:
                 // deduplicate labels while preserving first-seen order.
@@ -77101,6 +77323,53 @@ fn concat_dataframes_axis1(
     let mut out = DataFrame::new_with_column_order(target_index, columns, output_column_order)?;
     out.allows_duplicate_labels = allows_duplicate_labels;
     Ok(out)
+}
+
+/// The values of `indexes` once each, in the order first met: each index
+/// strictly increasing merges against the ascending union so far (the new
+/// values in their own order), any other set by a hash set
+/// (br-frankenpandas-jwjo7).
+fn first_seen_int_union(indexes: &[Arc<Vec<i64>>]) -> Vec<i64> {
+    let increasing = indexes
+        .iter()
+        .all(|values| values.windows(2).all(|pair| pair[0] < pair[1]));
+    let mut union = Vec::new();
+    if increasing {
+        let mut sorted: Vec<i64> = Vec::new();
+        for values in indexes {
+            let mut fresh = Vec::new();
+            let mut at = 0;
+            for &value in values.iter() {
+                while at < sorted.len() && sorted[at] < value {
+                    at += 1;
+                }
+                if sorted.get(at) != Some(&value) {
+                    fresh.push(value);
+                }
+            }
+            union.extend_from_slice(&fresh);
+            let mut merged = Vec::with_capacity(sorted.len() + fresh.len());
+            let (mut i, mut j) = (0, 0);
+            while i < sorted.len() && j < fresh.len() {
+                if sorted[i] < fresh[j] {
+                    merged.push(sorted[i]);
+                    i += 1;
+                } else {
+                    merged.push(fresh[j]);
+                    j += 1;
+                }
+            }
+            merged.extend_from_slice(&sorted[i..]);
+            merged.extend_from_slice(&fresh[j..]);
+            sorted = merged;
+        }
+        return union;
+    }
+    let mut seen: FxHashSet<i64> = FxHashSet::default();
+    for values in indexes {
+        union.extend(values.iter().copied().filter(|&value| seen.insert(value)));
+    }
+    union
 }
 
 /// Reshape DataFrame by unpivoting wide format columns into long format rows (`pd.melt`).
@@ -89061,6 +89330,44 @@ impl DataFrame {
     /// that can be used for hierarchical indexing operations.
     pub fn to_multi_index(&self, columns: &[&str]) -> Result<fp_index::MultiIndex, FrameError> {
         let nrows = self.index.len();
+        // Each level named by its column's typed label: set_index([0, 1])
+        // names them the integers 0 and 1 (fvsao.64); in its column's zone.
+        let names: Vec<Option<LabelName>> = columns
+            .iter()
+            .map(|&c| Some(self.column_series_name(c)))
+            .collect();
+        let zones: Vec<Option<String>> = columns
+            .iter()
+            .map(|&c| {
+                self.columns
+                    .get(c)
+                    .and_then(Column::timezone)
+                    .map(str::to_owned)
+            })
+            .collect();
+        let finish = |multiindex: fp_index::MultiIndex| {
+            zones
+                .iter()
+                .enumerate()
+                .fold(multiindex.set_names(names), |multiindex, (level, zone)| {
+                    multiindex.with_level_zone(level, zone.as_deref())
+                })
+        };
+        // Every key an all-valid text or int64 column: coded levels, no
+        // label made - each row's label was cloned out of its column, then
+        // hashed back into codes by the first window or take of the rows
+        // (set_index([text, int]).head() 6 ms, pandas 0.05;
+        // br-frankenpandas-2h9up).
+        if nrows > 0
+            && let Some((uniques, codes)) = columns
+                .iter()
+                .map(|&name| self.columns.get(name).and_then(coded_key_level))
+                .collect::<Option<(Vec<_>, Vec<_>)>>()
+        {
+            return fp_index::MultiIndex::from_coded_levels(uniques, codes)
+                .map(finish)
+                .map_err(FrameError::Index);
+        }
         let mut levels: Vec<Vec<IndexLabel>> = Vec::with_capacity(columns.len());
 
         for &col_name in columns {
@@ -89129,32 +89436,8 @@ impl DataFrame {
             };
             levels.push(level_labels);
         }
-
-        // Each level is named by its column's typed label: set_index([0, 1])
-        // names them the integers 0 and 1 (fvsao.64).
-        let names: Vec<Option<LabelName>> = columns
-            .iter()
-            .map(|&c| Some(self.column_series_name(c)))
-            .collect();
-
-        let zones: Vec<Option<String>> = columns
-            .iter()
-            .map(|&c| {
-                self.columns
-                    .get(c)
-                    .and_then(Column::timezone)
-                    .map(str::to_owned)
-            })
-            .collect();
         fp_index::MultiIndex::from_arrays(levels)
-            .map(|mi| {
-                zones
-                    .iter()
-                    .enumerate()
-                    .fold(mi.set_names(names), |mi, (level, zone)| {
-                        mi.with_level_zone(level, zone.as_deref())
-                    })
-            })
+            .map(finish)
             .map_err(FrameError::Index)
     }
 
@@ -89265,11 +89548,35 @@ impl DataFrame {
         // RangeIndex / int indexes) has no missing labels, so from_i64_values is
         // bit-identical to from_values([Scalar::Int64..]).
         // Held instants first: an empty datetime index is vacuously all-Int64.
+        // A text index held as one buffer is that buffer's column, any other
+        // all-text one its typed text column: a String and a Scalar were made
+        // a label (reset_index of 200k strs 0.19x pandas; br-frankenpandas-o88r1).
+        let text_column = || {
+            self.index
+                .utf8_contiguous_parts()
+                .and_then(|(bytes, offsets)| Column::from_utf8_contiguous_arc(bytes, offsets))
+                .or_else(|| {
+                    (!self.index.is_empty())
+                        .then(|| typed_level_column(self.index.labels()))
+                        .flatten()
+                })
+        };
+        // An empty index's int view answers for any dtype: an empty object
+        // index is an object column, as pandas' (it came back int64).
+        let ints = self
+            .index
+            .int64_label_values()
+            .filter(|_| !self.index.is_empty() || self.index.dtype() == "int64");
         let index_column = match held_datetime_index_column(&self.index) {
             Some(column) => column,
-            None => match self.index.int64_label_values() {
+            None => match ints {
                 Some(view) => Column::from_i64_values_owned(view.as_ref().clone()),
-                None => Column::from_values(index_labels_to_column_scalars(self.index.labels()))?,
+                None => match text_column() {
+                    Some(column) => column,
+                    None => {
+                        Column::from_values(index_labels_to_column_scalars(self.index.labels()))?
+                    }
+                },
             },
         };
         // A narrow index's column keeps its width, a masked index's its
@@ -126952,7 +127259,8 @@ mod tests {
 
     use chrono::Duration;
     use fp_columnar::Column;
-    #[cfg(feature = "lazy-transpose-view")]
+    // Ungated: the word-scan tests (sqeub) name it in every build, and a
+    // --no-default-features test build failed 25 x E0433 (kphgt's class).
     use fp_columnar::ValidityMask;
     use fp_index::{AlignMode, Index};
     use fp_runtime::{EvidenceLedger, RuntimePolicy};
@@ -182221,6 +182529,225 @@ mod tests {
     }
 
     #[test]
+    fn grouped_nan_float_ranks_are_typed_0ixw3() {
+        // br-frankenpandas-0ixw3: a NaN-holding float column's group ranks
+        // over dense ids, pandas' values (2.2.3) for every method; a NaN
+        // row ranks NaN under na_option='keep'.
+        let keys = Series::from_values(
+            "k",
+            (0_i64..7).map(IndexLabel::Int64).collect(),
+            [1, 2, 1, 1, 2, 2, 1]
+                .iter()
+                .map(|&key| Scalar::Int64(key))
+                .collect(),
+        )
+        .unwrap();
+        let values = Series::new(
+            "v",
+            keys.index().clone(),
+            Column::from_f64_values(vec![3.0, f64::NAN, 1.0, 3.0, 2.0, 2.0, f64::NAN]),
+        )
+        .unwrap();
+        let shown = |result: Series| -> Vec<Option<f64>> {
+            result
+                .values()
+                .iter()
+                .map(|value| match value {
+                    Scalar::Float64(x) if !x.is_nan() => Some(*x),
+                    other => {
+                        assert!(other.is_missing(), "{other:?}");
+                        None
+                    }
+                })
+                .collect()
+        };
+        let grouped = values.groupby(&keys).unwrap();
+        assert!(grouped.dense_float_ranks("average", true, false).is_some());
+        let rank = |method: &str, ascending: bool, na_option: &str, pct: bool| {
+            shown(
+                grouped
+                    .rank_with_pct(method, ascending, na_option, pct)
+                    .unwrap(),
+            )
+        };
+        let n = None;
+        assert_eq!(
+            rank("average", true, "keep", false),
+            [Some(2.5), n, Some(1.0), Some(2.5), Some(1.5), Some(1.5), n]
+        );
+        assert_eq!(
+            rank("min", true, "keep", false),
+            [Some(2.0), n, Some(1.0), Some(2.0), Some(1.0), Some(1.0), n]
+        );
+        assert_eq!(
+            rank("max", true, "keep", false),
+            [Some(3.0), n, Some(1.0), Some(3.0), Some(2.0), Some(2.0), n]
+        );
+        assert_eq!(
+            rank("first", true, "keep", false),
+            [Some(2.0), n, Some(1.0), Some(3.0), Some(1.0), Some(2.0), n]
+        );
+        assert_eq!(
+            rank("dense", true, "keep", false),
+            [Some(2.0), n, Some(1.0), Some(2.0), Some(1.0), Some(1.0), n]
+        );
+        assert_eq!(
+            rank("average", false, "keep", false),
+            [Some(1.5), n, Some(3.0), Some(1.5), Some(1.5), Some(1.5), n]
+        );
+        let pct = rank("average", true, "keep", true);
+        assert!((pct[0].unwrap() - 2.5 / 3.0).abs() < 1e-12 && pct[1].is_none());
+        assert!((pct[4].unwrap() - 0.75).abs() < 1e-12);
+        // NEGATIVE: na_option='top' keeps the general path (NaN ranked).
+        assert_eq!(
+            rank("average", true, "top", false),
+            [
+                Some(3.5),
+                Some(1.0),
+                Some(2.0),
+                Some(3.5),
+                Some(2.5),
+                Some(2.5),
+                Some(1.0)
+            ]
+        );
+        // -0.0 ties 0.0, method='first' by appearance (pandas: [1, 2, 4, 3]
+        // and descending [2, 3, 1, 4]).
+        let one = Series::from_values(
+            "k",
+            (0_i64..4).map(IndexLabel::Int64).collect(),
+            vec![Scalar::Int64(1); 4],
+        )
+        .unwrap();
+        let zeros = Series::new(
+            "v",
+            one.index().clone(),
+            Column::from_f64_values(vec![0.0, -0.0, 1.0, -0.0]),
+        )
+        .unwrap();
+        let grouped = zeros.groupby(&one).unwrap();
+        let first = |ascending: bool| {
+            shown(
+                grouped
+                    .rank_with_pct("first", ascending, "keep", false)
+                    .unwrap(),
+            )
+        };
+        assert_eq!(first(true), [Some(1.0), Some(2.0), Some(4.0), Some(3.0)]);
+        assert_eq!(first(false), [Some(2.0), Some(3.0), Some(1.0), Some(4.0)]);
+    }
+
+    #[test]
+    fn dense_group_rows_match_build_groups_g390a() {
+        // br-frankenpandas-g390a: a key with dense ids takes each group's
+        // rows by a count and one pass, first seen, as build_groups has
+        // them; a key with a missing value has no dense ids, and its row
+        // belongs to no group.
+        let rows = || (0_i64..6).map(IndexLabel::Int64).collect::<Vec<_>>();
+        let text = |keys: [Option<&str>; 6]| {
+            Series::from_values(
+                "k",
+                rows(),
+                keys.iter()
+                    .map(|key| {
+                        key.map_or(Scalar::Null(NullKind::Null), |key| Scalar::Utf8(key.into()))
+                    })
+                    .collect(),
+            )
+            .unwrap()
+        };
+        let values =
+            Series::from_values("v", rows(), (0_i64..6).map(Scalar::Int64).collect()).unwrap();
+        let label = |key: &str| IndexLabel::Utf8(key.into());
+        let keys = text([
+            Some("b"),
+            Some("a"),
+            Some("b"),
+            Some("c"),
+            Some("a"),
+            Some("b"),
+        ]);
+        let grouped = values.groupby(&keys).unwrap();
+        let dense = grouped.dense_group_rows().unwrap();
+        assert_eq!(
+            dense,
+            [
+                (label("b"), vec![0, 2, 5]),
+                (label("a"), vec![1, 4]),
+                (label("c"), vec![3]),
+            ]
+        );
+        let (order, order_keys, groups) = grouped.build_groups();
+        let built: Vec<(IndexLabel, Vec<usize>)> = order
+            .into_iter()
+            .zip(order_keys)
+            .map(|(label, key)| (label, groups[&key].clone()))
+            .collect();
+        assert_eq!(dense, built);
+        assert_eq!(grouped.indices().len(), 3);
+        // NEGATIVE: a missing key keeps build_groups, which drops its row.
+        let keys = text([Some("b"), None, Some("b"), Some("c"), None, Some("b")]);
+        let grouped = values.groupby(&keys).unwrap();
+        assert!(grouped.dense_group_rows().is_none());
+        let indices = grouped.indices();
+        assert_eq!(indices.len(), 2);
+        assert_eq!(indices[&label("b")], [0, 2, 5]);
+        assert_eq!(indices[&label("c")], [3]);
+    }
+
+    #[test]
+    fn float_equals_compares_validity_words_gue9b() {
+        // br-frankenpandas-gue9b: equals over 64-row steps of the validity
+        // words - a NaN and a nullable gap match, -0.0 matches 0.0, and a
+        // difference anywhere (the last partial step too) is found.
+        let index = Index::new((0_i64..130).map(IndexLabel::Int64).collect());
+        let series = |column: Column| Series::new("v", index.clone(), column).unwrap();
+        let base: Vec<f64> = (0..130).map(|row| f64::from(row) * 0.5).collect();
+        let gaps = [3_usize, 64, 70, 128];
+        let mut nan_data = base.clone();
+        let mut gap_data = base.clone();
+        let mut words = vec![u64::MAX, u64::MAX, 0b11];
+        for &row in &gaps {
+            nan_data[row] = f64::NAN;
+            gap_data[row] = 0.0;
+            words[row / 64] &= !(1_u64 << (row % 64));
+        }
+        let nan_missing = series(Column::from_f64_values(nan_data.clone()));
+        let gapped = |data: Vec<f64>| {
+            series(Column::from_f64_values_with_validity(
+                data,
+                fp_columnar::ValidityMask::from_words(words.clone(), 130),
+            ))
+        };
+        let nullable = gapped(gap_data);
+        assert!(nan_missing.equals(&nullable));
+        assert!(nullable.equals(&nan_missing));
+        // The same gaps holding other data.
+        let mut other_gaps = base.clone();
+        for &row in &gaps {
+            other_gaps[row] = 5.0;
+        }
+        assert!(gapped(other_gaps).equals(&nullable));
+        let mut zero = nan_data.clone();
+        zero[0] = -0.0;
+        assert!(series(Column::from_f64_values(zero)).equals(&nan_missing));
+        // NEGATIVE: a difference in the last partial step, a value against
+        // a gap, and the all-valid arm's tail.
+        let mut tail = nan_data.clone();
+        tail[129] += 1.0;
+        assert!(!series(Column::from_f64_values(tail)).equals(&nan_missing));
+        let mut filled = nan_data;
+        filled[70] = 1.0;
+        assert!(!series(Column::from_f64_values(filled)).equals(&nan_missing));
+        assert!(!nullable.equals(&series(Column::from_f64_values(base.clone()))));
+        let mut last = base.clone();
+        last[129] = -1.0;
+        assert!(
+            !series(Column::from_f64_values(last)).equals(&series(Column::from_f64_values(base)))
+        );
+    }
+
+    #[test]
     fn groupby_rank() {
         let df = DataFrame::from_dict(
             &["g", "v"],
@@ -198712,6 +199239,50 @@ mod tests {
     }
 
     #[test]
+    fn axis1_int_union_is_first_seen_jwjo7() {
+        use std::sync::Arc;
+        let union = |parts: &[&[i64]]| {
+            let parts: Vec<Arc<Vec<i64>>> =
+                parts.iter().map(|part| Arc::new(part.to_vec())).collect();
+            super::first_seen_int_union(&parts)
+        };
+        // Increasing indexes (the merge): overlapping, interleaved, disjoint.
+        assert_eq!(
+            union(&[&[0, 1, 2, 3, 4], &[3, 4, 5, 6, 7]]),
+            [0, 1, 2, 3, 4, 5, 6, 7]
+        );
+        assert_eq!(union(&[&[0, 2], &[1, 2, 3]]), [0, 2, 1, 3]);
+        assert_eq!(union(&[&[5], &[1, 9], &[0, 5, 9, 11]]), [5, 1, 9, 0, 11]);
+        // Any other order (the hash set): first seen.
+        assert_eq!(union(&[&[5, 1], &[1, 9]]), [5, 1, 9]);
+        assert_eq!(union(&[&[3, 3, 1], &[1, 2]]), [3, 1, 2]);
+        // The frame: labels as pandas' first-seen union, values aligned.
+        let frame = |labels: Vec<i64>, values: Vec<f64>, name: &str| {
+            let index = Index::new(labels.into_iter().map(IndexLabel::Int64).collect());
+            DataFrame::new_with_column_order(
+                index,
+                BTreeMap::from([(name.to_owned(), Column::from_f64_values(values))]),
+                vec![name.to_owned()],
+            )
+            .unwrap()
+        };
+        let a = frame(vec![5, 1], vec![1.0, 2.0], "a");
+        let b = frame(vec![1, 9], vec![3.0, 4.0], "b");
+        let out = super::concat_dataframes_with_axis(&[&a, &b], 1).unwrap();
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::Int64(5),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(9)
+            ]
+        );
+        let b_values = out.column("b").unwrap().values();
+        assert!(b_values[0].is_missing());
+        assert_eq!(b_values[1], Scalar::Float64(3.0));
+    }
+
+    #[test]
     fn concat_number_gaps_are_nan_floats_am5l7() {
         let frame = |columns: Vec<(&str, Column)>| {
             let len = columns.first().map_or(0, |(_, column)| column.len());
@@ -214425,6 +214996,94 @@ mod tests {
         let level1 = mi.get_level_values(1).unwrap();
         assert_eq!(level1.labels()[0], IndexLabel::Int64(2024));
         assert_eq!(level1.labels()[1], IndexLabel::Int64(2025));
+    }
+
+    #[test]
+    fn typed_keys_make_coded_levels_2h9up() {
+        // br-frankenpandas-2h9up: all-valid text (one buffer) and int keys
+        // make coded levels - every int arm (a wide range hashed, a narrow
+        // one tabled, an increasing one its own codes) - with the labels,
+        // names and flat labels of the rows, a window and a take reading
+        // the same; a gapped key keeps the label path and its NaN label.
+        let mut bytes = Vec::new();
+        let mut offsets = vec![0];
+        for word in ["b", "a", "b", "", "a"] {
+            bytes.extend_from_slice(word.as_bytes());
+            offsets.push(bytes.len());
+        }
+        let frame = |g: Column| {
+            DataFrame::new(
+                Index::from_range(0, 5, 1),
+                BTreeMap::from([
+                    ("g".to_owned(), g),
+                    (
+                        "k".to_owned(),
+                        Column::from_i64_values(vec![9, -4, 9, 9, 100_000_000_000]),
+                    ),
+                    ("d".to_owned(), Column::from_i64_values(vec![3, 1, 3, 2, 1])),
+                    ("i".to_owned(), Column::from_i64_values(vec![1, 2, 3, 4, 5])),
+                    (
+                        "v".to_owned(),
+                        Column::from_f64_values(vec![0.5, 1.5, 2.5, 3.5, 4.5]),
+                    ),
+                ]),
+            )
+            .unwrap()
+        };
+        let text = |words: &[&str]| -> Vec<IndexLabel> {
+            words
+                .iter()
+                .map(|&word| IndexLabel::Utf8(word.to_owned()))
+                .collect()
+        };
+        let ints = |values: &[i64]| -> Vec<IndexLabel> {
+            values
+                .iter()
+                .map(|&value| IndexLabel::Int64(value))
+                .collect()
+        };
+        let keys = ["g", "k", "d", "i"];
+        let multi = frame(Column::from_utf8_contiguous(bytes, offsets));
+        let levels = multi.to_multi_index(&keys).unwrap();
+        let level = |at: usize| levels.get_level_values(at).unwrap().labels().to_vec();
+        assert_eq!(level(0), text(&["b", "a", "b", "", "a"]));
+        assert_eq!(level(1), ints(&[9, -4, 9, 9, 100_000_000_000]));
+        assert_eq!(level(2), ints(&[3, 1, 3, 2, 1]));
+        assert_eq!(level(3), ints(&[1, 2, 3, 4, 5]));
+        assert_eq!(
+            levels.names(),
+            keys.map(|key| Some(fp_index::LabelName::from(key)))
+                .as_slice()
+        );
+        let indexed = multi.set_index_multi(&["g", "k"], true, "|").unwrap();
+        assert_eq!(
+            indexed.index().labels(),
+            text(&["b|9", "a|-4", "b|9", "|9", "a|100000000000"]).as_slice()
+        );
+        assert_eq!(
+            indexed.head(2).unwrap().index().labels(),
+            text(&["b|9", "a|-4"]).as_slice()
+        );
+        assert_eq!(
+            indexed.take(&[4, 3], 0).unwrap().index().labels(),
+            text(&["a|100000000000", "|9"]).as_slice()
+        );
+        // NEGATIVE: a gapped text key keeps the label path.
+        let gapped = frame(
+            Column::from_values(vec![
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8(String::new()),
+                Scalar::Utf8("a".to_owned()),
+            ])
+            .unwrap(),
+        );
+        let levels = gapped.to_multi_index(&["g", "k"]).unwrap();
+        assert_eq!(
+            levels.get_level_values(0).unwrap().labels()[1],
+            IndexLabel::Null(NullKind::NaN)
+        );
     }
 
     #[test]

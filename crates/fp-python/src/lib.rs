@@ -32523,6 +32523,20 @@ fn sample_weights(
 /// pandas' sort of a union of index labels (`Index.sort_values`): numbers
 /// by value (bools as 0 / 1), text, instants or durations, missing labels
 /// last; labels of kinds Python cannot order are its TypeError.
+/// Whether two indexes hold equal labels in the same order, as their label
+/// slices compare: the lengths first, two int64 indexes by their values,
+/// else the labels (each label of both was made to be compared;
+/// br-frankenpandas-fpl2p).
+fn index_labels_equal(left: &Index, right: &Index) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    match (left.int64_label_values(), right.int64_label_values()) {
+        (Some(left), Some(right)) => left == right,
+        _ => left.labels() == right.labels(),
+    }
+}
+
 fn sort_union_labels(labels: &mut [IndexLabel]) -> PyResult<()> {
     let python_type = |label: &IndexLabel| match label {
         IndexLabel::Int64(_) => "int",
@@ -41683,14 +41697,44 @@ impl PySeries {
         // A label found takes the source's own value - the reindexed column
         // had turned float by the very rows the fill replaces, so
         // reindex(fill_value=0) of an int Series came back float64.
+        // Under a method, a label the method filled from a source - a NaN
+        // one too - is no gap: pandas fills only where its indexer found no
+        // source (an all-True marker reindexed the same way says where; a
+        // NaN ffilled from the source was filled; br-frankenpandas-ex4op).
+        let method_found: Option<Vec<bool>> = match method {
+            Some(m) => {
+                let marker = Series::new(
+                    self.inner.name(),
+                    self.inner.index().clone(),
+                    Column::from_bool_values(vec![true; self.inner.len()]),
+                )
+                .and_then(|marker| {
+                    marker.reindex_index_with_method(&target.inner, m, limit, tolerance.as_deref())
+                })
+                .map_err(frame_error_to_py)?;
+                Some(
+                    marker
+                        .values()
+                        .iter()
+                        .map(|cell| !cell.is_missing())
+                        .collect(),
+                )
+            }
+            None => None,
+        };
         let source_values = self.inner.values();
         let values = reindexed
             .values()
             .iter()
             .zip(&source_positions)
-            .map(|(value, source)| match source {
+            .enumerate()
+            .map(|(row, (value, source))| match source {
                 Some(position) if method.is_none() => source_values[*position].clone(),
-                None if value.is_missing() => fill.clone(),
+                None if value.is_missing()
+                    && method_found.as_ref().is_none_or(|found| !found[row]) =>
+                {
+                    fill.clone()
+                }
                 _ => value.clone(),
             })
             .collect();
@@ -43254,6 +43298,9 @@ fn column_ndarray<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<'py, 
         && column.categorical().is_none()
         && let Some((bytes, offsets)) = column.as_utf8_window()
     {
+        if let Some(array) = repeated_text_ndarray(py, &np, bytes, offsets)? {
+            return Ok(array);
+        }
         let strs = text_list(py, bytes, offsets)?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("dtype", "object")?;
@@ -43262,6 +43309,52 @@ fn column_ndarray<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<'py, 
         return Ok(array);
     }
     object_ndarray(py, &np, &materialized_values(column))
+}
+
+/// The object ndarray of a text column held as one byte buffer whose values
+/// repeat: its distinct strs made once into a small object array, taken by
+/// each row's first-seen code - numpy copies the references - where a list
+/// of every row's str was read back by numpy a row at a time (to_numpy of
+/// 200k strs over 3 values 4.6 ms, pandas 0.003; br-frankenpandas-o1i2m).
+/// None - text_list's path - when a 16k-row window is mostly distinct.
+fn repeated_text_ndarray<'py>(
+    py: Python<'py>,
+    np: &Bound<'py, PyModule>,
+    bytes: &[u8],
+    offsets: &[usize],
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    const WINDOW: usize = 16_384;
+    let rows = offsets.len().saturating_sub(1);
+    let mut code_of: FxHashMap<&[u8], i64> = FxHashMap::default();
+    let mut distinct: Vec<&[u8]> = Vec::new();
+    let mut codes: Vec<i64> = Vec::with_capacity(rows);
+    for (row, bounds) in offsets.windows(2).enumerate() {
+        let cell = &bytes[bounds[0]..bounds[1]];
+        let next = i64::try_from(distinct.len()).unwrap_or(i64::MAX);
+        let code = *code_of.entry(cell).or_insert_with(|| {
+            distinct.push(cell);
+            next
+        });
+        codes.push(code);
+        let seen = row + 1;
+        if (seen % WINDOW == 0 || seen == rows) && distinct.len() * 2 > seen {
+            return Ok(None);
+        }
+    }
+    let strs = distinct
+        .iter()
+        .map(|cell| {
+            std::str::from_utf8(cell)
+                .map(|text| pyo3::types::PyString::new(py, text))
+                .map_err(|error| PyErr::new::<pyo3::exceptions::PyValueError, _>(error.to_string()))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "object")?;
+    let uniques = np.call_method("empty", (strs.len(),), Some(&kwargs))?;
+    uniques.set_item(pyo3::types::PySlice::full(py), PyList::new(py, strs)?)?;
+    let codes = i64_ndarray(py, &codes, "int64")?;
+    Ok(Some(uniques.call_method1("take", (codes,))?))
 }
 
 /// An object numpy array holding `values` as Python objects, filled
@@ -43746,6 +43839,20 @@ fn frame_ndarray<'py>(py: Python<'py>, frame: &DataFrame) -> PyResult<Bound<'py,
                 .map(|value| cell_to_py(py, column, value))
                 .collect::<PyResult<Vec<_>>>()?;
             np.call_method("array", (PyList::new(py, items)?,), Some(&kwargs))?
+        } else if column.width().is_none()
+            && column.categorical().is_none()
+            && (matches!(
+                (column.dtype(), numpy_kind(column)),
+                (DType::Int64, Some("int64"))
+                    | (DType::Float64, Some("float64"))
+                    | (DType::Bool, Some("bool"))
+            ) || column.dtype() == DType::Utf8)
+        {
+            // A plain number or bool column's typed array (numpy boxes it,
+            // as pandas' astype(object)), a text one's object array: each
+            // cell was made a Python object through its Scalar, the list
+            // read back by numpy (0.40x pandas; br-frankenpandas-o1i2m).
+            column_ndarray(py, column)?
         } else {
             object_ndarray(py, &np, column.values())?
         };
@@ -49032,19 +49139,21 @@ impl PyDataFrame {
                         // and its labels copied into an unnamed Index (a frame
                         // of one 200k Series 0.06x pandas; br-frankenpandas-1rrx0).
                         let head = &series_indices[0];
+                        // The name all share, on whatever index unites them
+                        // (a union dropped it; br-frankenpandas-fpl2p).
+                        let shared = series_indices
+                            .iter()
+                            .all(|idx| idx.name() == head.name())
+                            .then(|| head.name().cloned())
+                            .flatten();
                         if series_indices.iter().all(|idx| {
                             idx == head
                                 && (series_indices.len() == 1 || idx.dtype() == head.dtype())
                         }) {
-                            let shared = series_indices
-                                .iter()
-                                .all(|idx| idx.name() == head.name())
-                                .then(|| head.name().cloned())
-                                .flatten();
                             Some(head.rename_index(shared))
                         } else if series_indices
                             .iter()
-                            .all(|idx| idx.labels() == head.labels())
+                            .all(|idx| index_labels_equal(idx, head))
                         {
                             // Ints beside equal floats are pandas' float64
                             // index (the first's ints were kept).
@@ -49058,6 +49167,60 @@ impl PyDataFrame {
                                 )),
                                 None => Some(Index::new(head.labels().to_vec())),
                             }
+                            .map(|index| index.rename_index(shared))
+                        } else if let Some(ints) = series_indices
+                            .iter()
+                            .map(Index::int64_label_values)
+                            .collect::<Option<Vec<_>>>()
+                        {
+                            // Int indexes unite by their values sorted and
+                            // deduplicated, the order sort_union_labels gives
+                            // ints: every label was hashed with SipHash and
+                            // copied (two 200k Series on differing indexes
+                            // 0.15x pandas; br-frankenpandas-fpl2p).
+                            // pandas unites them a pair at a time; a RangeIndex
+                            // stays one while each union is equally spaced
+                            // (RangeIndex._shallow_copy).
+                            let spaced = |values: &[i64]| {
+                                let step = |w: &[i64]| i128::from(w[1]) - i128::from(w[0]);
+                                values.len() > 1
+                                    && values.windows(2).all(|w| step(w) == step(values))
+                            };
+                            // Each index's values ascending (as they are, or
+                            // reversed, when monotone - a sort else), merged
+                            // into the union so far.
+                            let ascending = |values: &[i64]| -> Vec<i64> {
+                                if values.windows(2).all(|w| w[0] < w[1]) {
+                                    values.to_vec()
+                                } else if values.windows(2).all(|w| w[0] > w[1]) {
+                                    values.iter().rev().copied().collect()
+                                } else {
+                                    let mut sorted = values.to_vec();
+                                    sorted.sort_unstable();
+                                    sorted.dedup();
+                                    sorted
+                                }
+                            };
+                            let mut values: Vec<i64> = Vec::new();
+                            let mut ranged = head.range_span().is_some();
+                            for (at, more) in ints.iter().enumerate() {
+                                let more = ascending(more);
+                                let mut merged = Vec::with_capacity(values.len() + more.len());
+                                let (mut i, mut j) = (0, 0);
+                                while i < values.len() && j < more.len() {
+                                    let (a, b) = (values[i], more[j]);
+                                    merged.push(a.min(b));
+                                    i += usize::from(a <= b);
+                                    j += usize::from(b <= a);
+                                }
+                                merged.extend_from_slice(&values[i..]);
+                                merged.extend_from_slice(&more[j..]);
+                                values = merged;
+                                ranged &= at == 0 || spaced(&values);
+                            }
+                            let united = Index::from_i64_values(values);
+                            let span = united.int64_range_span().filter(|_| ranged);
+                            Some(united.with_range_span(span).rename_index(shared))
                         } else {
                             let mut seen = HashSet::new();
                             let mut union_labels: Vec<IndexLabel> = series_indices
@@ -49067,7 +49230,26 @@ impl PyDataFrame {
                                 .cloned()
                                 .collect();
                             sort_union_labels(&mut union_labels)?;
-                            Some(Index::new(union_labels))
+                            // Ints beside floats unite as pandas' float64 (they
+                            // were an object index).
+                            let floats: Option<Vec<f64>> = union_labels
+                                .iter()
+                                .map(|label| match label {
+                                    IndexLabel::Int64(value) => Some(*value as f64),
+                                    IndexLabel::Float64(value) => Some(value.0),
+                                    _ => None,
+                                })
+                                .collect();
+                            let any_float = union_labels
+                                .iter()
+                                .any(|label| matches!(label, IndexLabel::Float64(_)));
+                            Some(
+                                match floats.filter(|_| any_float) {
+                                    Some(floats) => Index::from_f64_values(floats),
+                                    None => Index::new(union_labels),
+                                }
+                                .rename_index(shared),
+                            )
                         }
                     } else {
                         None
@@ -49086,18 +49268,16 @@ impl PyDataFrame {
                             // answer at once) is on it already.
                             if let Some(target) = common_rows.as_ref().filter(|target| {
                                 s.inner.index() != *target
-                                    && s.inner.index().labels() != target.labels()
+                                    && !index_labels_equal(s.inner.index(), target)
                             }) {
                                 // A Series already on the target labels - repeated
                                 // labels too - is taken as it is, as pandas' (the
                                 // reindex refused a repeated index;
-                                // br-frankenpandas-rbiki).
-                                let reindexed =
-                                    s.inner.reindex(target.labels().to_vec()).map_err(|e| {
-                                        PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                            e.to_string(),
-                                        )
-                                    })?;
+                                // br-frankenpandas-rbiki). The target itself, not a
+                                // copy of its labels (br-frankenpandas-fpl2p).
+                                let reindexed = s.inner.reindex_to_index(target).map_err(|e| {
+                                    PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
+                                })?;
                                 reindexed.column().clone()
                             } else {
                                 s.inner.column().clone()
@@ -59413,10 +59593,10 @@ impl PyDataFrame {
         let index = self.inner.index();
         let row_multi = self.inner.row_multiindex();
         // Each row level's labels, borrowed (they were copied out).
-        let row_levels: Vec<&[IndexLabel]> = match row_multi {
+        let row_levels = || match row_multi {
             Some(multi) => (0..multi.nlevels())
                 .filter_map(|level| multi.level_labels(level))
-                .collect(),
+                .collect::<Vec<&[IndexLabel]>>(),
             None => vec![index.labels()],
         };
         let mut names: Vec<Option<LabelName>> = match row_multi {
@@ -59445,8 +59625,15 @@ impl PyDataFrame {
         // levels; df.stack() over a NaN-holding frame 0.23x pandas;
         // br-frankenpandas-iq5l6). pandas keeps the levels whole, in the
         // frame's order; these report the sorted labels kept
-        // (br-frankenpandas-33b80).
-        if let Some(levels) = fp_index::MultiIndex::stacked_cells(&row_levels, &column_labels) {
+        // (br-frankenpandas-33b80). Row levels stack their codes, no label
+        // made, and keep their zones - a zoned index or level came out naive
+        // UTC (br-frankenpandas-srwyq).
+        let stacked = match row_multi {
+            Some(multi) => multi.stacked_levels(&column_labels),
+            None => fp_index::MultiIndex::stacked_cells(&row_levels(), &column_labels)
+                .map(|levels| levels.with_level_zone(0, index.tz())),
+        };
+        if let Some(levels) = stacked {
             let (levels, values) = if all_kept {
                 (levels, values)
             } else {
@@ -59471,6 +59658,7 @@ impl PyDataFrame {
             let out = Series::new("", index, values).map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: out })?.into_any());
         }
+        let row_levels = row_levels();
         let total = index.len() * columns.len();
         let mut arrays: Vec<Vec<IndexLabel>> = (0..=row_levels.len())
             .map(|_| Vec::with_capacity(total))
@@ -61042,6 +61230,28 @@ impl PyDataFrame {
                                 .map_or_else(|| format!("level_{level}"), ToString::to_string),
                         );
                     }
+                }
+                // An int index is its int array, of its own width: its
+                // labels were copied into a new Index to be read back
+                // (to_records 0.35x pandas; an int32 index's field int64;
+                // br-frankenpandas-u2iv4).
+                None if frame_index.tz().is_none()
+                    && matches!(
+                        frame_index.dtype(),
+                        "int64" | "int32" | "int16" | "int8" | "uint32" | "uint16" | "uint8"
+                    )
+                    && let Some(ints) = frame_index.int64_label_values() =>
+                {
+                    let array = i64_ndarray(py, &ints, "int64")?;
+                    arrays.push(match frame_index.dtype() {
+                        "int64" => array,
+                        narrow => array.call_method1("astype", (narrow,))?,
+                    });
+                    names.push(
+                        frame_index
+                            .name()
+                            .map_or_else(|| "index".to_owned(), String::from),
+                    );
                 }
                 None => {
                     let plain = Index::new(frame_index.labels().to_vec())
@@ -62833,6 +63043,25 @@ fn loc_assign(
         }
         return Ok(out);
     }
+    // One str over plain text columns: each column's buffer with the str at
+    // the rows, the column write_cells and put make of it - a Scalar String
+    // was made a row, and cloned again a column (df.loc[mask, text] = 'X'
+    // 0.40x pandas; br-frankenpandas-1ofpy).
+    if let Ok(text) = value.cast_exact::<pyo3::types::PyString>()
+        && let Ok(text) = text.to_str()
+        && let Some(written) = columns
+            .iter()
+            .map(|name| df.column(name)?.put_text(positions, text))
+            .collect::<Option<Vec<Column>>>()
+    {
+        let mut out = df.clone();
+        for (name, column) in columns.iter().zip(written) {
+            out = out
+                .with_column(name.clone(), column)
+                .map_err(frame_error_to_py)?;
+        }
+        return Ok(out);
+    }
     let cells = assign_cells(py, labels, positions, value)?;
     let mut out = df.clone();
     for name in columns {
@@ -63476,6 +63705,15 @@ fn bool_mask_key(key: &Bound<'_, PyAny>) -> Option<Vec<bool>> {
             .and_then(|bytes| ndarray_elements::<u8>(key.py(), &bytes))
     {
         return Some(bytes.into_iter().map(|byte| byte != 0).collect());
+    }
+    // An all-valid bool Series is its column's flags: it was iterated into a
+    // list of Python bools, each extracted back (s[mask] = v 0.35x pandas;
+    // br-frankenpandas-jmkb7).
+    if kind.as_deref().is_ok_and(|kind| kind == "b")
+        && let Ok(series) = key.extract::<PyRef<'_, PySeries>>()
+        && let Some(flags) = series.inner.column().as_bool_slice()
+    {
+        return Some(flags.to_vec());
     }
     let mask = key.extract::<Vec<bool>>().ok()?;
     if mask.is_empty() {
@@ -75315,7 +75553,7 @@ fn keyed_group_rows(
     keys: &[Vec<IndexLabel>],
     key_names: Vec<Option<LabelName>>,
     pieces: &[&Index],
-) -> PyResult<(Vec<IndexLabel>, fp_index::MultiIndex)> {
+) -> PyResult<(Index, fp_index::MultiIndex)> {
     let (flat, levels) = keyed_rows(keys, pieces, None)?;
     let mut names = key_names;
     let named = names.len();
@@ -75334,7 +75572,8 @@ fn lay_out_frames(pieces: &[DataFrame], layout: AppliedLayout) -> PyResult<DataF
                 .collect::<PyResult<Vec<_>>>()?;
             let indexes: Vec<&Index> = indexes.iter().collect();
             let (flat, levels) = keyed_group_rows(&keys, names, &indexes)?;
-            out.set_axis(flat, 0)
+            let name = out.index().name().cloned();
+            out.with_index(flat.rename_index(name))
                 .and_then(|out| out.with_row_multiindex(levels))
                 .map_err(frame_error_to_py)
         }
@@ -75352,7 +75591,7 @@ fn lay_out_series(pieces: &[Series], layout: AppliedLayout) -> PyResult<Series> 
         AppliedLayout::Keyed(keys, names) => {
             let indexes: Vec<&Index> = pieces.iter().map(Series::index).collect();
             let (flat, levels) = keyed_group_rows(&keys, names, &indexes)?;
-            let index = Index::new(flat)
+            let index = flat
                 .with_row_multiindex(levels)
                 .map_err(index_error_to_py)?;
             Series::new(out.name(), index, out.column().clone()).map_err(frame_error_to_py)
@@ -82889,10 +83128,6 @@ impl PyResampler {
     }
 }
 
-/// pandas' `concat(keys=...)` row labels: every piece's labels under its key as
-/// the outer level. The level names are `names=`, else no name and the pieces'
-/// shared index name. Returns the flat `key|label` labels and the levels
-/// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.3).
 /// A frame's row axis as one `Index`: its flat labels carrying the frame's
 /// row MultiIndex levels, as a Series index carries them.
 fn frame_row_index(frame: &DataFrame) -> PyResult<Index> {
@@ -82906,11 +83141,42 @@ fn frame_row_index(frame: &DataFrame) -> PyResult<Index> {
     }
 }
 
+/// The parts of `keys` when every key is a tuple of one length (one or
+/// more): pandas' key levels for them (br-frankenpandas-b4cp7). None for
+/// any other keys.
+fn tuple_key_parts(keys: &[Bound<'_, PyAny>]) -> PyResult<Option<Vec<Vec<IndexLabel>>>> {
+    let Some(tuples) = keys
+        .iter()
+        .map(|key| key.cast::<PyTuple>().ok())
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(None);
+    };
+    let width = tuples.first().map_or(0, |tuple| tuple.len());
+    if width == 0 || tuples.iter().any(|tuple| tuple.len() != width) {
+        return Ok(None);
+    }
+    tuples
+        .iter()
+        .map(|tuple| tuple.iter().map(|part| py_to_index_label(&part)).collect())
+        .collect::<PyResult<Vec<_>>>()
+        .map(Some)
+}
+
+/// pandas' `concat(keys=...)` row labels: every piece's labels under its key as
+/// the outer level. The level names are `names=`, else no name and the pieces'
+/// shared index name. Returns the flat `key|label` labels and the levels
+/// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6.3). The levels
+/// are made from codes - a key level's code repeated over its piece, an index
+/// level's first-seen codes - and the flat labels on first read: each row
+/// cloned its key (a String for text) and every label into the levels and
+/// formatted its flat label (concat(keys=) of 2 x 50k 0.46x pandas;
+/// br-frankenpandas-flq7y).
 fn keyed_rows(
     keys: &[Vec<IndexLabel>],
     pieces: &[&Index],
     names: Option<Vec<Option<LabelName>>>,
-) -> PyResult<(Vec<IndexLabel>, fp_index::MultiIndex)> {
+) -> PyResult<(Index, fp_index::MultiIndex)> {
     // Each key is one level (several for a groupby's tuple keys); each
     // piece's index adds its own levels after them.
     let key_levels = keys.first().map_or(1, Vec::len);
@@ -82928,34 +83194,48 @@ fn keyed_rows(
         None => piece.name().cloned(),
     };
     let rows: usize = pieces.iter().map(|piece| piece.len()).sum();
-    let mut arrays = vec![Vec::with_capacity(rows); key_levels + index_levels];
-    let mut flat = Vec::with_capacity(rows);
-    for (key, piece) in keys.iter().zip(pieces) {
-        let piece_arrays = match piece.row_multiindex() {
-            Some(multi) => (0..index_levels)
-                .map(|level| {
-                    multi
-                        .get_level_values(level)
-                        .map(|values| values.labels().to_vec())
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(index_error_to_py)?,
-            None => vec![piece.labels().to_vec()],
-        };
-        let key_text = key
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("|");
-        for (row, label) in piece.labels().iter().enumerate() {
-            for (level, part) in key.iter().enumerate() {
-                arrays[level].push(part.clone());
-            }
-            for (level, values) in piece_arrays.iter().enumerate() {
-                arrays[key_levels + level].push(values[row].clone());
-            }
-            flat.push(IndexLabel::Utf8(format!("{key_text}|{label}")));
+    let too_many = || not_implemented("concat(keys=...) past u32 rows or keys");
+    let mut uniques: Vec<Vec<IndexLabel>> = Vec::with_capacity(key_levels + index_levels);
+    let mut codes: Vec<Vec<u32>> = Vec::with_capacity(key_levels + index_levels);
+    for level in 0..key_levels {
+        let mut level_uniques: Vec<IndexLabel> = Vec::new();
+        let mut level_codes = Vec::with_capacity(rows);
+        for (key, piece) in keys.iter().zip(pieces) {
+            let part = &key[level];
+            let code = match level_uniques.iter().position(|seen| seen == part) {
+                Some(code) => code,
+                None => {
+                    level_uniques.push(part.clone());
+                    level_uniques.len() - 1
+                }
+            };
+            let code = u32::try_from(code).map_err(|_| too_many())?;
+            level_codes.extend(std::iter::repeat_n(code, piece.len()));
         }
+        uniques.push(level_uniques);
+        codes.push(level_codes);
+    }
+    for level in 0..index_levels {
+        let mut labels: Vec<IndexLabel> = Vec::with_capacity(rows);
+        for piece in pieces {
+            match piece.row_multiindex() {
+                Some(multi) => labels.extend_from_slice(
+                    multi
+                        .level_labels(level)
+                        .ok_or_else(|| not_implemented("concat(keys=...) of a missing level"))?,
+                ),
+                None => labels.extend_from_slice(piece.labels()),
+            }
+        }
+        let level_codes = fp_index::first_seen_label_codes(&labels).ok_or_else(too_many)?;
+        let mut level_uniques: Vec<IndexLabel> = Vec::new();
+        for (row, &code) in level_codes.iter().enumerate() {
+            if code as usize == level_uniques.len() {
+                level_uniques.push(labels[row].clone());
+            }
+        }
+        uniques.push(level_uniques);
+        codes.push(level_codes);
     }
     let names = names.unwrap_or_else(|| {
         let mut names = vec![None; key_levels];
@@ -82974,10 +83254,10 @@ fn keyed_rows(
             "concat(names=...) naming other than every key and index level",
         ));
     }
-    let levels = fp_index::MultiIndex::from_arrays(arrays)
+    let levels = fp_index::MultiIndex::from_coded_levels(uniques, codes)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
         .set_names(names);
-    Ok((flat, levels))
+    Ok((levels.to_flat_index(MULTIINDEX_FLAT_SEP), levels))
 }
 
 /// pandas `concat` over fp-frame: a list (or a dict, whose keys become
@@ -83481,13 +83761,20 @@ fn concat_objects(
         }
         Err(_) => (objs.clone(), keys.cloned()),
     };
-    let keys = keys
-        .map(|keys| -> PyResult<Vec<IndexLabel>> {
-            keys.try_iter()?
-                .map(|key| py_to_index_label(&key?))
-                .collect()
-        })
+    let key_items = keys
+        .map(|keys| -> PyResult<Vec<Bound<'_, PyAny>>> { keys.try_iter()?.collect() })
         .transpose()?;
+    let keys = key_items
+        .as_ref()
+        .map(|items| -> PyResult<Vec<IndexLabel>> { items.iter().map(py_to_index_label).collect() })
+        .transpose()?;
+    // Keys that are all tuples of one length are that many key levels of
+    // the rows, as pandas' (each tuple was one key label;
+    // br-frankenpandas-b4cp7).
+    let key_parts: Option<Vec<Vec<IndexLabel>>> = match key_items.as_ref() {
+        Some(items) => tuple_key_parts(items)?,
+        None => None,
+    };
     if names.is_some() && keys.is_none() {
         return Err(not_implemented("concat(names=...) without keys="));
     }
@@ -83538,6 +83825,7 @@ fn concat_objects(
     let mut series: Vec<Series> = Vec::new();
     // The keys of the objects kept: a None object drops out with its key.
     let mut kept_keys: Vec<IndexLabel> = Vec::new();
+    let mut kept_parts: Vec<Vec<IndexLabel>> = Vec::new();
     let mut kept: Vec<&Bound<'_, PyAny>> = Vec::new();
     for (position, item) in objects.iter().enumerate() {
         if item.is_none() {
@@ -83545,6 +83833,9 @@ fn concat_objects(
         }
         if let Some(keys) = &keys {
             kept_keys.push(keys[position].clone());
+        }
+        if let Some(parts) = &key_parts {
+            kept_parts.push(parts[position].clone());
         }
         kept.push(item);
         if let Ok(frame) = item.extract::<PyRef<'_, PyDataFrame>>() {
@@ -83597,6 +83888,14 @@ fn concat_objects(
     } else {
         Some(kept_keys)
     };
+    // The rows' key levels: a tuple key's parts, else the key alone.
+    let row_keys = |keys: &[IndexLabel]| -> Vec<Vec<IndexLabel>> {
+        if key_parts.is_some() {
+            kept_parts.clone()
+        } else {
+            keys.iter().map(|key| vec![key.clone()]).collect()
+        }
+    };
 
     if !series.is_empty() && axis == 0 {
         let refs: Vec<&Series> = series.iter().collect();
@@ -83643,9 +83942,9 @@ fn concat_objects(
             return PySeries { inner: out }.into_py_any(py);
         };
         let pieces: Vec<&Index> = series.iter().map(Series::index).collect();
-        let keys: Vec<Vec<IndexLabel>> = keys.iter().map(|key| vec![key.clone()]).collect();
+        let keys = row_keys(keys);
         let (flat, levels) = keyed_rows(&keys, &pieces, names)?;
-        let index = Index::new(flat)
+        let index = flat
             .with_row_multiindex(levels)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         let out =
@@ -83762,10 +84061,11 @@ fn concat_objects(
             .map(frame_row_index)
             .collect::<PyResult<Vec<_>>>()?;
         let pieces: Vec<&Index> = pieces.iter().collect();
-        let keys: Vec<Vec<IndexLabel>> = keys.iter().map(|key| vec![key.clone()]).collect();
+        let keys = row_keys(keys);
         let (flat, levels) = keyed_rows(&keys, &pieces, names)?;
+        let name = out.index().name().cloned();
         out = out
-            .set_axis(flat, 0)
+            .with_index(flat.rename_index(name))
             .and_then(|framed| framed.with_row_multiindex(levels))
             .map_err(frame_error_to_py)?;
     }

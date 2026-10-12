@@ -14224,6 +14224,28 @@ impl Column {
         }
     }
 
+    /// An all-valid Utf8 column over shared text bytes and offsets (from 0
+    /// to the bytes' end): an index's labels taken back as its column
+    /// without a copy - reset_index made a String and a Scalar a label
+    /// (br-frankenpandas-o88r1). None for other bounds.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_utf8_contiguous_arc(bytes: Arc<[u8]>, offsets: Arc<[usize]>) -> Option<Self> {
+        if offsets.first() != Some(&0) || offsets.last() != Some(&bytes.len()) {
+            return None;
+        }
+        let len = offsets.len() - 1;
+        Some(Self {
+            dtype: DType::Utf8,
+            values: ScalarValues::lazy_contiguous_utf8_arc(bytes, offsets),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+            categorical: None,
+            width: None,
+            pandas_string: false,
+        })
+    }
+
     /// Build an all-valid Utf8 column from a contiguous byte buffer + n+1
     /// offsets (br-frankenpandas-2krr0). `bytes[offsets[i]..offsets[i+1]]`
     /// must be valid UTF-8 for every row — string-output ops guarantee this
@@ -24501,6 +24523,45 @@ impl Column {
         Self::new(self.dtype.clone(), out)
     }
 
+    /// `text` written at each of `indices` of an all-valid plain text column
+    /// (no categories, not pandas' `string`), the rest of its rows as they
+    /// are: one pass over its buffer, where a write made a Scalar String a
+    /// row (df.loc[mask, text] = 'X' 0.20x pandas; br-frankenpandas-1ofpy).
+    /// None for any other column or an index past its end.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn put_text(&self, indices: &[usize], text: &str) -> Option<Self> {
+        self.text_rows_written(indices.iter().map(|&i| (i, text)))
+    }
+
+    /// The column [`Self::put_text`] and [`Self::put`] write: each row its
+    /// last write in `writes` (row, text) or its own span, into one buffer.
+    fn text_rows_written<'a>(
+        &self,
+        writes: impl Iterator<Item = (usize, &'a str)>,
+    ) -> Option<Self> {
+        if self.dtype != DType::Utf8 || self.categorical.is_some() || self.pandas_string {
+            return None;
+        }
+        let (bytes, offsets) = self.as_utf8_window()?;
+        let rows = self.len();
+        let mut written: Vec<Option<&str>> = vec![None; rows];
+        for (i, text) in writes {
+            *written.get_mut(i)? = Some(text);
+        }
+        let mut out_bytes = Vec::with_capacity(offsets[rows] - offsets[0]);
+        let mut out_offsets = Vec::with_capacity(rows + 1);
+        out_offsets.push(0);
+        for (row, written) in written.iter().enumerate() {
+            match written {
+                Some(text) => out_bytes.extend_from_slice(text.as_bytes()),
+                None => out_bytes.extend_from_slice(&bytes[offsets[row]..offsets[row + 1]]),
+            }
+            out_offsets.push(out_bytes.len());
+        }
+        Some(Self::from_utf8_contiguous(out_bytes, out_offsets))
+    }
+
     /// Replace elements at specified indices with given values.
     ///
     /// Matches np.put(). Returns a new column with values replaced at indices.
@@ -24551,6 +24612,20 @@ impl Column {
                     }
                 }
                 return Ok(Self::from_bool_values(out));
+            }
+            // All-valid text written with strs: each row's own span or its
+            // new text into one buffer - every cell was a String in the
+            // Scalar copy below (df.loc[mask, text] = 'X' 0.20x pandas;
+            // br-frankenpandas-1ofpy).
+            if values.iter().all(|value| matches!(value, Scalar::Utf8(_)))
+                && let Some(written) = self.text_rows_written(indices.iter().zip(values).map(
+                    |(&i, value)| match value {
+                        Scalar::Utf8(text) => (i, text.as_str()),
+                        _ => (i, ""),
+                    },
+                ))
+            {
+                return Ok(written);
             }
         }
         let mut out = self.values.to_vec();
@@ -43804,6 +43879,63 @@ mod tests {
             Some(5.0_f64.to_bits()),
         ];
         assert_eq!(shown(mixed.values()), mixed_want);
+    }
+
+    #[test]
+    fn text_put_writes_spans_1ofpy() {
+        // br-frankenpandas-1ofpy: strs written into all-valid text, whole or
+        // a window, are its rows with those replaced; NEGATIVE: a missing
+        // write takes the Scalar path and leaves the row missing.
+        let text = |cells: &[&str]| {
+            let mut bytes = Vec::new();
+            let mut offsets = vec![0];
+            for cell in cells {
+                bytes.extend_from_slice(cell.as_bytes());
+                offsets.push(bytes.len());
+            }
+            Column::from_utf8_contiguous(bytes, offsets)
+        };
+        let shown = |column: &Column| -> Vec<String> {
+            column
+                .values()
+                .iter()
+                .map(|cell| format!("{cell:?}"))
+                .collect()
+        };
+        let want = |cells: &[&str]| -> Vec<String> {
+            cells
+                .iter()
+                .map(|cell| format!("{:?}", Scalar::Utf8((*cell).to_owned())))
+                .collect()
+        };
+        let source = text(&["ab", "", "é", "cd", "e"]);
+        let values = [Scalar::Utf8("X".into()), Scalar::Utf8("日本".into())];
+        let put = source.put(&[1, 3], &values).unwrap();
+        assert_eq!(put.dtype(), DType::Utf8);
+        assert_eq!(shown(&put), want(&["ab", "X", "é", "日本", "e"]));
+        let window = source.take_contiguous_range(1, 3);
+        let put = window.put(&[0, 2], &values).unwrap();
+        assert_eq!(shown(&put), want(&["X", "é", "日本"]));
+        let missing = source.put(&[0], &[Scalar::Null(NullKind::Null)]).unwrap();
+        assert!(missing.values()[0].is_missing());
+        assert_eq!(missing.values()[4], Scalar::Utf8("e".into()));
+        // put_text: one str at each index, the same column put makes.
+        let one = source.put_text(&[4, 0, 4], "Q").unwrap();
+        assert_eq!(shown(&one), want(&["Q", "", "é", "cd", "Q"]));
+        let via_put = source
+            .put(
+                &[4, 0],
+                &[Scalar::Utf8("Q".into()), Scalar::Utf8("Q".into())],
+            )
+            .unwrap();
+        assert_eq!(shown(&one), shown(&via_put));
+        // NEGATIVE: an index past the end, a number column decline.
+        assert!(source.put_text(&[5], "Q").is_none());
+        assert!(
+            Column::from_f64_values(vec![1.0])
+                .put_text(&[0], "Q")
+                .is_none()
+        );
     }
 
     #[test]

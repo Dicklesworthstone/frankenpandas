@@ -3191,6 +3191,17 @@ impl Index {
         }
     }
 
+    /// The text bytes and offsets of an index held as one contiguous text
+    /// buffer, shared: reset_index takes them back as its column, where a
+    /// String and a Scalar were made a label (br-frankenpandas-o88r1). A
+    /// MultiIndex's flat labels are made first. `None` for any other backing.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn utf8_contiguous_parts(&self) -> Option<Utf8LabelBacking> {
+        let (bytes, offsets) = self.labels.utf8_contiguous.as_ref()?.backing();
+        Some((Arc::clone(bytes), Arc::clone(offsets)))
+    }
+
     /// The labels at `positions` (each below the length) of an index held as
     /// one contiguous text buffer, gathered as bytes into another: a
     /// MultiIndex frame's flat labels were cloned a String a row on every
@@ -24107,23 +24118,62 @@ impl MultiIndex {
         if rows.iter().any(|labels| labels.len() != row_count) {
             return None;
         }
-        let column_count = columns.len();
         let mut levels = Vec::with_capacity(rows.len() + 1);
         for labels in rows {
             let codes = first_seen_label_codes(labels)?;
             let uniques = Arc::new(first_seen_uniques(labels, &codes));
-            let cells: Vec<u32> = codes
-                .iter()
-                .flat_map(|&code| std::iter::repeat_n(code, column_count))
-                .collect();
-            levels.push(Level::from_codes(uniques, CodesWindow::from(cells)));
+            levels.push(Self::stacked_row_level(uniques, &codes, columns.len()));
         }
+        levels.push(Self::stacked_column_level(columns, row_count)?);
+        let names = vec![None; levels.len()];
+        Some(Self::from_shared_levels_and_names(levels, names))
+    }
+
+    /// [`Self::stacked_cells`] of this MultiIndex's rows: each level's codes
+    /// repeated a column at a time, its uniques shared, no label read - a
+    /// stack of a MultiIndex frame made each level's labels from its codes
+    /// and hashed them back into codes (df.stack() 0.30x pandas;
+    /// br-frankenpandas-srwyq). Each level keeps its zone (a stack made a
+    /// zoned level's naive UTC labels). Unnamed; None without a level or
+    /// past u32 codes.
+    #[must_use]
+    pub fn stacked_levels(&self, columns: &[IndexLabel]) -> Option<Self> {
+        if self.levels.is_empty() {
+            return None;
+        }
+        let mut levels = Vec::with_capacity(self.levels.len() + 1);
+        for level in &self.levels {
+            let coded = level.codes()?;
+            levels.push(
+                Self::stacked_row_level(Arc::clone(&coded.uniques), &coded.codes, columns.len())
+                    .zoned(level.zone.clone()),
+            );
+        }
+        levels.push(Self::stacked_column_level(columns, self.len())?);
+        let names = vec![None; levels.len()];
+        Some(Self::from_shared_levels_and_names(levels, names))
+    }
+
+    /// A stacked row level: each row's code repeated `column_count` times.
+    fn stacked_row_level(
+        uniques: Arc<Vec<IndexLabel>>,
+        codes: &[u32],
+        column_count: usize,
+    ) -> Level {
+        let cells: Vec<u32> = codes
+            .iter()
+            .flat_map(|&code| std::iter::repeat_n(code, column_count))
+            .collect();
+        Level::from_codes(uniques, CodesWindow::from(cells))
+    }
+
+    /// The stacked column level: the columns' codes cycled `row_count`
+    /// times; None past u32 codes.
+    fn stacked_column_level(columns: &[IndexLabel], row_count: usize) -> Option<Level> {
         let codes = first_seen_label_codes(columns)?;
         let uniques = Arc::new(first_seen_uniques(columns, &codes));
         let cells: Vec<u32> = (0..row_count).flat_map(|_| codes.iter().copied()).collect();
-        levels.push(Level::from_codes(uniques, CodesWindow::from(cells)));
-        let names = vec![None; levels.len()];
-        Some(Self::from_shared_levels_and_names(levels, names))
+        Some(Level::from_codes(uniques, CodesWindow::from(cells)))
     }
 
     /// Rows `start..start + len`: each level a window of its codes, the
@@ -27900,6 +27950,65 @@ mod tests {
         assert!(MultiIndex::stacked_cells(&[], &columns).is_none());
         assert!(MultiIndex::stacked_cells(&[&rows, &inner[..2]], &columns).is_none());
         assert_eq!(MultiIndex::stacked_cells(&[&rows], &[]).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn stacked_levels_stack_the_codes_srwyq() {
+        // br-frankenpandas-srwyq: a MultiIndex's rows stacked off its
+        // levels' codes - a window of coded levels (their uniques shared,
+        // an unused label among them) - give the cells stacked_cells gives
+        // the same labels, a zoned level keeping its zone; NEGATIVE: no
+        // level is None.
+        let utf8 = |s: &str| IndexLabel::Utf8(s.to_owned());
+        let coded = MultiIndex::from_coded_levels(
+            vec![
+                vec![utf8("b"), utf8("a"), utf8("c")],
+                vec![IndexLabel::Int64(9), IndexLabel::Int64(-4)],
+            ],
+            vec![vec![0, 1, 0, 2], vec![0, 1, 1, 0]],
+        )
+        .unwrap();
+        let window = coded.slice_rows(0, 3).unwrap();
+        let columns = [utf8("v"), utf8("w")];
+        let stacked = window.stacked_levels(&columns).unwrap();
+        let outer = [utf8("b"), utf8("a"), utf8("b")];
+        let inner = [
+            IndexLabel::Int64(9),
+            IndexLabel::Int64(-4),
+            IndexLabel::Int64(-4),
+        ];
+        let expected = MultiIndex::stacked_cells(&[&outer, &inner], &columns).unwrap();
+        assert_eq!(stacked.len(), 6);
+        for row in 0..6 {
+            assert_eq!(stacked.get_tuple(row), expected.get_tuple(row));
+        }
+        for level in 0..3 {
+            assert_eq!(stacked.level_labels(level), expected.level_labels(level));
+        }
+        assert_eq!(
+            stacked.to_flat_index("|").labels(),
+            expected.to_flat_index("|").labels()
+        );
+        // A level held as labels is coded first.
+        let labelled = MultiIndex::from_arrays(vec![outer.to_vec(), inner.to_vec()]).unwrap();
+        let stacked = labelled.stacked_levels(&columns).unwrap();
+        assert_eq!(stacked.get_tuple(3), expected.get_tuple(3));
+        let zoned = MultiIndex::from_arrays(vec![
+            vec![IndexLabel::Datetime64(0), IndexLabel::Datetime64(1)],
+            vec![utf8("p"), utf8("q")],
+        ])
+        .unwrap()
+        .with_level_zone(0, Some("Europe/Paris"));
+        let stacked = zoned.stacked_levels(&columns).unwrap();
+        assert_eq!(stacked.level_zone(0), Some("Europe/Paris"));
+        assert_eq!(stacked.level_zone(1), None);
+        assert_eq!(
+            stacked.get_tuple(2).unwrap(),
+            vec![&IndexLabel::Datetime64(1), &utf8("q"), &utf8("v")]
+        );
+        // NEGATIVE: no level.
+        let empty = MultiIndex::from_arrays(Vec::new()).unwrap();
+        assert!(empty.stacked_levels(&columns).is_none());
     }
 
     #[test]

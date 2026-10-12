@@ -3254,16 +3254,15 @@ fn ordered_unique_int64_outer_positions(
                 }
             }
         }
-        while left_idx < left_values.len() {
-            left_positions.push(Some(left_idx));
-            right_positions.push(None);
-            left_idx += 1;
-        }
-        while right_idx < right_values.len() {
-            left_positions.push(None);
-            right_positions.push(Some(right_idx));
-            right_idx += 1;
-        }
+        // The tails (one of them empty) in bulk: a push a row spilled both
+        // lengths, and an outer join of two disjoint indexes is all tail
+        // (br-frankenpandas-m3z4g).
+        let left_rest = left_values.len() - left_idx;
+        left_positions.extend((left_idx..left_values.len()).map(Some));
+        right_positions.extend(std::iter::repeat_n(None, left_rest));
+        let right_rest = right_values.len() - right_idx;
+        left_positions.extend(std::iter::repeat_n(None, right_rest));
+        right_positions.extend((right_idx..right_values.len()).map(Some));
         return Some((left_positions, right_positions));
     }
 

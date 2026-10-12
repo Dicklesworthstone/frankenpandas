@@ -42341,14 +42341,22 @@ def test_reindex_fill_value_like_pandas_q569n(case: str) -> None:
 
 _EX4OP_CASES = {
     "method ffill keeps a NaN source": lambda m: m.Series([1.0, np.nan, 3.0], index=[0, 2, 4]).reindex(range(6), method="ffill", fill_value=0.0),
+    "method bfill keeps a NaN source": lambda m: m.Series([np.nan, 2.0, np.nan], index=[1, 3, 5]).reindex(range(8), method="bfill", fill_value=-1.0),
+    "ffill with a limit": lambda m: m.Series([1.0, 2.0], index=[0, 10]).reindex(range(0, 14, 2), method="ffill", limit=1, fill_value=9.0),
     "nullable Int64 keeps its dtype": lambda m: m.Series([1, None, 3], dtype="Int64").reindex([0, 1, 9], fill_value=0),
+    "nullable boolean": lambda m: m.Series([True, None], dtype="boolean").reindex([0, 1, 5], fill_value=False),
+    # NEGATIVE: no method fills every absent label; a found NaN stays NaN.
+    "no method (NEGATIVE)": lambda m: m.Series([1.0, np.nan], index=[0, 2]).reindex(range(4), fill_value=7.0),
 }
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.xfail(strict=True, reason="br-frankenpandas-ex4op: reindex fill_value after method= / of a nullable source")
 @pytest.mark.parametrize("case", list(_EX4OP_CASES))
-def test_reindex_fill_value_generic_gaps_ex4op(case: str) -> None:
+def test_reindex_fill_value_after_method_and_nullable_ex4op(case: str) -> None:
+    # fill_value fills only the labels the method found no source for (it
+    # filled a label filled from a NaN source), and a nullable source keeps
+    # its dtype under a fill it holds (it came back int64;
+    # br-frankenpandas-ex4op): dtype and cells.
     def run(m: Any) -> Any:
         out = _EX4OP_CASES[case](m)
         return str(out.dtype), [repr(v) for v in out.tolist()]
@@ -42397,6 +42405,613 @@ def test_merge_on_indexes_like_pandas_m3z4g(case: str) -> None:
             [str(out[c].dtype) for c in out.columns],
             [repr(v) for v in out.index],
             [[repr(v) for v in out[c].tolist()] for c in out.columns],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+_FPL2P_V = np.random.default_rng(37).normal(size=400)
+
+_FPL2P_CASES = {
+    "range and reversed": lambda m: m.DataFrame({
+        "a": m.Series(_FPL2P_V[:200]),
+        "o": m.Series(_FPL2P_V[200:], index=np.arange(200)[::-1].copy()),
+    }),
+    "range and every other": lambda m: m.DataFrame({
+        "a": m.Series(_FPL2P_V[:200]),
+        "h": m.Series(_FPL2P_V[:100], index=np.arange(0, 300, 3)),
+    }),
+    "shared name on the union": lambda m: m.DataFrame({
+        "a": m.Series([1.0, 2.0], index=m.Index([3, 1], name="x")),
+        "b": m.Series([3.0, 4.0], index=m.Index([2, 1], name="x")),
+    }),
+    "three int indexes": lambda m: m.DataFrame({
+        "a": m.Series([1.0, 2.0], index=[5, -3]),
+        "b": m.Series([3.0], index=[7]),
+        "c": m.Series([4.0, 5.0, 6.0], index=[-3, 7, 0]),
+    }),
+    "range then a stepped range": lambda m: m.DataFrame({
+        "a": m.Series(_FPL2P_V[:5]),
+        "b": m.Series(_FPL2P_V[5:8], index=[6, 8, 10]),
+    }),
+    # NEGATIVE: a union unevenly spaced on the way stays an Index though the
+    # last one is a range; names that differ, a text union, a float label.
+    "range, a gap, then filled (NEGATIVE)": lambda m: m.DataFrame({
+        "a": m.Series(_FPL2P_V[:5]),
+        "b": m.Series(_FPL2P_V[5:6], index=[10]),
+        "c": m.Series(_FPL2P_V[6:11], index=[5, 6, 7, 8, 9]),
+    }),
+    "names differ (NEGATIVE)": lambda m: m.DataFrame({
+        "a": m.Series([1.0, 2.0], index=m.Index([3, 1], name="x")),
+        "b": m.Series([3.0, 4.0], index=m.Index([2, 1], name="y")),
+    }),
+    "text union (NEGATIVE)": lambda m: m.DataFrame({
+        "a": m.Series([1.0, 2.0], index=["q", "b"]),
+        "b": m.Series([3.0, 4.0], index=["b", "a"]),
+    }),
+    "float labels (NEGATIVE)": lambda m: m.DataFrame({
+        "a": m.Series([1.0, 2.0], index=[3, 1]),
+        "b": m.Series([3.0, 4.0], index=[2.5, 1.0]),
+    }),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FPL2P_CASES))
+def test_dict_of_series_union_like_pandas_fpl2p(case: str) -> None:
+    # Series on differing int indexes unite by their values and reindex to
+    # the union itself (SipHash over every label, a copy per Series: 0.15x
+    # pandas; br-frankenpandas-fpl2p), the union named as they agree.
+    def run(m: Any) -> Any:
+        out = _FPL2P_CASES[case](m)
+        return (
+            type(out.index).__name__,
+            str(out.index.dtype),
+            repr(out.index.name),
+            [repr(v) for v in out.index],
+            [[repr(v) for v in out[c].tolist()] for c in out.columns],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+def _flq7y_frame(m: Any, start: int, n: int, index: Any = None) -> Any:
+    rows = np.arange(start, start + n)
+    return m.DataFrame({"x": rows * 2, "y": rows / 8.0}, index=rows if index is None else index)
+
+
+_FLQ7Y_CASES = {
+    "two keys": lambda m: m.concat([_flq7y_frame(m, 0, 30), _flq7y_frame(m, 100, 30)], keys=["a", "b"]),
+    "keys given unsorted": lambda m: m.concat([_flq7y_frame(m, 0, 5), _flq7y_frame(m, 5, 5)], keys=["b", "a"]).loc["a"],
+    "repeated key": lambda m: m.concat([_flq7y_frame(m, 0, 3), _flq7y_frame(m, 3, 3)], keys=["k", "k"]),
+    "names": lambda m: m.concat([_flq7y_frame(m, 0, 4), _flq7y_frame(m, 9, 4)], keys=["p", "q"], names=["src", "row"]),
+    "text index": lambda m: m.concat(
+        [_flq7y_frame(m, 0, 3, index=["u", "v", "w"]), _flq7y_frame(m, 3, 2, index=["v", "z"])], keys=[1, 2]
+    ),
+    "Series": lambda m: m.concat([m.Series([1.0, 2.0]), m.Series([3.0])], keys=["s", "t"]),
+    "MultiIndex rows": lambda m: m.concat(
+        [_flq7y_frame(m, 0, 4).set_index(["x"], append=True), _flq7y_frame(m, 4, 4).set_index(["x"], append=True)],
+        keys=["a", "b"],
+    ),
+    "loc a key": lambda m: m.concat([_flq7y_frame(m, 0, 30), _flq7y_frame(m, 100, 30)], keys=["a", "b"]).loc["b"],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FLQ7Y_CASES))
+def test_concat_keys_like_pandas_flq7y(case: str) -> None:
+    # concat(keys=) builds its levels from codes and its flat labels on first
+    # read (a String a row and every label cloned: 0.46x pandas;
+    # br-frankenpandas-flq7y): index tuples, names, cells.
+    def run(m: Any) -> Any:
+        out = _FLQ7Y_CASES[case](m)
+        cells = (
+            [[repr(v) for v in out[c].tolist()] for c in out.columns]
+            if hasattr(out, "columns")
+            else [repr(v) for v in out.tolist()]
+        )
+        return [repr(v) for v in out.index], [repr(n) for n in out.index.names], cells
+
+    assert run(fpd) == run(pd)
+
+
+_B4CP7_CASES = {
+    "frames": lambda m: m.concat([_flq7y_frame(m, 0, 2), _flq7y_frame(m, 2, 2)], keys=[("x", 1), ("y", 2)]),
+    "Series": lambda m: m.concat([m.Series([1.0]), m.Series([2.0])], keys=[("a", 1), ("b", 2)]),
+    "names": lambda m: m.concat(
+        [_flq7y_frame(m, 0, 2), _flq7y_frame(m, 2, 2)], keys=[("x", 1), ("y", 2)], names=["p", "q", "r"]
+    ),
+    "loc a tuple key": lambda m: m.concat([_flq7y_frame(m, 0, 2), _flq7y_frame(m, 2, 2)], keys=[("x", 1), ("y", 2)]).loc["y"],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_B4CP7_CASES))
+def test_concat_keys_tuples_split_b4cp7(case: str) -> None:
+    # Tuple keys are one key level each of their parts, as pandas' (each
+    # tuple was one key label; br-frankenpandas-b4cp7): index, names, cells.
+    def run(m: Any) -> Any:
+        out = _B4CP7_CASES[case](m)
+        cells = out.tolist() if not hasattr(out, "columns") else [out[c].tolist() for c in out.columns]
+        return [repr(v) for v in out.index], [repr(n) for n in out.index.names], repr(cells)
+
+    assert run(fpd) == run(pd)
+
+
+def _o88r1_frame(m: Any) -> Any:
+    return m.DataFrame({"name": [f"user_{i}" for i in range(50)], "v": np.arange(50.0)})
+
+
+_O88R1_CASES = {
+    "set_index text then reset": lambda m: _o88r1_frame(m).set_index("name").reset_index(),
+    "named text index": lambda m: m.DataFrame({"v": [1, 2, 3]}, index=m.Index(["a", "b", "c"], name="key")).reset_index(),
+    "sliced text index": lambda m: _o88r1_frame(m).set_index("name").iloc[10:20].reset_index(),
+    "taken text index": lambda m: _o88r1_frame(m).set_index("name").iloc[[5, 1, 9]].reset_index(),
+    "Series text index": lambda m: m.Series([1.0, 2.0], index=["p", "q"], name="s").reset_index(),
+    "non-ASCII text": lambda m: m.DataFrame({"v": [1, 2]}, index=["é", "日本"]).reset_index(),
+    # NEGATIVE: the other arms and the Scalar column.
+    "a missing label (NEGATIVE)": lambda m: m.DataFrame({"v": [1, 2, 3]}, index=["a", None, "c"]).reset_index(),
+    "mixed labels (NEGATIVE)": lambda m: m.DataFrame({"v": [1, 2]}, index=["a", 1]).reset_index(),
+    "categorical index (NEGATIVE)": lambda m: m.DataFrame({"v": [1, 2]}, index=m.CategoricalIndex(["x", "y"])).reset_index(),
+    "int index (NEGATIVE)": lambda m: m.DataFrame({"v": [1, 2]}, index=[7, 3]).reset_index(),
+    "empty text index (NEGATIVE)": lambda m: m.DataFrame({"v": []}, index=m.Index([], dtype=object)).reset_index(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_O88R1_CASES))
+def test_reset_text_index_like_pandas_o88r1(case: str) -> None:
+    # reset_index of a text index takes its text buffer back as the column
+    # (a String and a Scalar a label: 0.19x pandas; br-frankenpandas-o88r1):
+    # columns, dtypes, cells.
+    def run(m: Any) -> Any:
+        out = _O88R1_CASES[case](m)
+        return (
+            [repr(c) for c in out.columns],
+            [str(out[c].dtype) for c in out.columns],
+            [[repr(v) for v in out[c].tolist()] for c in out.columns],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+_O1I2M_N = 40_000
+_O1I2M_RNG = np.random.default_rng(41)
+_O1I2M_CITY = np.array(["Paris", "Lyon", "Nice"], dtype=object)[_O1I2M_RNG.integers(0, 3, _O1I2M_N)]
+_O1I2M_K = _O1I2M_RNG.integers(0, 50, _O1I2M_N)
+
+
+def _o1i2m_frame(m: Any) -> Any:
+    return m.DataFrame({
+        "k": _O1I2M_K,
+        "v": np.where(np.arange(_O1I2M_N) % 9 == 0, np.nan, np.arange(_O1I2M_N) / 3.0),
+        "city": _O1I2M_CITY,
+        "b": np.arange(_O1I2M_N) % 2 == 0,
+    })
+
+
+def _o1i2m_cells(array: Any) -> Any:
+    flat = array.ravel()
+    return str(array.dtype), array.shape, [(type(v).__name__, repr(v)) for v in flat[:200]] + [
+        (type(v).__name__, repr(v)) for v in flat[-200:]
+    ]
+
+
+_O1I2M_CASES = {
+    "mixed values": lambda m: _o1i2m_frame(m).values,
+    "mixed to_numpy": lambda m: _o1i2m_frame(m)[["city", "k"]].to_numpy(),
+    "text to_numpy": lambda m: _o1i2m_frame(m)["city"].to_numpy(),
+    "distinct text to_numpy": lambda m: m.Series([f"u{i}" for i in range(30_000)]).to_numpy(),
+    "short text": lambda m: m.Series(["a", "b", "a"]).to_numpy(),
+    "non-ASCII text": lambda m: m.Series(["é", "日本", "é"] * 6000).to_numpy(),
+    # NEGATIVE: datetime / tz / nullable / text with a gap keep their cells.
+    "with datetimes (NEGATIVE)": lambda m: m.DataFrame(
+        {"t": m.date_range("2024-01-01", periods=3), "s": ["a", "b", "c"]}
+    ).values,
+    "with tz (NEGATIVE)": lambda m: m.DataFrame(
+        {"t": m.date_range("2024-01-01", periods=2, tz="UTC"), "k": [1, 2]}
+    ).values,
+    "nullable Int64 (NEGATIVE)": lambda m: m.DataFrame({"a": m.array([1, None], dtype="Int64"), "s": ["x", "y"]}).values,
+    "text with a gap (NEGATIVE)": lambda m: m.DataFrame({"s": ["x", None, "x"], "k": [1, 2, 3]}).values,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_O1I2M_CASES))
+def test_object_values_like_pandas_o1i2m(case: str) -> None:
+    # A mixed frame's object array fills each column from its typed array
+    # and a repeating text column takes its distinct strs by code (a Python
+    # object a cell through its Scalar: 0.40x pandas; br-frankenpandas-o1i2m):
+    # dtype, shape, each cell's type and value.
+    assert _o1i2m_cells(_O1I2M_CASES[case](fpd)) == _o1i2m_cells(_O1I2M_CASES[case](pd))
+
+
+_0IXW3_N = 20_000
+_0IXW3_RNG = np.random.default_rng(53)
+_0IXW3_KEY = np.array([f"g{i}" for i in range(12)], dtype=object)[_0IXW3_RNG.integers(0, 12, _0IXW3_N)]
+_0IXW3_V = np.where(_0IXW3_RNG.random(_0IXW3_N) < 0.05, np.nan, np.round(_0IXW3_RNG.normal(size=_0IXW3_N), 1))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("method", ["average", "min", "max", "first", "dense"])
+@pytest.mark.parametrize("ascending", [True, False])
+@pytest.mark.parametrize("pct", [False, True])
+def test_grouped_nan_float_rank_like_pandas_0ixw3(method: str, ascending: bool, pct: bool) -> None:
+    # groupby rank of a NaN-holding float column over dense group ids, typed
+    # (Scalar keys and a comparison sort a group; br-frankenpandas-0ixw3).
+    def run(m: Any) -> Any:
+        frame = m.DataFrame({"k": _0IXW3_KEY, "v": _0IXW3_V})
+        out = frame.groupby("k")["v"].rank(method=method, ascending=ascending, pct=pct)
+        return str(out.dtype), [repr(round(v, 12)) if v == v else "nan" for v in out.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("na_option", ["top", "bottom"])
+def test_grouped_nan_float_rank_na_options_0ixw3(na_option: str) -> None:
+    # NEGATIVE: na_option top / bottom keep the general path.
+    def run(m: Any) -> Any:
+        frame = m.DataFrame({"k": _0IXW3_KEY[:500], "v": _0IXW3_V[:500]})
+        return frame.groupby("k")["v"].rank(na_option=na_option).tolist()
+
+    assert run(fpd) == run(pd)
+
+
+def _u2iv4_frame(m: Any, index: Any = None) -> Any:
+    return m.DataFrame({"a": np.arange(6), "b": np.arange(6) / 2.0}, index=index)
+
+
+_U2IV4_CASES = {
+    "RangeIndex": lambda m: _u2iv4_frame(m).to_records(),
+    "named int index": lambda m: _u2iv4_frame(m, m.Index([5, 3, 9, 1, 0, 2], name="id")).to_records(),
+    "sliced frame": lambda m: _u2iv4_frame(m).iloc[2:5].to_records(),
+    # NEGATIVE: other indexes keep their path.
+    "text index (NEGATIVE)": lambda m: _u2iv4_frame(m, list("pqrstu")).to_records(),
+    "datetime index (NEGATIVE)": lambda m: _u2iv4_frame(m, m.date_range("2024-01-01", periods=6)).to_records(),
+    "int32 index (NEGATIVE)": lambda m: _u2iv4_frame(m, m.Index(np.arange(6, dtype=np.int32))).to_records(),
+    "MultiIndex (NEGATIVE)": lambda m: _u2iv4_frame(m).set_index(["a"], append=True).to_records(),
+    "index=False (NEGATIVE)": lambda m: _u2iv4_frame(m).to_records(index=False),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_U2IV4_CASES))
+def test_to_records_like_pandas_u2iv4(case: str) -> None:
+    # to_records of an int index frame reads the index as its int64 array
+    # (its labels were copied into a new Index: 0.35x pandas;
+    # br-frankenpandas-u2iv4): field names, dtypes and records.
+    def run(m: Any) -> Any:
+        records = _U2IV4_CASES[case](m)
+        return str(records.dtype), [repr(tuple(row)) for row in records.tolist()]
+
+    assert run(fpd) == run(pd)
+
+
+_JMKB7_V = np.random.default_rng(59).normal(size=3000)
+_JMKB7_CITY = np.array(["Paris", "Lyon", "Nice"], dtype=object)[np.arange(3000) % 3]
+
+
+def _jmkb7_frame(m: Any) -> Any:
+    return m.DataFrame({"v": _JMKB7_V, "w": np.arange(3000.0), "city": _JMKB7_CITY})
+
+
+def _jmkb7_set(m: Any, write: Any) -> Any:
+    frame = _jmkb7_frame(m)
+    write(frame)
+    return frame
+
+
+_JMKB7_CASES = {
+    "s[bool Series] = v": lambda m: (
+        lambda s: (s.__setitem__(m.Series(_JMKB7_V > 0.5), 1.0), s.to_frame())[1]
+    )(m.Series(np.arange(3000.0), name="w")),
+    "loc[bool Series, col] = v": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__((f["v"] > 0.5, "w"), 0.0)),
+    "loc[ndarray, col] = v": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__((_JMKB7_V > 0.5, "w"), 0.0)),
+    "loc[mask, text] = str (1ofpy)": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__((_JMKB7_V > 0.5, "city"), "X")),
+    "loc[mask, text] = non-ASCII (1ofpy)": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__((_JMKB7_V > 1.0, "city"), "日本")),
+    "loc[rows, text] = str (1ofpy)": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__(([3, 1, 2], "city"), "Z")),
+    # NEGATIVE: a missing / non-str write, a bool Series with a missing value.
+    "loc[mask, text] = None (NEGATIVE)": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__((_JMKB7_V > 1.0, "city"), None)),
+    "loc[mask, text] = 5 (NEGATIVE)": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__((_JMKB7_V > 1.0, "city"), 5)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_JMKB7_CASES))
+def test_mask_writes_like_pandas_jmkb7(case: str) -> None:
+    # A bool Series mask is its column's flags (a Python list of bools:
+    # 0.35x pandas; br-frankenpandas-jmkb7) and a text column written with
+    # strs is one buffer pass (a String a row: 0.20x; br-frankenpandas-1ofpy):
+    # columns, dtypes, cells.
+    def run(m: Any) -> Any:
+        out = _JMKB7_CASES[case](m)
+        return (
+            [str(out[c].dtype) for c in out.columns],
+            [[repr(v) for v in out[c].tolist()] for c in out.columns],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+_JWJO7_V = np.random.default_rng(67).normal(size=400)
+
+_JWJO7_CASES = {
+    "overlapping Series": lambda m: m.concat([m.Series(_JWJO7_V).head(200), m.Series(_JWJO7_V).iloc[100:300]], axis=1),
+    "overlapping frames": lambda m: m.concat(
+        [m.DataFrame({"x": _JWJO7_V[:50]}), m.DataFrame({"y": _JWJO7_V[50:100]}, index=np.arange(25, 75))], axis=1
+    ),
+    "int indexes first seen": lambda m: m.concat(
+        [m.Series([1.0, 2.0], index=[5, 1]), m.Series([3.0, 4.0], index=[1, 9])], axis=1
+    ),
+    "interleaved increasing": lambda m: m.concat(
+        [m.Series([1.0, 2.0], index=[0, 2]), m.Series([3.0, 4.0, 5.0], index=[1, 2, 3])], axis=1
+    ),
+    "shared name": lambda m: m.concat(
+        [m.Series([1.0], index=m.Index([3], name="i")), m.Series([2.0], index=m.Index([4], name="i"))], axis=1
+    ),
+    # NEGATIVE: text and datetime indexes keep the general union.
+    "text indexes (NEGATIVE)": lambda m: m.concat([m.Series([1.0], index=["b"]), m.Series([2.0], index=["a"])], axis=1),
+    "datetime indexes (NEGATIVE)": lambda m: m.concat(
+        [m.Series([1.0, 2.0], index=m.date_range("2024-01-01", periods=2)),
+         m.Series([3.0], index=m.date_range("2024-01-02", periods=1))], axis=1
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_JWJO7_CASES))
+def test_concat_axis1_int_union_like_pandas_jwjo7(case: str) -> None:
+    # concat(axis=1) of objects on differing int indexes unites them by value
+    # in first-seen order (a BTreeSet insert a label: 0.13x pandas;
+    # br-frankenpandas-jwjo7): labels, name, cells (the index type left out:
+    # pandas keeps a RangeIndex for two overlapping ranges, fp an int Index).
+    def run(m: Any) -> Any:
+        out = _JWJO7_CASES[case](m)
+        return (
+            [repr(v) for v in out.index],
+            repr(out.index.name),
+            [repr(c) for c in out.columns],
+            [[repr(v) for v in out[c].tolist()] for c in out.columns],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+_G390A_RNG = np.random.default_rng(67)
+_G390A_TEXT = np.array(["b", "a", "d", "c"], dtype=object)[_G390A_RNG.integers(0, 4, 400)]
+_G390A_INT = _G390A_RNG.integers(-3, 3, 400)
+_G390A_V = _G390A_RNG.normal(size=400)
+
+
+def _g390a_frame(m: Any) -> Any:
+    return m.DataFrame({"t": _G390A_TEXT, "i": _G390A_INT, "v": _G390A_V})
+
+
+def _g390a_spread(x: Any) -> Any:
+    return x.max() - x.min()
+
+
+_G390A_CASES = {
+    "text key agg": lambda m: _g390a_frame(m).groupby("t")["v"].agg(_g390a_spread),
+    "text key agg len": lambda m: _g390a_frame(m).groupby("t")["v"].agg(len),
+    "text key sort=False": lambda m: _g390a_frame(m).groupby("t", sort=False)["v"].agg(_g390a_spread),
+    "text key apply scalar": lambda m: _g390a_frame(m).groupby("t")["v"].apply(lambda x: x.iloc[0]),
+    "text key apply Series": lambda m: _g390a_frame(m).groupby("t")["v"].apply(lambda x: x - x.mean()),
+    "text key group_keys=False": lambda m: _g390a_frame(m).groupby("t", group_keys=False)["v"].apply(
+        lambda x: x * 2
+    ),
+    "int key agg": lambda m: _g390a_frame(m).groupby("i")["v"].agg(_g390a_spread),
+    "datetime key agg": lambda m: _g390a_frame(m)
+    .assign(d=m.Timestamp("2024-01-01") + m.to_timedelta(_G390A_INT % 3, unit="D"))
+    .groupby("d")["v"]
+    .agg(len),
+    "categorical key agg": lambda m: _g390a_frame(m)
+    .assign(c=m.Categorical(_G390A_TEXT, categories=["d", "c", "b", "a", "z"]))
+    .groupby("c", observed=False)["v"]
+    .agg(len),
+    # NEGATIVE: keys without dense ids keep build_groups.
+    "missing text key (NEGATIVE)": lambda m: _g390a_frame(m)
+    .assign(t=np.where(np.arange(400) % 7 == 0, None, _G390A_TEXT))
+    .groupby("t")["v"]
+    .agg(_g390a_spread),
+    "float key (NEGATIVE)": lambda m: _g390a_frame(m).groupby(_G390A_INT / 2.0)["v"].agg(len),
+    "two keys (NEGATIVE)": lambda m: _g390a_frame(m).groupby(["t", "i"])["v"].agg(_g390a_spread),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_G390A_CASES))
+def test_groupby_callable_like_pandas_g390a(case: str) -> None:
+    # A callable agg / apply over a key with dense group ids takes its
+    # groups' rows by a count and one pass (build_groups hashed each key as
+    # a Scalar: 0.75-0.85x pandas; br-frankenpandas-g390a): labels, name,
+    # values.
+    def run(m: Any) -> Any:
+        out = _G390A_CASES[case](m)
+        return (
+            [repr(v) for v in out.index],
+            repr(out.index.names),
+            repr(out.name),
+            [repr(round(v, 12)) if isinstance(v, float) else repr(v) for v in out.tolist()],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("key", ["t", "i"])
+def test_groupby_indices_like_pandas_g390a(key: str) -> None:
+    # SeriesGroupBy.indices / .groups over dense group ids: each group's
+    # positions and labels in pandas' group order.
+    def run(m: Any) -> Any:
+        gb = _g390a_frame(m).groupby(key)["v"]
+        return (
+            [(repr(k), v.tolist()) for k, v in gb.indices.items()],
+            [(repr(k), list(v)) for k, v in gb.groups.items()],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+_GUE9B_V = np.where(np.arange(300) % 7 == 0, np.nan, np.random.default_rng(71).normal(size=300))
+
+
+def _gue9b_other(change: Any) -> Any:
+    values = _GUE9B_V.copy()
+    change(values)
+    return values
+
+
+_GUE9B_CASES = {
+    "copy": lambda m: m.Series(_GUE9B_V).equals(m.Series(_GUE9B_V.copy())),
+    "None for NaN": lambda m: m.Series(_GUE9B_V).equals(
+        m.Series([None if v != v else v for v in _GUE9B_V.tolist()], dtype="float64")
+    ),
+    "-0.0 for 0.0": lambda m: m.Series([0.0, np.nan, 1.0]).equals(m.Series([-0.0, np.nan, 1.0])),
+    "frame copy": lambda m: m.DataFrame({"a": _GUE9B_V, "b": np.arange(300.0)}).equals(
+        m.DataFrame({"a": _GUE9B_V.copy(), "b": np.arange(300.0)})
+    ),
+    # NEGATIVE: a difference anywhere, a value against a NaN, another dtype.
+    "last row differs (NEGATIVE)": lambda m: m.Series(_GUE9B_V).equals(
+        m.Series(_gue9b_other(lambda v: v.__setitem__(299, 9.0)))
+    ),
+    "value for NaN (NEGATIVE)": lambda m: m.Series(_GUE9B_V).equals(
+        m.Series(_gue9b_other(lambda v: v.__setitem__(70, 1.0)))
+    ),
+    "NaN for value (NEGATIVE)": lambda m: m.Series(_GUE9B_V).equals(
+        m.Series(_gue9b_other(lambda v: v.__setitem__(71, np.nan)))
+    ),
+    "frame cell differs (NEGATIVE)": lambda m: m.DataFrame({"a": _GUE9B_V}).equals(
+        m.DataFrame({"a": _gue9b_other(lambda v: v.__setitem__(128, -1.0))})
+    ),
+    "int against float (NEGATIVE)": lambda m: m.Series([1.0, 2.0]).equals(m.Series([1, 2])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_GUE9B_CASES))
+def test_float_equals_like_pandas_gue9b(case: str) -> None:
+    # equals of NaN-holding float columns folds blocks of rows, or 64-row
+    # steps against the validity words (a ValidityMask::get a row: 0.08x
+    # pandas; br-frankenpandas-gue9b).
+    assert _GUE9B_CASES[case](fpd) == _GUE9B_CASES[case](pd)
+
+
+_2H9UP_G = np.array(["b", "a", "c"], dtype=object)[np.arange(60) % 3]
+_2H9UP_K = (np.arange(60) * 7) % 11
+
+
+def _2h9up_frame(m: Any) -> Any:
+    return m.DataFrame({"g": _2H9UP_G, "k": _2H9UP_K, "v": np.arange(60.0), "w": np.arange(60.0) / 4})
+
+
+_2H9UP_CASES = {
+    "head": lambda m: _2h9up_frame(m).set_index(["g", "k"]).head(7),
+    "stack": lambda m: _2h9up_frame(m).set_index(["g", "k"])[["v", "w"]].head(9).stack(),
+    "loc key": lambda m: _2h9up_frame(m).set_index(["g", "k"]).loc[("a", 7)],
+    "sort_index": lambda m: _2h9up_frame(m).set_index(["g", "k"]).sort_index().head(8),
+    "reset_index": lambda m: _2h9up_frame(m).set_index(["g", "k"]).head(5).reset_index(),
+    "level values": lambda m: _2h9up_frame(m).set_index(["g", "k"]).index.get_level_values(1).to_series(),
+    "groupby level": lambda m: _2h9up_frame(m).set_index(["g", "k"]).groupby(level=0).sum(),
+    "take": lambda m: _2h9up_frame(m).set_index(["g", "k"]).iloc[[5, 2, 40]],
+    "drop=False": lambda m: _2h9up_frame(m).set_index(["g", "k"], drop=False).tail(4),
+    # NEGATIVE: a gapped, a float and a datetime key keep the label path.
+    "gapped key (NEGATIVE)": lambda m: _2h9up_frame(m)
+    .assign(g=np.where(np.arange(60) % 9 == 0, None, _2H9UP_G))
+    .set_index(["g", "k"])
+    .head(10),
+    "float key (NEGATIVE)": lambda m: _2h9up_frame(m).set_index(["w", "k"]).head(6),
+    "datetime key (NEGATIVE)": lambda m: _2h9up_frame(m)
+    .assign(d=m.Timestamp("2024-01-01") + m.to_timedelta(_2H9UP_K, unit="D"))
+    .set_index(["g", "d"])
+    .head(6),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_2H9UP_CASES))
+def test_set_index_coded_levels_like_pandas_2h9up(case: str) -> None:
+    # set_index over all-valid text and int keys builds coded levels (each
+    # row's label cloned, then hashed back into codes by the first window:
+    # head 0.01x pandas; br-frankenpandas-2h9up): index tuples, names,
+    # columns, cells.
+    def run(m: Any) -> Any:
+        out = _2H9UP_CASES[case](m)
+        frame = out.to_frame() if hasattr(out, "to_frame") and not hasattr(out, "columns") else out
+        return (
+            [repr(v) for v in frame.index],
+            repr(list(frame.index.names)),
+            [repr(c) for c in frame.columns],
+            [[repr(v) for v in frame[c].tolist()] for c in frame.columns],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_set_index_coded_levels_and_codes_2h9up() -> None:
+    # The coded levels read as pandas' sorted levels and codes into them.
+    def run(m: Any) -> Any:
+        index = _2h9up_frame(m).set_index(["g", "k"]).index
+        return (
+            [[repr(v) for v in level] for level in index.levels],
+            [list(codes) for codes in index.codes],
+        )
+
+    assert run(fpd) == run(pd)
+
+
+def _srwyq_frame(m: Any) -> Any:
+    v = np.arange(40.0)
+    return m.DataFrame(
+        {
+            "g": np.array(["q", "p", "r", "p"], dtype=object)[np.arange(40) % 4],
+            "k": (np.arange(40) * 3) % 7,
+            "v": np.where(np.arange(40) % 6 == 0, np.nan, v),
+            "w": v / 8,
+        }
+    )
+
+
+_SRWYQ_CASES = {
+    "two levels": lambda m: _srwyq_frame(m).set_index(["g", "k"])[["v", "w"]].stack(),
+    "window": lambda m: _srwyq_frame(m).set_index(["g", "k"])[["w", "v"]].iloc[5:17].stack(),
+    "take": lambda m: _srwyq_frame(m).set_index(["g", "k"]).iloc[[9, 2, 30, 2]].stack(),
+    "three levels": lambda m: _srwyq_frame(m).assign(j=np.arange(40) % 2).set_index(["g", "k", "j"]).stack(),
+    "dropna=False": lambda m: _srwyq_frame(m).set_index(["g", "k"]).stack(dropna=False),
+    "from_arrays index": lambda m: m.DataFrame(
+        {"v": np.arange(6.0), "w": np.arange(6.0) * 2},
+        index=m.MultiIndex.from_arrays([["x", "y", "x", "z", "y", "x"], [1, 1, 2, 2, 3, 3]], names=["a", "b"]),
+    ).stack(),
+    # A zoned level or index keeps its zone (both came out naive UTC).
+    "zoned level": lambda m: _srwyq_frame(m)
+    .assign(t=m.date_range("2024-01-01", periods=40, freq="h", tz="Europe/Paris"))
+    .set_index(["t", "k"])[["v"]]
+    .head(6)
+    .stack(),
+    "zoned index": lambda m: _srwyq_frame(m)
+    .assign(t=m.date_range("2024-03-30", periods=40, freq="h", tz="Europe/Paris"))
+    .set_index("t")[["v", "w"]]
+    .iloc[20:26]
+    .stack(),
+    # NEGATIVE: a plain index keeps stacked_cells.
+    "plain index (NEGATIVE)": lambda m: _srwyq_frame(m).set_index("g")[["v", "w"]].stack(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_SRWYQ_CASES))
+def test_stack_coded_rows_like_pandas_srwyq(case: str) -> None:
+    # stack() of a MultiIndex-row frame stacks its levels' codes (each
+    # level's labels were made, then hashed back into codes: 0.30x pandas;
+    # br-frankenpandas-srwyq): index tuples, names, values.
+    def run(m: Any) -> Any:
+        out = _SRWYQ_CASES[case](m)
+        return (
+            [repr(v) for v in out.index],
+            repr(list(out.index.names)),
+            [repr(v) for v in out.tolist()],
         )
 
     assert run(fpd) == run(pd)
