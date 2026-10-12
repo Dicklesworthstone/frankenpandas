@@ -758,6 +758,10 @@ enum CsvTypedColumnValues {
 }
 
 const SIMPLE_NUMERIC_CSV_PARALLEL_MIN_BYTES: usize = 1 << 20;
+/// A quote-free body from this size up is read by the chunk reader (one
+/// chunk on this thread under the threaded size); smaller ones by the csv
+/// crate's record reader, where its per-record cost does not matter.
+const SIMPLE_CSV_ONE_CHUNK_MIN_BYTES: usize = 64 << 10;
 const SIMPLE_NUMERIC_CSV_PARALLEL_MAX_WORKERS: usize = 8;
 
 fn trim_ascii_field(mut field: &[u8]) -> &[u8] {
@@ -1570,6 +1574,17 @@ fn csv_cell(field: &str) -> CsvCell {
         return CsvCell::Missing;
     }
     let trimmed = field.trim();
+    // A number opens with a sign, a digit, a point or (inf / nan) an i or
+    // an n, a boolean with a t or an f: a cell opening with any other letter
+    // or a non-ASCII byte is text, without the integer and float parses (a
+    // sixth of reading a text CSV; br-frankenpandas-alehi).
+    if let Some(&first) = trimmed.as_bytes().first()
+        && (!first.is_ascii()
+            || (first.is_ascii_alphabetic()
+                && !matches!(first.to_ascii_lowercase(), b'i' | b'n' | b't' | b'f')))
+    {
+        return CsvCell::Text;
+    }
     if let Ok(value) = trimmed.parse::<i64>() {
         return CsvCell::Int(value);
     }
@@ -1649,7 +1664,14 @@ enum CsvColumnAcc {
     Int(Vec<i64>, Option<Vec<bool>>),
     Float(Vec<f64>, Option<Vec<bool>>, CsvWideInts),
     Bool(Vec<bool>, Option<Vec<bool>>),
-    Text,
+    /// Text cells and missing ones: `rows` read, `valid` from the first
+    /// missing cell on. A missing cell sent the column to the Scalar path
+    /// (parse_scalar a cell; a text column with a gap read 0.40x pandas;
+    /// br-frankenpandas-alehi).
+    Text {
+        rows: usize,
+        valid: Option<Vec<bool>>,
+    },
     Fallback,
 }
 
@@ -1690,7 +1712,10 @@ impl CsvColumnAcc {
                         .push(false);
                     buf.push(false);
                 }
-                Self::Text => *acc = Self::Fallback,
+                Self::Text { rows, valid } => {
+                    valid.get_or_insert_with(|| vec![true; *rows]).push(false);
+                    *rows += 1;
+                }
                 Self::Fallback => {}
             },
             CsvCell::Int(value) => match acc {
@@ -1706,7 +1731,7 @@ impl CsvColumnAcc {
                         valid.push(true);
                     }
                 }
-                Self::Bool(..) | Self::Text => *acc = Self::Fallback,
+                Self::Bool(..) | Self::Text { .. } => *acc = Self::Fallback,
                 Self::Fallback => {}
             },
             CsvCell::Float(value) => match acc {
@@ -1733,7 +1758,7 @@ impl CsvColumnAcc {
                         valid.push(true);
                     }
                 }
-                Self::Bool(..) | Self::Text => *acc = Self::Fallback,
+                Self::Bool(..) | Self::Text { .. } => *acc = Self::Fallback,
                 Self::Fallback => {}
             },
             CsvCell::Bool(value) => match acc {
@@ -1759,11 +1784,30 @@ impl CsvColumnAcc {
                         valid.push(true);
                     }
                 }
-                Self::Float(..) | Self::Text | Self::Fallback => *acc = Self::Fallback,
+                Self::Float(..) | Self::Text { .. } | Self::Fallback => *acc = Self::Fallback,
             },
             CsvCell::Text => match acc {
-                Self::Int(buf, _) if buf.is_empty() => *acc = Self::Text,
-                Self::Text => {}
+                Self::Int(buf, _) if buf.is_empty() => {
+                    *acc = Self::Text {
+                        rows: 1,
+                        valid: None,
+                    };
+                }
+                // Missing cells, then text: the missing cells a Float's.
+                Self::Float(buf, Some(valid), _) if valid.iter().all(|&present| !present) => {
+                    let mut valid = std::mem::take(valid);
+                    valid.push(true);
+                    *acc = Self::Text {
+                        rows: buf.len() + 1,
+                        valid: Some(valid),
+                    };
+                }
+                Self::Text { rows, valid } => {
+                    if let Some(valid) = valid {
+                        valid.push(true);
+                    }
+                    *rows += 1;
+                }
                 _ => *acc = Self::Fallback,
             },
         }
@@ -1795,8 +1839,29 @@ impl CsvColumnAcc {
             (Self::Fallback, _) => Self::Fallback,
             (prev @ Self::Bool(..), Self::Fallback) => return Err(prev),
             (_, Self::Fallback) => Self::Fallback,
-            (Self::Text, Self::Text) => Self::Text,
-            (Self::Text, _) | (_, Self::Text) => Self::Fallback,
+            (Self::Text { valid: valid_a, .. }, Self::Text { valid: valid_b, .. }) => Self::Text {
+                rows: self_len + next_len,
+                valid: joined(valid_a, self_len, valid_b, next_len),
+            },
+            // One side holds missing cells only: a Text column keeps them
+            // missing, as one read of both chunks would.
+            (Self::Text { valid, .. }, Self::Float(_, Some(valid_b), _))
+                if valid_b.iter().all(|&present| !present) =>
+            {
+                Self::Text {
+                    rows: self_len + next_len,
+                    valid: joined(valid, self_len, Some(valid_b), next_len),
+                }
+            }
+            (Self::Float(_, Some(valid_a), _), Self::Text { valid, .. })
+                if valid_a.iter().all(|&present| !present) =>
+            {
+                Self::Text {
+                    rows: self_len + next_len,
+                    valid: joined(Some(valid_a), self_len, valid, next_len),
+                }
+            }
+            (Self::Text { .. }, _) | (_, Self::Text { .. }) => Self::Fallback,
             (Self::Int(mut a, valid_a), Self::Int(b, valid_b)) => {
                 a.extend(b);
                 Self::Int(a, joined(valid_a, self_len, valid_b, next_len))
@@ -1880,10 +1945,18 @@ impl CsvColumnAcc {
             }
             Self::Float(mut buf, valid, wide) if has_value(buf.len(), &valid) => {
                 wide.finish(&mut buf);
-                match valid.as_deref().and_then(validity_from_bools) {
-                    Some(mask) => Column::from_f64_values_with_validity(buf, mask),
-                    None => Column::from_f64_values(buf),
+                // A missing cell is NaN, as pandas reads it: the NaN-as-missing
+                // column the float kernels read without re-deriving a mask (a
+                // nullable 0.0-datum one cost rolling std / resample / shift
+                // 0.29-0.65x pandas; br-frankenpandas-xtqax).
+                if let Some(valid) = valid {
+                    for (value, present) in buf.iter_mut().zip(valid) {
+                        if !present {
+                            *value = f64::NAN;
+                        }
+                    }
                 }
+                Column::from_f64_values(buf)
             }
             Self::Bool(buf, valid) if has_value(buf.len(), &valid) => match valid {
                 // A missing cell is NaN, as the Scalar path reads it
@@ -1905,7 +1978,26 @@ impl CsvColumnAcc {
                 _ => Column::from_bool_values(buf),
             },
             // Text cells only (never empty: an empty field is missing).
-            Self::Text => Column::from_utf8_contiguous(raw_bytes, raw_offsets),
+            Self::Text { valid: None, .. } => Column::from_utf8_contiguous(raw_bytes, raw_offsets),
+            // Text with missing cells: each missing cell's span emptied (its
+            // raw field is the NA marker), read back NaN as pandas' object
+            // column holds it.
+            Self::Text {
+                valid: Some(valid), ..
+            } => {
+                let mut bytes = Vec::with_capacity(raw_bytes.len());
+                let mut offsets = Vec::with_capacity(raw_offsets.len());
+                offsets.push(0);
+                for (span, &present) in raw_offsets.windows(2).zip(&valid) {
+                    if present {
+                        bytes.extend_from_slice(&raw_bytes[span[0]..span[1]]);
+                    }
+                    offsets.push(bytes.len());
+                }
+                let mask = validity_from_bools(&valid)
+                    .unwrap_or_else(|| fp_columnar::ValidityMask::all_valid(valid.len()));
+                Column::from_utf8_values_with_gap(bytes, offsets, mask, NullKind::NaN)
+            }
             // Any ambiguous cell, all-NA, or empty → exact legacy path from raw.
             _ => {
                 let mut values = Vec::with_capacity(raw_offsets.len().saturating_sub(1));
@@ -1928,7 +2020,7 @@ impl CsvColumnAcc {
             Self::Int(buf, valid) => !present(buf.len(), valid),
             Self::Float(buf, valid, _) => !present(buf.len(), valid),
             Self::Bool(buf, valid) => !present(buf.len(), valid),
-            Self::Text | Self::Fallback => true,
+            Self::Text { .. } | Self::Fallback => true,
         }
     }
 }
@@ -2023,8 +2115,17 @@ fn read_csv_str_body_parallel(
     };
     let body = &input[header_end + 1..];
     let worker_count = simple_numeric_csv_parallel_worker_count(body.len());
-    if header_count == 0 || worker_count < 2 || memchr::memchr2(b'"', b'\r', bytes).is_some() {
+    if header_count == 0
+        || body.len() < SIMPLE_CSV_ONE_CHUNK_MIN_BYTES
+        || memchr::memchr2(b'"', b'\r', bytes).is_some()
+    {
         return Ok(None);
+    }
+    // Under the threaded size, the body as one chunk on this thread: the
+    // same accumulators without the csv crate's record a row (a 750 KB text
+    // column read 8 ms that way, pandas 6.3; br-frankenpandas-alehi).
+    if worker_count < 2 {
+        return read_csv_body_in_chunks(body, headers, &[(0, body.len())]);
     }
     let Some(chunks) = split_simple_numeric_csv_chunks(body.as_bytes(), worker_count) else {
         return Ok(None);
@@ -2040,19 +2141,24 @@ fn read_csv_body_in_chunks(
     chunks: &[(usize, usize)],
 ) -> Result<Option<DataFrame>, IoError> {
     let header_count = headers.len();
-    let parsed: Option<Vec<CsvBodyChunk>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = chunks
-            .iter()
-            .map(|&(start, end)| {
-                let chunk = &body[start..end];
-                scope.spawn(move || parse_csv_body_chunk(chunk, header_count))
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|handle| handle.join().ok().flatten())
-            .collect()
-    });
+    let parsed: Option<Vec<CsvBodyChunk>> = if let [(start, end)] = chunks {
+        // One chunk is read on this thread.
+        parse_csv_body_chunk(&body[*start..*end], header_count).map(|chunk| vec![chunk])
+    } else {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = chunks
+                .iter()
+                .map(|&(start, end)| {
+                    let chunk = &body[start..end];
+                    scope.spawn(move || parse_csv_body_chunk(chunk, header_count))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().ok().flatten())
+                .collect()
+        })
+    };
     let Some(mut parsed) = parsed else {
         return Ok(None);
     };
@@ -2183,8 +2289,10 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
 
     let mut row_count: i64 = 0;
     let mut implicit_index = promotes_implicit_index.then(Vec::new);
-    for row in reader.records() {
-        let record = row?;
+    // One record reused: the records iterator cloned each into a fresh one
+    // (a clone, an allocation and a free a row; br-frankenpandas-alehi).
+    let mut record = csv::StringRecord::new();
+    while reader.read_record(&mut record)? {
         let field_offset = usize::from(promotes_implicit_index);
         if promotes_implicit_index {
             debug_assert_eq!(record.len(), header_count + field_offset);
@@ -5758,6 +5866,99 @@ fn apply_csv_parse_dates(
     Ok(())
 }
 
+/// `read_csv(parse_dates=[...], dtype={...})` with every other option at its
+/// default: the default typed read, then each `parse_dates` column - read as
+/// text - parsed by the fixed naive datetime parser [`apply_csv_parse_dates`]
+/// tries first for it, its missing cells NaT. A `dtype` entry is taken only
+/// where the typed read already holds that dtype (a no-op cast; a text or
+/// nullable target, which the general path builds from the raw text or a
+/// mask, is its). None, for the general path to decide, when another option
+/// differs, a column is both parsed and forced, a `dtype` entry is no no-op,
+/// a name is no text column, or a present cell is not a fixed naive datetime
+/// (a zone, another format, a number). The general path read every cell of
+/// every column as a Scalar to parse or force one column
+/// (read_csv(parse_dates=['date']) 168 ms, 42 without, pandas 185;
+/// br-frankenpandas-z6oif).
+fn try_read_csv_typed_route(
+    input: &str,
+    options: &CsvReadOptions,
+) -> Result<Option<DataFrame>, IoError> {
+    let names = options.parse_dates.as_deref().unwrap_or_default();
+    let forced = options.dtype.as_ref();
+    if (names.is_empty() && forced.is_none())
+        || options.parse_dates.as_ref().is_some_and(Vec::is_empty)
+        || forced.is_some_and(|map| names.iter().any(|name| map.contains_key(name)))
+    {
+        return Ok(None);
+    }
+    let mut plain = options.clone();
+    plain.parse_dates = None;
+    plain.dtype = None;
+    if !csv_read_options_match_default_fast_path(&plain) {
+        return Ok(None);
+    }
+    let mut frame = read_csv_str(input)?;
+    for (name, dtype) in forced.into_iter().flatten() {
+        let no_op = frame.column(name).is_some_and(|column| {
+            column.dtype() == *dtype && *dtype != DType::Utf8 && !dtype.is_nullable()
+        });
+        if !no_op {
+            return Ok(None);
+        }
+    }
+    for name in names {
+        let Some(parsed) = frame
+            .column(name)
+            .and_then(fixed_naive_datetime_text_column)
+        else {
+            return Ok(None);
+        };
+        frame = frame.with_column(name.as_str(), parsed)?;
+    }
+    Ok(Some(frame))
+}
+
+/// A text column's cells as fixed naive datetimes (see
+/// [`parse_fixed_naive_csv_datetime_nanos`]), a missing cell NaT; None when
+/// the column is not text, a present cell is no such datetime, or no cell
+/// is present - [`parse_csv_fixed_naive_datetime_fields`]'s answers. The
+/// typed reader holds text without a missing cell contiguously and text with
+/// one as Scalars (its raw path); both are read.
+fn fixed_naive_datetime_text_column(column: &Column) -> Option<Column> {
+    if column.dtype() != DType::Utf8 {
+        return None;
+    }
+    let mut nanos = Vec::with_capacity(column.len());
+    if let Some((bytes, offsets)) = column.as_utf8_contiguous() {
+        for span in offsets.windows(2) {
+            let text = std::str::from_utf8(&bytes[span[0]..span[1]]).ok()?;
+            nanos.push(parse_fixed_naive_csv_datetime_nanos(text)?);
+        }
+    } else {
+        for cell in column.values() {
+            nanos.push(match cell {
+                Scalar::Utf8(text) => parse_fixed_naive_csv_datetime_nanos(text)?,
+                cell if cell.is_missing() => Timestamp::NAT,
+                _ => return None,
+            });
+        }
+    }
+    // A parsed datetime is never the NaT sentinel (years 0-9999).
+    let mut words = vec![0_u64; nanos.len().div_ceil(64)];
+    for (row, &value) in nanos.iter().enumerate() {
+        if value != Timestamp::NAT {
+            words[row / 64] |= 1_u64 << (row % 64);
+        }
+    }
+    if words.iter().all(|&word| word == 0) {
+        return None;
+    }
+    let validity = fp_columnar::ValidityMask::from_words(words, nanos.len());
+    Some(Column::from_datetime64_values_with_validity(
+        nanos, validity,
+    ))
+}
+
 fn deferred_parse_date_column_mask(headers: &[String], options: &CsvReadOptions) -> Vec<bool> {
     let Some(parse_dates) = options.parse_dates.as_deref() else {
         return vec![false; headers.len()];
@@ -6628,6 +6829,9 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     if csv_read_options_match_default_fast_path(options) {
         return read_csv_str(input);
     }
+    if let Some(frame) = try_read_csv_typed_route(input, options)? {
+        return Ok(frame);
+    }
 
     if csv_read_options_match_no_na_numeric_fast_path(options) {
         if let Some(frame) = csv_parse_cache_lookup(CsvParseCacheMode::NoNaNumeric, input) {
@@ -7021,6 +7225,10 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 Column::new(dtype, columns[col_idx].clone())?
             } else if let Some(column) = zoned_date_column(&name, &columns[col_idx]) {
                 column
+            } else if let Some(column) =
+                csv_float_cells_column(&columns[col_idx]).filter(|_| !dtype_forced(&name))
+            {
+                column
             } else if preserve_object_text && !dtype_forced(&name) {
                 let (rb, ro) = strings_to_contiguous_raw(&raw_columns[orig_idx]);
                 build_csv_object_aware_column(columns[col_idx].clone(), &rb, &ro)?
@@ -7045,6 +7253,10 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 Column::new(dtype, values)?
             } else if let Some(column) = zoned_date_column(&name, &values) {
                 column
+            } else if let Some(column) =
+                csv_float_cells_column(&values).filter(|_| !dtype_forced(&name))
+            {
+                column
             } else if preserve_object_text && !dtype_forced(&name) {
                 let (rb, ro) = strings_to_contiguous_raw(&raw_columns[idx]);
                 build_csv_object_aware_column(values, &rb, &ro)?
@@ -7061,6 +7273,29 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             column_order,
         )?)
     }
+}
+
+/// A parsed column of float cells as the typed parser builds it: every
+/// cell a float or a NaN missing value, the NaN-as-missing column -
+/// `Column::from_values` over the cells (the parse_dates / option path)
+/// built one the float kernels re-read a Scalar at a time
+/// (read_csv(parse_dates=) float columns 0.65x pandas in rolling std;
+/// br-frankenpandas-xtqax). None for any other cells (an int, text, another
+/// missing kind) or none a float.
+fn csv_float_cells_column(values: &[Scalar]) -> Option<Column> {
+    let mut floats = Vec::with_capacity(values.len());
+    let mut any = false;
+    for value in values {
+        match value {
+            Scalar::Float64(number) => {
+                floats.push(*number);
+                any = true;
+            }
+            Scalar::Null(NullKind::NaN) => floats.push(f64::NAN),
+            _ => return None,
+        }
+    }
+    any.then(|| Column::from_f64_values(floats))
 }
 
 /// Read CSV and promote the named columns into a row index / row MultiIndex.
@@ -11510,9 +11745,18 @@ fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Co
     macro_rules! f64_col {
         ($ty:ty) => {{
             let t = arr.as_any().downcast_ref::<$ty>()?;
-            let data: Vec<f64> = t.values().iter().map(|&v| v as f64).collect();
+            let mut data: Vec<f64> = t.values().iter().map(|&v| v as f64).collect();
+            // A null is NaN, as pandas reads it: the NaN-as-missing column
+            // (br-frankenpandas-xtqax).
             Some(match arrow_validity_mask(arr) {
-                Some(m) => Column::from_f64_values_with_validity(data, m),
+                Some(m) => {
+                    for (row, value) in data.iter_mut().enumerate() {
+                        if !m.get(row) {
+                            *value = f64::NAN;
+                        }
+                    }
+                    Column::from_f64_values(data)
+                }
                 None => Column::from_f64_values_owned(data),
             })
         }};
@@ -20018,11 +20262,261 @@ mod tests {
         let frame = read_csv_str(input).expect("read");
         let value_col = frame.column("value").expect("value");
 
-        assert_eq!(value_col.values()[1], Scalar::Null(NullKind::NaN));
+        // Missing (the NaN-as-missing float column reads it Float64(NaN);
+        // br-frankenpandas-33fa5), the others their numbers.
+        assert!(value_col.values()[1].is_missing());
+        assert_eq!(value_col.values()[0], Scalar::Float64(10.0));
+        assert_eq!(value_col.values()[2], Scalar::Float64(3.5));
 
         let out = write_csv_string(&frame).expect("write");
         assert!(out.contains("id,value"));
+        assert!(
+            out.contains("\n1,2,\n"),
+            "a missing cell writes empty: {out:?}"
+        );
         assert!(out.contains("3,3.5"));
+    }
+
+    #[test]
+    fn csv_float_missing_cells_are_nan_as_missing_xtqax() {
+        // br-frankenpandas-xtqax: a float column's missing cells are NaN, the
+        // NaN-as-missing column the float kernels read without re-deriving a
+        // mask - missing rows Null(NaN), a literal nan cell missing too, the
+        // rest their numbers. NEGATIVE: a column without a missing cell is
+        // all-valid, an int one keeps its own path.
+        use super::{CsvReadOptions, read_csv_with_options};
+        let input = "f,g,i\n0.5,1.5,1\n,2.5,2\n3.25,nan,3\n-0.0,4.5,4\n";
+        let frame = read_csv_str(input).expect("read");
+        // A missing cell None, a present one its bits (a NaN Scalar is not
+        // equal to itself).
+        let shown = |cells: &[Scalar]| -> Vec<Option<u64>> {
+            cells
+                .iter()
+                .map(|cell| (!cell.is_missing()).then(|| cell.to_f64().map_or(0, f64::to_bits)))
+                .collect()
+        };
+        let f = frame.column("f").expect("f");
+        assert_eq!(f.dtype(), DType::Float64);
+        assert!(f.nan_missing_exact());
+        assert_eq!(
+            shown(f.values()),
+            vec![
+                Some(0.5_f64.to_bits()),
+                None,
+                Some(3.25_f64.to_bits()),
+                Some((-0.0_f64).to_bits())
+            ]
+        );
+        let g = frame.column("g").expect("g");
+        assert!(g.nan_missing_exact());
+        assert!(g.values()[2].is_missing());
+        assert_eq!(g.values()[3], Scalar::Float64(4.5));
+        let i = frame.column("i").expect("i");
+        assert_eq!(i.dtype(), DType::Int64);
+        assert!(i.as_i64_slice().is_some());
+        // The parse_dates path builds its float columns the same way.
+        let dated = "d,f\n2024-01-01,0.5\n2024-01-02,\n2024-01-03,2.25\n";
+        let options = CsvReadOptions {
+            parse_dates: Some(vec!["d".to_owned()]),
+            ..CsvReadOptions::default()
+        };
+        let frame = read_csv_with_options(dated, &options).expect("read dated");
+        let f = frame.column("f").expect("f");
+        assert_eq!(f.dtype(), DType::Float64);
+        assert!(f.nan_missing_exact());
+        assert_eq!(
+            shown(f.values()),
+            vec![Some(0.5_f64.to_bits()), None, Some(2.25_f64.to_bits())]
+        );
+        assert!(super::csv_float_cells_column(&[Scalar::Int64(1), Scalar::Float64(0.5)]).is_none());
+        assert!(super::csv_float_cells_column(&[Scalar::Null(NullKind::NaN)]).is_none());
+    }
+
+    #[test]
+    fn csv_cells_open_by_their_first_byte_alehi() {
+        // br-frankenpandas-alehi: a cell opening with a letter no number or
+        // boolean opens with is text without the number parses; the ones
+        // that can open a number or a boolean still parse. NEGATIVE: an
+        // infinity, a boolean in any case and a padded number keep their
+        // kinds; a padded infinity and a non-ASCII cell stay text.
+        use super::{CsvCell, csv_cell};
+        let kind = |field: &str| match csv_cell(field) {
+            CsvCell::Missing => "missing",
+            CsvCell::Int(_) => "int",
+            CsvCell::Float(_) => "float",
+            CsvCell::Bool(_) => "bool",
+            CsvCell::Text => "text",
+        };
+        for (field, want) in [
+            ("abc", "text"),
+            ("Great 5/5", "text"),
+            ("e5", "text"),
+            ("x1", "text"),
+            ("é1", "text"),
+            ("1e5", "float"),
+            ("inf", "float"),
+            ("-Infinity", "float"),
+            ("Inf ", "text"),
+            ("NAN", "text"),
+            ("nan", "missing"),
+            ("None", "missing"),
+            ("True", "bool"),
+            ("fALSE", "bool"),
+            ("trueish", "text"),
+            (" 12", "int"),
+            ("+5", "int"),
+            (".5", "float"),
+            ("  ", "text"),
+        ] {
+            assert_eq!(kind(field), want, "{field:?}");
+        }
+    }
+
+    #[test]
+    fn text_with_missing_cells_reads_typed_alehi() {
+        // br-frankenpandas-alehi: a text column with missing cells - in the
+        // middle, leading, NA markers, quoted commas - is read as nullable
+        // contiguous text, each cell the general path's (forced by an
+        // na_values entry no cell holds), a missing one NaN. NEGATIVE: text
+        // then a number falls back to the Scalar path, the same cells.
+        use super::{CsvReadOptions, read_csv_with_options};
+        let input = "text_na,na_text,quoted,mixed\n\
+                     a,,\"x, y\",a\n\
+                     ,,\"z\",\n\
+                     c,c,,1\n\
+                     NA,d,\"w,\",b\n\
+                     e,null,v,c\n";
+        let typed = read_csv_str(input).unwrap();
+        let general = read_csv_with_options(
+            input,
+            &CsvReadOptions {
+                na_values: vec!["__no_cell__".to_owned()],
+                ..CsvReadOptions::default()
+            },
+        )
+        .unwrap();
+        for name in ["text_na", "na_text", "quoted", "mixed"] {
+            let (ours, theirs) = (typed.column(name).unwrap(), general.column(name).unwrap());
+            assert_eq!(ours.dtype(), theirs.dtype(), "{name}");
+            assert_eq!(
+                format!("{:?}", ours.values()),
+                format!("{:?}", theirs.values()),
+                "{name}"
+            );
+            assert_eq!(
+                ours.as_nullable_utf8_contiguous().is_some(),
+                name != "mixed",
+                "{name} typed"
+            );
+        }
+        assert!(matches!(
+            typed.column("quoted").unwrap().values()[0],
+            Scalar::Utf8(ref text) if text == "x, y"
+        ));
+        assert!(matches!(
+            typed.column("na_text").unwrap().values()[0],
+            Scalar::Null(NullKind::NaN)
+        ));
+    }
+
+    #[test]
+    fn parse_dates_fast_route_is_the_general_path_z6oif() {
+        // br-frankenpandas-z6oif: read_csv(parse_dates=[...]) with no other
+        // option reads typed and parses each named text column as fixed
+        // naive datetimes - the general path's frame (forced here by an
+        // na_values entry no cell holds), column for column. NEGATIVE: a
+        // zoned, an odd-format and a numeric date column decline the route.
+        use super::{CsvReadOptions, read_csv_with_options, try_read_csv_typed_route};
+        let options = |names: &[&str], general: bool| CsvReadOptions {
+            parse_dates: Some(names.iter().map(|name| (*name).to_owned()).collect()),
+            na_values: if general {
+                vec!["__no_cell__".to_owned()]
+            } else {
+                Vec::new()
+            },
+            ..CsvReadOptions::default()
+        };
+        let shown = |frame: &DataFrame| -> Vec<(String, String, Vec<String>)> {
+            frame
+                .column_names()
+                .into_iter()
+                .map(|name| {
+                    let column = frame.column(name).unwrap();
+                    let cells = column
+                        .values()
+                        .iter()
+                        .map(|cell| {
+                            if cell.is_missing() {
+                                "missing".to_owned()
+                            } else {
+                                format!("{cell:?}")
+                            }
+                        })
+                        .collect();
+                    (name.clone(), format!("{:?}", column.dtype()), cells)
+                })
+                .collect()
+        };
+        let input = "date,day,store,units,flag\n\
+                     2022-01-01 00:00:05,2022-01-01,north,3,True\n\
+                     2022-01-01 08:30:00,2022-02-28,south,,False\n\
+                     ,2023-12-31,east,7,True\n\
+                     2022-03-04 23:59:59,,north,1.5,False\n";
+        for names in [&["date"][..], &["day"], &["date", "day"]] {
+            let fast = try_read_csv_typed_route(input, &options(names, false))
+                .unwrap()
+                .expect("the fast route reads it");
+            let general = read_csv_with_options(input, &options(names, true)).unwrap();
+            assert_eq!(shown(&fast), shown(&general), "{names:?}");
+            for name in names {
+                assert!(fast.column(name).unwrap().dtype().is_datetime(), "{name}");
+            }
+        }
+        for (odd, label) in [
+            ("2022-01-01 00:00:05+01:00", "zoned"),
+            ("01/02/2022", "odd format"),
+            ("20220101", "numeric"),
+        ] {
+            let input = format!("date,x\n{odd},1\n{odd},2\n");
+            let declined = try_read_csv_typed_route(&input, &options(&["date"], false)).unwrap();
+            assert!(declined.is_none(), "{label}");
+        }
+
+        // A dtype entry the typed read already holds is a no-op cast: taken
+        // (with dates or alone), the general path's frame. NEGATIVE: a text
+        // target, a cast the read does not hold and a column both parsed
+        // and forced decline the route.
+        let forced = |names: &[&str], pairs: &[(&str, DType)], general: bool| {
+            let mut forced = options(names, general);
+            if names.is_empty() {
+                forced.parse_dates = None;
+            }
+            forced.dtype = Some(
+                pairs
+                    .iter()
+                    .map(|(name, dtype)| ((*name).to_owned(), dtype.clone()))
+                    .collect(),
+            );
+            forced
+        };
+        for (names, pairs) in [
+            (&["date"][..], &[("units", DType::Float64)][..]),
+            (&[], &[("flag", DType::Bool)]),
+        ] {
+            let fast = try_read_csv_typed_route(input, &forced(names, pairs, false))
+                .unwrap()
+                .expect("a no-op dtype takes the route");
+            let general = read_csv_with_options(input, &forced(names, pairs, true)).unwrap();
+            assert_eq!(shown(&fast), shown(&general), "{pairs:?}");
+        }
+        for (names, pairs) in [
+            (&["date"][..], &[("store", DType::Utf8)][..]),
+            (&[], &[("units", DType::Int64)]),
+            (&["date"], &[("date", DType::Utf8)]),
+        ] {
+            let declined = try_read_csv_typed_route(input, &forced(names, pairs, false)).unwrap();
+            assert!(declined.is_none(), "{pairs:?}");
+        }
     }
 
     #[test]
@@ -20416,6 +20910,9 @@ mod tests {
                     })
                     .collect(),
             );
+            // The whole body as one chunk, read on the calling thread
+            // (br-frankenpandas-alehi).
+            splits.push(vec![(0, body.len())]);
             let chunked = splits
                 .iter()
                 .map(|chunks| {
@@ -20427,7 +20924,7 @@ mod tests {
             (sequential, chunked)
         }
 
-        let columns: [(&str, [&str; 8]); 14] = [
+        let columns: [(&str, [&str; 8]); 16] = [
             ("int", ["1", "2", "3", "4", "5", "6", "7", "8"]),
             ("int_float", ["1", "2", "3", "4.5", "5", "6", "7", "8"]),
             (
@@ -20466,6 +20963,10 @@ mod tests {
                 ["", "", "True", "false", "", "true", "false", "True"],
             ),
             ("text", ["a", "b", "c", "d", "e", "f", "g", "h"]),
+            // Text with missing cells (br-frankenpandas-alehi): a chunk of
+            // missing cells only, before or after text, merges into it.
+            ("text_na", ["a", "", "c", "NA", "", "f", "", "h"]),
+            ("na_text", ["", "", "c", "d", "", "f", "g", "h"]),
             ("text_num", ["a", "b", "c", "1", "e", "", "g", "2.5"]),
             ("num_text", ["1", "2", "x", "4", "5", "6", "7", "8"]),
             (
@@ -20478,7 +20979,7 @@ mod tests {
         ];
         let text = frame_text(&columns, Some(5));
         let (sequential, chunked) = reads(&text);
-        assert_eq!(chunked.len(), 8);
+        assert_eq!(chunked.len(), 9);
         for (split, read) in chunked.iter().enumerate() {
             assert_eq!(
                 read.as_ref(),
@@ -22837,10 +23338,10 @@ mod tests {
         }
 
         let nan_frame = read_csv_str("x\nNaN\n1.0\n").expect("fallback nan");
-        assert_eq!(
-            nan_frame.column("x").expect("x").values(),
-            &[Scalar::Null(NullKind::NaN), Scalar::Float64(1.0)]
-        );
+        let nan_cells = nan_frame.column("x").expect("x").values();
+        assert_eq!(nan_cells.len(), 2);
+        assert!(nan_cells[0].is_missing());
+        assert_eq!(nan_cells[1], Scalar::Float64(1.0));
 
         let bool_frame = read_csv_str("x\ntrue\nfalse\n").expect("fallback bool");
         assert_eq!(
@@ -31710,14 +32211,11 @@ mod tests {
         }
 
         let frame = read_feather_bytes(&bytes).expect("lz4 feather must read");
-        assert_eq!(
-            frame.column("x").expect("x").values(),
-            &[
-                Scalar::Float64(1.5),
-                Scalar::Null(NullKind::NaN),
-                Scalar::Float64(-2.0)
-            ]
-        );
+        let x_cells = frame.column("x").expect("x").values();
+        assert_eq!(x_cells.len(), 3);
+        assert_eq!(x_cells[0], Scalar::Float64(1.5));
+        assert!(x_cells[1].is_missing());
+        assert_eq!(x_cells[2], Scalar::Float64(-2.0));
         assert_eq!(
             frame.column("s").expect("s").values()[0],
             Scalar::Utf8("a".to_owned())
@@ -32504,7 +33002,8 @@ mod tests {
             .expect("parse");
         let a = plain.column("a").unwrap();
         assert_eq!(a.dtype(), fp_types::DType::Float64);
-        assert_eq!(a.values()[1], Scalar::Null(fp_types::NullKind::NaN));
+        assert!(a.values()[1].is_missing());
+        assert_eq!(a.values()[2], Scalar::Float64(3.0));
         let records =
             read_json_str(r#"[{"a":1},{"a":null},{"a":3}]"#, JsonOrient::Records).expect("parse");
         assert_eq!(

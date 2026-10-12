@@ -354,8 +354,10 @@ fn reindex_join_column_with_invented_gap(
 
     // A source that already carries a gap is NULLABLE; pandas keeps the dtype
     // and fills with NA rather than widening. Only an all-valid numpy column
-    // has to widen to hold the invented gap.
-    if column.values().iter().any(fp_types::Scalar::is_missing) {
+    // has to widen to hold the invented gap. Its mask answers (every cell was
+    // made a Scalar to be asked: merge on two indexes, outer, 0.26x pandas;
+    // br-frankenpandas-m3z4g).
+    if !column.validity().all() {
         return Ok(column.reindex_by_positions(positions)?);
     }
 
@@ -3346,25 +3348,28 @@ fn resolve_merge_indicator_name(indicator_name: Option<&str>) -> Result<Option<S
 fn build_merge_indicator_column(
     left_positions: &[Option<usize>],
     right_positions: &[Option<usize>],
-) -> Result<Column, JoinError> {
-    let values = left_positions
+) -> Column {
+    // pandas makes `_merge` a category with the fixed categories
+    // [left_only, right_only, both] - all three, in that order, whichever rows
+    // appear (br-frankenpandas-hrxn9; it was an object column) - held as each
+    // row's code into them, as pandas' Categorical: a String a row made a
+    // Scalar-backed categorical every reader re-scanned (the merge paid
+    // 10.7 ms for it at 190k rows, `_merge == 'both'` 0.00x pandas;
+    // br-frankenpandas-fl3f0).
+    let codes = left_positions
         .iter()
         .zip(right_positions.iter())
         .map(|(left_pos, right_pos)| match (left_pos, right_pos) {
-            (Some(_), Some(_)) => fp_types::Scalar::Utf8("both".to_owned()),
-            (Some(_), None) => fp_types::Scalar::Utf8("left_only".to_owned()),
-            (None, Some(_)) => fp_types::Scalar::Utf8("right_only".to_owned()),
-            (None, None) => fp_types::Scalar::Null(fp_types::NullKind::Null),
+            (Some(_), None) => 0,
+            (None, Some(_)) => 1,
+            (Some(_), Some(_)) => 2,
+            (None, None) => -1,
         })
-        .collect::<Vec<_>>();
-    // pandas makes `_merge` a category with the fixed categories
-    // [left_only, right_only, both] - all three, in that order, whichever rows
-    // appear (br-frankenpandas-hrxn9; it was an object column).
+        .collect::<Vec<i32>>();
     let categories = ["left_only", "right_only", "both"]
         .map(|category| fp_types::Scalar::Utf8(category.to_owned()))
         .to_vec();
-    Ok(Column::new(fp_types::DType::Categorical, values)?
-        .with_categorical(Some(fp_types::CategoricalMetadata::new(categories, false))))
+    Column::from_categorical_codes(codes, fp_types::CategoricalMetadata::new(categories, false))
 }
 
 fn ensure_indicator_name_available(
@@ -10527,7 +10532,7 @@ fn merge_dataframes_on_with_options_storage(
             &right_col_names,
             &columns,
         )?;
-        let indicator_col = build_merge_indicator_column(&left_positions, &right_positions)?;
+        let indicator_col = build_merge_indicator_column(&left_positions, &right_positions);
         insert_merged_output_column(
             &mut columns,
             &mut column_order,
@@ -10655,7 +10660,7 @@ fn merge_dataframes_cross(
             &right_col_names,
             &columns,
         )?;
-        let indicator_col = build_merge_indicator_column(&left_positions, &right_positions)?;
+        let indicator_col = build_merge_indicator_column(&left_positions, &right_positions);
         insert_merged_output_column(
             &mut columns,
             &mut column_order,
@@ -13079,6 +13084,34 @@ mod tests {
             assert_eq!(geti(&lv[i]), exp_lv[k], "lv at {k}");
             assert_eq!(geti(&rv[i]), exp_rv[k], "rv at {k}");
         }
+    }
+
+    #[test]
+    fn merge_indicator_is_held_as_codes_fl3f0() {
+        // br-frankenpandas-fl3f0: `_merge` is each row's code into the fixed
+        // categories [left_only, right_only, both] (0 / 1 / 2), as pandas'
+        // Categorical - a String a row was made into a Scalar-backed
+        // categorical - and reads back as those categories. NEGATIVE: a row
+        // in neither side would be missing (-1), never a category.
+        let left_positions = [Some(0), Some(1), None, Some(2)];
+        let right_positions = [None, Some(0), Some(1), Some(1)];
+        let column = super::build_merge_indicator_column(&left_positions, &right_positions);
+        assert_eq!(column.dtype(), fp_types::DType::Categorical);
+        assert_eq!(column.categorical_codes(), Some(&[0, 2, 1, 2][..]));
+        let categories: Vec<Scalar> = ["left_only", "right_only", "both"]
+            .map(|category| Scalar::Utf8(category.to_owned()))
+            .to_vec();
+        assert_eq!(
+            column.categorical().map(|meta| meta.categories.clone()),
+            Some(categories)
+        );
+        let shown: Vec<Scalar> = ["left_only", "both", "right_only", "both"]
+            .map(|value| Scalar::Utf8(value.to_owned()))
+            .to_vec();
+        assert_eq!(column.values(), shown.as_slice());
+        let neither = super::build_merge_indicator_column(&[None], &[None]);
+        assert_eq!(neither.categorical_codes(), Some(&[-1][..]));
+        assert!(neither.values()[0].is_missing());
     }
 
     #[test]

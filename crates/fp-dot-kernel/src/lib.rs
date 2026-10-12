@@ -777,6 +777,39 @@ pub fn div_by_number_f64_arc(a: &[f64], s: f64, number_first: bool) -> std::sync
     }
 }
 
+/// The centered cross-sums of a covariance matrix's upper triangle - pair
+/// `(a, b)`, `b >= a`, in that order, the sum over the rows in row order of
+/// `(columns[a][row] - means[a]) * (columns[b][row] - means[b])`, each pair its
+/// own accumulator - four pairs a lane-wide step: column `a`'s pairs are one
+/// contiguous run of the sums, added to as one slice product. A product feeds
+/// an addition, which Rust does not contract into an FMA, so the bits are the
+/// baseline loop's (df.cov() of 50k x 10 0.30x pandas;
+/// br-frankenpandas-jy2f4).
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn cov_cross_sums_f64(columns: &[&[f64]], means: &[f64], len: usize) -> Vec<f64> {
+    let k = columns.len();
+    let mut cross = vec![0.0_f64; k * (k + 1) / 2];
+    let mut centered = vec![0.0_f64; k];
+    for row in 0..len {
+        for ((slot, column), &mean) in centered.iter_mut().zip(columns).zip(means) {
+            *slot = column[row] - mean;
+        }
+        let mut at = 0;
+        for (a, &first) in centered.iter().enumerate() {
+            let tail = &centered[a..];
+            for (sum, &second) in cross[at..at + tail.len()].iter_mut().zip(tail) {
+                *sum += first * second;
+            }
+            at += tail.len();
+        }
+    }
+    cross
+}
+
 /// pandas' `pct_change(periods)` of a float column - `data[i] / data[i -
 /// periods] - 1.0` - four lanes wide, the first `periods` rows (every row
 /// when `periods` reaches the length) 0.0 for the caller's mask. Collected,

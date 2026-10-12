@@ -7650,6 +7650,16 @@ fn to_dict_cell(py: Python<'_>, column: &Column, value: &Scalar) -> PyResult<Py<
 /// (df.iloc[0]['t'], iterrows, df.loc[k] gave 15:30 for 10:30-05:00;
 /// br-frankenpandas-wuize). A row that kept a tz-aware dtype is as it is.
 fn zoned_row(py: Python<'_>, frame: &DataFrame, row: Series) -> PyResult<Series> {
+    // A lazily transposed number frame holds no zone: its columns, one per
+    // source row, are not built to ask (df.T.iloc[3];
+    // br-frankenpandas-rc0923-epic-zero-certified-losses-bss5q.2).
+    #[cfg(feature = "lazy-transpose-view")]
+    if frame
+        .lazy_transpose_sources()
+        .is_some_and(|(_, dtype)| matches!(dtype, DType::Float64 | DType::Int64 | DType::Bool))
+    {
+        return Ok(row);
+    }
     let columns: Vec<Option<&Column>> = (0..frame.num_columns())
         .map(|position| frame.column_at(position))
         .collect();
@@ -8823,7 +8833,13 @@ fn zoned_astype(column: &Column, target: &DType) -> PyResult<Option<Column>> {
 /// list, a dict): grouping hashes the keys. A list column grouped into
 /// nothing (fvsao.66).
 fn refuse_unhashable_keys(py: Python<'_>, column: &Column) -> PyResult<()> {
-    if column.dtype() != DType::Utf8 {
+    // Text held contiguously holds no object cell: its Scalars were built a
+    // row at a time to find none (a fifth of a groupby by a text column;
+    // br-frankenpandas-bl5ct).
+    if column.dtype() != DType::Utf8
+        || column.as_utf8_contiguous().is_some()
+        || column.as_nullable_utf8_contiguous().is_some()
+    {
         return Ok(());
     }
     for value in column.values() {
@@ -9386,6 +9402,216 @@ fn narrow_numpy_list_column(py: Python<'_>, list: &Bound<'_, PyList>) -> PyResul
         return Ok(None);
     }
     py_array_like_column(py, &array)
+}
+
+/// A native-order numpy unicode ('U') array read off its buffer: each item's
+/// UTF-32 code points, the trailing NULs numpy drops on access dropped,
+/// encoded into the contiguous text column - where tolist made a Python str
+/// a row to copy (a Series of a wide non-ASCII U array 28 ms, pandas 19;
+/// br-frankenpandas-voo97). None - the caller's tolist path - for an array
+/// that is no contiguous run of `len` items (a strided view cannot be viewed
+/// as uint32) or a code point that is no char (a lone surrogate).
+fn numpy_unicode_column(
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    len: usize,
+) -> PyResult<Option<Column>> {
+    let itemsize = obj
+        .getattr("dtype")?
+        .getattr("itemsize")?
+        .extract::<usize>()?;
+    let width = itemsize / 4;
+    if len == 0 || width == 0 {
+        return Ok(None);
+    }
+    let Ok(view) = obj.call_method1("view", ("uint32",)) else {
+        return Ok(None);
+    };
+    let points = ndarray_elements::<u32>(py, &view)?;
+    if points.len() != len * width {
+        return Ok(None);
+    }
+    let mut bytes = Vec::with_capacity(points.len());
+    let mut offsets = Vec::with_capacity(len + 1);
+    offsets.push(0);
+    for item in points.chunks_exact(width) {
+        let used = item
+            .iter()
+            .rposition(|&point| point != 0)
+            .map_or(0, |at| at + 1);
+        for &point in &item[..used] {
+            let Some(ch) = char::from_u32(point) else {
+                return Ok(None);
+            };
+            let mut utf8 = [0_u8; 4];
+            bytes.extend_from_slice(ch.encode_utf8(&mut utf8).as_bytes());
+        }
+        offsets.push(bytes.len());
+    }
+    Ok(Some(Column::from_utf8_contiguous(bytes, offsets)))
+}
+
+/// An object array of strs (and None) whose elements repeat - a category
+/// column of a few distinct strs - as the column [`contiguous_text_column`]
+/// makes of it, each distinct element read once: the array's element
+/// pointers, read as integers through its buffer, name the elements (the
+/// array holds a reference to each while the GIL is held, so one pointer is
+/// one immutable object), and the distinct ones are taken in one call; a
+/// row past its element's first copies that element's bytes. numpy's
+/// iterator made a scalar of each element to be read (DataFrame of 300k
+/// strs over 20 values 3.85 ms, pandas 0.58; br-frankenpandas-qpbpa). None,
+/// the caller's iterator then, for a short array, one that is no contiguous
+/// run of `len` pointers, mostly distinct elements (past 4096 and one in 16
+/// of the rows read: a distinct element costs more than an iterator step),
+/// and any element neither a str nor None.
+fn repeated_object_text_column(
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    len: usize,
+) -> PyResult<Option<Column>> {
+    const MIN_ROWS: usize = 4096;
+    const FREE_DISTINCT: usize = 4096;
+    if len < MIN_ROWS || u32::try_from(len).is_err() {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let Ok(pointers) = numpy.getattr("frombuffer")?.call1((obj, "uint64")) else {
+        return Ok(None);
+    };
+    let Ok(buffer) = pyo3::buffer::PyBuffer::<u64>::get(&pointers) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py).filter(|cells| cells.len() == len) else {
+        return Ok(None);
+    };
+    // Each row's distinct element, numbered as first met. The pointers'
+    // low bits are alignment zeros: rotated out of the bits FxHash buckets
+    // by (a bijection, so equal keys are equal pointers).
+    // Before the map a direct-mapped cache of the pointers met, so a few
+    // distinct elements cost a compare a row (an odd pointer is no
+    // object's: the empty line).
+    const LINES: usize = 1024;
+    let mut slot_of: FxHashMap<u64, u32> = FxHashMap::default();
+    let mut first_rows: Vec<usize> = Vec::new();
+    let mut slots: Vec<u32> = Vec::with_capacity(len);
+    let mut lines = [(u64::MAX, 0_u32); LINES];
+    for (row, cell) in cells.iter().enumerate() {
+        let pointer = cell.get();
+        let line = &mut lines[(pointer >> 4) as usize % LINES];
+        if line.0 != pointer {
+            let next = first_rows.len();
+            let slot = *slot_of.entry(pointer.rotate_right(4)).or_insert_with(|| {
+                first_rows.push(row);
+                u32::try_from(next).unwrap_or(u32::MAX)
+            });
+            if first_rows.len() > FREE_DISTINCT + row / 16 {
+                return Ok(None);
+            }
+            *line = (pointer, slot);
+        }
+        slots.push(line.1);
+    }
+    drop(buffer);
+    let distinct = obj
+        .call_method1("take", (PyList::new(py, &first_rows)?,))?
+        .call_method0("tolist")?;
+    let distinct = distinct.cast::<PyList>()?;
+    // Each distinct element's span of `texts`; None for a None element.
+    let mut texts = Vec::new();
+    let mut spans: Vec<Option<(usize, usize)>> = Vec::with_capacity(distinct.len());
+    for item in distinct.iter() {
+        if item.is_none() {
+            spans.push(None);
+            continue;
+        }
+        let Ok(text) = item.cast_exact::<pyo3::types::PyString>() else {
+            return Ok(None);
+        };
+        let Ok(text) = text.to_str() else {
+            return Ok(None);
+        };
+        spans.push(Some((texts.len(), texts.len() + text.len())));
+        texts.extend_from_slice(text.as_bytes());
+    }
+    if spans.len() != first_rows.len() || spans.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let total: usize = slots
+        .iter()
+        .map(|&slot| spans[slot as usize].map_or(0, |(start, end)| end - start))
+        .sum();
+    let mut offsets = Vec::with_capacity(len + 1);
+    offsets.push(0);
+    // Short texts copied a fixed-size pad at a time: the copy of each row's
+    // own length was a call a row, a third of the time.
+    let widest = spans
+        .iter()
+        .flatten()
+        .map(|(start, end)| end - start)
+        .max()
+        .unwrap_or(0);
+    let bytes = if widest <= 16 {
+        padded_text_rows::<16>(&texts, &spans, &slots, total, &mut offsets)
+    } else if widest <= 32 {
+        padded_text_rows::<32>(&texts, &spans, &slots, total, &mut offsets)
+    } else {
+        let mut bytes = Vec::with_capacity(total);
+        for &slot in &slots {
+            if let Some((start, end)) = spans[slot as usize] {
+                bytes.extend_from_slice(&texts[start..end]);
+            }
+            offsets.push(bytes.len());
+        }
+        bytes
+    };
+    if spans.iter().all(Option::is_some) {
+        return Ok(Some(Column::from_utf8_contiguous(bytes, offsets)));
+    }
+    let words = slots
+        .chunks(64)
+        .map(|chunk| {
+            chunk.iter().enumerate().fold(0_u64, |word, (bit, &slot)| {
+                word | (u64::from(spans[slot as usize].is_some()) << bit)
+            })
+        })
+        .collect();
+    let validity = fp_columnar::ValidityMask::from_words(words, len);
+    Ok(Some(Column::from_utf8_values_with_validity(
+        bytes, offsets, validity,
+    )))
+}
+
+/// [`repeated_object_text_column`]'s bytes: each row's text (its slot's
+/// span of `texts`; none for a None) end to end, `offsets` extended by each
+/// row's end. Every text within `P` bytes is copied as its `P`-byte pad - a
+/// constant-length copy - into a zeroed buffer `P` bytes past `total`, cut
+/// to `total` after.
+fn padded_text_rows<const P: usize>(
+    texts: &[u8],
+    spans: &[Option<(usize, usize)>],
+    slots: &[u32],
+    total: usize,
+    offsets: &mut Vec<usize>,
+) -> Vec<u8> {
+    let pads: Vec<([u8; P], usize)> = spans
+        .iter()
+        .map(|span| {
+            let text = span.map_or(&[][..], |(start, end)| &texts[start..end]);
+            let mut pad = [0_u8; P];
+            pad[..text.len()].copy_from_slice(text);
+            (pad, text.len())
+        })
+        .collect();
+    let mut bytes = vec![0_u8; total + P];
+    let mut at = 0;
+    for &slot in slots {
+        let (pad, len) = &pads[slot as usize];
+        bytes[at..at + P].copy_from_slice(pad);
+        at += len;
+        offsets.push(at);
+    }
+    bytes.truncate(total);
+    bytes
 }
 
 /// A native-order numpy array's elements through the buffer protocol: one
@@ -10076,6 +10302,13 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
                 .collect(),
         ),
         _ => {
+            if kind == "U"
+                && native
+                && let Ok(len) = obj.len()
+                && let Some(column) = numpy_unicode_column(py, obj, len)?
+            {
+                return Ok(Some(column));
+            }
             // An object array of strs read straight off its iterator: no
             // Python list of every element, no Vec of them (tolist and its
             // teardown were a fifth of factorize over 300k strs, 10.4 ms,
@@ -10083,6 +10316,9 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
             // kind) is no exact str; any other array takes the list below.
             if kind == "O" {
                 let len = obj.len()?;
+                if let Some(column) = repeated_object_text_column(py, obj, len)? {
+                    return Ok(Some(column));
+                }
                 if let Some(column) =
                     contiguous_text_column(obj.try_iter()?.map_while(Result::ok), len)
                         .filter(|column| column.len() == len)
@@ -12470,7 +12706,7 @@ fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
             && kinds.within(LabelKinds::INTERVAL.union(missing));
         let closed = if intervals_only {
             labels.iter().find_map(|label| match label {
-                IndexLabel::Interval(interval) => Some(interval.closed.to_string()),
+                IndexLabel::Interval(interval) => Some(closed_side(interval.closed)),
                 _ => None,
             })
         } else {
@@ -12488,7 +12724,7 @@ fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
                         interval.int_endpoints &= !gap;
                         interval
                     }
-                    _ => PyInterval::missing(&closed),
+                    _ => PyInterval::missing(closed),
                 })
                 .collect();
             return Ok(Py::new(
@@ -41395,6 +41631,55 @@ impl PySeries {
         } else {
             self.inner.index().get_indexer(&target.inner)
         };
+        // A number filling a float or int source: one typed pass, a found
+        // label its source value (a NaN stays), an absent one the fill - the
+        // column reindex_fill_column makes, where both columns were read a
+        // Scalar a row (reindex(fill_value=0.0) 0.32x pandas;
+        // br-frankenpandas-q569n).
+        let source = self.inner.column();
+        if method.is_none() && source.width().is_none() && source.categorical().is_none() {
+            let floats = match source.dtype() {
+                DType::Float64 => source.as_f64_slice().or_else(|| {
+                    source
+                        .nan_missing_exact()
+                        .then(|| source.as_f64_slice_with_validity().map(|(data, _)| data))
+                        .flatten()
+                }),
+                _ => None,
+            };
+            let ints = (source.dtype() == DType::Int64)
+                .then(|| source.as_i64_slice())
+                .flatten();
+            let column = match (&fill, floats, ints) {
+                (Scalar::Float64(_) | Scalar::Int64(_), Some(data), _) => {
+                    let fill = fill.to_f64().unwrap_or(f64::NAN);
+                    Some(Column::from_f64_values(
+                        source_positions
+                            .iter()
+                            .map(|position| position.map_or(fill, |at| data[at]))
+                            .collect(),
+                    ))
+                }
+                (Scalar::Int64(fill), None, Some(data)) => Some(Column::from_i64_values(
+                    source_positions
+                        .iter()
+                        .map(|position| position.map_or(*fill, |at| data[at]))
+                        .collect(),
+                )),
+                (Scalar::Float64(fill), None, Some(data)) => Some(Column::from_f64_values(
+                    source_positions
+                        .iter()
+                        .map(|position| position.map_or(*fill, |at| data[at] as f64))
+                        .collect(),
+                )),
+                _ => None,
+            };
+            if let Some(column) = column {
+                let filled = Series::new(reindexed.name(), reindexed.index().clone(), column)
+                    .map_err(frame_error_to_py)?;
+                return Ok(PySeries { inner: filled });
+            }
+        }
         // A label found takes the source's own value - the reindexed column
         // had turned float by the very rows the fill replaces, so
         // reindex(fill_value=0) of an int Series came back float64.
@@ -46543,8 +46828,21 @@ impl PyDataFrame {
 
         let mut matrix = vec![vec![f64::NAN; n]; n];
 
+        // All-valid float columns over a unique index: the matrix in one pass
+        // over the rows, each pair the bits its pairwise call answers
+        // (fp_frame::cov_matrix_all_valid).
+        let slices: Option<Vec<&[f64]>> = series_list
+            .iter()
+            .map(|series| series.column().as_f64_slice())
+            .collect();
         if len == 0 || (min_periods.is_some() && min_periods.unwrap() > len && !has_nans) {
             // Leave as all NaN
+        } else if let Some(slices) = slices.filter(|_| !has_nans && self.inner.index().is_unique())
+        {
+            let values = fp_frame::cov_matrix_all_valid(&slices, min_periods, effective_ddof);
+            for (i, row) in matrix.iter_mut().enumerate() {
+                row.copy_from_slice(&values[i * n..(i + 1) * n]);
+            }
         } else {
             for i in 0..n {
                 for j in i..n {
@@ -46793,7 +47091,17 @@ impl PyDataFrame {
             return Ok(reduced);
         };
         let reduced = reduced.inner;
-        let common = common_answer_dtype(&answers);
+        // A numpy int answer holding a missing value (a row below min_count)
+        // is numpy's float64 NaN, as pandas' - a masked one keeps <NA> (it
+        // was int64 None: DataFrame({'a': [1], 'b': [3]}).sum(axis=1,
+        // min_count=3); found by bss5q.2's pytest).
+        let common = common_answer_dtype(&answers).map(|common| {
+            if common == DType::Int64 && reduced.values().iter().any(Scalar::is_missing) {
+                DType::Float64
+            } else {
+                common
+            }
+        });
         let values: Vec<Scalar> = match &common {
             Some(common) => reduced
                 .values()
@@ -48718,10 +49026,38 @@ impl PyDataFrame {
                     } else if !series_indices.is_empty() {
                         // pandas' union_indexes: identical indexes keep their
                         // order, others are united and SORTED (it kept the
-                        // first-seen order).
-                        let first = series_indices[0].labels();
-                        if series_indices.iter().all(|idx| idx.labels() == first) {
-                            Some(Index::new(first.to_vec()))
+                        // first-seen order). Equal indexes of one dtype give
+                        // the first itself - its type, its freq - named by the
+                        // name all share: each was compared a label at a time
+                        // and its labels copied into an unnamed Index (a frame
+                        // of one 200k Series 0.06x pandas; br-frankenpandas-1rrx0).
+                        let head = &series_indices[0];
+                        if series_indices.iter().all(|idx| {
+                            idx == head
+                                && (series_indices.len() == 1 || idx.dtype() == head.dtype())
+                        }) {
+                            let shared = series_indices
+                                .iter()
+                                .all(|idx| idx.name() == head.name())
+                                .then(|| head.name().cloned())
+                                .flatten();
+                            Some(head.rename_index(shared))
+                        } else if series_indices
+                            .iter()
+                            .all(|idx| idx.labels() == head.labels())
+                        {
+                            // Ints beside equal floats are pandas' float64
+                            // index (the first's ints were kept).
+                            let floats = series_indices.iter().any(|idx| idx.dtype() == "float64")
+                                && series_indices
+                                    .iter()
+                                    .all(|idx| matches!(idx.dtype(), "int64" | "float64"));
+                            match head.int64_label_values().filter(|_| floats) {
+                                Some(ints) => Some(Index::from_f64_values(
+                                    ints.iter().map(|&value| value as f64).collect(),
+                                )),
+                                None => Some(Index::new(head.labels().to_vec())),
+                            }
                         } else {
                             let mut seen = HashSet::new();
                             let mut union_labels: Vec<IndexLabel> = series_indices
@@ -48746,10 +49082,12 @@ impl PyDataFrame {
                         refuse_unordered_set(&value)?;
 
                         let col = if let Ok(s) = value.extract::<PyRef<'_, PySeries>>() {
-                            if let Some(target) = common_rows
-                                .as_ref()
-                                .filter(|target| s.inner.index().labels() != target.labels())
-                            {
+                            // An index equal to the target (shared labels
+                            // answer at once) is on it already.
+                            if let Some(target) = common_rows.as_ref().filter(|target| {
+                                s.inner.index() != *target
+                                    && s.inner.index().labels() != target.labels()
+                            }) {
                                 // A Series already on the target labels - repeated
                                 // labels too - is taken as it is, as pandas' (the
                                 // reindex refused a repeated index;
@@ -59102,9 +59440,29 @@ impl PyDataFrame {
         // column at a time, the columns' cycled - and its flat labels made on
         // first read; each cell's labels were cloned into its levels (df.stack()
         // 13.0 ms at 50k x 6, pandas 5.1; br-frankenpandas-nna8h).
-        if all_kept
-            && let Some(levels) = fp_index::MultiIndex::stacked_cells(&row_levels, &column_labels)
-        {
+        // Cells dropped as missing: the same MultiIndex taken at the kept
+        // cells' positions (each kept cell's labels were cloned into new
+        // levels; df.stack() over a NaN-holding frame 0.23x pandas;
+        // br-frankenpandas-iq5l6). pandas keeps the levels whole, in the
+        // frame's order; these report the sorted labels kept
+        // (br-frankenpandas-33b80).
+        if let Some(levels) = fp_index::MultiIndex::stacked_cells(&row_levels, &column_labels) {
+            let (levels, values) = if all_kept {
+                (levels, values)
+            } else {
+                let total = values.len();
+                let mut keep = Vec::with_capacity(total);
+                let mut next = 0;
+                values.validity().for_each_invalid_range(|start, run| {
+                    keep.extend(next..start);
+                    next = start + run;
+                });
+                keep.extend(next..total);
+                let levels = levels
+                    .take(&keep)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                (levels, values.take_positions(&keep))
+            };
             let levels = levels.set_names(names);
             let index = levels
                 .to_flat_index(MULTIINDEX_FLAT_SEP)
@@ -66662,13 +67020,23 @@ impl PySeriesStringAccessor {
             return Ok(PySeries { inner });
         }
         if !source.is_pandas_string() {
+            // Text held contiguously holds no number, bool or date cell, and
+            // its missing cells are its mask's: the checks below built its
+            // Scalars, a String a row, to learn that (a third of
+            // s.str.split() over a CSV text column; br-frankenpandas-alehi).
+            let contiguous_text = source.as_utf8_contiguous().is_some()
+                || source.as_nullable_utf8_contiguous().is_some();
             // A count over an object column of nothing but missing values is
             // those values, object, as pandas' masked loop leaves them (None
             // stays None; they were NaN floats; fvsao.59).
             if kind == StrKind::Count
                 && matches!(source.dtype(), DType::Utf8 | DType::Null)
                 && !source.is_empty()
-                && source.values().iter().all(Scalar::is_missing)
+                && if contiguous_text {
+                    source.validity().count_valid() == 0
+                } else {
+                    source.values().iter().all(Scalar::is_missing)
+                }
             {
                 let column = Column::from_object_values(source.values().to_vec());
                 return Series::new(inner.name(), inner.index().clone(), column)
@@ -66687,7 +67055,7 @@ impl PySeriesStringAccessor {
                             | Scalar::Period(_)
                     )
             };
-            if !source.values().iter().any(not_text) {
+            if contiguous_text || !source.values().iter().any(not_text) {
                 return Ok(PySeries { inner });
             }
             let cells: Vec<Scalar> = inner
@@ -83372,8 +83740,15 @@ fn concat_objects(
     let unnamed_columns =
         keys.is_none() && !series.is_empty() && series.iter().all(|s| s.name().is_empty());
     let refs: Vec<&DataFrame> = frames.iter().collect();
-    let mut out =
-        fp_frame::concat_dataframes_with_axis_join(&refs, axis, join).map_err(frame_error_to_py)?;
+    // ignore_index: the row concat builds its RangeIndex rather than
+    // concatenating the frames' indexes to drop them (br-frankenpandas-uxjm4).
+    let mut out = fp_frame::concat_dataframes_with_axis_join_ignoring_index(
+        &refs,
+        axis,
+        join,
+        ignore_index && keys.is_none(),
+    )
+    .map_err(frame_error_to_py)?;
     if let Some(multi) = keyed_columns {
         out = out
             .with_columns_multiindex(Some(multi))
@@ -84113,6 +84488,40 @@ fn pandas_astype_int_source(column: &Column, dtype: &Bound<'_, PyAny>) -> PyResu
             ));
         }
         DType::Utf8 => {
+            // Contiguous text of plain optionally-signed digit runs, parsed off
+            // its bytes into an int64 column: a trim, an underscore-stripping
+            // String and a Scalar were made per row (s.astype('int64') of 200k
+            // digit strings 9.8 ms, pandas 9.3, to_numeric 4.8;
+            // br-frankenpandas-qcbpv). Any other span - whitespace,
+            // underscores, past i64 - leaves it to the loop below, whose
+            // errors and their row order hold.
+            if !nullable && let Some((bytes, offsets)) = column.as_utf8_window() {
+                let mut ints = Vec::with_capacity(offsets.len().saturating_sub(1));
+                for span in offsets.windows(2) {
+                    let raw = &bytes[span[0]..span[1]];
+                    let digits = raw.strip_prefix(b"+").or_else(|| raw.strip_prefix(b"-"));
+                    let plain = digits.unwrap_or(raw).iter().all(u8::is_ascii_digit)
+                        && digits.unwrap_or(raw).len() < 19;
+                    let Some(parsed) = plain
+                        .then(|| std::str::from_utf8(raw).ok()?.parse::<i64>().ok())
+                        .flatten()
+                    else {
+                        ints.clear();
+                        break;
+                    };
+                    if let Some(width) = width
+                        && !width.holds_int(parsed)
+                    {
+                        return Err(PyErr::new::<pyo3::exceptions::PyOverflowError, _>(format!(
+                            "Python integer {parsed} out of bounds for {name}"
+                        )));
+                    }
+                    ints.push(parsed);
+                }
+                if ints.len() + 1 == offsets.len() {
+                    return Ok(Some(Column::from_i64_values(ints)));
+                }
+            }
             let missing_type = if column.is_pandas_string() {
                 "NAType"
             } else {
@@ -84147,17 +84556,23 @@ fn pandas_astype_int_source(column: &Column, dtype: &Bound<'_, PyAny>) -> PyResu
                         )));
                     }
                     Scalar::Utf8(text) => {
-                        let parsed = text.trim().replace('_', "").parse::<i64>().ok();
-                        if let (Some(parsed), Some(width)) = (parsed, width)
+                        // An integer literal past int64 is Python's overflow,
+                        // as pandas raises it for int64 and Int64 alike (it fell
+                        // to a ValueError; br-frankenpandas-qcbpv).
+                        let Ok(parsed) = text.trim().replace('_', "").parse::<i64>() else {
+                            return Err(PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
+                                "Python int too large to convert to C long",
+                            ));
+                        };
+                        if let Some(width) = width
                             && !width.holds_int(parsed)
                         {
                             return Err(PyErr::new::<pyo3::exceptions::PyOverflowError, _>(
                                 format!("Python integer {parsed} out of bounds for {name}"),
                             ));
                         }
-                        match (&mut ints, parsed) {
-                            (Some(ints), Some(parsed)) => ints.push(Scalar::Int64(parsed)),
-                            _ => ints = None,
+                        if let Some(ints) = &mut ints {
+                            ints.push(Scalar::Int64(parsed));
                         }
                     }
                     missing if missing.is_missing() => {
@@ -87098,9 +87513,12 @@ fn merge_impl(
         let name = index_join_name(left.index(), right.index(), args.how);
         // pandas joins the two indexes, so labels that are a RangeIndex side's
         // own (a left join's left, an inner join's shorter range) stay one.
+        // Lengths first: a side of other length is no match, and comparing
+        // made each side's labels (br-frankenpandas-m3z4g).
         let span = [left.index(), right.index()].into_iter().find_map(|side| {
             let span = side.range_span()?;
-            (side.labels() == frame.index().labels()).then_some(span)
+            (side.len() == frame.index().len() && side.labels() == frame.index().labels())
+                .then_some(span)
         });
         // Two tz-aware indexes join in their shared zone, or in UTC for two
         // zones (they came back naive UTC, fvsao.60).
@@ -93814,13 +94232,39 @@ impl PyGrouper {
     }
 }
 
+/// pandas' interval side named `closed`, as an Interval holds it - else
+/// pandas' ValueError.
+fn interval_side(closed: &str) -> PyResult<&'static str> {
+    ["right", "left", "both", "neither"]
+        .into_iter()
+        .find(|&side| side == closed)
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "closed must be one of 'right', 'left', 'both', 'neither'",
+            )
+        })
+}
+
+/// The side's name of a core interval's `closed`.
+fn closed_side(closed: fp_types::IntervalClosed) -> &'static str {
+    match closed {
+        fp_types::IntervalClosed::Left => "left",
+        fp_types::IntervalClosed::Both => "both",
+        fp_types::IntervalClosed::Neither => "neither",
+        _ => "right",
+    }
+}
+
 #[pyclass(name = "Interval", from_py_object)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PyInterval {
     pub left: f64,
     pub right: f64,
+    /// One of pandas' four sides ([`interval_side`]): a static name, where
+    /// a String a interval was an allocation each (interval_range(0, 100_000)
+    /// 0.19x pandas; br-frankenpandas-w3wnb).
     #[pyo3(get)]
-    pub closed: String,
+    pub closed: &'static str,
     /// Integer endpoints (pandas' `interval[int64]`): `.left` / `.right` /
     /// `.length` are ints and print without '.0' (fvsao.54: they were
     /// floats).
@@ -93954,7 +94398,7 @@ impl PyInterval {
                 Some(std::cmp::Ordering::Equal) => self
                     .right
                     .partial_cmp(&other.right)
-                    .map(|right| right.then_with(|| self.closed.cmp(&other.closed))),
+                    .map(|right| right.then_with(|| self.closed.cmp(other.closed))),
                 order => order,
             },
             // Timestamp / Timedelta endpoints compare exactly, and only
@@ -93963,7 +94407,7 @@ impl PyInterval {
                 this.left
                     .cmp(&that.left)
                     .then(this.right.cmp(&that.right))
-                    .then_with(|| self.closed.cmp(&other.closed)),
+                    .then_with(|| self.closed.cmp(other.closed)),
             ),
             _ => return Ok(py.NotImplemented()),
         };
@@ -93984,15 +94428,10 @@ impl PyInterval {
 
     /// A float64 interval from Rust endpoints, the closed side checked.
     fn floats(left: f64, right: f64, closed: &str) -> PyResult<Self> {
-        if !["right", "left", "both", "neither"].contains(&closed) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "closed must be one of 'right', 'left', 'both', 'neither'",
-            ));
-        }
         Ok(Self {
             left,
             right,
-            closed: closed.to_owned(),
+            closed: interval_side(closed)?,
             int_endpoints: false,
             temporal: None,
         })
@@ -94015,7 +94454,7 @@ impl PyInterval {
     /// these: its constructor refuses the others).
     fn numeric_core(&self) -> fp_types::Interval {
         debug_assert!(self.temporal.is_none());
-        let closed = match self.closed.as_str() {
+        let closed = match self.closed {
             "left" => fp_types::IntervalClosed::Left,
             "both" => fp_types::IntervalClosed::Both,
             "neither" => fp_types::IntervalClosed::Neither,
@@ -94034,7 +94473,7 @@ impl PyInterval {
         Self {
             left: interval.left,
             right: interval.right,
-            closed: interval.closed.to_string(),
+            closed: closed_side(interval.closed),
             int_endpoints: interval.subtype == fp_types::IntervalSubtype::Int64,
             temporal: None,
         }
@@ -94062,11 +94501,11 @@ impl PyInterval {
 
     /// A missing interval of an IntervalIndex closed on `closed`: NaN
     /// endpoints, as pandas' IntervalArray holds one.
-    fn missing(closed: &str) -> Self {
+    fn missing(closed: &'static str) -> Self {
         Self {
             left: f64::NAN,
             right: f64::NAN,
-            closed: closed.to_owned(),
+            closed,
             int_endpoints: false,
             temporal: None,
         }
@@ -94096,7 +94535,7 @@ impl PyInterval {
 
     /// The brackets of this interval's closed sides.
     fn brackets(&self) -> (char, char) {
-        match self.closed.as_str() {
+        match self.closed {
             "right" => ('(', ']'),
             "left" => ('[', ')'),
             "both" => ('[', ']'),
@@ -94173,19 +94612,14 @@ impl PyInterval {
         right: &Bound<'_, PyAny>,
         closed: Option<&str>,
     ) -> PyResult<Self> {
-        let closed_str = closed.unwrap_or("right");
-        if !["right", "left", "both", "neither"].contains(&closed_str) {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "closed must be one of 'right', 'left', 'both', 'neither'",
-            ));
-        }
+        let closed_str = interval_side(closed.unwrap_or("right"))?;
         // Timestamp / Timedelta endpoints, held exactly (they were refused:
         // 'must be real number, not Timestamp'; br-frankenpandas-1qj7z).
         if let Some(temporal) = IntervalTemporal::of(left, right)? {
             return Ok(Self {
                 left: temporal.left as f64,
                 right: temporal.right as f64,
-                closed: closed_str.to_string(),
+                closed: closed_str,
                 int_endpoints: false,
                 temporal: Some(temporal),
             });
@@ -94197,7 +94631,7 @@ impl PyInterval {
         Ok(Self {
             left: left.extract::<f64>()?,
             right: right.extract::<f64>()?,
-            closed: closed_str.to_string(),
+            closed: closed_str,
             int_endpoints: integer(left) && integer(right),
             temporal: None,
         })
@@ -94243,13 +94677,13 @@ impl PyInterval {
     /// Whether the left end is closed ('left' / 'both').
     #[getter]
     fn closed_left(&self) -> bool {
-        matches!(self.closed.as_str(), "left" | "both")
+        matches!(self.closed, "left" | "both")
     }
 
     /// Whether the right end is closed ('right' / 'both').
     #[getter]
     fn closed_right(&self) -> bool {
-        matches!(self.closed.as_str(), "right" | "both")
+        matches!(self.closed, "right" | "both")
     }
 
     #[getter]
@@ -94370,14 +94804,14 @@ impl PyInterval {
                 )));
             };
             return Ok(Self::holds(
-                &self.closed,
+                self.closed,
                 temporal.left,
                 temporal.right,
                 point,
             ));
         }
         let val: f64 = val.extract()?;
-        Ok(Self::holds(&self.closed, self.left, self.right, val))
+        Ok(Self::holds(self.closed, self.left, self.right, val))
     }
 
     /// pandas' repr: `Interval(0, 3, closed='right')` for integer
@@ -94495,8 +94929,7 @@ impl PyIntervalIndex {
                     .iter()
                     .flatten()
                     .next()
-                    .map_or("right", |interval| interval.closed.as_str())
-                    .to_owned();
+                    .map_or("right", |interval| interval.closed);
                 let any_missing = items.iter().any(Option::is_none);
                 intervals = items
                     .into_iter()
@@ -94505,7 +94938,7 @@ impl PyIntervalIndex {
                             interval.int_endpoints &= !any_missing;
                             interval
                         }
-                        None => PyInterval::missing(&closed),
+                        None => PyInterval::missing(closed),
                     })
                     .collect();
             }
@@ -94534,7 +94967,7 @@ impl PyIntervalIndex {
         closed: Option<&str>,
         name: Option<&str>,
     ) -> PyResult<Self> {
-        let closed_str = closed.unwrap_or("right");
+        let closed_str = interval_side(closed.unwrap_or("right"))?;
         let (breaks, ints) = interval_endpoints(breaks)?;
         if breaks.len() < 2 {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -94564,7 +94997,7 @@ impl PyIntervalIndex {
         closed: Option<&str>,
         name: Option<&str>,
     ) -> PyResult<Self> {
-        let closed_str = closed.unwrap_or("right");
+        let closed_str = interval_side(closed.unwrap_or("right"))?;
         let mut pairs = Vec::new();
         let mut ints = true;
         for pair in data.try_iter()? {
@@ -94609,7 +95042,7 @@ impl PyIntervalIndex {
         closed: Option<&str>,
         name: Option<&str>,
     ) -> PyResult<Self> {
-        let closed_str = closed.unwrap_or("right");
+        let closed_str = interval_side(closed.unwrap_or("right"))?;
         let (left, left_ints) = interval_endpoints(left)?;
         let (right, right_ints) = interval_endpoints(right)?;
         if left.len() != right.len() {
@@ -94915,7 +95348,7 @@ impl PyIntervalIndex {
     fn closed(&self) -> String {
         self.intervals
             .first()
-            .map_or("right", |iv| iv.closed.as_str())
+            .map_or("right", |iv| iv.closed)
             .to_string()
     }
 
@@ -95150,8 +95583,7 @@ impl PyIntervalIndex {
             .intervals
             .iter()
             .find(|interval| !interval.is_missing())
-            .map_or("right", |interval| interval.closed.as_str())
-            .to_owned();
+            .map_or("right", |interval| interval.closed);
         let intervals = pair
             .get_item(1)?
             .try_iter()?
@@ -95159,7 +95591,7 @@ impl PyIntervalIndex {
                 let item = item?;
                 Ok(match item.extract::<PyRef<'_, PyInterval>>() {
                     Ok(interval) => interval.clone(),
-                    Err(_) => PyInterval::missing(&closed),
+                    Err(_) => PyInterval::missing(closed),
                 })
             })
             .collect::<PyResult<Vec<_>>>()?;
@@ -95363,7 +95795,7 @@ impl PyIntervalIndex {
                 "'<' not supported between the IntervalIndex's endpoints and the Interval's",
             ));
         }
-        let other_closed = match other.closed.as_str() {
+        let other_closed = match other.closed {
             "left" => fp_types::IntervalClosed::Left,
             "both" => fp_types::IntervalClosed::Both,
             "neither" => fp_types::IntervalClosed::Neither,
@@ -95521,7 +95953,7 @@ impl PyIntervalIndex {
             .intervals
             .iter()
             .map(|iv| {
-                let closed = match iv.closed.as_str() {
+                let closed = match iv.closed {
                     "left" => fp_types::IntervalClosed::Left,
                     "both" => fp_types::IntervalClosed::Both,
                     "neither" => fp_types::IntervalClosed::Neither,
@@ -99336,12 +99768,7 @@ pub fn interval_range(
     let ints = int_or_absent(start) && int_or_absent(end) && int_or_absent(freq);
     let number = |value: Option<&Bound<'_, PyAny>>| value.map(|v| v.extract::<f64>()).transpose();
     let (start, end, freq) = (number(start)?, number(end)?, number(freq)?);
-    let closed = closed.unwrap_or("right");
-    if !matches!(closed, "right" | "left" | "both" | "neither") {
-        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "closed must be one of 'right', 'left', 'both', 'neither'",
-        ));
-    }
+    let closed = interval_side(closed.unwrap_or("right"))?;
     let freq = match freq {
         None if start.is_none() || end.is_none() || periods.is_none() => Some(1.0),
         freq => freq,
@@ -99405,11 +99832,20 @@ pub fn interval_range(
         Some(last) if i == count => last,
         _ => first + step * i as f64,
     };
-    let whole = ints && (0..=count).all(|i| edge(i).fract() == 0.0);
+    // Each edge made once: an int range is whole when every edge is (they
+    // were made a second time to ask).
+    let mut whole = ints;
+    let mut left = edge(0);
     for i in 0..count {
-        let mut interval = PyInterval::floats(edge(i), edge(i + 1), closed)?;
-        interval.int_endpoints = whole;
-        intervals.push(interval);
+        let right = edge(i + 1);
+        whole = whole && left.fract() == 0.0;
+        intervals.push(PyInterval::floats(left, right, closed)?);
+        left = right;
+    }
+    if whole && left.fract() == 0.0 {
+        for interval in &mut intervals {
+            interval.int_endpoints = true;
+        }
     }
     Ok(PyIntervalIndex {
         intervals,
@@ -107189,14 +107625,14 @@ mod tests {
                 PyInterval {
                     left: 0.0,
                     right: 1.5,
-                    closed: "right".to_string(),
+                    closed: "right",
                     int_endpoints: false,
                     temporal: None,
                 },
                 PyInterval {
                     left: 1.5,
                     right: 3.0,
-                    closed: "right".to_string(),
+                    closed: "right",
                     int_endpoints: false,
                     temporal: None,
                 },
@@ -107247,7 +107683,7 @@ mod tests {
         let other = PyInterval {
             left: 1.0,
             right: 2.0,
-            closed: "both".to_string(),
+            closed: "both",
             int_endpoints: false,
             temporal: None,
         };
@@ -107963,15 +108399,17 @@ mod tests {
                 .fillna(py, Some(dict_fill.as_any()), None, None, false, None, None)
                 .expect("dict fill")
                 .expect("a copy");
-            assert_eq!(
-                filled_dict.inner.column().values(),
-                &[
-                    Scalar::Float64(1.0),
-                    Scalar::Float64(20.0),
-                    Scalar::Null(NullKind::NaN),
-                    Scalar::Float64(4.0)
-                ]
-            );
+            // 'c' stays missing: the fill is the NaN-as-missing column, which
+            // reads a missing row Float64(NaN) (not equal to itself), so each
+            // cell is compared as missing or its number.
+            let cells: Vec<Option<f64>> = filled_dict
+                .inner
+                .column()
+                .values()
+                .iter()
+                .map(|cell| (!cell.is_missing()).then(|| cell.to_f64().expect("a number")))
+                .collect();
+            assert_eq!(cells, vec![Some(1.0), Some(20.0), None, Some(4.0)]);
 
             // DataFrame tests
             let df = DataFrame::from_dict(

@@ -6270,8 +6270,11 @@ fn readme_csv_options_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         &na_opts,
     )?;
     let score_col = na_df.column("score").unwrap();
-    // Row 1 (Bob) should be Null after MISSING → NA.
-    assert!(matches!(score_col.values()[1], Scalar::Null(_)));
+    // Row 1 (Bob) should be missing after MISSING → NA (the float column is
+    // NaN-as-missing, so the cell reads Float64(NaN)); the others present.
+    assert!(score_col.values()[1].is_missing());
+    assert_eq!(score_col.values()[0], Scalar::Float64(42.0));
+    assert_eq!(score_col.values()[2], Scalar::Float64(17.5));
 
     // ── 4. usecols: column subset ───────────────────────────────
     let usecols_opts = CsvReadOptions {

@@ -2463,6 +2463,36 @@ pub fn pct_change_values(data: &[f64], periods: usize) -> Vec<f64> {
         .collect()
 }
 
+/// The centered cross-sums of a covariance matrix's upper triangle (pair
+/// `(a, b)`, `b >= a`, in that order), each pair summed over the rows in row
+/// order: fp-dot-kernel's four-pairs-a-step kernel where the CPU has AVX2,
+/// the same loop at the baseline ISA else - the same bits either way
+/// (br-frankenpandas-jy2f4).
+#[must_use]
+pub fn cov_cross_sums(columns: &[&[f64]], means: &[f64], len: usize) -> Vec<f64> {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        return fp_dot_kernel::cov_cross_sums_f64(columns, means, len);
+    }
+    let k = columns.len();
+    let mut cross = vec![0.0_f64; k * (k + 1) / 2];
+    let mut centered = vec![0.0_f64; k];
+    for row in 0..len {
+        for ((slot, column), &mean) in centered.iter_mut().zip(columns).zip(means) {
+            *slot = column[row] - mean;
+        }
+        let mut at = 0;
+        for (a, &first) in centered.iter().enumerate() {
+            let tail = &centered[a..];
+            for (sum, &second) in cross[at..at + tail.len()].iter_mut().zip(tail) {
+                *sum += first * second;
+            }
+            at += tail.len();
+        }
+    }
+    cross
+}
+
 /// [`sqrt_values`] collected straight into the `Arc<[f64]>` a NaN-exact
 /// column keeps - not a Vec copied into one, nor a zero-filled Arc written
 /// over (its fill was larger than the roots; br-frankenpandas-cmgnp).
@@ -3499,12 +3529,18 @@ enum ScalarValues {
     /// `Arc<[f64]>` (which `Arc::from(Vec)` builds by allocating a fresh n*8+16
     /// buffer and memcpy-ing — a cold-page-fault-bound ~5.7ms/1M, the dominant
     /// cost of every f64-producing op: abs/cumsum/cummax/cummin/cumprod/diff/clip).
-    /// Semantically identical to `LazyAllValidFloat64` (all-valid, no missing);
-    /// consumers read the slice via `&data[..]`.
+    /// Semantically identical to `LazyAllValidFloat64` (all-valid, no missing,
+    /// unless `nan_missing_exact`); consumers read the slice via `&data[..]`.
     LazyAllValidFloat64Vec {
         data: Arc<Vec<f64>>,
         all_finite: OnceLock<bool>,
         values: OnceLock<Vec<Scalar>>,
+        /// The `LazyAllValidFloat64` witness for an owned buffer holding NaN in
+        /// exactly the owning column's missing rows - a NaN-exact column's rows
+        /// moved with their mask into a Vec the op just wrote (a shift), kept
+        /// without the `Arc<[f64]>` copy (br-frankenpandas-0mxem). Conservative
+        /// like its sibling: `false` means unknown.
+        nan_missing_exact: bool,
     },
     LazyAllValidFloat64Chunks {
         chunks: Arc<[Float64Chunk]>,
@@ -3567,6 +3603,13 @@ enum ScalarValues {
         ///
         /// Re-open only with a measurement showing the Plain arm is unharmed.
         shared_values: Option<Arc<OnceLock<Vec<Scalar>>>>,
+        /// The `LazyAllValidFloat64` witness, for a window of a NaN-bearing
+        /// column: the owning column's validity is EXACTLY `!data[i].is_nan()`
+        /// over `start..start + len`. Without it every `iloc` range, `head` or
+        /// `tail` of such a column lost the scan-free paths its source had
+        /// (br-frankenpandas-mvo99: concat of two halves scanned both).
+        /// Conservative like its sibling: `false` means unknown.
+        nan_missing_exact: bool,
     },
     /// Deferred all-valid Float64 output column for finite `DataFrame::dot`.
     ///
@@ -3754,13 +3797,17 @@ enum ScalarValues {
         // the `Option` payload (40 B -> 16 B) shrinks every `Column`; `Option<Box<_>>`
         // uses the null-pointer niche so `None` stays a single word.
         lower_hex_sequence: OnceLock<Option<Box<Utf8LowerHexSequence>>>,
-        // Boxed: this cold factorize cache is the single widest field (56 B) of the
-        // widest `ScalarValues` variant, so it alone sizes the whole enum. Boxing it
-        // (56 B -> 16 B) shrinks `ScalarValues`/`Column` for every column in the
-        // workspace, and the deref it adds falls ONLY on the cold factorize path
-        // (`utf8_default_factorize_columns`), never on the hot byte-access path
-        // (`bytes`/`offsets`), so the contiguous-Utf8 wins are untouched.
-        factorize_default: OnceLock<Box<Utf8FactorizeDefaultWitness>>,
+        // Behind a pointer: this cold factorize cache is the single widest field
+        // (56 B) of the widest `ScalarValues` variant, so inline it would size the
+        // whole enum; the deref falls ONLY on the factorize path
+        // (`utf8_default_factorize_columns`), never on the hot byte-access path.
+        //
+        // SHARED by clones (an `Arc`, not a per-clone `OnceLock<Box<_>>`): it is a
+        // pure function of the shared buffers, and every `df.groupby(key)` works
+        // on a clone of the key column, so a per-clone cache was rebuilt by each
+        // groupby - a third of `groupby('cat')[c].transform('mean')`
+        // (br-frankenpandas-bl5ct).
+        factorize_default: Arc<OnceLock<Utf8FactorizeDefaultWitness>>,
         values: OnceLock<Vec<Scalar>>,
     },
     /// Lazy fixed-width lowercase-hex Utf8 sequence
@@ -3797,7 +3844,11 @@ enum ScalarValues {
         /// source (a merge, an align), whose gaps pandas marks NaN
         /// (br-frankenpandas-7u2td).
         gap: NullKind,
-        values: OnceLock<Vec<Scalar>>,
+        /// The Scalar view, SHARED by clones: every `df[col]` hands a clone to
+        /// the op, so a per-clone cache built a String a row for each string
+        /// op on a column read from CSV with gaps (str.contains 3.8 -> 7.5 ms
+        /// once such columns stopped being Scalars; br-frankenpandas-alehi).
+        values: Arc<OnceLock<Vec<Scalar>>>,
     },
     /// Deferred null-introducing Utf8 gather (br-frankenpandas-yiqv5): the
     /// null path of `reindex_by_positions` over an all-valid `Eager` Utf8
@@ -4187,6 +4238,7 @@ impl ScalarValues {
             data: Arc::new(data),
             all_finite: Self::bool_once_lock(all_finite),
             values: OnceLock::new(),
+            nan_missing_exact: false,
         }
     }
 
@@ -4236,6 +4288,12 @@ impl ScalarValues {
     fn nan_missing_exact(&self) -> bool {
         match self {
             Self::LazyAllValidFloat64 {
+                nan_missing_exact, ..
+            }
+            | Self::LazyAllValidFloat64Slice {
+                nan_missing_exact, ..
+            }
+            | Self::LazyAllValidFloat64Vec {
                 nan_missing_exact, ..
             } => *nan_missing_exact,
             _ => false,
@@ -4398,7 +4456,21 @@ impl ScalarValues {
             // A STANDALONE window has no page-shared Scalar view; that field is
             // for sibling windows over one buffer (the transposed-frame plan).
             shared_values: None,
+            nan_missing_exact: false,
         }
+    }
+
+    /// [`Self::lazy_all_valid_float64_slice`] for a caller whose window mask is
+    /// exactly the window's non-NaN slots; see the variant's `nan_missing_exact`.
+    fn lazy_all_valid_float64_slice_nan_exact(data: Arc<[f64]>, start: usize, len: usize) -> Self {
+        let mut window = Self::lazy_all_valid_float64_slice(data, start, len);
+        if let Self::LazyAllValidFloat64Slice {
+            nan_missing_exact, ..
+        } = &mut window
+        {
+            *nan_missing_exact = true;
+        }
+        window
     }
 
     /// Sibling of [`Self::lazy_all_valid_float64_slice`] for windows that share
@@ -4428,6 +4500,7 @@ impl ScalarValues {
             all_finite: OnceLock::new(),
             values: OnceLock::new(),
             shared_values: Some(shared_values),
+            nan_missing_exact: false,
         }
     }
 
@@ -4715,8 +4788,17 @@ impl ScalarValues {
     /// contiguous-Utf8 columns can share one immutable byte buffer
     /// (br-frankenpandas-oifvy). The witness caches start fresh — they are pure
     /// functions of the (identical) shared buffers, so a clone recomputes the
-    /// same value lazily if asked.
+    /// same value lazily if asked - but for the factorize cache, which the
+    /// `Clone` arm shares (see `factorize_default`).
     fn lazy_contiguous_utf8_arc(bytes: Arc<[u8]>, offsets: Arc<[usize]>) -> Self {
+        Self::lazy_contiguous_utf8_sharing_factorize(bytes, offsets, Arc::default())
+    }
+
+    fn lazy_contiguous_utf8_sharing_factorize(
+        bytes: Arc<[u8]>,
+        offsets: Arc<[usize]>,
+        factorize_default: Arc<OnceLock<Utf8FactorizeDefaultWitness>>,
+    ) -> Self {
         debug_assert!(!offsets.is_empty(), "offsets must hold n+1 entries");
         debug_assert_eq!(*offsets.last().expect("non-empty"), bytes.len());
         Self::LazyContiguousUtf8 {
@@ -4725,7 +4807,7 @@ impl ScalarValues {
             strictly_increasing: OnceLock::new(),
             fixed_width: OnceLock::new(),
             lower_hex_sequence: OnceLock::new(),
-            factorize_default: OnceLock::new(),
+            factorize_default,
             values: OnceLock::new(),
         }
     }
@@ -4744,7 +4826,7 @@ impl ScalarValues {
             offsets: Arc::from(offsets),
             validity,
             gap,
-            values: OnceLock::new(),
+            values: Arc::default(),
         }
     }
 
@@ -7461,7 +7543,6 @@ impl ScalarValues {
             | Self::LazyStridedBool { values, .. }
             | Self::LazyContiguousUtf8 { values, .. }
             | Self::LazyLowerHexSequenceUtf8 { values, .. }
-            | Self::LazyNullableUtf8 { values, .. }
             | Self::LazyGatherUtf8 { values, .. }
             | Self::LazyNullableUtf8Range { values, .. }
             | Self::LazyNullableInt64 { values, .. }
@@ -7486,6 +7567,8 @@ impl ScalarValues {
             Self::LazyCategoryCodes { values, .. }
             | Self::LazyNullableDatetime64 { values, .. }
             | Self::LazyNullableTimedelta64 { values, .. } => values.get().is_some(),
+            // Its view is shared by clones (an Arc around the OnceLock).
+            Self::LazyNullableUtf8 { values, .. } => values.get().is_some(),
         }
     }
 }
@@ -7758,11 +7841,16 @@ impl Clone for ScalarValues {
                 }
             }
             Self::LazyAllValidFloat64Vec {
-                data, all_finite, ..
+                data,
+                all_finite,
+                nan_missing_exact,
+                ..
             } => Self::LazyAllValidFloat64Vec {
                 data: Arc::clone(data),
                 all_finite: Self::bool_once_lock(all_finite.get().copied()),
                 values: OnceLock::new(),
+                // The clone copies the mask with the buffer: the pair holds.
+                nan_missing_exact: *nan_missing_exact,
             },
             Self::LazyAllValidFloat64Chunks {
                 chunks,
@@ -7802,13 +7890,25 @@ impl Clone for ScalarValues {
                 start,
                 len,
                 all_finite,
+                nan_missing_exact,
                 ..
-            } => Self::lazy_all_valid_float64_slice_with_finite(
-                Arc::clone(data),
-                *start,
-                *len,
-                all_finite.get().copied(),
-            ),
+            } => {
+                let mut window = Self::lazy_all_valid_float64_slice_with_finite(
+                    Arc::clone(data),
+                    *start,
+                    *len,
+                    all_finite.get().copied(),
+                );
+                // The clone copies the mask with the window, so the pair holds.
+                if let Self::LazyAllValidFloat64Slice {
+                    nan_missing_exact: carried,
+                    ..
+                } = &mut window
+                {
+                    *carried = *nan_missing_exact;
+                }
+                window
+            }
             Self::LazyAllValidFloat64Dot {
                 a_cols, b_col, len, ..
             } => Self::lazy_all_valid_float64_dot(Arc::clone(a_cols), Arc::clone(b_col), *len),
@@ -7892,9 +7992,16 @@ impl Clone for ScalarValues {
                 len,
                 ..
             } => Self::lazy_strided_bool(Arc::clone(data), *start, *step, *len),
-            Self::LazyContiguousUtf8 { bytes, offsets, .. } => {
-                Self::lazy_contiguous_utf8_arc(Arc::clone(bytes), Arc::clone(offsets))
-            }
+            Self::LazyContiguousUtf8 {
+                bytes,
+                offsets,
+                factorize_default,
+                ..
+            } => Self::lazy_contiguous_utf8_sharing_factorize(
+                Arc::clone(bytes),
+                Arc::clone(offsets),
+                Arc::clone(factorize_default),
+            ),
             Self::LazyLowerHexSequenceUtf8 {
                 prefix,
                 start,
@@ -7914,13 +8021,13 @@ impl Clone for ScalarValues {
                 offsets,
                 validity,
                 gap,
-                ..
+                values,
             } => Self::LazyNullableUtf8 {
                 bytes: Arc::clone(bytes),
                 offsets: Arc::clone(offsets),
                 validity: validity.clone(),
                 gap: *gap,
-                values: OnceLock::new(),
+                values: Arc::clone(values),
             },
             Self::LazyGatherUtf8 {
                 source,
@@ -16562,7 +16669,7 @@ impl Column {
                 factorize_default,
                 ..
             } => factorize_default
-                .get_or_init(|| Box::new(build_utf8_factorize_default_witness(bytes, offsets))),
+                .get_or_init(|| build_utf8_factorize_default_witness(bytes, offsets)),
             _ => return None,
         };
 
@@ -17375,7 +17482,12 @@ impl Column {
             // Bit-identical to the Scalar-clone path: each output slot materializes
             // `Scalar::Utf8` of the exact same span bytes in the same order, with an
             // all-valid mask (the source is all-valid by the enclosing branch).
-            if let Some((bytes, offsets)) = self.as_utf8_contiguous() {
+            // A row-range window of such a column (head / iloc) too: its offsets
+            // index the shared bytes, and it fell to the Scalar path below,
+            // whose `self.values[pos]` built a String for every row of the
+            // window (a third of merge(how='outer') over df.head(50_000);
+            // br-frankenpandas-a4ii9).
+            if let Some((bytes, offsets)) = self.as_utf8_window() {
                 let total: usize = positions
                     .iter()
                     .map(|&pos| offsets[pos + 1] - offsets[pos])
@@ -17490,8 +17602,21 @@ impl Column {
                 buffer, start, len, ..
             } => Some(&buffer[*start..*start + *len]),
             ScalarValues::LazyAllValidFloat64 { data, .. } => Some(data.as_ref()),
+            ScalarValues::LazyAllValidFloat64Vec { data, .. } => Some(&data[..]),
+            ScalarValues::LazyAllValidFloat64Slice {
+                data, start, len, ..
+            } => Some(&data[*start..*start + *len]),
             _ => None,
         };
+        // A source whose missing rows are exactly its NaNs gathers into the
+        // same NaN-as-missing column, written in place in its Arc
+        // (`from_f64_arc`): the nullable backing below lost that, and each
+        // later op on the rows re-derived the mask from the data
+        // (br-frankenpandas-looy4).
+        if let Some(src) = typed_f64.filter(|_| self.nan_missing_exact()) {
+            return Self::from_f64_arc(positions.iter().map(|&pos| src[pos]).collect())
+                .keeping_nullable_dtype(&self.dtype);
+        }
         if let Some(src) = typed_f64 {
             let mut data = Vec::with_capacity(n);
             let mut words = vec![0_u64; n.div_ceil(64)];
@@ -17896,6 +18021,10 @@ impl Column {
                 buffer, start, len, ..
             } => Some(&buffer[*start..*start + *len]),
             ScalarValues::LazyAllValidFloat64 { data, .. } => Some(data.as_ref()),
+            ScalarValues::LazyAllValidFloat64Vec { data, .. } => Some(&data[..]),
+            ScalarValues::LazyAllValidFloat64Slice {
+                data, start, len, ..
+            } => Some(&data[*start..*start + *len]),
             _ => None,
         };
         if let Some(src) = typed_f64 {
@@ -18214,7 +18343,10 @@ impl Column {
                 }
                 return Self {
                     dtype: self.dtype.clone(),
-                    values: ScalarValues::lazy_all_valid_float64_slice(buffer, view_start, len),
+                    // A bit-slice of a NaN-exact pair is a NaN-exact pair.
+                    values: ScalarValues::lazy_all_valid_float64_slice_nan_exact(
+                        buffer, view_start, len,
+                    ),
                     validity: ValidityMask::from_words(words, len),
                     data: None,
                     categorical: None,
@@ -18339,9 +18471,14 @@ impl Column {
                     .checked_add(len)
                     .is_some_and(|view_end| view_end <= buffer.len())
             {
+                // `mask` is `valid & !NaN` and `escaped == 0` says no invalid slot
+                // holds a non-NaN datum, so the mask is exactly the window's
+                // non-NaN slots: the witness holds.
                 return Self {
                     dtype: self.dtype.clone(),
-                    values: ScalarValues::lazy_all_valid_float64_slice(buffer, view_start, len),
+                    values: ScalarValues::lazy_all_valid_float64_slice_nan_exact(
+                        buffer, view_start, len,
+                    ),
                     validity: mask,
                     data: None,
                     categorical: None,
@@ -19251,9 +19388,50 @@ impl Column {
     /// NaN-exact column's values mapped by a function that keeps every NaN
     /// and makes none, under its own mask).
     fn nan_exact_float64(data: Arc<[f64]>, validity: ValidityMask) -> Self {
+        debug_assert!(
+            data.len() == validity.len()
+                && data
+                    .iter()
+                    .enumerate()
+                    .all(|(row, value)| validity.get(row) != value.is_nan()),
+            "a NaN-exact column's mask is exactly its non-NaN rows"
+        );
         Self {
             dtype: DType::Float64,
             values: ScalarValues::lazy_all_valid_float64_arc_nan_exact(data, None),
+            validity,
+            data: None,
+            categorical: None,
+            width: None,
+            pandas_string: false,
+        }
+    }
+
+    /// The NaN-as-missing Float64 column over the owned `data` whose
+    /// `validity` the caller has proven is exactly `data`'s non-NaN rows,
+    /// moved in WITHOUT the scan `from_f64_values` derives the mask by or its
+    /// `Arc<[f64]>` copy - for rows a NaN-exact column moved with its mask (a
+    /// shift whose vacated rows hold NaN under cleared bits). Debug builds
+    /// check the pairing.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_f64_vec_nan_exact_unchecked(data: Vec<f64>, validity: ValidityMask) -> Self {
+        debug_assert!(
+            data.len() == validity.len()
+                && data
+                    .iter()
+                    .enumerate()
+                    .all(|(row, value)| validity.get(row) != value.is_nan()),
+            "a NaN-exact column's mask is exactly its non-NaN rows"
+        );
+        Self {
+            dtype: DType::Float64,
+            values: ScalarValues::LazyAllValidFloat64Vec {
+                data: Arc::new(data),
+                all_finite: OnceLock::new(),
+                values: OnceLock::new(),
+                nan_missing_exact: true,
+            },
             validity,
             data: None,
             categorical: None,
@@ -19996,6 +20174,29 @@ impl Column {
                 match slot {
                     Some(idx) if *idx < slice.len() => {
                         data.push(slice[*idx]);
+                        words[out_idx / 64] |= 1_u64 << (out_idx % 64);
+                    }
+                    _ => data.push(0.0),
+                }
+            }
+            return Ok(Self::from_f64_values_with_validity(
+                data,
+                ValidityMask::from_words(words, n),
+            ));
+        }
+        // A NaN-as-missing Float64 source the same way, a source NaN a gap
+        // like an absent slot: it fell to the Scalar gather below (a merge on
+        // two indexes over a NaN-holding column; br-frankenpandas-m3z4g).
+        if self.dtype == DType::Float64
+            && self.nan_missing_exact()
+            && let Some((slice, _)) = self.as_f64_slice_with_validity()
+        {
+            let mut data = Vec::with_capacity(n);
+            let mut words = vec![0_u64; n.div_ceil(64)];
+            for (out_idx, slot) in positions.iter().enumerate() {
+                match slot.and_then(|idx| slice.get(idx)) {
+                    Some(&value) if !value.is_nan() => {
+                        data.push(value);
                         words[out_idx / 64] |= 1_u64 << (out_idx % 64);
                     }
                     _ => data.push(0.0),
@@ -21436,6 +21637,18 @@ impl Column {
             ScalarValues::LazyAllValidFloat64 { data, .. } if data.len() == self.validity.len() => {
                 Some(data.as_ref())
             }
+            // The owned and windowed all-valid buffers (a boolean filter's
+            // rows, a slice): they materialized a Scalar a row to be read back
+            // as floats (s[mask] - s[mask] over a DatetimeIndex 0.06x pandas;
+            // br-frankenpandas-looy4).
+            ScalarValues::LazyAllValidFloat64Vec { data, .. }
+                if data.len() == self.validity.len() =>
+            {
+                Some(&data[..])
+            }
+            ScalarValues::LazyAllValidFloat64Slice {
+                data, start, len, ..
+            } if *len == self.validity.len() => data.get(*start..start.checked_add(*len)?),
             ScalarValues::LazyStridedFloat64 { len, .. } if *len == self.validity.len() => {
                 self.values.strided_float64_data()
             }
@@ -23736,8 +23949,25 @@ impl Column {
                     buffer, start, len, ..
                 } => Some(&buffer[*start..*start + *len]),
                 ScalarValues::LazyAllValidFloat64 { data, .. } => Some(data.as_ref()),
+                ScalarValues::LazyAllValidFloat64Vec { data, .. } => Some(&data[..]),
+                ScalarValues::LazyAllValidFloat64Slice {
+                    data, start, len, ..
+                } => Some(&data[*start..*start + *len]),
                 _ => None,
             };
+            // A source whose missing rows are exactly its NaNs keeps that
+            // (`from_f64_values`): the nullable backing below lost it, and each
+            // later op on the rows re-derived the mask from the data
+            // (s[mask] - s[mask] holding NaN 0.29x pandas;
+            // br-frankenpandas-looy4).
+            if let Some(src) = typed_f64.filter(|_| self.nan_missing_exact()) {
+                let gathered: Vec<f64> = src
+                    .iter()
+                    .zip(mask_bits)
+                    .filter_map(|(&v, &m)| m.then_some(v))
+                    .collect();
+                return Ok(Self::from_f64_values(gathered));
+            }
             if let Some(src) = typed_f64 {
                 let count = mask_bits.iter().filter(|&&m| m).count();
                 let mut gathered = Vec::with_capacity(count);
@@ -24480,6 +24710,38 @@ impl Column {
                 .iter()
                 .map(|piece| piece.as_f64_slice_with_validity())
                 .collect::<Option<Vec<_>>>()?;
+            // Pieces whose missing rows are exactly their NaNs (or that miss
+            // none) join into the same NaN-as-missing column: the data written
+            // in place in its Arc in one pass, the mask the pieces' words
+            // joined - no element visited for its bit, and a column the float
+            // kernels read, where the 0.0-datum nullable one below made each
+            // later op re-derive its mask (concat of a NaN-holding float
+            // column 0.31x pandas; br-frankenpandas-mvo99).
+            if pieces
+                .iter()
+                .zip(&parts)
+                .all(|(piece, (_, validity))| piece.nan_missing_exact() || validity.all())
+                && parts
+                    .iter()
+                    .all(|(values, validity)| !validity.all() || !values.iter().any(|v| v.is_nan()))
+            {
+                // Each piece one memcpy into the fresh Arc: a map over the rows
+                // that found each row's piece was a load and a bounds check a
+                // row, the whole of this op's time (0.21 ms for 300k rows,
+                // pandas 0.10).
+                let mut joined: Arc<[f64]> = std::iter::repeat_n(0.0, len).collect();
+                if let Some(out) = Arc::get_mut(&mut joined) {
+                    for (values, validity) in &parts {
+                        out[at..at + values.len()].copy_from_slice(values);
+                        validity.or_into_words(&mut words, at);
+                        at += values.len();
+                    }
+                    return Some(Self::nan_exact_float64(
+                        joined,
+                        ValidityMask::from_words(words, len),
+                    ));
+                }
+            }
             let mut data = Vec::with_capacity(len);
             for (values, validity) in parts {
                 data.extend_from_slice(values);
@@ -28550,6 +28812,9 @@ impl Column {
                 right: other.values.len(),
             });
         }
+        if let Some(filled) = self.float_filled_from(other) {
+            return Ok(filled);
+        }
         let out: Vec<Scalar> = self
             .values
             .iter()
@@ -28564,6 +28829,62 @@ impl Column {
             .collect::<Result<Vec<_>, _>>()
             .map_err(ColumnError::Type)?;
         Self::new(self.dtype.clone(), out)
+    }
+
+    /// [`Self::fillna_with_column`] of a float column (no narrow width, no
+    /// categories) from a float or all-valid int column: one pass over the
+    /// buffers, a row missing here (its mask or a NaN) taking the other's
+    /// number - NaN where that is missing too - into the NaN-as-missing
+    /// column; each row was a Scalar, cast and revalidated
+    /// (s.fillna(other) 0.03x pandas at 300k rows; br-frankenpandas-sqxqn).
+    /// None for any other pair.
+    #[allow(clippy::cast_precision_loss)] // numpy's int64 -> float64 fill
+    fn float_filled_from(&self, other: &Self) -> Option<Self> {
+        if self.dtype != DType::Float64 || self.width.is_some() || self.categorical.is_some() {
+            return None;
+        }
+        let (data, validity) = self.as_f64_slice_with_validity()?;
+        let fill: std::borrow::Cow<'_, [f64]> = if let Some(numbers) = other.as_i64_slice() {
+            std::borrow::Cow::Owned(numbers.iter().map(|&number| number as f64).collect())
+        } else if other.dtype == DType::Float64
+            && other.width.is_none()
+            && other.categorical.is_none()
+            && let Some((numbers, other_validity)) = other.as_f64_slice_with_validity()
+        {
+            if other.nan_missing_exact() || other_validity.all() {
+                std::borrow::Cow::Borrowed(numbers)
+            } else {
+                std::borrow::Cow::Owned(
+                    numbers
+                        .iter()
+                        .enumerate()
+                        .map(|(row, &number)| {
+                            if other_validity.get(row) {
+                                number
+                            } else {
+                                f64::NAN
+                            }
+                        })
+                        .collect(),
+                )
+            }
+        } else {
+            return None;
+        };
+        let exact = self.nan_missing_exact() || validity.all();
+        let out: Vec<f64> = data
+            .iter()
+            .zip(fill.iter())
+            .enumerate()
+            .map(|(row, (&value, &filler))| {
+                if value.is_nan() || (!exact && !validity.get(row)) {
+                    filler
+                } else {
+                    value
+                }
+            })
+            .collect();
+        Some(Self::from_f64_values(out))
     }
 
     /// Element-wise quotient and remainder against `divisor`.
@@ -31170,6 +31491,22 @@ impl Column {
                 data.iter().map(|&v| f64_radix_key(v)).collect()
             } else {
                 data.iter().map(|&v| !f64_radix_key(v)).collect()
+            });
+        }
+        // A datetime (any zone) or timedelta column without NaT orders as its
+        // nanos: a (text, datetime) sort took the Scalar comparison sort
+        // (df.sort_values(['cat', 'ts']) 0.17x pandas at 300k rows;
+        // br-frankenpandas-op7mx). NaT sorts last, so it keeps that path.
+        if !self.has_nulls()
+            && let Some(data) = self
+                .as_datetime64_slice()
+                .or_else(|| self.as_timedelta64_slice())
+            && !data.contains(&i64::MIN)
+        {
+            return Some(if ascending {
+                data.iter().map(|&v| i64_radix_key(v)).collect()
+            } else {
+                data.iter().map(|&v| !i64_radix_key(v)).collect()
             });
         }
         None
@@ -35919,6 +36256,25 @@ impl Column {
             let validity =
                 ValidityMask::from_invalid_ranges(Arc::from(vec![vacated].into_boxed_slice()), len);
             return Ok(Self::from_f64_values_with_validity(out, validity));
+        }
+        // A column whose missing rows are exactly its NaNs shifts into the same
+        // NaN-as-missing column, the vacated slots NaN: it took the Scalar
+        // path, whose column the arithmetic re-read (s.shift(1) - s holding
+        // NaN 0.34x pandas; br-frankenpandas-looy4).
+        if fill.is_missing()
+            && let Some((data, _)) = self
+                .as_f64_slice_with_validity()
+                .filter(|_| self.nan_missing_exact())
+        {
+            let mut out = vec![f64::NAN; len];
+            if abs < len {
+                if periods > 0 {
+                    out[abs..].copy_from_slice(&data[..len - abs]);
+                } else {
+                    out[..len - abs].copy_from_slice(&data[abs..]);
+                }
+            }
+            return Ok(Self::from_f64_values(out));
         }
         // Typed all-valid-Int64 fast path for an Int64 fill. This is the
         // dtype-preserving `shift(..., fill_value=0)` shape: the scalar path emits
@@ -43174,6 +43530,539 @@ mod tests {
                 assert_eq!(value.to_bits(), want.to_bits(), "{periods} {i}");
             }
         }
+    }
+
+    #[test]
+    fn filtered_and_taken_floats_stay_typed_looy4() {
+        // br-frankenpandas-looy4: a boolean filter or a take of a float column
+        // keeps a backing the float kernels read - a NaN-exact source's rows
+        // NaN-exact (no mask re-derived per op), a clean source's owned
+        // buffer read by same-position arithmetic without a Scalar a row -
+        // values and missingness unchanged. NEGATIVE: a nullable source whose
+        // gaps hold 0.0 keeps its nullable gather (not NaN-exact).
+        let n = 300_usize;
+        let data: Vec<f64> = (0..n)
+            .map(|i| {
+                if i.is_multiple_of(7) {
+                    f64::NAN
+                } else {
+                    i as f64 * 0.25 - 9.0
+                }
+            })
+            .collect();
+        let nan_holding = crate::Column::from_f64_values(data);
+        assert!(nan_holding.nan_missing_exact());
+        let keep: Vec<bool> = (0..n).map(|i| i % 3 != 1).collect();
+        let mask = crate::Column::from_bool_values(keep.clone());
+        let rows: Vec<usize> = (0..n).filter(|&i| keep[i]).collect();
+        // A missing cell None, a present one its bits (a NaN Scalar is not
+        // equal to itself).
+        let shown = |cells: &[Scalar]| -> Vec<Option<u64>> {
+            cells
+                .iter()
+                .map(|cell| (!cell.is_missing()).then(|| cell.to_f64().map_or(0, f64::to_bits)))
+                .collect()
+        };
+        let expected = |source: &crate::Column| -> Vec<Option<u64>> {
+            let cells: Vec<Scalar> = rows.iter().map(|&i| source.values()[i].clone()).collect();
+            shown(&cells)
+        };
+        let filtered = nan_holding.filter_by_mask(&mask).unwrap();
+        let taken = nan_holding.take_positions(&rows);
+        for column in [&filtered, &taken] {
+            assert!(column.nan_missing_exact());
+            assert_eq!(shown(column.values()), expected(&nan_holding));
+        }
+        let clean = crate::Column::from_f64_values((0..n).map(|i| i as f64 * 0.5 + 1.0).collect());
+        let clean_rows = clean.filter_by_mask(&mask).unwrap();
+        let difference = clean_rows
+            .aligned_binary_f64_same_positions(&clean_rows, crate::ArithmeticOp::Sub)
+            .unwrap();
+        assert!(!clean_rows.scalar_cache_is_materialized());
+        assert_eq!(
+            difference.as_f64_slice().unwrap(),
+            vec![0.0; rows.len()].as_slice()
+        );
+        let gapped = filtered
+            .aligned_binary_f64_same_positions(&filtered, crate::ArithmeticOp::Sub)
+            .unwrap();
+        for (cell, &row) in gapped.values().iter().zip(&rows) {
+            if row.is_multiple_of(7) {
+                assert!(cell.is_missing(), "row {row}");
+            } else {
+                assert_eq!(*cell, Scalar::Float64(0.0), "row {row}");
+            }
+        }
+        // NEGATIVE: gaps holding 0.0, a nullable backing.
+        let mut words = vec![0_u64; n.div_ceil(64)];
+        for i in (0..n).filter(|i| !i.is_multiple_of(5)) {
+            words[i / 64] |= 1_u64 << (i % 64);
+        }
+        let sentinel = crate::Column::from_f64_values_with_validity(
+            (0..n)
+                .map(|i| if i.is_multiple_of(5) { 0.0 } else { i as f64 })
+                .collect(),
+            crate::ValidityMask::from_words(words, n),
+        );
+        assert!(!sentinel.nan_missing_exact());
+        for column in [
+            sentinel.filter_by_mask(&mask).unwrap(),
+            sentinel.take_positions(&rows),
+        ] {
+            assert!(!column.nan_missing_exact());
+            assert_eq!(shown(column.values()), expected(&sentinel));
+        }
+    }
+    #[test]
+    fn cov_cross_sums_are_the_pair_loop_jy2f4() {
+        // br-frankenpandas-jy2f4: the cross-sums - fp-dot-kernel's
+        // four-pairs-a-step kernel under AVX2 - are, bit for bit, each pair's
+        // centered products summed in row order (a pair at a time), the
+        // pairs in (a, b >= a) order. NEGATIVE: a summation in another order
+        // (rows in reverse) differs for some pair, so the data tells orders
+        // apart.
+        let len = 513_usize;
+        let columns: Vec<Vec<f64>> = (0..7)
+            .map(|c| {
+                (0..len)
+                    .map(|r| ((r * (c + 3) * 7919) % 1009) as f64 / 13.0 - (c as f64) * 1e3)
+                    .collect()
+            })
+            .collect();
+        let slices: Vec<&[f64]> = columns.iter().map(Vec::as_slice).collect();
+        let means: Vec<f64> = columns
+            .iter()
+            .map(|column| column.iter().fold(0.0, |sum, &v| sum + v) / len as f64)
+            .collect();
+        let got = crate::cov_cross_sums(&slices, &means, len);
+        let mut want = Vec::new();
+        let mut reversed_differs = false;
+        for a in 0..7 {
+            for b in a..7 {
+                let forward = (0..len).fold(0.0_f64, |sum, r| {
+                    sum + (columns[a][r] - means[a]) * (columns[b][r] - means[b])
+                });
+                let backward = (0..len).rev().fold(0.0_f64, |sum, r| {
+                    sum + (columns[a][r] - means[a]) * (columns[b][r] - means[b])
+                });
+                reversed_differs |= forward.to_bits() != backward.to_bits();
+                want.push(forward);
+            }
+        }
+        assert_eq!(got.len(), 28);
+        let bits = |values: &[f64]| values.iter().map(|v| v.to_bits()).collect::<Vec<u64>>();
+        assert_eq!(bits(&got), bits(&want));
+        assert!(
+            reversed_differs,
+            "the data must tell summation orders apart"
+        );
+    }
+
+    #[test]
+    fn temporal_radix_keys_order_as_the_nanos_op7mx() {
+        // br-frankenpandas-op7mx: a datetime / timedelta column without NaT
+        // gives radix keys ordered as its nanos (negative ones before
+        // positive), descending the reverse. NEGATIVE: a NaT-holding
+        // datetime column gives none (NaT sorts last in the comparison path).
+        let nanos = vec![5_i64, -3, 0, i64::MAX, -900, 5];
+        let dates = crate::Column::from_datetime64_values(nanos.clone());
+        let keys = dates.typed_radix_keys(true).unwrap();
+        let order = |keys: &[u64]| {
+            let mut positions: Vec<usize> = (0..keys.len()).collect();
+            positions.sort_by_key(|&p| keys[p]);
+            positions
+        };
+        let mut by_nanos: Vec<usize> = (0..nanos.len()).collect();
+        by_nanos.sort_by_key(|&p| nanos[p]);
+        assert_eq!(order(&keys), by_nanos);
+        let mut descending: Vec<usize> = (0..nanos.len()).collect();
+        descending.sort_by_key(|&p| std::cmp::Reverse(nanos[p]));
+        assert_eq!(order(&dates.typed_radix_keys(false).unwrap()), descending);
+        let with_nat = crate::Column::new(
+            DType::datetime64_naive(),
+            vec![
+                Scalar::Datetime64(1),
+                Scalar::Null(NullKind::NaT),
+                Scalar::Datetime64(0),
+            ],
+        )
+        .unwrap();
+        assert!(with_nat.typed_radix_keys(true).is_none());
+    }
+
+    #[test]
+    fn float_fill_from_a_column_is_the_scalar_fill_sqxqn() {
+        // br-frankenpandas-sqxqn: a float column filled from a float / int
+        // column is, value for value, the Scalar fill - a missing row (a NaN,
+        // or a 0.0 datum under a cleared bit) takes the other's number, NaN
+        // where that is missing too - and NaN-exact. NEGATIVE: an int column
+        // keeps the generic path (its dtype), a text fill too.
+        let nan = f64::NAN;
+        let source = Column::from_f64_values(vec![1.5, nan, -0.0, nan, 4.0, nan]);
+        let mut words = vec![0_u64];
+        for row in [0_usize, 2, 4] {
+            words[0] |= 1 << row;
+        }
+        let sentinel = Column::from_f64_values_with_validity(
+            vec![1.5, 0.0, -0.0, 0.0, 4.0, 0.0],
+            ValidityMask::from_words(words, 6),
+        );
+        let floats = Column::from_f64_values(vec![9.0, 8.0, 7.0, nan, 6.0, 5.5]);
+        let ints = Column::from_i64_values(vec![10, 20, 30, 40, 50, 60]);
+        // A missing cell None, a present one its bits (a NaN Scalar is not
+        // equal to itself).
+        let shown = |cells: &[Scalar]| -> Vec<Option<u64>> {
+            cells
+                .iter()
+                .map(|cell| (!cell.is_missing()).then(|| cell.to_f64().map_or(0, f64::to_bits)))
+                .collect()
+        };
+        let expect = |fill: &[f64]| -> Vec<Option<u64>> {
+            [1.5, nan, -0.0, nan, 4.0, nan]
+                .iter()
+                .zip(fill)
+                .map(|(&value, &filler)| {
+                    let x = if value.is_nan() { filler } else { value };
+                    (!x.is_nan()).then(|| x.to_bits())
+                })
+                .collect()
+        };
+        for column in [&source, &sentinel] {
+            let by_floats = column.fillna_with_column(&floats).unwrap();
+            assert!(by_floats.nan_missing_exact());
+            assert_eq!(
+                shown(by_floats.values()),
+                expect(&[9.0, 8.0, 7.0, nan, 6.0, 5.5])
+            );
+            let by_ints = column.fillna_with_column(&ints).unwrap();
+            assert_eq!(
+                shown(by_ints.values()),
+                expect(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+            );
+        }
+        let int_column = Column::from_i64_values(vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            int_column.fillna_with_column(&floats).unwrap().dtype(),
+            DType::Int64
+        );
+        let texts =
+            Column::from_values((0..6).map(|i| Scalar::Utf8(format!("t{i}"))).collect()).unwrap();
+        assert!(source.float_filled_from(&texts).is_none());
+    }
+    #[test]
+    fn nan_exact_float_pieces_concat_nan_exact_mvo99() {
+        // br-frankenpandas-mvo99: NaN-exact (or clean) float pieces join into
+        // a NaN-exact column - an empty piece, a piece ending mid-word, the
+        // mask joined - each cell its piece's (missing where its piece
+        // misses). NEGATIVE: a 0.0-datum nullable piece keeps the bit walk
+        // (not NaN-exact), the same cells.
+        let shown = |cells: &[Scalar]| -> Vec<Option<u64>> {
+            cells
+                .iter()
+                .map(|cell| (!cell.is_missing()).then(|| cell.to_f64().map_or(0, f64::to_bits)))
+                .collect()
+        };
+        let first: Vec<f64> = (0..70)
+            .map(|i| {
+                if i % 9 == 4 {
+                    f64::NAN
+                } else {
+                    f64::from(i) * 0.5
+                }
+            })
+            .collect();
+        let pieces = [
+            Column::from_f64_values(first.clone()),
+            Column::from_f64_values(Vec::new()),
+            Column::from_f64_values(vec![1.25, -0.0, 7.0]),
+            Column::from_f64_values(vec![f64::NAN, 2.0]),
+        ];
+        let refs: Vec<&Column> = pieces.iter().collect();
+        let joined = Column::concat_masked(&refs).unwrap();
+        assert!(joined.nan_missing_exact());
+        let mut want: Vec<f64> = first;
+        want.extend([1.25, -0.0, 7.0, f64::NAN, 2.0]);
+        let want_cells: Vec<Option<u64>> = want
+            .iter()
+            .map(|v| (!v.is_nan()).then(|| v.to_bits()))
+            .collect();
+        assert_eq!(shown(joined.values()), want_cells);
+        let mut words = vec![0_u64];
+        words[0] |= 1 | (1 << 2);
+        let sentinel = Column::from_f64_values_with_validity(
+            vec![3.0, 0.0, 5.0],
+            ValidityMask::from_words(words, 3),
+        );
+        let mixed = Column::concat_masked(&[&pieces[2], &sentinel]).unwrap();
+        assert!(!mixed.nan_missing_exact());
+        let mixed_want = vec![
+            Some(1.25_f64.to_bits()),
+            Some((-0.0_f64).to_bits()),
+            Some(7.0_f64.to_bits()),
+            Some(3.0_f64.to_bits()),
+            None,
+            Some(5.0_f64.to_bits()),
+        ];
+        assert_eq!(shown(mixed.values()), mixed_want);
+    }
+
+    #[test]
+    fn nan_exact_reindex_gathers_typed_m3z4g() {
+        // br-frankenpandas-m3z4g: a NaN-as-missing Float64 reindexed with
+        // absent slots is missing at a source NaN and at an absent or
+        // out-of-range slot, the source's value elsewhere - the same column
+        // the Scalar gather makes of the unwitnessed source.
+        let data = vec![1.5, f64::NAN, -2.0, 0.0];
+        let typed = Column::from_f64_values(data.clone());
+        assert!(typed.nan_missing_exact());
+        let unwitnessed = Column {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64_arc(Arc::from(data.clone())),
+            validity: ValidityMask::from_f64(&data),
+            data: None,
+            categorical: None,
+            width: None,
+            pandas_string: false,
+        };
+        assert!(!unwitnessed.nan_missing_exact());
+        let positions = [Some(2), None, Some(1), Some(0), Some(9), Some(3)];
+        let fast = typed.reindex_by_positions(&positions).unwrap();
+        let slow = unwitnessed.reindex_by_positions(&positions).unwrap();
+        let shown = |column: &Column| -> Vec<Option<u64>> {
+            column
+                .values()
+                .iter()
+                .map(|cell| (!cell.is_missing()).then(|| cell.to_f64().map_or(0, f64::to_bits)))
+                .collect()
+        };
+        let want = vec![
+            Some((-2.0_f64).to_bits()),
+            None,
+            None,
+            Some(1.5_f64.to_bits()),
+            None,
+            Some(0.0_f64.to_bits()),
+        ];
+        assert_eq!(fast.dtype(), DType::Float64);
+        assert_eq!(shown(&fast), want);
+        assert_eq!(shown(&slow), want);
+        // NEGATIVE: a finite datum at an invalid slot is no NaN-as-missing
+        // source; its gather keeps the slot missing.
+        let mut held = data.clone();
+        held[2] = 7.0;
+        let mut mask = ValidityMask::from_f64(&data);
+        mask.set(2, false);
+        let holed = Column {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64_arc(Arc::from(held)),
+            validity: mask,
+            data: None,
+            categorical: None,
+            width: None,
+            pandas_string: false,
+        };
+        assert!(!holed.nan_missing_exact());
+        let gathered = holed.reindex_by_positions(&[Some(2), Some(0)]).unwrap();
+        assert_eq!(shown(&gathered), vec![None, Some(1.5_f64.to_bits())]);
+    }
+
+    #[test]
+    fn nan_exact_windows_keep_the_witness_mvo99() {
+        // br-frankenpandas-mvo99: a row range of a NaN-holding column - on a
+        // word boundary and off it, from the witnessed source and from one whose
+        // mask the window derives - is NaN-exact, each cell the source's; a
+        // window of it, a clone, a take and a concat of windows stay so.
+        // NEGATIVE: a finite datum at an invalid slot keeps the window off the
+        // witness, and the slot stays missing.
+        let shown = |cells: &[Scalar]| -> Vec<Option<u64>> {
+            cells
+                .iter()
+                .map(|cell| (!cell.is_missing()).then(|| cell.to_f64().map_or(0, f64::to_bits)))
+                .collect()
+        };
+        let data: Vec<f64> = (0..300)
+            .map(|i| {
+                if i % 11 == 5 {
+                    f64::NAN
+                } else {
+                    f64::from(i) - 100.5
+                }
+            })
+            .collect();
+        let want = |rows: &[usize]| -> Vec<Option<u64>> {
+            rows.iter()
+                .map(|&row| (!data[row].is_nan()).then(|| data[row].to_bits()))
+                .collect()
+        };
+        let source = Column::from_f64_values(data.clone());
+        let unwitnessed = Column {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64_arc(Arc::from(data.clone())),
+            validity: ValidityMask::from_f64(&data),
+            data: None,
+            categorical: None,
+            width: None,
+            pandas_string: false,
+        };
+        assert!(source.nan_missing_exact() && !unwitnessed.nan_missing_exact());
+        for column in [&source, &unwitnessed] {
+            for (start, len) in [(0, 128), (64, 100), (5, 200), (130, 170), (299, 1)] {
+                let rows: Vec<usize> = (start..start + len).collect();
+                let window = column.take_contiguous_range(start, len);
+                assert!(window.nan_missing_exact(), "{start}+{len}");
+                assert_eq!(shown(window.values()), want(&rows), "{start}+{len}");
+                assert!(window.clone().nan_missing_exact());
+                let inner = window.take_contiguous_range(len / 3, len - len / 3);
+                // An all-valid sub-window is the plain all-valid slice, no
+                // witness needed (299+1's last row).
+                assert!(
+                    inner.nan_missing_exact() || inner.validity().all(),
+                    "{start}+{len} inner"
+                );
+                assert_eq!(shown(inner.values()), want(&rows[len / 3..]));
+                let picks = [len - 1, 0, len / 2, len / 2];
+                let taken = window.take_positions(&picks);
+                assert!(taken.nan_missing_exact() || taken.validity().all());
+                let picked: Vec<usize> = picks.iter().map(|&pick| rows[pick]).collect();
+                assert_eq!(shown(taken.values()), want(&picked));
+            }
+        }
+        let halves = [
+            source.take_contiguous_range(0, 150),
+            source.take_contiguous_range(150, 150),
+        ];
+        let joined = Column::concat_masked(&[&halves[0], &halves[1]]).unwrap();
+        assert!(joined.nan_missing_exact());
+        assert_eq!(shown(joined.values()), want(&(0..300).collect::<Vec<_>>()));
+
+        let mut escaped = data.clone();
+        escaped[17] = 2.5;
+        let mut mask = ValidityMask::from_f64(&data);
+        mask.set(17, false);
+        let holed = Column {
+            dtype: DType::Float64,
+            values: ScalarValues::lazy_all_valid_float64_arc(Arc::from(escaped)),
+            validity: mask,
+            data: None,
+            categorical: None,
+            width: None,
+            pandas_string: false,
+        };
+        let window = holed.take_contiguous_range(10, 100);
+        assert!(!window.nan_missing_exact());
+        let mut held = want(&(10..110).collect::<Vec<_>>());
+        held[7] = None;
+        assert_eq!(shown(window.values()), held);
+    }
+
+    #[test]
+    fn text_clones_share_their_factorize_cache_bl5ct() {
+        // br-frankenpandas-bl5ct: clones of a contiguous text column share one
+        // default-factorize cache - the source's factorize after a clone's
+        // hands back the clone's codes buffer, each code the row's first-seen
+        // rank. NEGATIVE: a column built separately from the same text
+        // computes its own (another buffer, the same codes).
+        let words = ["b", "a", "b", "c", "a"];
+        let build = || {
+            let mut bytes = Vec::new();
+            let mut offsets = vec![0];
+            for word in words {
+                bytes.extend_from_slice(word.as_bytes());
+                offsets.push(bytes.len());
+            }
+            Column::from_utf8_contiguous(bytes, offsets)
+        };
+        let source = build();
+        let (codes, uniques) = source.clone().utf8_default_factorize_columns().unwrap();
+        assert_eq!(codes.as_i64_slice().unwrap(), &[0, 1, 0, 2, 1]);
+        assert_eq!(
+            uniques.values(),
+            &[
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("c".to_owned())
+            ]
+        );
+        let (again, _) = source.utf8_default_factorize_columns().unwrap();
+        let first = codes.as_i64_slice().unwrap().as_ptr();
+        assert!(std::ptr::eq(first, again.as_i64_slice().unwrap().as_ptr()));
+        let (own, _) = build().utf8_default_factorize_columns().unwrap();
+        assert_eq!(own.as_i64_slice().unwrap(), &[0, 1, 0, 2, 1]);
+        assert!(!std::ptr::eq(first, own.as_i64_slice().unwrap().as_ptr()));
+    }
+
+    #[test]
+    fn text_window_take_reads_its_spans_a4ii9() {
+        // br-frankenpandas-a4ii9: a take from a row-range window of a
+        // contiguous text column gathers its spans into contiguous text -
+        // the cells of the same rows of the whole column - without building
+        // the window's Scalars. NEGATIVE: an object column holding a number
+        // keeps the clone path, its cells as they were.
+        let words: Vec<String> = (0..300).map(|i| format!("w{}", i % 17)).collect();
+        let mut bytes = Vec::new();
+        let mut offsets = vec![0];
+        for word in &words {
+            bytes.extend_from_slice(word.as_bytes());
+            offsets.push(bytes.len());
+        }
+        let column = Column::from_utf8_contiguous(bytes, offsets);
+        let window = column.take_contiguous_range(40, 200);
+        assert!(window.as_utf8_window().is_some() && window.as_utf8_contiguous().is_none());
+        let picks = [199, 0, 5, 5, 120];
+        let taken = window.take_positions(&picks);
+        assert!(!window.values.scalar_cache_is_materialized());
+        assert!(taken.as_utf8_contiguous().is_some());
+        let want: Vec<Scalar> = picks
+            .iter()
+            .map(|&pick| Scalar::Utf8(words[40 + pick].clone()))
+            .collect();
+        assert_eq!(taken.values(), want.as_slice());
+
+        let object = Column::from_object_values(vec![
+            Scalar::Utf8("a".to_owned()),
+            Scalar::Int64(1),
+            Scalar::Utf8("b".to_owned()),
+        ]);
+        let moved = object.take_positions(&[2, 1, 0]);
+        assert_eq!(
+            moved.values(),
+            &[
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Int64(1),
+                Scalar::Utf8("a".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    fn nullable_text_clones_share_their_scalars_alehi() {
+        // br-frankenpandas-alehi: clones of a nullable contiguous text column
+        // share one Scalar view - a clone's materialized cells are the
+        // source's - each cell its text or the gap marker. NEGATIVE: a column
+        // built separately from the same bytes builds its own.
+        let build = || {
+            Column::from_utf8_values_with_gap(
+                b"redblue".to_vec(),
+                vec![0, 3, 3, 7],
+                ValidityMask::from_words(vec![0b101], 3),
+                NullKind::NaN,
+            )
+        };
+        let source = build();
+        let clone = source.clone();
+        let cells = clone.values();
+        assert_eq!(
+            cells,
+            &[
+                Scalar::Utf8("red".to_owned()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Utf8("blue".to_owned())
+            ]
+        );
+        assert!(std::ptr::eq(cells.as_ptr(), source.values().as_ptr()));
+        let other = build();
+        assert!(!std::ptr::eq(cells.as_ptr(), other.values().as_ptr()));
+        assert_eq!(other.values(), cells);
     }
 
     #[test]
@@ -65673,7 +66562,7 @@ mod ab_transpose_row_typed_ccfp {
                 OnceLock<bool>,
                 OnceLock<Option<usize>>,
                 OnceLock<Option<Box<super::Utf8LowerHexSequence>>>,
-                OnceLock<Box<super::Utf8FactorizeDefaultWitness>>,
+                std::sync::Arc<OnceLock<super::Utf8FactorizeDefaultWitness>>,
                 OnceLock<Vec<Sc>>,
             )
         );

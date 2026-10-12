@@ -3372,6 +3372,28 @@ fn pivot_axis_dense_codes(col: &Column) -> Option<(Vec<u32>, Vec<IndexLabel>, Ve
         let names = keys.iter().map(|&ns| format_datetime_ns(ns)).collect();
         return Some((codes, labels, names));
     }
+    // A bool axis: False before True, as scalar_key_cmp ranks them, the keys
+    // present only; labels the bools, names the generic path's 'False' /
+    // 'True' (crosstab(text, bools) took the generic path, two SipHashed
+    // ScalarKeys a row: 0.58x pandas; br-frankenpandas-5gmje).
+    if let Some(bits) = col.as_bool_slice() {
+        let trues = bits.iter().filter(|&&bit| bit).count();
+        let keys: Vec<bool> = [(false, trues < bits.len()), (true, trues > 0)]
+            .into_iter()
+            .filter_map(|(key, present)| present.then_some(key))
+            .collect();
+        let true_code = u32::from(trues < bits.len());
+        let codes = bits
+            .iter()
+            .map(|&bit| if bit { true_code } else { 0 })
+            .collect();
+        let labels = keys.iter().map(|&key| IndexLabel::Bool(key)).collect();
+        let names = keys
+            .iter()
+            .map(|&key| if key { "True" } else { "False" }.to_owned())
+            .collect();
+        return Some((codes, labels, names));
+    }
     if is_text_key_column(col) {
         let (codes, sorted) = pivot_factorize_utf8_sorted(&pivot_utf8_key_strs(col, col.len()));
         let labels = sorted
@@ -11298,6 +11320,20 @@ fn i64_dense_histogram_range(data: &[i64]) -> Option<(i64, usize)> {
     Some((min, span(min, max) as usize))
 }
 
+/// Each row's code of a contiguous text column (`offsets` its row bounds
+/// into `bytes`), the strings numbered by first sight: two rows share a code
+/// exactly when they hold the same bytes.
+fn text_first_seen_codes(bytes: &[u8], offsets: &[usize]) -> Vec<i64> {
+    let mut code_of: FxHashMap<&[u8], i64> = FxHashMap::default();
+    offsets
+        .windows(2)
+        .map(|bounds| {
+            let next = i64::try_from(code_of.len()).unwrap_or(i64::MAX);
+            *code_of.entry(&bytes[bounds[0]..bounds[1]]).or_insert(next)
+        })
+        .collect()
+}
+
 /// One exact int key per row of several all-valid int64 columns: each
 /// column's offset from its minimum weighted by the product of the ranges
 /// before it (mixed radix), so two rows share a key exactly when they share
@@ -11891,13 +11927,58 @@ fn typed_slice_sort_order(column: &Column, ascending: bool) -> Option<Vec<usize>
     None
 }
 
-/// Stable NaN-last permutation over a nullable Float64 typed buffer.
+/// Whether a nullable Float64 typed buffer is already in its sorted order:
+/// the missing rows (a gap or a NaN) all before the present ones (`na_first`)
+/// or after them, the present values monotone - the answer the Scalar check
+/// gave once every cell was a Scalar (a NaN-holding key's first sort made
+/// them; br-frankenpandas-efgu5). None without such a buffer.
+fn typed_nullable_f64_already_sorted(
+    column: &Column,
+    ascending: bool,
+    na_first: bool,
+) -> Option<bool> {
+    let (data, validity) = column.as_f64_slice_with_validity()?;
+    let mut previous: Option<f64> = None;
+    let (mut seen_present, mut seen_missing) = (false, false);
+    for (position, &value) in data.iter().enumerate() {
+        if !validity.get(position) || value.is_nan() {
+            if na_first && seen_present {
+                return Some(false);
+            }
+            seen_missing = true;
+            continue;
+        }
+        if !na_first && seen_missing {
+            return Some(false);
+        }
+        seen_present = true;
+        if let Some(prior) = previous
+            && (if ascending {
+                value < prior
+            } else {
+                value > prior
+            })
+        {
+            return Some(false);
+        }
+        previous = Some(value);
+    }
+    Some(true)
+}
+
+/// Stable permutation over a nullable Float64 typed buffer.
 ///
 /// Values marked missing (including NaN, whose ingestion clears validity) are
-/// appended in input order after the stable radix order of finite/infinite values.
-/// This is exactly pandas' `na_position='last'` contract in either direction,
-/// without materializing a `Vec<Scalar>` just to compare the key column.
-fn typed_nullable_f64_sort_order(column: &Column, ascending: bool) -> Option<Vec<usize>> {
+/// placed in input order before (`na_first`) or after the stable radix order of
+/// finite/infinite values. This is exactly pandas' `na_position` contract in
+/// either direction, without materializing a `Vec<Scalar>` just to compare the
+/// key column (na_position='first' compared Scalars: 0.22x pandas;
+/// br-frankenpandas-efgu5).
+fn typed_nullable_f64_sort_order(
+    column: &Column,
+    ascending: bool,
+    na_first: bool,
+) -> Option<Vec<usize>> {
     let (data, validity) = column.as_f64_slice_with_validity()?;
     let mut valid = Vec::with_capacity(data.len());
     let mut valid_pos = Vec::with_capacity(data.len());
@@ -11911,8 +11992,14 @@ fn typed_nullable_f64_sort_order(column: &Column, ascending: bool) -> Option<Vec
         }
     }
     let sorted = fp_columnar::radix_argsort_f64(&valid, ascending);
-    let mut order: Vec<usize> = sorted.into_iter().map(|index| valid_pos[index]).collect();
-    order.extend(na_pos);
+    let mut order: Vec<usize> = Vec::with_capacity(data.len());
+    if na_first {
+        order.extend_from_slice(&na_pos);
+    }
+    order.extend(sorted.into_iter().map(|index| valid_pos[index]));
+    if !na_first {
+        order.extend(na_pos);
+    }
     Some(order)
 }
 
@@ -14066,7 +14153,6 @@ impl Series {
 
         // pandas: a tz-aware datetime index does not join a naive one.
         fp_index::check_tz_compatible(&self.index, &other.index)?;
-        let has_duplicate_labels = self.index.has_duplicates() || other.index.has_duplicates();
         let exact_index_fast_path = self.index == other.index;
 
         if exact_index_fast_path {
@@ -14114,6 +14200,11 @@ impl Series {
             return Self::new(out_name, union_index, column);
         }
 
+        // Asked only now: the same-index path above never reads it, and the
+        // first ask builds the index's labels (a fresh 270k-row datetime
+        // index's first s.shift(1) - s 1.3-1.6 ms, pandas 1.1;
+        // br-frankenpandas-a425n).
+        let has_duplicate_labels = self.index.has_duplicates() || other.index.has_duplicates();
         let typed_unit_range_columns = matches!(
             (self.column.dtype(), other.column.dtype()),
             (DType::Float64, DType::Float64) | (DType::Int64, DType::Int64)
@@ -14682,7 +14773,8 @@ impl Series {
         op: ArithmeticOp,
         fill_value: f64,
     ) -> Result<Self, FrameError> {
-        let has_duplicate_labels = self.index.has_duplicates() || other.index.has_duplicates();
+        // Equal indexes first: they never ask about duplicates, whose first
+        // ask builds the labels (br-frankenpandas-a425n).
         let plan = if self.index == other.index {
             let positions = (0..self.len()).map(Some).collect::<Vec<_>>();
             AlignmentPlan {
@@ -14690,7 +14782,7 @@ impl Series {
                 left_positions: positions.clone(),
                 right_positions: positions,
             }
-        } else if has_duplicate_labels {
+        } else if self.index.has_duplicates() || other.index.has_duplicates() {
             let (union_index, left_positions, right_positions) =
                 align_union_duplicate_aware(&self.index, &other.index);
             AlignmentPlan {
@@ -17769,28 +17861,35 @@ impl Series {
                     .keeping_dtype_of(&self.column);
                 return Series::new(self.name.clone(), self.index.clone(), column);
             }
-            let mut out = vec![0.0_f64; n];
-            let mut out_valid = fp_columnar::ValidityMask::all_valid(n);
-            let mut next: Option<f64> = None;
-            let mut consecutive_fills: usize = 0;
-            for i in (0..n).rev() {
-                if validity.get(i) {
-                    out[i] = data[i];
-                    next = Some(data[i]);
-                    consecutive_fills = 0;
-                } else if let Some(fill) = next {
-                    consecutive_fills += 1;
-                    if limit.is_none_or(|l| consecutive_fills <= l) {
-                        out[i] = fill;
-                    } else {
-                        out[i] = data[i];
-                        out_valid.set(i, false);
+            // limit: each run of missing rows before a present one takes its
+            // value for its last `limit` rows, the rest - and a trailing run -
+            // staying missing over their own datums; run by run, where a row's
+            // mask bit was read and set a row (bfill(limit=2) of 200k 0.59x
+            // pandas; br-frankenpandas-jxx6k), as ffill's limit (7krba).
+            let limit = limit.unwrap_or(usize::MAX);
+            let mut out = data.to_vec();
+            let mut still_missing: Vec<(usize, usize)> = Vec::new();
+            validity.for_each_invalid_range(|start, run_len| {
+                let end = start + run_len;
+                if end < n {
+                    let filled = run_len.min(limit);
+                    let fill = out[end];
+                    out[end - filled..end].fill(fill);
+                    if filled < run_len {
+                        still_missing.push((start, run_len - filled));
                     }
                 } else {
-                    out[i] = data[i];
-                    out_valid.set(i, false);
+                    still_missing.push((start, run_len));
                 }
-            }
+            });
+            let out_valid = if still_missing.is_empty() {
+                fp_columnar::ValidityMask::all_valid(n)
+            } else {
+                fp_columnar::ValidityMask::from_invalid_ranges(
+                    std::sync::Arc::from(still_missing),
+                    n,
+                )
+            };
             // The source's values carried: a float32 column stays float32
             // (br-frankenpandas-ttc8x).
             let column = Column::from_f64_values_with_validity(out, out_valid)
@@ -20821,6 +20920,9 @@ impl Series {
         }
         let by_value = self.replace_keys_by_value(&replacements);
         let replacements = last_pair_per_key(&by_value);
+        if let Some(out) = self.ints_replaced_by_floats(&replacements) {
+            return out;
+        }
         let out = self.keeping_width(self.replace_storage(&replacements), false)?;
         let writes_missing = replacements.iter().any(|(_, value)| value.is_missing());
         self.holding_replaced(out, writes_missing, |before| {
@@ -20908,6 +21010,91 @@ impl Series {
         let column = Column::from_values(values).ok()?;
         let out = Self::new(self.name.clone(), self.index.clone(), column).ok()?;
         Some(out.with_categories(CategoricalMetadata::new(new_categories, meta.ordered)))
+    }
+
+    /// An int64 column's replace by NaN or floats (`s.replace(0, np.nan)`)
+    /// as pandas' block replace: numpy's float64 when a key matching a row
+    /// takes a value int64 cannot hold (NaN, a fraction, an infinity, one out
+    /// of range; a NaN a missing row), int64 when every matched value is a
+    /// whole number in range (`s.replace(0, 7.0)` stays int64 - it was
+    /// float64), the column itself when no key matches - where each row
+    /// became a Scalar, the dtype was found over the source's and the
+    /// result's Scalars after, and the column rebuilt from Scalars that no
+    /// typed kernel reads (q.replace(0, np.nan) 10.8 ms at 190k rows, pandas
+    /// 0.40, its result divided at 0.17x; br-frankenpandas-zgu79). None for
+    /// another column (a narrow width, categories) or replacement: an int
+    /// key and a float, NaN or int value each, one at least not an int (an
+    /// all-int replace stays int64; a None value is pandas' object column).
+    #[allow(clippy::cast_precision_loss)] // numpy's int64 -> float64
+    fn ints_replaced_by_floats(
+        &self,
+        replacements: &[(Scalar, Scalar)],
+    ) -> Option<Result<Self, FrameError>> {
+        let vals = self
+            .column
+            .as_i64_slice()
+            .filter(|_| self.column.width().is_none() && self.categorical.is_none())?;
+        let pairs: Vec<(i64, f64)> = replacements
+            .iter()
+            .map(|(key, value)| match (key, value) {
+                (Scalar::Int64(key), Scalar::Float64(to)) => Some((*key, *to)),
+                (Scalar::Int64(key), Scalar::Null(NullKind::NaN)) => Some((*key, f64::NAN)),
+                (Scalar::Int64(key), Scalar::Int64(to)) => Some((*key, *to as f64)),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        if replacements
+            .iter()
+            .all(|(_, value)| matches!(value, Scalar::Int64(_)))
+        {
+            return None;
+        }
+        let by_key: FxHashMap<i64, f64> = if pairs.len() > 16 {
+            pairs.iter().copied().collect()
+        } else {
+            FxHashMap::default()
+        };
+        let replaced = |value: i64| -> Option<f64> {
+            if pairs.len() <= 16 {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == value)
+                    .map(|&(_, to)| to)
+            } else {
+                by_key.get(&value).copied()
+            }
+        };
+        // numpy's np_can_hold_element: a whole float within int64.
+        let held = |to: f64| {
+            to.fract() == 0.0 && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&to)
+        };
+        let (mut hits, mut floats) = (0_usize, 0_usize);
+        // Written in place in the column's Arc (a Vec copied in after).
+        let out: Arc<[f64]> = vals
+            .iter()
+            .map(|&value| match replaced(value) {
+                Some(to) => {
+                    hits += 1;
+                    floats += usize::from(!held(to));
+                    to
+                }
+                None => value as f64,
+            })
+            .collect();
+        if hits == 0 {
+            return Some(Ok(self.clone()));
+        }
+        let column = if floats == 0 {
+            #[allow(clippy::cast_possible_truncation)] // whole and in range
+            let ints = vals
+                .iter()
+                .map(|&value| replaced(value).map_or(value, |to| to as i64))
+                .collect();
+            Column::from_i64_values_owned(ints)
+        } else {
+            Column::from_f64_arc(out)
+        };
+        Some(Self::new(self.name.clone(), self.index.clone(), column))
     }
 
     /// The replace keys as this column compares them: pandas matches by
@@ -25998,6 +26185,18 @@ impl Series {
                     n - p..n
                 };
                 let mut words = shifted_validity_words(validity, n, periods);
+                // A NaN-exact column shifted with a missing fill is one: its
+                // rows moved with their bits, the vacated rows NaN under
+                // cleared bits. Kept so - the 0.0-datum form below made the
+                // next op re-derive the mask from the data (s.shift(1) - s
+                // 0.28x pandas; br-frankenpandas-0mxem).
+                if !fill_valid && self.column.nan_missing_exact() {
+                    let column = Column::from_f64_vec_nan_exact_unchecked(
+                        out,
+                        fp_columnar::ValidityMask::from_words(words, n),
+                    );
+                    return Self::new(self.name.clone(), self.index.clone(), column);
+                }
                 if fill_valid {
                     for i in vacated {
                         words[i / 64] |= 1u64 << (i % 64);
@@ -28308,6 +28507,37 @@ impl Series {
         // Unguarded, FrankenPandas returned [True, False, True] for the second
         // one. Same trap as astype (5821dc846) and to_list (545eba15d).
         if let Some(categorical) = self.cat() {
+            // Held as codes: each category tested once, a row answered by its
+            // code - a missing row matched by a missing needle, as pandas'
+            // Categorical.isin - where each row's category was made a value
+            // and tested (cat.isin 0.18x pandas; br-frankenpandas-0lg81).
+            if let (Some(codes), Some(meta)) =
+                (self.column.categorical_codes(), self.column.categorical())
+                && let Ok(column) = Column::from_values(meta.categories.clone())
+            {
+                let count = i64::try_from(meta.categories.len()).unwrap_or(i64::MAX);
+                let categories = Self::new("", Index::from_range(0, count, 1), column)?;
+                let tested = categories.isin_flags(test_values)?;
+                let hits: Vec<bool> = tested
+                    .column
+                    .values()
+                    .iter()
+                    .map(|flag| matches!(flag, Scalar::Bool(true)))
+                    .collect();
+                let missing = test_values.iter().any(Scalar::is_missing);
+                let flags = codes
+                    .iter()
+                    .map(|&code| {
+                        usize::try_from(code)
+                            .map_or(missing, |code| hits.get(code).copied().unwrap_or(false))
+                    })
+                    .collect();
+                return Series::new(
+                    self.name.clone(),
+                    self.index.clone(),
+                    Column::from_bool_values(flags),
+                );
+            }
             return categorical.to_values()?.isin(test_values);
         }
         // pandas' `string` dtype tests its strings against the string
@@ -32199,6 +32429,13 @@ impl Series {
                 "unstack needs a level left for the rows and one for the columns".to_owned(),
             ));
         }
+        if depth == 2
+            && moved == [1]
+            && fill_value.is_none()
+            && let Some(frame) = self.unstack_two_level_numbers(levels)?
+        {
+            return Ok(frame);
+        }
         // Each level's sorted distinct labels and every row's code into them;
         // a missing label first, as pandas' code -1 sorts (it came last) -
         // unless it is a value of its level (groupby dropna=False keys),
@@ -32341,6 +32578,15 @@ impl Series {
             } else {
                 Column::from_values(values)?
             };
+            // A narrow source keeps its width: float32 though a combination
+            // is missing, a narrow int while none is (it came back float64 /
+            // int64; found by br-frankenpandas-vkb08's float32 case).
+            let column = match self.column.width() {
+                Some(width) if !nullable && (width.is_float() || !any_missing) => {
+                    column.cast_to_width(width, false)?
+                }
+                _ => column,
+            };
             columns.insert(name.clone(), column);
             order.push(name);
         }
@@ -32360,6 +32606,134 @@ impl Series {
                 frame.with_columns_multiindex(Some(multi))?
             }
         })
+    }
+
+    /// [`Self::unstack_levels`] of a two-level index's last level over a
+    /// float64 or int64 Series (no narrow width, no categories) with no fill:
+    /// each level's first-seen codes renumbered by its sorted labels, the
+    /// cells written into typed columns - the generic grid cloned a Scalar a
+    /// cell and sorted and hashed every row's label (df.stack().unstack() of
+    /// 20k x 2 floats 4.0 ms, pandas 1.6; br-frankenpandas-vkb08). None -
+    /// the generic path - for a level holding a missing label or two labels
+    /// equal in order though distinct (its sort + dedup merges them).
+    fn unstack_two_level_numbers(
+        &self,
+        levels: &fp_index::MultiIndex,
+    ) -> Result<Option<DataFrame>, FrameError> {
+        enum Cells<'a> {
+            Floats(&'a [f64]),
+            Ints(&'a [i64]),
+        }
+        let column = &self.column;
+        if column.width().is_some() || column.categorical().is_some() {
+            return Ok(None);
+        }
+        let cells = match column.dtype() {
+            DType::Float64 => match column.as_f64_slice() {
+                Some(data) => Cells::Floats(data),
+                None if column.nan_missing_exact() => match column.as_f64_slice_with_validity() {
+                    Some((data, _)) => Cells::Floats(data),
+                    None => return Ok(None),
+                },
+                None => return Ok(None),
+            },
+            DType::Int64 => match column.as_i64_slice() {
+                Some(data) => Cells::Ints(data),
+                None => return Ok(None),
+            },
+            _ => return Ok(None),
+        };
+        // A level's labels present sorted, and each first-seen code's place
+        // among them: a taken index shares its level's uniques, so a label
+        // no row holds any more (a pivot's all-missing row dropped) is no
+        // row of the table.
+        let sorted_level = |level: usize| -> Option<(Vec<IndexLabel>, Vec<usize>, &[u32])> {
+            let (uniques, codes) = levels.level_codes(level)?;
+            let mut used = vec![false; uniques.len()];
+            for &code in codes {
+                *used.get_mut(code as usize)? = true;
+            }
+            let mut order: Vec<usize> = (0..uniques.len()).filter(|&code| used[code]).collect();
+            if order.iter().any(|&code| uniques[code].is_missing()) {
+                return None;
+            }
+            order.sort_by(|&a, &b| uniques[a].cmp(&uniques[b]));
+            if order
+                .windows(2)
+                .any(|pair| uniques[pair[0]] >= uniques[pair[1]])
+            {
+                return None;
+            }
+            let mut place = vec![0; uniques.len()];
+            for (at, &code) in order.iter().enumerate() {
+                place[code] = at;
+            }
+            let sorted = order.iter().map(|&code| uniques[code].clone()).collect();
+            Some((sorted, place, codes))
+        };
+        let Some((row_labels, row_place, row_codes)) = sorted_level(0) else {
+            return Ok(None);
+        };
+        let Some((col_labels, col_place, col_codes)) = sorted_level(1) else {
+            return Ok(None);
+        };
+        let n = self.len();
+        let (rows, width) = (row_labels.len(), col_labels.len());
+        if row_codes.len() != n || col_codes.len() != n {
+            return Ok(None);
+        }
+        // Each output cell's source row, or none: a column at a time.
+        let mut source = vec![usize::MAX; rows * width];
+        for (row, (&r, &c)) in row_codes.iter().zip(col_codes).enumerate() {
+            let cell = &mut source[col_place[c as usize] * rows + row_place[r as usize]];
+            if *cell != usize::MAX {
+                return Err(FrameError::CompatibilityRejected(
+                    "Index contains duplicate entries, cannot reshape".to_owned(),
+                ));
+            }
+            *cell = row;
+        }
+        let any_missing = source.contains(&usize::MAX);
+        let made: Vec<Column> = source
+            .chunks_exact(rows.max(1))
+            .take(width)
+            .map(|cells_of| match &cells {
+                Cells::Floats(data) => Column::from_f64_values(
+                    cells_of
+                        .iter()
+                        .map(|&at| data.get(at).copied().unwrap_or(f64::NAN))
+                        .collect(),
+                ),
+                Cells::Ints(data) if any_missing => Column::from_f64_values(
+                    cells_of
+                        .iter()
+                        .map(|&at| data.get(at).map_or(f64::NAN, |&v| v as f64))
+                        .collect(),
+                ),
+                Cells::Ints(data) => {
+                    Column::from_i64_values(cells_of.iter().map(|&at| data[at]).collect())
+                }
+            })
+            .collect();
+        if made.len() != width {
+            return Ok(None);
+        }
+        let names = levels.names();
+        let index = Index::new(row_labels)
+            .rename_index(names[0].clone())
+            .with_tz(levels.level_zone(0))?;
+        let keys: Vec<String> = col_labels.iter().map(column_key).collect();
+        let mut columns = BTreeMap::new();
+        for (name, column) in keys.iter().zip(made) {
+            columns.insert(name.clone(), column);
+        }
+        let frame = DataFrame::new_with_column_order(index, columns, keys)?;
+        Ok(Some(
+            frame
+                .with_recorded_column_labels(col_labels)
+                .with_columns_name(names[1].clone())
+                .with_columns_tz(levels.level_zone(1).map(str::to_owned)),
+        ))
     }
 
     /// Unstack a Series with string-composite index into a DataFrame.
@@ -38245,6 +38619,14 @@ impl Rolling<'_> {
         let mut state = RollingVarianceState::default();
         let mut r = 0_usize;
         let mut l = 0_usize;
+        // An expanding standard deviation is the variance's root taken in a
+        // pass of its own, as pandas' zsqrt takes it: in the add-only sweep
+        // each root waited on the divider beside the running mean's division,
+        // the sweep's latency chain (expanding().std() 0.80x pandas at 200k
+        // rows; br-frankenpandas-vj2z0). A sliding window's sweep removes as
+        // well and keeps its roots: the extra pass measured 1-6% slower there.
+        let root_after = matches!(kind, VarOutputKind::Std) && self.window >= len;
+        let sweep_kind = if root_after { VarOutputKind::Var } else { kind };
 
         for i in 0..len {
             let (start, end) = self.window_bounds(i, len);
@@ -38269,12 +38651,18 @@ impl Rolling<'_> {
                 }
                 r += 1;
             }
-            match state.output(self.min_periods, ddof, kind) {
+            match state.output(self.min_periods, ddof, sweep_kind) {
                 Some(v) => {
                     words[i / 64] |= 1_u64 << (i % 64);
                     data.push(v);
                 }
                 None => data.push(0.0),
+            }
+        }
+        // The root of the variance clamped at 0.0, as `output` takes it.
+        if root_after {
+            for value in &mut data {
+                *value = if *value < 0.0 { 0.0 } else { *value }.sqrt();
             }
         }
 
@@ -42287,19 +42675,26 @@ fn resample_build_groups_with_options(
             Some("left") => ResampleLabel::Left,
             _ => ResampleLabel::Right,
         };
+        // A row's week-ending Sunday: its own day's when the weeks close on
+        // the right (Monday through Sunday, the default), the first one after
+        // its day when they close on the left - pandas' weeks then start at
+        // Sunday 00:00, so a Sunday's rows open the next week (they stayed
+        // in the week ending that Sunday; br-frankenpandas-ym4w2).
+        let days_to_sunday = |weekday_from_sunday: i64| match closed {
+            ResampleClosed::Left => 7 - weekday_from_sunday,
+            ResampleClosed::Right => (7 - weekday_from_sunday) % 7,
+        };
         let sunday_ords: Vec<Option<i64>> = labels
             .iter()
             .map(|l| {
                 if let Some(ns) = resample_label_to_ns(l) {
                     let dse = ns.div_euclid(Timedelta::NANOS_PER_DAY);
-                    let wd_from_sun = (dse + 4).rem_euclid(7);
-                    let days_to_sunday = (7 - wd_from_sun) % 7;
-                    Some(dse + days_to_sunday + 719_163)
+                    Some(dse + days_to_sunday((dse + 4).rem_euclid(7)) + 719_163)
                 } else {
                     resample_label_to_date(l).and_then(|date| {
-                        let days_to_sunday =
-                            i64::from((7 - date.weekday().num_days_from_sunday()) % 7);
-                        date.checked_add_signed(Duration::days(days_to_sunday))
+                        let ahead =
+                            days_to_sunday(i64::from(date.weekday().num_days_from_sunday()));
+                        date.checked_add_signed(Duration::days(ahead))
                             .map(|s| i64::from(s.num_days_from_ce()))
                     })
                 }
@@ -42310,9 +42705,17 @@ fn resample_build_groups_with_options(
             None => return ResampleGrouping::empty(),
         };
         let step = 7 * mult;
+        // The first bin's last Sunday: the first rows' own on the right; on
+        // the left pandas rolls the first day back to its Sunday and steps a
+        // bin from there (2W closed='left' ended its bins a week early;
+        // br-frankenpandas-ym4w2). The same for one week.
+        let first_end = match closed {
+            ResampleClosed::Left => min - 7 + step,
+            ResampleClosed::Right => min,
+        };
         let bin_end = |ws: i64| -> i64 {
-            let off = ws - min;
-            min + ((off + step - 1) / step) * step
+            let off = ws - first_end;
+            first_end + ((off + step - 1) / step) * step
         };
         let max_bin_end = match sunday_ords.iter().filter_map(|o| *o).map(bin_end).max() {
             Some(m) => m,
@@ -42323,14 +42726,14 @@ fn resample_build_groups_with_options(
             let d = NaiveDate::from_num_days_from_ce_opt(i32::try_from(ord).ok()?)?;
             Some(format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day()))
         };
-        let num_bins = ((max_bin_end - min) / step + 1) as usize;
+        let num_bins = ((max_bin_end - first_end) / step + 1) as usize;
         if num_bins > RESAMPLE_MAX_BINS as usize {
             return ResampleGrouping::empty();
         }
         let mut dense: Vec<Vec<usize>> = vec![Vec::new(); num_bins];
         for (i, ord_opt) in sunday_ords.iter().enumerate() {
             if let Some(ord) = *ord_opt {
-                let bin_idx = ((bin_end(ord) - min) / step) as usize;
+                let bin_idx = ((bin_end(ord) - first_end) / step) as usize;
                 if bin_idx < dense.len() {
                     dense[bin_idx].push(i);
                 }
@@ -42341,7 +42744,7 @@ fn resample_build_groups_with_options(
             std::collections::HashMap::with_capacity(num_bins);
         let mut lattice: Vec<(String, i64)> = Vec::with_capacity(num_bins);
         for (bin_idx, rows) in dense.into_iter().enumerate() {
-            let be = min + bin_idx as i64 * step;
+            let be = first_end + bin_idx as i64 * step;
             let bs = be - step;
             let agg_ord = match label {
                 ResampleLabel::Left => bs,
@@ -43947,6 +44350,9 @@ impl Resample<'_> {
         if unit == "D" && mult <= 1 {
             return self.daily_row_bins(vals, empty);
         }
+        if unit == "W" {
+            return self.weekly_row_bins(mult, vals, empty);
+        }
         let ns_per: i64 = match unit.to_lowercase().as_str() {
             "h" => 3_600_000_000_000,
             "min" | "t" => 60_000_000_000,
@@ -44217,6 +44623,129 @@ impl Resample<'_> {
         let bins = ResampleRowBins {
             runs,
             rows: labels.len(),
+            bins: n,
+            emitted: Some(emitted),
+            index: Index::new(out_labels),
+            identity: false,
+        };
+        Some((bins, acc))
+    }
+
+    /// The weekly (`W` = W-SUN, `kW`) bins of the rows: the grouping's
+    /// weekly bins - each row's week-ending Sunday, every `7 * mult` days
+    /// from the first rows' Sunday, a bin labelled by its last Sunday, the
+    /// dataless ones kept - a run of rows at a time, the current week a
+    /// cursor (each row was hashed into its bin's key: resample('W').sum() of
+    /// 270k rows 0.32x pandas; br-frankenpandas-7d1k4). A typed datetime
+    /// index is read without its labels. `None` (the grouping) for an empty
+    /// index or past a million bins.
+    fn weekly_row_bins<B: ResampleBin>(
+        &self,
+        mult: i64,
+        vals: &[f64],
+        empty: B,
+    ) -> Option<(ResampleRowBins, Vec<B>)> {
+        use chrono::Datelike;
+        const DAY: i64 = Timedelta::NANOS_PER_DAY;
+        let step = mult.checked_mul(7)?;
+        // A stamp's week-ending Sunday as a day ordinal (num_days_from_ce),
+        // as the grouping's.
+        let sunday_of_ns = |ns: i64| {
+            let dse = ns.div_euclid(DAY);
+            let days_to_sunday = (7 - (dse + 4).rem_euclid(7)) % 7;
+            dse + days_to_sunday + 719_163
+        };
+        let sunday_of_other = |label: &IndexLabel| -> Option<i64> {
+            match resample_label_to_ns(label) {
+                Some(ns) => Some(sunday_of_ns(ns)),
+                None => resample_label_to_date(label).and_then(|date| {
+                    let days_to_sunday = i64::from((7 - date.weekday().num_days_from_sunday()) % 7);
+                    date.checked_add_signed(Duration::days(days_to_sunday))
+                        .map(|sunday| i64::from(sunday.num_days_from_ce()))
+                }),
+            }
+        };
+        let index = self.series.index();
+        let nanos = index
+            .datetime64_label_values()
+            .filter(|nanos| nanos.len() == vals.len() && !nanos.contains(&i64::MIN));
+        let labels: &[IndexLabel] = match nanos {
+            Some(_) => &[],
+            None => index.labels(),
+        };
+        let (min, max) = match &nanos {
+            Some(nanos) => {
+                let (lo, hi) = nanos.iter().fold((i64::MAX, i64::MIN), |(lo, hi), &ns| {
+                    (lo.min(ns), hi.max(ns))
+                });
+                (lo <= hi).then(|| (sunday_of_ns(lo), sunday_of_ns(hi)))?
+            }
+            None => labels.iter().filter_map(sunday_of_other).fold(
+                None,
+                |span: Option<(i64, i64)>, sunday| {
+                    Some(span.map_or((sunday, sunday), |(lo, hi)| {
+                        (lo.min(sunday), hi.max(sunday))
+                    }))
+                },
+            )?,
+        };
+        let bin_of = |sunday: i64| u32::try_from((sunday - min + step - 1) / step).ok();
+        let n = usize::try_from((max - min + step - 1) / step + 1).ok()?;
+        if n >= 1_000_000 {
+            return None;
+        }
+        let mut acc = vec![empty; n];
+        let mut runs = RowRuns::default();
+        // The current week [start, end) and its bin are a cursor: stamps in
+        // order divide only where they cross into another week.
+        let mut cursor = (0_i64, 0_i64, u32::MAX);
+        let bin_of_ns = |cursor: &mut (i64, i64, u32), ns: i64| -> u32 {
+            if ns >= cursor.0 && ns < cursor.1 {
+                return cursor.2;
+            }
+            let sunday = sunday_of_ns(ns);
+            let first = (sunday - 719_163 - 6).checked_mul(DAY);
+            let last = (sunday - 719_163 + 1).checked_mul(DAY);
+            let (start, end) = first.zip(last).unwrap_or((0, 0));
+            *cursor = (start, end, bin_of(sunday).unwrap_or(u32::MAX));
+            cursor.2
+        };
+        match &nanos {
+            Some(nanos) => {
+                for (i, &ns) in nanos.iter().enumerate() {
+                    runs.row(i, bin_of_ns(&mut cursor, ns));
+                }
+            }
+            None => {
+                for (i, label) in labels.iter().enumerate() {
+                    let bin = match label {
+                        IndexLabel::Datetime64(ns) => bin_of_ns(&mut cursor, *ns),
+                        other => {
+                            cursor = (0, 0, u32::MAX);
+                            sunday_of_other(other).and_then(bin_of).unwrap_or(u32::MAX)
+                        }
+                    };
+                    runs.row(i, bin);
+                }
+            }
+        }
+        let runs = runs.finish(vals.len());
+        fold_row_runs(&runs, vals, &mut acc);
+        let key_of = |ord: i64| -> Option<String> {
+            let d = NaiveDate::from_num_days_from_ce_opt(i32::try_from(ord).ok()?)?;
+            Some(format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day()))
+        };
+        let mut out_labels = Vec::with_capacity(n);
+        let mut emitted = Vec::with_capacity(n);
+        for bidx in 0..n {
+            if let Some(key) = key_of(min + bidx as i64 * step) {
+                out_labels.push(resample_bin_label(&key));
+                emitted.push(bidx);
+            }
+        }
+        let bins = ResampleRowBins {
+            runs,
+            rows: vals.len(),
             bins: n,
             emitted: Some(emitted),
             index: Index::new(out_labels),
@@ -47464,6 +47993,111 @@ fn host_numbered_keys(column: &Column) -> Option<Vec<i64>> {
         .collect()
 }
 
+/// The covariance matrix (row-major, `columns.len()` squared) of all-valid
+/// float columns of one length, each pair the bits
+/// [`Series::cov_with_options`] answers for it: each column's mean (a sum in
+/// row order over all its rows) once, then every pair's centered cross-sum
+/// in one pass over the rows, each pair its own accumulator in row order.
+/// The pairwise calls ran two latency-bound passes a pair (df.cov() of 200k
+/// x 3 0.61x pandas). A caller passes no column holding a NaN.
+#[must_use]
+pub fn cov_matrix_all_valid(
+    columns: &[&[f64]],
+    min_periods: Option<usize>,
+    ddof: usize,
+) -> Vec<f64> {
+    let k = columns.len();
+    let len = columns.first().map_or(0, |column| column.len());
+    let mut matrix = vec![f64::NAN; k * k];
+    let min = min_periods.unwrap_or(0).max(ddof + 1);
+    #[allow(clippy::cast_precision_loss)] // pandas' float count
+    let divisor = len as f64 - ddof as f64;
+    if len == 0 || len < min || divisor <= 0.0 || columns.iter().any(|column| column.len() != len) {
+        return matrix;
+    }
+    #[allow(clippy::cast_precision_loss)] // pandas' float count
+    let means: Vec<f64> = columns
+        .iter()
+        .map(|column| column.iter().fold(0.0_f64, |sum, &value| sum + value) / len as f64)
+        .collect();
+    let pairs: Vec<(usize, usize)> = (0..k).flat_map(|a| (a..k).map(move |b| (a, b))).collect();
+    // Six columns or more: each column's pairs a slice product, four pairs
+    // a lane-wide step where the CPU has AVX2 - the same bits, each pair
+    // still its own accumulator in row order (50k x 10 0.30x pandas;
+    // br-frankenpandas-jy2f4). Fewer pairs measured faster a pair at a time.
+    let cross = if k >= 6 {
+        fp_columnar::cov_cross_sums(columns, &means, len)
+    } else {
+        let mut cross = vec![0.0_f64; pairs.len()];
+        let mut centered = vec![0.0_f64; k];
+        for row in 0..len {
+            for (slot, (column, &mean)) in centered.iter_mut().zip(columns.iter().zip(&means)) {
+                *slot = column[row] - mean;
+            }
+            for (sum, &(a, b)) in cross.iter_mut().zip(&pairs) {
+                *sum += centered[a] * centered[b];
+            }
+        }
+        cross
+    };
+    for (&sum, &(a, b)) in cross.iter().zip(&pairs) {
+        let value = sum / divisor;
+        matrix[a * k + b] = value;
+        matrix[b * k + a] = value;
+    }
+    matrix
+}
+
+/// Each group's median of its present values (valid, not NaN) - group `g`
+/// the rows whose `gids` entry is `g` - selected as `fp_types::nanmedian`
+/// selects it: the middle value, the mean of the two middle ones for an
+/// even count, NaN for a group without a value. The values scattered by
+/// group in one counting pass (br-frankenpandas-9edn4).
+fn grouped_float_medians(
+    data: &[f64],
+    validity: &fp_columnar::ValidityMask,
+    gids: &[usize],
+    ngroups: usize,
+) -> Vec<f64> {
+    let present = |row: usize| !data[row].is_nan() && validity.get(row);
+    let mut starts = vec![0_usize; ngroups + 1];
+    for (row, &g) in gids.iter().enumerate() {
+        if present(row) {
+            starts[g + 1] += 1;
+        }
+    }
+    for g in 0..ngroups {
+        starts[g + 1] += starts[g];
+    }
+    let mut values = vec![0.0_f64; starts[ngroups]];
+    let mut next = starts.clone();
+    for (row, &g) in gids.iter().enumerate() {
+        if present(row) {
+            values[next[g]] = data[row];
+            next[g] += 1;
+        }
+    }
+    let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+    (0..ngroups)
+        .map(|g| {
+            let group = &mut values[starts[g]..starts[g + 1]];
+            let n = group.len();
+            if n == 0 {
+                return f64::NAN;
+            }
+            let mid = n / 2;
+            let (left, middle, _) = group.select_nth_unstable_by(mid, cmp);
+            let middle = *middle;
+            if n.is_multiple_of(2) {
+                let lower = left.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                (lower + middle) / 2.0
+            } else {
+                middle
+            }
+        })
+        .collect()
+}
+
 fn kahan_running(mut sum: fp_types::KahanSum, value: f64) -> (fp_types::KahanSum, f64) {
     sum.add(value);
     (sum, sum.sum())
@@ -48032,7 +48666,12 @@ fn dense_groupby_diff_nan_f64_ring_by_key(
     (out, marks.finish(n))
 }
 
-/// Gid sister of [`dense_groupby_shift_nullable_f64_by_key`].
+/// Gid sister of [`dense_groupby_shift_nullable_f64_by_key`], shaped as it is:
+/// the source's validity a word at a time, each row's value written in order
+/// (0.0 where the shifted-in source is missing) and its mark built in a
+/// register - a ValidityMask::get a row, the zeroed output and an |= into the
+/// shared words were 86% of g.shift(1) by a text key (0.50x pandas;
+/// br-frankenpandas-4ljev).
 fn dense_groupby_shift_nullable_f64(
     gid_per_row: &[usize],
     ngroups: usize,
@@ -48041,22 +48680,75 @@ fn dense_groupby_shift_nullable_f64(
     periods: usize,
 ) -> (Vec<f64>, fp_columnar::ValidityMask) {
     let n = data.len();
+    let valid_words = validity.packed_words_for_scan();
+    let source_valid = |row: usize| (valid_words[row / 64] >> (row % 64)) & 1 != 0;
+    let mut marks = ValidityWordWriter::new(n);
+    if periods == 1 {
+        let mut last = vec![0.0_f64; ngroups];
+        let mut last_valid = vec![false; ngroups];
+        let out: Vec<f64> = gid_per_row
+            .iter()
+            .zip(data)
+            .enumerate()
+            .map(|(row, (&gid, &datum))| {
+                let present = last_valid[gid];
+                marks.mark(row, present);
+                let value = if present { last[gid] } else { 0.0 };
+                last[gid] = datum;
+                last_valid[gid] = source_valid(row);
+                value
+            })
+            .collect();
+        return (out, marks.finish(n));
+    }
     let mut hist = vec![0.0_f64; ngroups.saturating_mul(periods)];
     let mut hist_valid = vec![false; ngroups.saturating_mul(periods)];
     let mut ring = ShiftRing::new(ngroups, periods);
-    let mut out = vec![0.0_f64; n];
-    let mut words = vec![0u64; n.div_ceil(64)];
-    #[allow(clippy::needless_range_loop)] // row indexes data, gids and out
-    for row in 0..n {
-        let (slot, filled) = ring.step(gid_per_row[row]);
-        if filled && hist_valid[slot] {
-            out[row] = hist[slot];
-            words[row / 64] |= 1u64 << (row % 64);
-        }
-        hist[slot] = data[row];
-        hist_valid[slot] = validity.get(row);
-    }
-    (out, fp_columnar::ValidityMask::from_words(words, n))
+    let out: Vec<f64> = gid_per_row
+        .iter()
+        .zip(data)
+        .enumerate()
+        .map(|(row, (&gid, &datum))| {
+            let (slot, filled) = ring.step(gid);
+            let present = filled && hist_valid[slot];
+            marks.mark(row, present);
+            let value = if present { hist[slot] } else { 0.0 };
+            hist[slot] = datum;
+            hist_valid[slot] = source_valid(row);
+            value
+        })
+        .collect();
+    (out, marks.finish(n))
+}
+
+/// Gid sister of [`dense_groupby_shift_nan_f64_ring_by_key`]: a float column
+/// missing exactly at its NaN shifts through each group's NaN ring, reading
+/// no mask (br-frankenpandas-4ljev).
+#[inline(never)]
+fn dense_groupby_shift_nan_f64_ring(
+    gid_per_row: &[usize],
+    ngroups: usize,
+    data: &[f64],
+    periods: usize,
+) -> (Vec<f64>, fp_columnar::ValidityMask) {
+    let n = data.len();
+    let mut marks = ValidityWordWriter::new(n);
+    let mut hist = vec![f64::NAN; ngroups.saturating_mul(periods)];
+    let mut cursors = vec![0_usize; ngroups];
+    let out: Vec<f64> = gid_per_row
+        .iter()
+        .zip(data)
+        .enumerate()
+        .map(|(row, (&gid, &value))| {
+            let at = cursors[gid];
+            cursors[gid] = if at + 1 == periods { 0 } else { at + 1 };
+            let held = std::mem::replace(&mut hist[gid * periods + at], value);
+            let present = !held.is_nan();
+            marks.mark(row, present);
+            if present { held } else { 0.0 }
+        })
+        .collect();
+    (out, marks.finish(n))
 }
 
 /// Int64 sister of [`dense_groupby_shift_nullable_f64_by_key`]: a single
@@ -54703,8 +55395,11 @@ impl SeriesGroupBy<'_> {
                 return Series::new(self.series.name(), index, column);
             }
             if let Some((gids, ngroups)) = self.dense_group_ids() {
-                let (out, mask) =
-                    dense_groupby_shift_nullable_f64(&gids, ngroups, data, validity, p);
+                let (out, mask) = if self.series.column.nan_missing_exact() {
+                    dense_groupby_shift_nan_f64_ring(&gids, ngroups, data, p)
+                } else {
+                    dense_groupby_shift_nullable_f64(&gids, ngroups, data, validity, p)
+                };
                 let index = self.series.index.clone();
                 let column = Column::from_f64_values_with_validity(out, mask);
                 return Series::new(self.series.name(), index, column);
@@ -56268,6 +56963,25 @@ impl SeriesGroupBy<'_> {
         // `try_transform_dense` (bounded-Int64 / contiguous-Utf8 key). transform
         // broadcasts the per-group reduction PER ROW, so group order is
         // irrelevant — bit-identical to the generic path below.
+        // A float column's group median broadcast to its rows: each group's
+        // present values scattered by its dense id, its median selected as
+        // nanmedian selects it - it went through a two-column frame's
+        // transform (transform('median') 0.30x pandas at 300k rows;
+        // br-frankenpandas-9edn4).
+        if func == "median"
+            && self.series.column().width().is_none()
+            && let Some((data, validity)) = self.series.column().as_f64_slice_with_validity()
+            && let Some((gids, ngroups)) = self.dense_group_ids()
+            && gids.len() == data.len()
+        {
+            let medians = grouped_float_medians(data, validity, &gids, ngroups);
+            let out: Vec<f64> = gids.iter().map(|&g| medians[g]).collect();
+            return Series::new(
+                self.series.name(),
+                self.series.index().clone(),
+                Column::from_f64_values(out),
+            );
+        }
         if matches!(
             func,
             "count" | "min" | "max" | "median" | "first" | "last" | "prod" | "var" | "std"
@@ -57120,7 +57834,17 @@ impl SeriesGroupBy<'_> {
                 });
             }
         }
-        let (order, _, _) = self.build_groups();
+        // The first-seen group labels: off the dense group ids when the key
+        // has them (the order the dense per-func results below are in), where
+        // build_groups listed every group's rows only for this order (42% of
+        // g.agg(['sum', 'mean', 'count']) by an int key; br-frankenpandas-lo1fa).
+        let order = match self
+            .dense_group_ids()
+            .and_then(|(gids, ngroups)| self.dense_group_labels(&gids, ngroups))
+        {
+            Some(order) => order,
+            None => self.build_groups().0,
+        };
         let mut result_cols = BTreeMap::new();
         let mut col_order = Vec::new();
 
@@ -74972,6 +75696,61 @@ fn column_with_invented_gaps(
     Column::from_values(values).map_err(Into::into)
 }
 
+/// `col_name` of the row concat of `frames` (`total_len` rows) when its
+/// present pieces are numpy float64 (all-valid or NaN-as-missing) or
+/// all-valid int64 - no width, no categories - and a non-empty frame lacks
+/// it or a piece is float: one float64 buffer, NaN at each gap, as the
+/// Scalar path below makes it (an int source widens where a gap is
+/// invented; a float one is float) - that path cloned, cast and revalidated
+/// a Scalar a cell (concat of frames differing in a column 0.09x pandas;
+/// br-frankenpandas-am5l7). None for any other column: int pieces without
+/// a gap stay int64 there.
+fn concat_number_gaps(frames: &[&DataFrame], col_name: &str, total_len: usize) -> Option<Column> {
+    enum Piece<'a> {
+        Floats(&'a [f64]),
+        Ints(&'a [i64]),
+        Gap(usize),
+    }
+    let mut pieces = Vec::with_capacity(frames.len());
+    let (mut any_float, mut any_gap) = (false, false);
+    for frame in frames {
+        let Some(column) = frame.column(col_name) else {
+            any_gap |= !frame.is_no_piece();
+            pieces.push(Piece::Gap(frame.len()));
+            continue;
+        };
+        if column.width().is_some() || column.categorical().is_some() {
+            return None;
+        }
+        pieces.push(match column.dtype() {
+            DType::Float64 => {
+                any_float = true;
+                match column.as_f64_slice() {
+                    Some(data) => Piece::Floats(data),
+                    None if column.nan_missing_exact() => {
+                        Piece::Floats(column.as_f64_slice_with_validity()?.0)
+                    }
+                    None => return None,
+                }
+            }
+            DType::Int64 => Piece::Ints(column.as_i64_slice()?),
+            _ => return None,
+        });
+    }
+    if !any_float && !any_gap {
+        return None;
+    }
+    let mut out = Vec::with_capacity(total_len);
+    for piece in pieces {
+        match piece {
+            Piece::Floats(data) => out.extend_from_slice(data),
+            Piece::Ints(data) => out.extend(data.iter().map(|&value| value as f64)),
+            Piece::Gap(len) => out.extend(std::iter::repeat_n(f64::NAN, len)),
+        }
+    }
+    Some(Column::from_f64_values(out))
+}
+
 /// The missing value `concat(axis=0)` invents for `col_name` in a frame that
 /// lacks it. A numeric column that already held a missing value keeps its
 /// dtype and takes a `Null` gap (see [`column_with_invented_gaps`]), but an
@@ -75767,6 +76546,10 @@ pub fn concat_dataframes_with_ignore_index(
             columns.insert(col_name.clone(), column);
             continue;
         }
+        if let Some(column) = concat_number_gaps(frames, col_name, total_len) {
+            columns.insert(col_name.clone(), column);
+            continue;
+        }
         // FIRST PASS decides the KIND of the gaps before any are minted. A source
         // column that already carried a missing value is nullable, and pandas
         // fills a nullable column with pd.NA (a Null-kind missing) while keeping
@@ -75785,12 +76568,14 @@ pub fn concat_dataframes_with_ignore_index(
                     .column(col_name)
                     .is_none_or(|column| !column.values().iter().any(fp_types::Scalar::is_missing))
             });
-        // Only counts as invented if a row actually gets one. An EMPTY frame
-        // contributes no rows, so a column absent from it is not widened —
-        // measured: concat of {} with {'a': [50, 60]} keeps int64.
+        // A frame of no rows and no columns is no piece - measured: concat of
+        // {} with {'a': [50, 60]} keeps int64 - but any other frame lacking
+        // the column adds its gap, even a frame of no rows: pandas 2.2.3
+        // widens 'a' beside a 0-row frame holding only 'b' (it stayed int64;
+        // found by br-frankenpandas-am5l7's empty-frame case).
         let invented_a_gap = frames
             .iter()
-            .any(|frame| frame.column(col_name).is_none() && !frame.is_empty());
+            .any(|frame| frame.column(col_name).is_none() && !frame.is_no_piece());
         let gap = concat_axis0_gap(frames, col_name, source_was_all_valid);
 
         let mut values = Vec::with_capacity(total_len);
@@ -75882,9 +76667,22 @@ pub fn concat_dataframes_with_axis_join(
     axis: i64,
     join: ConcatJoin,
 ) -> Result<DataFrame, FrameError> {
+    concat_dataframes_with_axis_join_ignoring_index(frames, axis, join, false)
+}
+
+/// [`concat_dataframes_with_axis_join`] whose outer row concat builds a
+/// RangeIndex when `ignore_index`: the frames' indexes were concatenated
+/// (each as an i64 view) and then dropped (concat(ignore_index=True) of
+/// 300k rows 0.52x pandas; br-frankenpandas-uxjm4).
+pub fn concat_dataframes_with_axis_join_ignoring_index(
+    frames: &[&DataFrame],
+    axis: i64,
+    join: ConcatJoin,
+    ignore_index: bool,
+) -> Result<DataFrame, FrameError> {
     let out = match axis {
         0 => match join {
-            ConcatJoin::Outer => concat_dataframes(frames),
+            ConcatJoin::Outer => concat_dataframes_with_ignore_index(frames, ignore_index),
             ConcatJoin::Inner => concat_dataframes_axis0_inner(frames),
         },
         1 => concat_dataframes_axis1(frames, join),
@@ -76044,12 +76842,14 @@ pub fn concat_dataframes_with_keys(
                     .column(col_name)
                     .is_none_or(|column| !column.values().iter().any(fp_types::Scalar::is_missing))
             });
-        // Only counts as invented if a row actually gets one. An EMPTY frame
-        // contributes no rows, so a column absent from it is not widened —
-        // measured: concat of {} with {'a': [50, 60]} keeps int64.
+        // A frame of no rows and no columns is no piece - measured: concat of
+        // {} with {'a': [50, 60]} keeps int64 - but any other frame lacking
+        // the column adds its gap, even a frame of no rows: pandas 2.2.3
+        // widens 'a' beside a 0-row frame holding only 'b' (it stayed int64;
+        // found by br-frankenpandas-am5l7's empty-frame case).
         let invented_a_gap = frames
             .iter()
-            .any(|frame| frame.column(col_name).is_none() && !frame.is_empty());
+            .any(|frame| frame.column(col_name).is_none() && !frame.is_no_piece());
         let gap = concat_axis0_gap(frames, col_name, source_was_all_valid);
 
         let mut values = Vec::with_capacity(total_len);
@@ -85364,6 +86164,13 @@ impl DataFrame {
         self.index.is_empty()
     }
 
+    /// No rows and no columns: a row concat drops such a frame, where any
+    /// other frame lacking a column gives that column its gap - even one of
+    /// no rows (pandas 2.2.3).
+    fn is_no_piece(&self) -> bool {
+        self.is_empty() && self.num_columns() == 0
+    }
+
     /// Pandas-style `.empty` property: true iff the DataFrame contains
     /// zero rows OR zero columns.
     ///
@@ -85461,6 +86268,55 @@ impl DataFrame {
         })
     }
 
+    /// Row `position` of a lazily transposed frame: its source column
+    /// `position` under the view's column labels (the source's RangeIndex),
+    /// named by the row's label - where each of the view's columns, one per
+    /// source row, was built to give the row one cell (df.T.iloc[3] of 100k
+    /// x 5 13.5 ms, pandas 0.06; br-frankenpandas-rc0923-epic-zero-certified-
+    /// losses-bss5q.2). None unless that source holds the view's own float /
+    /// int / bool dtype, plain, or is an all-valid int column of a float
+    /// view (its numbers cast, as the view's column holds them).
+    #[cfg(feature = "lazy-transpose-view")]
+    #[allow(clippy::cast_precision_loss)] // numpy's int64 -> float64 cast
+    fn lazy_transpose_row(&self, position: usize) -> Option<Result<Series, FrameError>> {
+        let (sources, dtype) = self.lazy_transpose_sources()?;
+        let source = sources.get(position)?;
+        if !matches!(dtype, DType::Float64 | DType::Int64 | DType::Bool)
+            || source.width().is_some()
+            || source.categorical().is_some()
+            || source.is_pandas_string()
+        {
+            return None;
+        }
+        let column = if source.dtype() == dtype {
+            source.clone()
+        } else if dtype == DType::Float64 {
+            let numbers = source.as_i64_slice()?;
+            Column::from_f64_values(numbers.iter().map(|&number| number as f64).collect())
+        } else {
+            return None;
+        };
+        let index = self.lazy_range_columns_index()?;
+        let name = LabelName::typed(self.index.labels().get(position)?.clone());
+        Some(Series::new(name, index, column))
+    }
+
+    /// The all-valid int64 source rows of a lazily transposed int frame,
+    /// each `width` long: what an int view's reductions fold. None for any
+    /// source held otherwise (a narrow width, a categorical, a missing row).
+    #[cfg(feature = "lazy-transpose-view")]
+    fn lazy_transpose_int_rows(sources: &[Column], width: usize) -> Option<Vec<&[i64]>> {
+        sources
+            .iter()
+            .map(|column| {
+                if column.width().is_some() || column.categorical().is_some() {
+                    return None;
+                }
+                column.as_i64_slice().filter(|row| row.len() == width)
+            })
+            .collect()
+    }
+
     /// Each row's sum (`mean` false) or mean of a lazily transposed float
     /// frame: its source column's, as Series::sum / mean answer it - pandas'
     /// df.T.sum(axis=1) has df.sum()'s bits - where each row was a column
@@ -85476,6 +86332,29 @@ impl DataFrame {
         min_count: usize,
     ) -> Option<Result<Series, FrameError>> {
         let (sources, dtype) = self.lazy_transpose_sources()?;
+        // An int view: each source column's int64 sum or float64 mean, as
+        // Series::sum / mean answer them - each row was a column of the
+        // materialized view, reduced across (int.T.sum(axis=1); bss5q.2).
+        // Every row holds all its numbers, so a `min_count` above the width
+        // keeps the general path.
+        if dtype == DType::Int64 {
+            let width = self.num_columns();
+            if min_count > width {
+                return None;
+            }
+            Self::lazy_transpose_int_rows(sources, width)?;
+            let positions = Index::from_range(0, i64::try_from(width).ok()?, 1);
+            let answers = sources
+                .iter()
+                .map(|source| {
+                    let series = Series::new("", positions.clone(), source.clone())?;
+                    if mean { series.mean() } else { series.sum() }
+                })
+                .collect::<Result<Vec<Scalar>, FrameError>>();
+            return Some(answers.and_then(|answers| {
+                Series::new("", self.index.clone(), Column::from_values(answers)?)
+            }));
+        }
         if dtype != DType::Float64
             || sources
                 .iter()
@@ -85515,6 +86394,7 @@ impl DataFrame {
     /// holding NaN on its missing rows.
     #[cfg(feature = "lazy-transpose-view")]
     #[doc(hidden)]
+    #[allow(clippy::cast_precision_loss)] // pandas' float64 means of ints
     pub fn lazy_transpose_sum_or_mean(
         &self,
         mean: bool,
@@ -85522,10 +86402,41 @@ impl DataFrame {
     ) -> Option<Result<Series, FrameError>> {
         let (sources, dtype) = self.lazy_transpose_sources()?;
         let width = self.num_columns();
-        if dtype != DType::Float64 || sources.is_empty() || width == 0 {
+        if !matches!(dtype, DType::Float64 | DType::Int64) || sources.is_empty() || width == 0 {
             return None;
         }
         let index = self.lazy_range_columns_index()?;
+        // An int view: each column's numbers folded source row by source
+        // row, numpy's wrapping int64 adds for a sum, their float64 sum over
+        // the count for a mean - where each column was built and reduced
+        // (int.T.sum() of 100k x 5 41.4 ms, pandas 4.8; bss5q.2). Every
+        // column holds all its numbers, so a `min_count` above the height
+        // keeps the general path.
+        if dtype == DType::Int64 {
+            if min_count > sources.len() {
+                return None;
+            }
+            let rows = Self::lazy_transpose_int_rows(sources, width)?;
+            let column = if mean {
+                let mut sums = vec![0.0_f64; width];
+                for row in &rows {
+                    for (sum, &number) in sums.iter_mut().zip(*row) {
+                        *sum += number as f64;
+                    }
+                }
+                let count = rows.len() as f64;
+                Column::from_f64_values(sums.into_iter().map(|sum| sum / count).collect())
+            } else {
+                let mut sums = rows[0].to_vec();
+                for row in &rows[1..] {
+                    for (sum, &number) in sums.iter_mut().zip(*row) {
+                        *sum = sum.wrapping_add(number);
+                    }
+                }
+                Column::from_i64_values(sums)
+            };
+            return Some(Series::new(String::new(), index, column));
+        }
         let rows: Vec<&[f64]> = sources
             .iter()
             .map(|column| {
@@ -86931,6 +87842,31 @@ impl DataFrame {
                 })
                 .collect::<Option<Vec<&[i64]>>>()
                 .and_then(|columns| combined_int_row_keys(&columns))
+        {
+            return Ok(Self::duplicated_single_i64(&keys, keep));
+        }
+
+        // Ints beside all-valid text: each text column's strings coded by
+        // first sight, as pandas factorizes each key, then combined with the
+        // ints as one exact int key - the digest path below hashed every
+        // row's bytes and fanned its rows out to threads per call
+        // (df[['k', 't']].drop_duplicates() 0.91x pandas at 200k rows;
+        // br-frankenpandas-0twys).
+        if let Some(typed) = &typed_cols
+            && typed.len() > 1
+            && typed.iter().any(|tc| matches!(tc, TypedDedupCol::Utf8(..)))
+            && let Some(coded) = typed
+                .iter()
+                .map(|tc| match tc {
+                    TypedDedupCol::I64(data) => Some(std::borrow::Cow::Borrowed(*data)),
+                    TypedDedupCol::Utf8(bytes, offsets) => Some(std::borrow::Cow::Owned(
+                        text_first_seen_codes(bytes, offsets),
+                    )),
+                    TypedDedupCol::F64(..) => None,
+                })
+                .collect::<Option<Vec<std::borrow::Cow<'_, [i64]>>>>()
+            && let Some(keys) =
+                combined_int_row_keys(&coded.iter().map(AsRef::as_ref).collect::<Vec<&[i64]>>())
         {
             return Ok(Self::duplicated_single_i64(&keys, keep));
         }
@@ -88630,6 +89566,7 @@ impl DataFrame {
         // single-column sort entirely — the multi-column sibling has read its keys
         // this way since br-frankenpandas-1tuf5.
         let already_sorted = typed_slice_already_sorted(sort_column, ascending)
+            .or_else(|| typed_nullable_f64_already_sorted(sort_column, ascending, na_first))
             .or_else(|| {
                 typed_dense_values_already_sorted(
                     sort_column.values(),
@@ -88644,16 +89581,16 @@ impl DataFrame {
             return Ok(self.clone());
         }
 
-        let order = if !na_first && let Some(order) = typed_slice_sort_order(sort_column, ascending)
+        // The typed orders of an all-valid key serve either na_position (no
+        // missing value to place); a nullable float key places its missing
+        // block (br-frankenpandas-efgu5: na_position='first' compared Scalars).
+        let order = if let Some(order) = typed_slice_sort_order(sort_column, ascending) {
+            order
+        } else if let Some(order) = typed_nullable_f64_sort_order(sort_column, ascending, na_first)
         {
             order
-        } else if !na_first
-            && let Some(order) =
-                typed_dense_sort_order(sort_column.values(), sort_column.dtype(), ascending)
-        {
-            order
-        } else if !na_first
-            && let Some(order) = typed_nullable_f64_sort_order(sort_column, ascending)
+        } else if let Some(order) =
+            typed_dense_sort_order(sort_column.values(), sort_column.dtype(), ascending)
         {
             order
         } else {
@@ -89646,6 +90583,10 @@ impl DataFrame {
 
     /// Internal helper: extract a single row by position into a Series.
     fn row_to_series(&self, position: usize) -> Result<Series, FrameError> {
+        #[cfg(feature = "lazy-transpose-view")]
+        if let Some(row) = self.lazy_transpose_row(position) {
+            return row;
+        }
         let mut labels = Vec::with_capacity(self.column_order.len());
         let mut values = Vec::with_capacity(self.column_order.len());
         let mut columns: Vec<&Column> = Vec::with_capacity(self.column_order.len());
@@ -94144,12 +95085,14 @@ impl DataFrame {
 
         let n_idx = idx_order_keys.len();
         let n_col = col_order_keys.len();
-        let row_idx_of: HashMap<ScalarKey<'_>, usize> = idx_order_keys
+        // Fx, as the first-seen sets: two lookups a row below (std's SipHash
+        // was a quarter of crosstab; br-frankenpandas-5gmje).
+        let row_idx_of: FxHashMap<ScalarKey<'_>, usize> = idx_order_keys
             .iter()
             .enumerate()
             .map(|(i, k)| (*k, i))
             .collect();
-        let col_idx_of: HashMap<ScalarKey<'_>, usize> = col_order_keys
+        let col_idx_of: FxHashMap<ScalarKey<'_>, usize> = col_order_keys
             .iter()
             .enumerate()
             .map(|(i, k)| (*k, i))
@@ -107354,6 +108297,11 @@ impl DataFrame {
         axis: usize,
         reflected: bool,
     ) -> Result<Self, FrameError> {
+        if axis == 1
+            && let Some(columns) = self.columns_by_series_numbers(series, op, reflected)
+        {
+            return self.over_own_columns(self.index.clone(), self.own_column_store(columns));
+        }
         self.broadcast_series(series, axis, |left, right| {
             let (left, right) = if reflected {
                 (right, left)
@@ -107370,6 +108318,45 @@ impl DataFrame {
                 ArithmeticOp::Pow => left.pow(right),
             }
         })
+    }
+
+    /// Each column `<op>` its own number when `series`' labels are exactly
+    /// the columns: [`Column::binary_scalar`] by the number, the column the
+    /// broadcast of it makes (and numpy's power by one number, which pandas
+    /// gives `df ** series`) - the broadcast built a column of the number for
+    /// every column (num / num.sum() 0.09x pandas; br-frankenpandas-a01pc).
+    /// None - the broadcast - for any column it declines (text, bool, a
+    /// narrow width, categories) or an operand that is no number.
+    fn columns_by_series_numbers(
+        &self,
+        series: &Series,
+        op: ArithmeticOp,
+        reflected: bool,
+    ) -> Option<Vec<Column>> {
+        let labels = series.index().labels();
+        if labels.len() != self.num_columns()
+            || !self
+                .column_order
+                .iter()
+                .zip(labels)
+                .all(|(name, label)| *name == label.to_string())
+        {
+            return None;
+        }
+        let values = series.values();
+        (0..self.num_columns())
+            .map(|pos| {
+                let column = self.column_at(pos)?;
+                let value = values.get(pos)?;
+                if column.width().is_some()
+                    || column.categorical().is_some()
+                    || !matches!(value, Scalar::Float64(_) | Scalar::Int64(_))
+                {
+                    return None;
+                }
+                column.binary_scalar(value, op, reflected)
+            })
+            .collect()
     }
 
     /// `df <op> series` for a comparison, broadcast like
@@ -107425,7 +108412,13 @@ impl DataFrame {
         // One column with the operand's value for it (missing: NaN).
         let combine_value = |name: &str, own: Option<&Column>, value: Option<&Scalar>| {
             let nan = || Column::new(DType::Float64, vec![Scalar::Null(NullKind::NaN); n]);
+            // A number or a bool is its typed column, the one from_values
+            // made of the value repeated (it built a Scalar a row: num /
+            // num.sum() 0.10x pandas; br-frankenpandas-a01pc).
             let operand = match value {
+                Some(Scalar::Float64(x)) if !x.is_nan() => Column::from_f64_values(vec![*x; n]),
+                Some(Scalar::Int64(v)) => Column::from_i64_values(vec![*v; n]),
+                Some(Scalar::Bool(b)) => Column::from_bool_values(vec![*b; n]),
                 Some(value) if !value.is_missing() => Column::from_values(vec![value.clone(); n])?,
                 _ => nan()?,
             };
@@ -112299,11 +113292,24 @@ impl DataFrame {
                 }
             }
         }
-        let mut out = self.take_rows_by_positions(&rows)?;
+        // Only an object column holds lists; another keeps the taken column,
+        // dtype and all. The rebuilt ones are a one-byte placeholder in the
+        // take: it cloned every list cell, each dropped again when replaced
+        // (Series of 100k lists .explode() 0.91x pandas;
+        // br-frankenpandas-g1z76).
+        let rebuilt = |source: &&Column| matches!(source.dtype(), DType::Utf8 | DType::Null);
+        let mut skeleton = self.clone();
+        for (name, _) in columns
+            .iter()
+            .zip(&sources)
+            .filter(|(_, source)| rebuilt(source))
+        {
+            skeleton =
+                skeleton.with_column(*name, Column::from_bool_constant(false, self.len()))?;
+        }
+        let mut out = skeleton.take_rows_by_positions(&rows)?;
         for ((name, values), source) in columns.iter().zip(exploded).zip(&sources) {
-            // Only an object column holds lists; another keeps the taken
-            // column, dtype and all.
-            if matches!(source.dtype(), DType::Utf8 | DType::Null) {
+            if rebuilt(source) {
                 out = out.with_column(*name, Column::from_object_values(values))?;
             }
         }
@@ -121935,8 +122941,11 @@ impl DataFrameGroupBy<'_> {
                     let (out, mask) = dense_groupby_shift_f64(gids, *ngroups, vals, periods);
                     Some(Column::from_f64_values_with_validity(out, mask))
                 } else if let Some((data, validity)) = col.as_f64_slice_with_validity() {
-                    let (out, mask) =
-                        dense_groupby_shift_nullable_f64(gids, *ngroups, data, validity, periods);
+                    let (out, mask) = if col.nan_missing_exact() {
+                        dense_groupby_shift_nan_f64_ring(gids, *ngroups, data, periods)
+                    } else {
+                        dense_groupby_shift_nullable_f64(gids, *ngroups, data, validity, periods)
+                    };
                     Some(Column::from_f64_values_with_validity(out, mask))
                 } else if let Some((data, validity)) = col.as_i64_slice_with_validity() {
                     let (out, mask) =
@@ -131679,15 +132688,22 @@ mod tests {
         // Measured on 2.2.3, concat axis=0 over disjoint columns:
         //   x -> [1.0, NaN] float64      y -> [NaN, 2.0] float64
         // This test previously pinned [Int64(10), Null(Null)], which is what
-        // FrankenPandas used to produce (br-frankenpandas-nywa8).
-        assert_eq!(
-            out.column("b").unwrap().values(),
-            &[Scalar::Float64(10.0), Scalar::Null(NullKind::NaN)]
-        );
-        assert_eq!(
-            out.column("c").unwrap().values(),
-            &[Scalar::Null(NullKind::NaN), Scalar::Float64(20.0)]
-        );
+        // FrankenPandas used to produce (br-frankenpandas-nywa8). The gap is
+        // numpy's NaN however the float column holds it - Null(NaN), or the
+        // NaN datum of the NaN-as-missing column the typed concat makes
+        // (br-frankenpandas-am5l7) - never an NA.
+        let nan_gap = |v: &Scalar| {
+            matches!(v, Scalar::Null(NullKind::NaN))
+                || matches!(v, Scalar::Float64(x) if x.is_nan())
+        };
+        let b = out.column("b").unwrap();
+        assert_eq!(b.dtype(), DType::Float64);
+        assert_eq!(b.values()[0], Scalar::Float64(10.0));
+        assert!(nan_gap(&b.values()[1]), "{:?}", b.values());
+        let c = out.column("c").unwrap();
+        assert_eq!(c.dtype(), DType::Float64);
+        assert!(nan_gap(&c.values()[0]), "{:?}", c.values());
+        assert_eq!(c.values()[1], Scalar::Float64(20.0));
         // 'a' is present in BOTH frames, so nothing was invented and it stays
         // int64 — the negative control for the promotion above.
         assert_eq!(
@@ -131770,15 +132786,20 @@ mod tests {
                 Scalar::Null(NullKind::Null)
             ]
         );
-        // 'c' was all-valid int64 -> numpy -> promotes, gaps are NaN.
-        assert_eq!(
-            out.column("c").unwrap().values(),
-            &[
-                Scalar::Null(NullKind::NaN),
-                Scalar::Null(NullKind::NaN),
-                Scalar::Float64(300.0)
-            ]
+        // 'c' was all-valid int64 -> numpy -> promotes, gaps are NaN (held as
+        // Null(NaN) or as the NaN-as-missing column's NaN datum,
+        // br-frankenpandas-am5l7 - never an NA).
+        let c = out.column("c").unwrap();
+        assert_eq!(c.dtype(), DType::Float64);
+        assert!(
+            c.values()[..2]
+                .iter()
+                .all(|v| matches!(v, Scalar::Null(NullKind::NaN))
+                    || matches!(v, Scalar::Float64(x) if x.is_nan())),
+            "{:?}",
+            c.values()
         );
+        assert_eq!(c.values()[2], Scalar::Float64(300.0));
     }
 
     /// An EMPTY frame contributes no rows, so a column absent from it has no gap
@@ -141088,6 +142109,400 @@ mod tests {
     }
 
     #[test]
+    fn bfill_with_a_limit_is_the_row_walk_jxx6k() {
+        // br-frankenpandas-jxx6k: bfill(limit) fills each missing run's last
+        // `limit` rows with the value after it, as a backward walk of the
+        // rows does - runs at both ends, runs longer and shorter than the
+        // limit. NEGATIVE: a trailing run (no value after it) stays missing.
+        let data: Vec<f64> = (0..90_u32)
+            .map(|i| {
+                if i < 3 || (10..16).contains(&i) || i % 7 == 2 || i >= 85 {
+                    f64::NAN
+                } else {
+                    f64::from(i) * 0.5
+                }
+            })
+            .collect();
+        let series = Series::new(
+            "v",
+            Index::default_range(data.len()),
+            Column::from_f64_values(data.clone()),
+        )
+        .unwrap();
+        for limit in [1_usize, 2, 5] {
+            let mut want = vec![None; data.len()];
+            let mut next: Option<f64> = None;
+            let mut fills = 0;
+            for (slot, &value) in want.iter_mut().zip(&data).rev() {
+                if value.is_nan() {
+                    fills += 1;
+                    if fills <= limit {
+                        *slot = next.map(f64::to_bits);
+                    }
+                } else {
+                    *slot = Some(value.to_bits());
+                    next = Some(value);
+                    fills = 0;
+                }
+            }
+            let filled = series.bfill(Some(limit)).unwrap();
+            let got: Vec<Option<u64>> = filled
+                .values()
+                .iter()
+                .map(|cell| (!cell.is_missing()).then(|| cell.to_f64().map_or(0, f64::to_bits)))
+                .collect();
+            assert_eq!(got, want, "limit {limit}");
+            assert!(got[85..].iter().all(Option::is_none));
+        }
+    }
+
+    #[test]
+    fn agg_list_labels_are_the_per_func_results_lo1fa() {
+        // br-frankenpandas-lo1fa: g.agg([...]) labels its rows by the dense
+        // group ids' first-seen order - every func column is that func's own
+        // Series, under the same labels. NEGATIVE: a float key (no dense
+        // ids) keeps the build_groups order, the same columns.
+        let cells = |column: &Column| -> Vec<Option<u64>> {
+            column
+                .values()
+                .iter()
+                .map(|cell| (!cell.is_missing()).then(|| cell.to_f64().map_or(0, f64::to_bits)))
+                .collect()
+        };
+        let values: Vec<f64> = (0..240_u32)
+            .map(|i| {
+                if i % 7 == 3 {
+                    f64::NAN
+                } else {
+                    f64::from(i) * 0.25
+                }
+            })
+            .collect();
+        let int_keys: Vec<i64> = (0..240).map(|i| (i * 13 + 5) % 17).collect();
+        let float_keys: Vec<f64> = int_keys
+            .iter()
+            .map(|&key| f64::from(i32::try_from(key).unwrap()) + 0.5)
+            .collect();
+        let series = Series::new(
+            "v",
+            Index::default_range(240),
+            Column::from_f64_values(values),
+        )
+        .unwrap();
+        for key in [
+            Column::from_i64_values(int_keys),
+            Column::from_f64_values(float_keys),
+        ] {
+            let by = Series::new("k", Index::default_range(240), key).unwrap();
+            let grouped = series.groupby(&by).unwrap();
+            let agg = grouped.agg(&["sum", "mean", "count"]).unwrap();
+            assert_eq!(agg.index().len(), 17);
+            for (func, single) in [
+                ("sum", grouped.sum().unwrap()),
+                ("mean", grouped.mean().unwrap()),
+                ("count", grouped.count().unwrap()),
+            ] {
+                assert_eq!(single.index().labels(), agg.index().labels(), "{func}");
+                assert_eq!(
+                    cells(agg.column(func).unwrap()),
+                    cells(single.column()),
+                    "{func}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gid_shift_kernels_are_the_group_walk_4ljev() {
+        // br-frankenpandas-4ljev: the gid shift kernels - the nullable one by
+        // its words and the NaN ring - give each row the value `periods` rows
+        // back in its group, missing at a group's head rows and where that
+        // source row is missing, a missing row's datum 0.0, as a walk of each
+        // group's rows does. NEGATIVE: a 0.0-datum source's missing rows
+        // (finite data under cleared bits) stay missing.
+        let gids: Vec<usize> = (0..300).map(|i| (i * 7 + i / 13) % 5).collect();
+        let nan_data: Vec<f64> = (0..300_u32)
+            .map(|i| {
+                if i % 11 == 4 {
+                    f64::NAN
+                } else {
+                    f64::from(i) * 0.5 - 20.0
+                }
+            })
+            .collect();
+        let nan_exact = Column::from_f64_values(nan_data.clone());
+        assert!(nan_exact.nan_missing_exact());
+        let (_, mask) = nan_exact.as_f64_slice_with_validity().unwrap();
+        let zero_data: Vec<f64> = nan_data
+            .iter()
+            .map(|&value| if value.is_nan() { 0.0 } else { value })
+            .collect();
+        for periods in [1_usize, 2, 3, 64] {
+            let mut want = vec![None; gids.len()];
+            let mut walked: Vec<Vec<usize>> = vec![Vec::new(); 5];
+            for (row, &gid) in gids.iter().enumerate() {
+                let rows = &walked[gid];
+                if rows.len() >= periods {
+                    let source = rows[rows.len() - periods];
+                    want[row] = mask.get(source).then(|| nan_data[source].to_bits());
+                }
+                walked[gid].push(row);
+            }
+            let check = |(out, got_mask): (Vec<f64>, fp_columnar::ValidityMask), label: &str| {
+                let got: Vec<Option<u64>> = out
+                    .iter()
+                    .enumerate()
+                    .map(|(row, value)| got_mask.get(row).then(|| value.to_bits()))
+                    .collect();
+                assert_eq!(got, want, "{label} periods={periods}");
+                for (row, value) in out.iter().enumerate() {
+                    assert!(got_mask.get(row) || value.to_bits() == 0, "{label} {row}");
+                }
+            };
+            check(
+                super::dense_groupby_shift_nan_f64_ring(&gids, 5, &nan_data, periods),
+                "nan ring",
+            );
+            check(
+                super::dense_groupby_shift_nullable_f64(&gids, 5, &nan_data, mask, periods),
+                "nullable over NaN",
+            );
+            check(
+                super::dense_groupby_shift_nullable_f64(&gids, 5, &zero_data, mask, periods),
+                "nullable over 0.0",
+            );
+        }
+    }
+
+    #[test]
+    fn same_index_arithmetic_leaves_duplicates_unasked_a425n() {
+        // br-frankenpandas-a425n: arithmetic between Series sharing an
+        // index takes the same-index path without asking the index about
+        // duplicates (the first ask builds its labels), each cell the
+        // row's. NEGATIVE: unequal indexes holding a repeated label still
+        // ask and align duplicate-aware, the label crossed with each match.
+        let labels: Vec<IndexLabel> = (0..100)
+            .map(|i| IndexLabel::Utf8(format!("k{}", (i * 37) % 100)))
+            .collect();
+        let index = Index::new(labels);
+        let left = Series::new(
+            "v",
+            index.clone(),
+            Column::from_f64_values((0..100).map(f64::from).collect()),
+        )
+        .unwrap();
+        let right = Series::new(
+            "v",
+            index,
+            Column::from_f64_values((0..100).map(|i| f64::from(i) * 0.5).collect()),
+        )
+        .unwrap();
+        let unasked = "duplicate_cache: OnceLock(<uninit>)";
+        assert!(format!("{:?}", left.index()).contains(unasked));
+        let difference = left.sub(&right).unwrap();
+        assert!(format!("{:?}", left.index()).contains(unasked));
+        let filled = left.add_fill(&right, 0.0).unwrap();
+        assert!(format!("{:?}", left.index()).contains(unasked));
+        for (row, (cell, sum)) in difference.values().iter().zip(filled.values()).enumerate() {
+            let x = f64::from(u32::try_from(row).unwrap());
+            assert_eq!(cell, &Scalar::Float64(x * 0.5));
+            assert_eq!(sum, &Scalar::Float64(x * 1.5));
+        }
+
+        let repeated = Series::new(
+            "v",
+            Index::new(vec![
+                IndexLabel::Utf8("x".to_owned()),
+                IndexLabel::Utf8("y".to_owned()),
+                IndexLabel::Utf8("x".to_owned()),
+            ]),
+            Column::from_f64_values(vec![1.0, 2.0, 3.0]),
+        )
+        .unwrap();
+        let other = Series::new(
+            "v",
+            Index::new(vec![
+                IndexLabel::Utf8("y".to_owned()),
+                IndexLabel::Utf8("x".to_owned()),
+            ]),
+            Column::from_f64_values(vec![20.0, 10.0]),
+        )
+        .unwrap();
+        let joined = repeated.add(&other).unwrap();
+        assert!(!format!("{:?}", repeated.index()).contains(unasked));
+        let mut pairs: Vec<(String, f64)> = joined
+            .index()
+            .labels()
+            .iter()
+            .zip(joined.values())
+            .map(|(label, cell)| (label.to_string(), cell.to_f64().unwrap()))
+            .collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        assert_eq!(
+            pairs,
+            vec![
+                ("x".to_owned(), 11.0),
+                ("x".to_owned(), 13.0),
+                ("y".to_owned(), 22.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn nan_exact_shift_keeps_the_witness_0mxem() {
+        // br-frankenpandas-0mxem: a NaN-holding float Series shifted with a
+        // missing fill stays NaN-exact - its rows moved with their bits, the
+        // vacated rows missing - each cell the moved row's, across word
+        // boundaries and past the end; a row range and a take of it read
+        // the same rows. NEGATIVE: a valid fill makes the vacated rows
+        // present (not the witness path), and a 0.0-datum nullable source
+        // keeps its nullable form.
+        let cells = |column: &Column| -> Vec<Option<u64>> {
+            column
+                .values()
+                .iter()
+                .map(|cell| (!cell.is_missing()).then(|| cell.to_f64().map_or(0, f64::to_bits)))
+                .collect()
+        };
+        let shown = |series: &Series| cells(series.column());
+        let data: Vec<f64> = (0..200)
+            .map(|i| {
+                if i % 9 == 2 {
+                    f64::NAN
+                } else {
+                    f64::from(i) * 0.25 - 7.0
+                }
+            })
+            .collect();
+        let n = data.len();
+        let source = Series::new(
+            "v",
+            Index::default_range(n),
+            Column::from_f64_values(data.clone()),
+        )
+        .unwrap();
+        assert!(source.column().nan_missing_exact());
+        for periods in [1_i64, 3, 64, 65, -1, -70, 199, 200, 250, -250] {
+            let shifted = source.shift(periods).unwrap();
+            assert!(shifted.column().nan_missing_exact(), "{periods}");
+            let p = usize::try_from(periods.unsigned_abs()).unwrap();
+            let want: Vec<Option<u64>> = (0..n)
+                .map(|row| {
+                    let from = if periods >= 0 {
+                        row.checked_sub(p)
+                    } else {
+                        Some(row + p)
+                    };
+                    from.filter(|&from| from < n)
+                        .map(|from| data[from])
+                        .filter(|value| !value.is_nan())
+                        .map(f64::to_bits)
+                })
+                .collect();
+            assert_eq!(shown(&shifted), want, "{periods}");
+            let window = shifted.column().take_contiguous_range(5, 130);
+            assert_eq!(cells(&window), want[5..135], "{periods} window");
+            let picked = shifted.column().take_positions(&[199, 0, 64, 64, 130]);
+            assert!(picked.nan_missing_exact() || picked.validity().all());
+            let picked_want: Vec<Option<u64>> =
+                [199, 0, 64, 64, 130].iter().map(|&row| want[row]).collect();
+            assert_eq!(cells(&picked), picked_want, "{periods} take");
+        }
+        let filled = source
+            .shift_with_fill_value(2, Scalar::Float64(0.5))
+            .unwrap();
+        assert_eq!(
+            shown(&filled)[..3],
+            [
+                Some(0.5_f64.to_bits()),
+                Some(0.5_f64.to_bits()),
+                Some((-7.0_f64).to_bits())
+            ]
+        );
+        let nullable = Series::new(
+            "v",
+            Index::default_range(3),
+            Column::from_f64_values_with_validity(
+                vec![1.0, 0.0, 3.0],
+                fp_columnar::ValidityMask::from_words(vec![0b101], 3),
+            ),
+        )
+        .unwrap();
+        let moved = nullable.shift(1).unwrap();
+        assert!(!moved.column().nan_missing_exact());
+        assert_eq!(shown(&moved), vec![None, Some(1.0_f64.to_bits()), None]);
+    }
+
+    #[test]
+    fn duplicated_over_ints_and_text_codes_the_text_0twys() {
+        // br-frankenpandas-0twys: rows keyed by an int and a contiguous text
+        // column dedupe through first-seen text codes combined with the ints
+        // - the same marks as the digest path (the same strings held as
+        // Scalars) for every keep. Two equal strings at different byte
+        // offsets are one key. NEGATIVE: a float key keeps the digest path,
+        // the same marks too.
+        let words = ["alpha", "beta", "gamma", "be", "ta"];
+        let rows = 300_usize;
+        let ints: Vec<i64> = (0..rows).map(|i| (i % 7) as i64 - 3).collect();
+        let texts: Vec<&str> = (0..rows).map(|i| words[(i * 3 + i / 7) % 5]).collect();
+        let mut bytes = Vec::new();
+        let mut offsets = vec![0_usize];
+        for text in &texts {
+            bytes.extend_from_slice(text.as_bytes());
+            offsets.push(bytes.len());
+        }
+        let contiguous = Column::from_utf8_contiguous(bytes, offsets);
+        assert!(contiguous.as_utf8_contiguous().is_some());
+        let scalars = Column::from_values(
+            texts
+                .iter()
+                .map(|text| Scalar::Utf8((*text).to_owned()))
+                .collect(),
+        )
+        .unwrap();
+        let frame = |text: Column, key: Column| {
+            DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, rows),
+                BTreeMap::from([("k".to_owned(), key), ("t".to_owned(), text)]),
+                vec!["k".to_owned(), "t".to_owned()],
+            )
+            .unwrap()
+        };
+        let coded = frame(contiguous.clone(), Column::from_i64_values(ints.clone()));
+        let digested = frame(scalars.clone(), Column::from_i64_values(ints.clone()));
+        let floats: Vec<f64> = ints.iter().map(|&i| i as f64).collect();
+        let float_keyed = frame(contiguous, Column::from_f64_values(floats));
+        for keep in [
+            DuplicateKeep::First,
+            DuplicateKeep::Last,
+            DuplicateKeep::None,
+        ] {
+            let want = digested.duplicated(None, keep).unwrap();
+            assert_eq!(
+                coded.duplicated(None, keep).unwrap().values(),
+                want.values(),
+                "{keep:?}"
+            );
+            assert_eq!(
+                float_keyed.duplicated(None, keep).unwrap().values(),
+                want.values(),
+                "{keep:?}"
+            );
+        }
+        let firsts = coded.duplicated(None, DuplicateKeep::First).unwrap();
+        let kept = firsts
+            .values()
+            .iter()
+            .filter(|flag| **flag == Scalar::Bool(false))
+            .count();
+        assert_eq!(kept, 35, "7 ints x 5 words");
+        assert_eq!(
+            super::text_first_seen_codes(b"bebeta", &[0, 2, 4, 6]),
+            vec![0, 0, 1]
+        );
+    }
+
+    #[test]
     fn dataframe_duplicated_keep_variants() {
         let df = DataFrame::from_dict(
             &["a", "b"],
@@ -147813,6 +149228,79 @@ mod tests {
             assert_eq!(
                 expect_float64(&same_std.values()[idx]).to_bits(),
                 0.0_f64.to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn std_is_the_root_of_the_swept_variance_vj2z0() {
+        // br-frankenpandas-vj2z0: expanding std takes the variance's root in a
+        // pass of its own, rolling std in its sweep - each std the clamped
+        // variance's root either way, bit for bit, a row under min_periods
+        // missing in both. The run of
+        // +-1e15 cancels to a negative rolling(2) variance (rows 8 and 13):
+        // its std is 0.0, not NaN. NEGATIVE: sem keeps its own root, std /
+        // sqrt(count - 1).
+        let runs = [
+            (-1.0, 40.5),
+            (-1.0, 0.375),
+            (-1.0, 0.0),
+            (1.0, 0.0),
+            (-1.0, 987.25),
+            (1.0, 310.125),
+            (1.0, 898.875),
+            (-1.0, 0.0),
+            (-1.0, 434.125),
+            (1.0, 1.0),
+            (-1.0, 0.875),
+            (1.0, 805.0),
+            (1.0, 0.125),
+            (1.0, 0.625),
+            (1.0, 730.25),
+        ];
+        let values: Vec<Scalar> = runs
+            .iter()
+            .map(|&(sign, delta)| Scalar::Float64(sign * 1e15 + delta))
+            .collect();
+        let labels: Vec<IndexLabel> = (0..15).map(IndexLabel::Int64).collect();
+        let series = Series::from_values("x", labels, values).unwrap();
+        let root = |variance: f64| if variance < 0.0 { 0.0 } else { variance }.sqrt();
+        let mut negative = 0;
+        for (std, var) in [
+            (series.rolling(2, None).std(), series.rolling(2, None).var()),
+            (
+                series.rolling(3, Some(3)).std(),
+                series.rolling(3, Some(3)).var(),
+            ),
+            (
+                series.expanding(Some(4)).std(),
+                series.expanding(Some(4)).var(),
+            ),
+        ] {
+            let (std, var) = (std.unwrap(), var.unwrap());
+            for (deviation, variance) in std.values().iter().zip(var.values()) {
+                match (deviation, variance) {
+                    (Scalar::Float64(deviation), Scalar::Float64(variance)) => {
+                        negative += usize::from(*variance < 0.0);
+                        assert_eq!(deviation.to_bits(), root(*variance).to_bits());
+                    }
+                    (deviation, variance) => assert!(
+                        matches!(deviation, Scalar::Null(_)) && matches!(variance, Scalar::Null(_)),
+                        "{deviation:?} beside {variance:?}"
+                    ),
+                }
+            }
+        }
+        assert!(negative >= 2, "the run cancels to negative variances");
+        let sem = series.rolling(3, Some(3)).sem().unwrap();
+        let var = series.rolling(3, Some(3)).var().unwrap();
+        for (error, variance) in sem.values().iter().zip(var.values()).skip(2) {
+            let (Scalar::Float64(error), Scalar::Float64(variance)) = (error, variance) else {
+                panic!("{error:?} beside {variance:?}");
+            };
+            assert_eq!(
+                error.to_bits(),
+                (root(*variance) / 2.0_f64.sqrt()).to_bits()
             );
         }
     }
@@ -181076,6 +182564,89 @@ mod tests {
     }
 
     #[test]
+    fn pivot_bool_axis_is_dense_and_the_generic_table_5gmje() {
+        // br-frankenpandas-5gmje: a bool pivot axis takes the dense codes -
+        // False before True, only the keys present - and the table is the
+        // generic path's (the same keys as a nullable boolean column, which
+        // keeps the generic path). NEGATIVE: one key present is one column;
+        // a nullable boolean axis declines the dense codes.
+        let (codes, labels, names) =
+            super::pivot_axis_dense_codes(&Column::from_bool_values(vec![true, false, true]))
+                .unwrap();
+        assert_eq!(codes, vec![1, 0, 1]);
+        assert_eq!(
+            labels,
+            vec![IndexLabel::Bool(false), IndexLabel::Bool(true)]
+        );
+        assert_eq!(names, vec!["False".to_owned(), "True".to_owned()]);
+        let (codes, labels, names) =
+            super::pivot_axis_dense_codes(&Column::from_bool_values(vec![true, true])).unwrap();
+        assert_eq!(
+            (codes, labels, names),
+            (
+                vec![0, 0],
+                vec![IndexLabel::Bool(true)],
+                vec!["True".to_owned()]
+            )
+        );
+        let flags: Vec<bool> = (0..60).map(|i| i % 3 == 0 || i % 7 == 0).collect();
+        let nullable = Column::new(
+            DType::BoolNullable,
+            flags.iter().map(|&flag| Scalar::Bool(flag)).collect(),
+        )
+        .unwrap();
+        assert!(super::pivot_axis_dense_codes(&nullable).is_none());
+        let frame = |flag_column: Column| {
+            let order = vec!["city".to_owned(), "flag".to_owned(), "n".to_owned()];
+            DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, 60),
+                BTreeMap::from([
+                    (
+                        "city".to_owned(),
+                        Column::from_values(
+                            (0..60)
+                                .map(|i| Scalar::Utf8(["b", "a", "c"][i % 3].to_owned()))
+                                .collect(),
+                        )
+                        .unwrap(),
+                    ),
+                    ("flag".to_owned(), flag_column),
+                    (
+                        "n".to_owned(),
+                        Column::from_f64_values((0..60).map(|i| i as f64 * 0.5).collect()),
+                    ),
+                ]),
+                order,
+            )
+            .unwrap()
+        };
+        let dense = frame(Column::from_bool_values(flags.clone()));
+        let generic = frame(nullable);
+        for aggfunc in ["sum", "count", "mean"] {
+            let want = generic
+                .pivot_table_with_dropna("n", "city", "flag", aggfunc, true)
+                .unwrap();
+            let got = dense
+                .pivot_table_with_dropna("n", "city", "flag", aggfunc, true)
+                .unwrap();
+            assert_eq!(got.column_names(), want.column_names(), "{aggfunc}");
+            assert_eq!(got.index().labels(), want.index().labels(), "{aggfunc}");
+            for name in want.column_names() {
+                let bits = |frame: &DataFrame| -> Vec<Option<u64>> {
+                    frame
+                        .column(name)
+                        .unwrap()
+                        .values()
+                        .iter()
+                        .map(|v| (!v.is_missing()).then(|| v.to_f64().map_or(0, f64::to_bits)))
+                        .collect()
+                };
+                assert_eq!(bits(&got), bits(&want), "{aggfunc} {name}");
+            }
+        }
+    }
+
+    #[test]
     fn crosstab_counts() {
         let idx = Series::from_values(
             "a",
@@ -191612,6 +193183,205 @@ mod tests {
     }
 
     #[test]
+    fn cov_matrix_all_valid_is_the_pairwise_cov() {
+        // The one-pass matrix holds, bit for bit, each pair's
+        // Series::cov_with_options: ddof 1 and 0, min_periods met and not,
+        // a large-magnitude near-constant column (the two-pass centring's
+        // reason), a column paired with itself (var) - over 3 columns (a pair
+        // at a time) and 7 (each column's pairs a slice product, four pairs a
+        // step under AVX2; br-frankenpandas-jy2f4). NEGATIVE: min_periods
+        // past the length is all NaN, as the pairwise answer.
+        let n = 997_usize;
+        let columns: Vec<Vec<f64>> = vec![
+            (0..n).map(|i| ((i * 7919) % 1000) as f64 / 7.0).collect(),
+            (0..n)
+                .map(|i| -809_259.0 + ((i * 31) % 17) as f64 * 0.1)
+                .collect(),
+            (0..n).map(|i| ((i as f64) * 0.37).sin() * 1e3).collect(),
+            (0..n)
+                .map(|i| ((i * 13) % 101) as f64 * 1e-3 - 0.05)
+                .collect(),
+            (0..n).map(|i| ((i as f64) * 1.7).cos() * 1e-6).collect(),
+            (0..n).map(|i| (i as f64).sqrt() * 3.1).collect(),
+            (0..n)
+                .map(|i| if i % 2 == 0 { 1e12 } else { -1e12 })
+                .collect(),
+        ];
+        let series: Vec<Series> = columns
+            .iter()
+            .enumerate()
+            .map(|(at, values)| {
+                Series::new(
+                    format!("c{at}"),
+                    Index::default_range(n),
+                    Column::from_f64_values(values.clone()),
+                )
+                .unwrap()
+            })
+            .collect();
+        let slices: Vec<&[f64]> = columns.iter().map(Vec::as_slice).collect();
+        for k in [3_usize, 7] {
+            for (min_periods, ddof) in [(None, 1), (None, 0), (Some(10), 1), (Some(n + 1), 1)] {
+                let matrix = super::cov_matrix_all_valid(&slices[..k], min_periods, ddof);
+                for a in 0..k {
+                    for b in 0..k {
+                        let want = series[a]
+                            .cov_with_options(&series[b], min_periods, ddof)
+                            .unwrap();
+                        let got = matrix[a * k + b];
+                        assert!(
+                            got.to_bits() == want.to_bits() || (got.is_nan() && want.is_nan()),
+                            "{k} {min_periods:?} {ddof} {a} {b}: {got} vs {want}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn concat_ignoring_index_is_the_reset_concat_uxjm4() {
+        // br-frankenpandas-uxjm4: an outer row concat under ignore_index is
+        // the labelled concat with its index reset - the same columns, values
+        // and order over a RangeIndex. NEGATIVE: without ignore_index the
+        // frames' labels stay.
+        let frame = |start: i64, rows: usize| {
+            DataFrame::new_with_column_order(
+                Index::from_i64_values((0..rows as i64).map(|i| start + i * 3).collect()),
+                BTreeMap::from([
+                    (
+                        "a".to_owned(),
+                        Column::from_i64_values((0..rows as i64).collect()),
+                    ),
+                    (
+                        "b".to_owned(),
+                        Column::from_f64_values(
+                            (0..rows)
+                                .map(|i| if i % 4 == 0 { f64::NAN } else { i as f64 * 0.5 })
+                                .collect(),
+                        ),
+                    ),
+                ]),
+                vec!["b".to_owned(), "a".to_owned()],
+            )
+            .unwrap()
+        };
+        let (left, right) = (frame(7, 5), frame(100, 4));
+        let frames = [&left, &right];
+        let ignored = super::concat_dataframes_with_axis_join_ignoring_index(
+            &frames,
+            0,
+            super::ConcatJoin::Outer,
+            true,
+        )
+        .unwrap();
+        let labelled =
+            super::concat_dataframes_with_axis_join(&frames, 0, super::ConcatJoin::Outer).unwrap();
+        let reset = labelled.reset_index(true).unwrap();
+        assert_eq!(ignored.column_names(), reset.column_names());
+        assert_eq!(ignored.index().labels(), reset.index().labels());
+        for name in ["a", "b"] {
+            let cells = |frame: &DataFrame| -> Vec<Option<u64>> {
+                frame
+                    .column(name)
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .map(|v| (!v.is_missing()).then(|| v.to_f64().map_or(0, f64::to_bits)))
+                    .collect()
+            };
+            assert_eq!(cells(&ignored), cells(&reset), "{name}");
+        }
+        assert_eq!(labelled.index().labels()[5], IndexLabel::Int64(100));
+    }
+
+    #[test]
+    fn transform_median_by_dense_ids_is_nanmedian_9edn4() {
+        // br-frankenpandas-9edn4: transform('median') of a float column by
+        // an int key is each row's group nanmedian (the middle value, the
+        // mean of the two middle for an even count, infinities counted, NaN
+        // skipped), a group of only NaN NaN. NEGATIVE: a row whose key is
+        // missing belongs to no group (missing), as the generic path.
+        let nan = f64::NAN;
+        let values = vec![
+            3.0,
+            nan,
+            1.0,
+            7.5,
+            f64::INFINITY,
+            nan,
+            -2.0,
+            4.0,
+            4.0,
+            nan,
+            0.5,
+            -0.0,
+        ];
+        let keys = vec![0_i64, 1, 0, 2, 2, 3, 0, 2, 1, 3, 0, 1];
+        let series = Series::new(
+            "v",
+            Index::default_range(values.len()),
+            Column::from_f64_values(values.clone()),
+        )
+        .unwrap();
+        let key_series = Series::new(
+            "k",
+            Index::default_range(keys.len()),
+            Column::from_i64_values(keys.clone()),
+        )
+        .unwrap();
+        let got = series
+            .groupby(&key_series)
+            .unwrap()
+            .transform("median")
+            .unwrap();
+        for (row, cell) in got.values().iter().enumerate() {
+            let group: Vec<Scalar> = keys
+                .iter()
+                .zip(&values)
+                .filter(|(key, _)| **key == keys[row])
+                .map(|(_, &value)| Scalar::Float64(value))
+                .collect();
+            let want = fp_types::nanmedian(&group);
+            match (cell, &want) {
+                (Scalar::Float64(a), Scalar::Float64(b)) => {
+                    assert_eq!(a.to_bits(), b.to_bits(), "row {row}");
+                }
+                (a, b) => assert!(a.is_missing() && b.is_missing(), "row {row}: {a:?} {b:?}"),
+            }
+        }
+        // Key 3's group holds only NaN.
+        assert!(got.values()[5].is_missing());
+        let gapped_keys = Series::new(
+            "k",
+            Index::default_range(3),
+            Column::new(
+                DType::Int64,
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(1),
+                ],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let short = Series::new(
+            "v",
+            Index::default_range(3),
+            Column::from_f64_values(vec![1.0, 2.0, 5.0]),
+        )
+        .unwrap();
+        let gapped = short
+            .groupby(&gapped_keys)
+            .unwrap()
+            .transform("median")
+            .unwrap();
+        assert!(gapped.values()[1].is_missing());
+        assert_eq!(gapped.values()[0], Scalar::Float64(3.0));
+    }
+
+    #[test]
     fn float32_groupby_folds_in_float32_kajoj() {
         // A float32 Series' groupby mean / var (ddof 1 and 0) fold each group
         // in float32 and cumsum / cumprod run in float32, as pandas' float32
@@ -191712,6 +193482,90 @@ mod tests {
         assert_eq!(as_f32(grouped.cumprod()), want_cumprod);
         let wide_grouped = wide.groupby(&key_series).unwrap();
         assert!(as_f32(wide_grouped.mean()) != want_mean || as_f32(wide_grouped.var()) != want_var);
+    }
+
+    #[test]
+    fn weekly_resample_is_the_grouping_7d1k4() {
+        // br-frankenpandas-7d1k4: resample('W') / ('2W') bins its rows in one
+        // pass - each row's week-ending Sunday, the dataless weeks kept, each
+        // bin labelled by its last Sunday - as the grouping does (reached by
+        // an explicit closed='right', W's default): labels and bits of sum,
+        // mean, count over NaN rows, across a year end, with a gap of weeks,
+        // stamps out of order. NEGATIVE: text labels (the label path) give the
+        // grouping's answer too.
+        let day = Timedelta::NANOS_PER_DAY;
+        let start = 1_703_000_000_i64 * 1_000_000_000;
+        let mut stamps: Vec<i64> = (0..400_i64)
+            .map(|i| start + i * day * 3 / 7 + if i > 200 { 40 * day } else { 0 })
+            .collect();
+        stamps.swap(10, 300);
+        let values: Vec<f64> = (0..400)
+            .map(|i| {
+                if i % 9 == 0 {
+                    f64::NAN
+                } else {
+                    (i as f64 * 0.7).sin() * 100.0
+                }
+            })
+            .collect();
+        let series = Series::new(
+            "x",
+            Index::from_datetime64(stamps),
+            Column::from_f64_values(values),
+        )
+        .unwrap();
+        let shown = |s: &Series| -> (Vec<IndexLabel>, Vec<Option<u64>>) {
+            (
+                s.index().labels().to_vec(),
+                s.values()
+                    .iter()
+                    .map(|v| (!v.is_missing()).then(|| v.to_f64().map_or(0, f64::to_bits)))
+                    .collect(),
+            )
+        };
+        for freq in ["W", "2W"] {
+            let fast = series.resample(freq);
+            let grouped = || series.resample(freq).closed("right");
+            assert_eq!(
+                shown(&fast.sum().unwrap()),
+                shown(&grouped().sum().unwrap()),
+                "{freq} sum"
+            );
+            assert_eq!(
+                shown(&fast.mean().unwrap()),
+                shown(&grouped().mean().unwrap()),
+                "{freq} mean"
+            );
+            assert_eq!(
+                shown(&fast.count().unwrap()),
+                shown(&grouped().count().unwrap()),
+                "{freq} count"
+            );
+        }
+        // 31 weeks, the 40-day gap's dataless ones included (pandas'
+        // resample('W') of these stamps has 31 too).
+        assert_eq!(series.resample("W").sum().unwrap().len(), 31);
+        let texts = Series::new(
+            "t",
+            Index::new(
+                [
+                    "2024-01-01",
+                    "2024-01-03",
+                    "2024-01-09",
+                    "2024-01-30",
+                    "2024-02-04",
+                ]
+                .iter()
+                .map(|&day| IndexLabel::Utf8(day.into()))
+                .collect(),
+            ),
+            Column::from_f64_values(vec![1.0, 2.5, f64::NAN, 4.0, 8.0]),
+        )
+        .unwrap();
+        assert_eq!(
+            shown(&texts.resample("W").sum().unwrap()),
+            shown(&texts.resample("W").closed("right").sum().unwrap())
+        );
     }
 
     #[test]
@@ -196796,6 +198650,239 @@ mod tests {
     }
 
     #[test]
+    fn series_numbers_per_column_are_the_broadcast_a01pc() {
+        use fp_columnar::ArithmeticOp;
+        let f = Column::from_f64_values(vec![1.5, f64::NAN, -2.0, 0.0, 8.0]);
+        let i = Column::from_i64_values(vec![7, -3, 0, 12, 5]);
+        let b = Column::from_bool_values(vec![true, false, true, true, false]);
+        let frame = |columns: Vec<(&str, Column)>| {
+            let order: Vec<String> = columns.iter().map(|(name, _)| (*name).to_owned()).collect();
+            let map: BTreeMap<String, Column> = columns
+                .into_iter()
+                .map(|(name, column)| (name.to_owned(), column))
+                .collect();
+            DataFrame::new_with_column_order(Index::default_range(5), map, order).unwrap()
+        };
+        let numbers = frame(vec![("f", f.clone()), ("i", i.clone())]);
+        // The bool column sends the whole frame to the broadcast.
+        let mixed = frame(vec![("f", f), ("i", i), ("b", b)]);
+        let operand = |values: Vec<Scalar>, names: &[&str]| {
+            Series::from_values("s", names.iter().map(|&n| n.into()).collect(), values).unwrap()
+        };
+        let ops = [
+            ArithmeticOp::Add,
+            ArithmeticOp::Sub,
+            ArithmeticOp::Mul,
+            ArithmeticOp::Div,
+            ArithmeticOp::Pow,
+        ];
+        for op in ops {
+            for reflected in [false, true] {
+                for values in [
+                    vec![Scalar::Float64(2.5), Scalar::Int64(3)],
+                    vec![Scalar::Float64(0.0), Scalar::Int64(0)],
+                ] {
+                    let short = operand(values.clone(), &["f", "i"]);
+                    let mut long = values.clone();
+                    long.push(Scalar::Int64(1));
+                    let long = operand(long, &["f", "i", "b"]);
+                    let fast = numbers.arith_series(&short, op, 1, reflected).unwrap();
+                    let slow = mixed.arith_series(&long, op, 1, reflected).unwrap();
+                    for name in ["f", "i"] {
+                        let (a, b) = (fast.column(name).unwrap(), slow.column(name).unwrap());
+                        assert_eq!(a.dtype(), b.dtype(), "{op:?} {reflected} {name}");
+                        for (x, y) in a.values().iter().zip(b.values()) {
+                            assert_eq!(x.is_missing(), y.is_missing(), "{op:?} {reflected} {name}");
+                            if !x.is_missing() {
+                                assert_eq!(x, y, "{op:?} {reflected} {name}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // NEGATIVE: labels other than the columns decline (the broadcast
+        // unites them).
+        let other = operand(vec![Scalar::Int64(1), Scalar::Int64(2)], &["i", "f"]);
+        assert!(
+            numbers
+                .columns_by_series_numbers(&other, ArithmeticOp::Add, false)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn concat_number_gaps_are_nan_floats_am5l7() {
+        let frame = |columns: Vec<(&str, Column)>| {
+            let len = columns.first().map_or(0, |(_, column)| column.len());
+            let order: Vec<String> = columns.iter().map(|(name, _)| (*name).to_owned()).collect();
+            let map: BTreeMap<String, Column> = columns
+                .into_iter()
+                .map(|(name, column)| (name.to_owned(), column))
+                .collect();
+            DataFrame::new_with_column_order(Index::default_range(len), map, order).unwrap()
+        };
+        let a = frame(vec![
+            ("k", Column::from_i64_values(vec![1, 2])),
+            ("v", Column::from_f64_values(vec![0.5, f64::NAN])),
+        ]);
+        let b = frame(vec![
+            ("k", Column::from_i64_values(vec![3])),
+            ("i", Column::from_i64_values(vec![7])),
+        ]);
+        let out = super::concat_dataframes_with_ignore_index(&[&a, &b], true).unwrap();
+        assert_eq!(out.column_names(), vec!["k", "v", "i"]);
+        let v = out.column("v").unwrap();
+        assert_eq!(v.dtype(), DType::Float64);
+        let missing: Vec<bool> = v.values().iter().map(Scalar::is_missing).collect();
+        assert_eq!(missing, vec![false, true, true]);
+        assert_eq!(v.values()[0], Scalar::Float64(0.5));
+        // An all-valid int column widens where a gap is invented.
+        let i = out.column("i").unwrap();
+        assert_eq!(i.dtype(), DType::Float64);
+        assert!(i.values()[0].is_missing() && i.values()[1].is_missing());
+        assert_eq!(i.values()[2], Scalar::Float64(7.0));
+        assert_eq!(out.column("k").unwrap().dtype(), DType::Int64);
+        // A frame of no rows holding another column still gaps the int one
+        // (pandas 2.2.3: float64); NEGATIVE: a frame of no rows and no
+        // columns is no piece (int64 kept on the Scalar path); text declines.
+        let zero_rows = frame(vec![("z", Column::from_f64_values(Vec::new()))]);
+        let widened = super::concat_dataframes_with_ignore_index(&[&b, &zero_rows], true).unwrap();
+        assert_eq!(widened.column("i").unwrap().dtype(), DType::Float64);
+        let nothing = DataFrame::from_dict(&[], vec![]).unwrap();
+        assert!(super::concat_number_gaps(&[&b, &nothing], "i", 1).is_none());
+        let kept = super::concat_dataframes_with_ignore_index(&[&b, &nothing], true).unwrap();
+        assert_eq!(kept.column("i").unwrap().dtype(), DType::Int64);
+        let text = frame(vec![(
+            "i",
+            Column::new(DType::Utf8, vec![Scalar::Utf8("x".into())]).unwrap(),
+        )]);
+        assert!(super::concat_number_gaps(&[&text, &a], "i", 3).is_none());
+    }
+
+    #[test]
+    fn two_level_number_unstack_is_the_generic_grid_vkb08() {
+        let text = |t: &str| IndexLabel::Utf8(t.to_owned());
+        let series = |rows: &[&str], cols: &[i64], column: Column| {
+            let multi = fp_index::MultiIndex::from_arrays(vec![
+                rows.iter().map(|r| text(r)).collect(),
+                cols.iter().map(|&c| IndexLabel::Int64(c)).collect(),
+            ])
+            .unwrap()
+            .set_names(vec![Some("r".into()), Some("c".into())]);
+            let index = multi.to_flat_index("|").with_row_multiindex(multi).unwrap();
+            Series::new("v", index, column).unwrap()
+        };
+        // Labels first seen unsorted, (a, 1) absent, a source NaN at (c, 1).
+        let rows = ["b", "b", "a", "c", "c"];
+        let cols = [2, 1, 2, 2, 1];
+        let floats = series(
+            &rows,
+            &cols,
+            Column::from_f64_values(vec![1.5, 2.5, 3.5, 4.5, f64::NAN]),
+        );
+        let fast = floats.unstack_levels(&[1], None).unwrap();
+        // A fill value takes the generic grid (NaN fills as missing).
+        let generic = floats
+            .unstack_levels(&[1], Some(&Scalar::Null(NullKind::NaN)))
+            .unwrap();
+        assert_eq!(fast.index().labels(), &[text("a"), text("b"), text("c")]);
+        assert_eq!(fast.index().labels(), generic.index().labels());
+        assert_eq!(fast.index().name(), generic.index().name());
+        assert_eq!(
+            fast.column_labels(),
+            vec![IndexLabel::Int64(1), IndexLabel::Int64(2)]
+        );
+        assert_eq!(fast.column_labels(), generic.column_labels());
+        assert_eq!(fast.columns_name(), generic.columns_name());
+        for label in ["1", "2"] {
+            let (a, b) = (fast.column(label).unwrap(), generic.column(label).unwrap());
+            assert_eq!(a.dtype(), b.dtype());
+            for (x, y) in a.values().iter().zip(b.values()) {
+                assert_eq!(x.is_missing(), y.is_missing(), "{label}");
+                if !x.is_missing() {
+                    assert_eq!(x, y, "{label}");
+                }
+            }
+        }
+        // pandas: column 1 is [NaN, 2.5, NaN], column 2 [3.5, 1.5, 4.5].
+        let one = fast.column("1").unwrap().values();
+        assert!(one[0].is_missing() && one[2].is_missing());
+        assert_eq!(one[1], Scalar::Float64(2.5));
+        assert_eq!(
+            fast.column("2").unwrap().values(),
+            &[
+                Scalar::Float64(3.5),
+                Scalar::Float64(1.5),
+                Scalar::Float64(4.5)
+            ]
+        );
+        // Ints: every combination present stays int64; a gap widens both.
+        let full = series(
+            &["b", "b", "a", "a"],
+            &[2, 1, 2, 1],
+            Column::from_i64_values(vec![1, 2, 3, 4]),
+        );
+        let full = full.unstack_levels(&[1], None).unwrap();
+        assert_eq!(full.column("1").unwrap().dtype(), DType::Int64);
+        assert_eq!(
+            full.column("1").unwrap().values(),
+            &[Scalar::Int64(4), Scalar::Int64(2)]
+        );
+        let gap = series(&rows, &cols, Column::from_i64_values(vec![1, 2, 3, 4, 5]));
+        let gap = gap.unstack_levels(&[1], None).unwrap();
+        assert_eq!(gap.column("2").unwrap().dtype(), DType::Float64);
+        assert_eq!(gap.column("2").unwrap().values()[1], Scalar::Float64(1.0));
+        assert!(gap.column("1").unwrap().values()[0].is_missing());
+        // A taken index shares its levels' uniques: a label no row holds any
+        // more is no row (the generic grid counted only labels present).
+        let taken = floats.take(&[0, 1, 3]).unwrap();
+        let fast = taken.unstack_levels(&[1], None).unwrap();
+        let generic = taken
+            .unstack_levels(&[1], Some(&Scalar::Null(NullKind::NaN)))
+            .unwrap();
+        assert_eq!(fast.index().labels(), &[text("b"), text("c")]);
+        assert_eq!(fast.index().labels(), generic.index().labels());
+        assert_eq!(fast.column_labels(), generic.column_labels());
+        // NEGATIVE: a repeated combination still raises; a level holding a
+        // missing label and a text Series decline the typed path.
+        let twice = series(
+            &["a", "a"],
+            &[1, 1],
+            Column::from_f64_values(vec![1.0, 2.0]),
+        );
+        let err = twice.unstack_levels(&[1], None).unwrap_err();
+        assert!(err.to_string().contains("duplicate entries"), "{err}");
+        let missing_label = {
+            let multi = fp_index::MultiIndex::from_arrays(vec![
+                vec![text("a"), IndexLabel::Null(NullKind::NaN)],
+                vec![IndexLabel::Int64(1), IndexLabel::Int64(1)],
+            ])
+            .unwrap();
+            let index = multi.to_flat_index("|").with_row_multiindex(multi).unwrap();
+            Series::new("v", index, Column::from_f64_values(vec![1.0, 2.0])).unwrap()
+        };
+        let levels = missing_label.index().row_multiindex().unwrap();
+        assert!(
+            missing_label
+                .unstack_two_level_numbers(levels)
+                .unwrap()
+                .is_none()
+        );
+        let texts = series(
+            &["a", "b"],
+            &[1, 1],
+            Column::new(
+                DType::Utf8,
+                vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())],
+            )
+            .unwrap(),
+        );
+        let levels = texts.index().row_multiindex().unwrap();
+        assert!(texts.unstack_two_level_numbers(levels).unwrap().is_none());
+    }
+
+    #[test]
     fn unstack_levels_moves_any_levels_xbl2k() {
         // (a, b, c) -> w, as a three-level groupby result.
         let tuples = [
@@ -196941,7 +199028,12 @@ mod tests {
                         .iter()
                         .filter(|v| v.is_missing())
                         .all(|v| match widened {
-                            DType::Float64 => matches!(v, Scalar::Null(NullKind::NaN)),
+                            // Null(NaN), or the NaN datum of a NaN-as-missing
+                            // column (the typed concat; br-frankenpandas-am5l7).
+                            DType::Float64 => {
+                                matches!(v, Scalar::Null(NullKind::NaN))
+                                    || matches!(v, Scalar::Float64(x) if x.is_nan())
+                            }
                             _ => true,
                         }),
                     "{dtype:?} {path}: {:?}",
@@ -210896,6 +212988,54 @@ mod tests {
         assert_eq!(
             labels.isin(&[Scalar::Utf8("x".into())]).unwrap().values(),
             &[Scalar::Bool(true), Scalar::Bool(false)]
+        );
+    }
+
+    #[test]
+    fn categorical_isin_by_codes_is_the_value_isin_0lg81() {
+        // br-frankenpandas-0lg81: a categorical held as codes tests each
+        // category once and answers each row by its code - the value path's
+        // flags, a missing row matched only by a missing needle. NEGATIVE:
+        // a needle equal to a code (0) matches no value.
+        let categories: Vec<Scalar> = [10_i64, 20, 30].map(Scalar::Int64).to_vec();
+        let codes = vec![0, 2, -1, 1, 0, -1, 2];
+        let column = Column::from_categorical_codes(
+            codes.clone(),
+            fp_types::CategoricalMetadata::new(categories, false),
+        );
+        assert!(column.categorical_codes().is_some());
+        let series = Series::new("c", Index::from_range(0, 7, 1), column).unwrap();
+        let by_values = series.cat().unwrap().to_values().unwrap();
+        for needles in [
+            vec![Scalar::Int64(10), Scalar::Int64(30)],
+            vec![Scalar::Float64(20.0)],
+            vec![Scalar::Int64(20), Scalar::Null(NullKind::NaN)],
+            vec![Scalar::Int64(0)],
+            vec![],
+        ] {
+            let got = series.isin(&needles).unwrap();
+            assert_eq!(
+                got.values(),
+                by_values.isin(&needles).unwrap().values(),
+                "{needles:?}"
+            );
+        }
+        let missing = series.isin(&[Scalar::Null(NullKind::NaN)]).unwrap();
+        let flags: Vec<bool> = missing
+            .values()
+            .iter()
+            .map(|flag| matches!(flag, Scalar::Bool(true)))
+            .collect();
+        assert_eq!(
+            flags,
+            codes.iter().map(|&code| code < 0).collect::<Vec<_>>()
+        );
+        let by_code = series.isin(&[Scalar::Int64(0)]).unwrap();
+        assert!(
+            by_code
+                .values()
+                .iter()
+                .all(|flag| *flag == Scalar::Bool(false))
         );
     }
 
@@ -233629,6 +235769,7 @@ mod tests {
         let view = source.transpose().unwrap();
         assert!(view.is_lazy_transpose_storage());
         // A missing cell is missing (NaN or null), a present one its bits.
+        // (An int view answers too: transposed_int_rows_and_sums_bss5q2.)
         let shown = |s: &Series| -> (Vec<IndexLabel>, Vec<Option<u64>>) {
             (
                 s.index().labels().to_vec(),
@@ -233660,7 +235801,127 @@ mod tests {
         .transpose()
         .unwrap();
         assert!(ints.is_lazy_transpose_storage());
-        assert!(ints.lazy_transpose_sum_or_mean(false, 0).is_none());
+        let int_sums = ints.lazy_transpose_sum_or_mean(false, 0).unwrap().unwrap();
+        assert_eq!(int_sums.column().dtype(), DType::Int64);
+    }
+
+    #[cfg(feature = "lazy-transpose-view")]
+    #[test]
+    fn transposed_int_rows_and_sums_bss5q2() {
+        // br-frankenpandas-rc0923-epic-zero-certified-losses-bss5q.2: a
+        // lazily transposed frame's row is its source column (the
+        // materialized view's row: name, labels, dtype, values), and an int
+        // view's column sums / means are the materialized view's (labels,
+        // values; int64 sums, float64 means), its row sums each source
+        // column's int64 sum, int64 sums wrapping as numpy's. NEGATIVE: an
+        // int source holding a missing row, or a min_count above what a
+        // column holds, declines (the general path answers).
+        let n = 40_usize;
+        let order: Vec<String> = (0..3).map(|j| format!("c{j}")).collect();
+        let cell = |i: usize, j: usize| -> i64 { (i as i64 * 37 + j as i64 * 11) % 101 - 50 };
+        let ints: BTreeMap<String, Column> = order
+            .iter()
+            .enumerate()
+            .map(|(j, name)| {
+                let data = (0..n).map(|i| cell(i, j)).collect();
+                (name.clone(), Column::from_i64_values(data))
+            })
+            .collect();
+        let source = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, n),
+            ints,
+            order.clone(),
+        )
+        .unwrap();
+        let view = source.transpose().unwrap();
+        assert!(view.is_lazy_transpose_storage());
+        let eager = source.transpose_materialized().unwrap();
+        assert!(!eager.is_lazy_transpose_storage());
+        let row_shown = |s: &Series| {
+            (
+                s.name().to_owned(),
+                s.index().labels().to_vec(),
+                s.column().dtype(),
+                s.values().to_vec(),
+            )
+        };
+        for position in [0, 1, 2, -1, -3] {
+            let row = view.iloc_row(position).unwrap();
+            assert_eq!(
+                row_shown(&row),
+                row_shown(&eager.iloc_row(position).unwrap())
+            );
+        }
+        assert_eq!(view.iloc_row(1).unwrap().name(), "c1");
+        assert!(view.iloc_row(3).is_err());
+        let reduced = |s: &Series| -> (Vec<IndexLabel>, Vec<Option<u64>>) {
+            (
+                s.index().labels().to_vec(),
+                s.values()
+                    .iter()
+                    .map(|v| (!v.is_missing()).then(|| v.to_f64().map_or(0, f64::to_bits)))
+                    .collect(),
+            )
+        };
+        let sums = view.lazy_transpose_sum_or_mean(false, 0).unwrap().unwrap();
+        assert_eq!(sums.column().dtype(), DType::Int64);
+        assert_eq!(reduced(&sums), reduced(&eager.sum().unwrap()));
+        let means = view.lazy_transpose_sum_or_mean(true, 0).unwrap().unwrap();
+        assert_eq!(means.column().dtype(), DType::Float64);
+        assert_eq!(reduced(&means), reduced(&eager.mean().unwrap()));
+        let row_sums = view
+            .lazy_transpose_row_sum_or_mean(false, 0)
+            .unwrap()
+            .unwrap();
+        let column_sums: Vec<Scalar> = (0..3)
+            .map(|j| Scalar::Int64((0..n).map(|i| cell(i, j)).sum()))
+            .collect();
+        assert_eq!(row_sums.values(), column_sums.as_slice());
+        let row_means = view
+            .lazy_transpose_row_sum_or_mean(true, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reduced(&row_means), reduced(&eager.mean_axis1().unwrap()));
+        // A min_count above the 3 rows / 40 columns declines.
+        assert!(view.lazy_transpose_sum_or_mean(false, 4).is_none());
+        assert!(view.lazy_transpose_row_sum_or_mean(false, 41).is_none());
+        // A column summing past i64::MAX wraps, as numpy's int64 sum.
+        let big = DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, 1),
+            (0..3_i64)
+                .map(|j| (format!("b{j}"), Column::from_i64_values(vec![i64::MAX - j])))
+                .collect::<BTreeMap<String, Column>>(),
+            (0..3).map(|j| format!("b{j}")).collect::<Vec<String>>(),
+        )
+        .unwrap()
+        .transpose()
+        .unwrap();
+        assert!(big.is_lazy_transpose_storage());
+        let wrapped = big.lazy_transpose_sum_or_mean(false, 0).unwrap().unwrap();
+        assert_eq!(
+            wrapped.values(),
+            &[Scalar::Int64(
+                i64::MAX
+                    .wrapping_add(i64::MAX - 1)
+                    .wrapping_add(i64::MAX - 2)
+            )]
+        );
+
+        // An int source holding a missing row, or of another length: no int
+        // fold.
+        let whole = Column::from_i64_values(vec![1, 2, 3]);
+        let gapped = Column::new(
+            DType::Int64,
+            vec![
+                Scalar::Int64(1),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(3),
+            ],
+        )
+        .unwrap();
+        assert!(DataFrame::lazy_transpose_int_rows(std::slice::from_ref(&whole), 3).is_some());
+        assert!(DataFrame::lazy_transpose_int_rows(&[whole.clone(), gapped], 3).is_none());
+        assert!(DataFrame::lazy_transpose_int_rows(&[whole], 4).is_none());
     }
 
     #[test]
@@ -254724,11 +256985,70 @@ mod single_column_sort_typed_slice_uza04 {
         // keys, or moves NaNs to the front, must not be accepted.
         let column =
             Column::from_f64_values(vec![2.0, f64::NAN, -0.0, 2.0, f64::NAN, f64::NEG_INFINITY]);
-        let ascending = typed_nullable_f64_sort_order(&column, true).expect("typed f64 route");
-        let descending = typed_nullable_f64_sort_order(&column, false).expect("typed f64 route");
+        let ascending =
+            typed_nullable_f64_sort_order(&column, true, false).expect("typed f64 route");
+        let descending =
+            typed_nullable_f64_sort_order(&column, false, false).expect("typed f64 route");
         assert_eq!(ascending, vec![5, 2, 0, 3, 1, 4]);
         assert_eq!(descending, vec![0, 3, 2, 5, 1, 4]);
         assert_ne!(descending, vec![3, 0, 2, 5, 4, 1]);
+    }
+
+    #[test]
+    fn nullable_f64_na_first_orders_and_checks_typed_efgu5() {
+        // The missing block first in input order, the present values' stable
+        // order after it, either direction.
+        let column =
+            Column::from_f64_values(vec![2.0, f64::NAN, -0.0, 2.0, f64::NAN, f64::NEG_INFINITY]);
+        let ascending =
+            super::typed_nullable_f64_sort_order(&column, true, true).expect("typed f64 route");
+        let descending =
+            super::typed_nullable_f64_sort_order(&column, false, true).expect("typed f64 route");
+        assert_eq!(ascending, vec![1, 4, 5, 2, 0, 3]);
+        assert_eq!(descending, vec![1, 4, 0, 3, 2, 5]);
+        let sorted = |values: Vec<f64>, ascending: bool, na_first: bool| {
+            super::typed_nullable_f64_already_sorted(
+                &Column::from_f64_values(values),
+                ascending,
+                na_first,
+            )
+        };
+        assert_eq!(
+            sorted(vec![f64::NAN, f64::NAN, 1.0, 2.0], true, true),
+            Some(true)
+        );
+        assert_eq!(
+            sorted(vec![f64::NAN, 3.0, 1.0, 1.0], false, true),
+            Some(true)
+        );
+        assert_eq!(sorted(vec![1.0, 2.0, f64::NAN], true, false), Some(true));
+        // NEGATIVE: a missing row on the wrong side, or values out of order.
+        assert_eq!(
+            sorted(vec![f64::NAN, f64::NAN, 1.0, 2.0], true, false),
+            Some(false)
+        );
+        assert_eq!(sorted(vec![1.0, 2.0, f64::NAN], true, true), Some(false));
+        assert_eq!(sorted(vec![1.0, f64::NAN, 2.0], true, false), Some(false));
+        assert_eq!(sorted(vec![f64::NAN, 2.0, 1.0], true, true), Some(false));
+        // The frame sort: payload rows in pandas' na_position='first' order.
+        let frame = DataFrame::new_with_column_order(
+            Index::new((0_i64..6).map(Into::into).collect()),
+            std::collections::BTreeMap::from([
+                ("k".to_owned(), column),
+                (
+                    "payload".to_owned(),
+                    Column::from_i64_values(vec![0, 1, 2, 3, 4, 5]),
+                ),
+            ]),
+            vec!["k".to_owned(), "payload".to_owned()],
+        )
+        .expect("frame");
+        for (ascending, want) in [(true, [1, 4, 5, 2, 0, 3]), (false, [1, 4, 0, 3, 2, 5])] {
+            let out = frame.sort_values_na("k", ascending, "first").expect("sort");
+            let got: Vec<Scalar> = out.column("payload").expect("payload").values().to_vec();
+            let want: Vec<Scalar> = want.iter().map(|&row| Scalar::Int64(row)).collect();
+            assert_eq!(got, want, "ascending={ascending}");
+        }
     }
 
     #[test]
