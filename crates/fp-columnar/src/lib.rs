@@ -14244,14 +14244,24 @@ impl Column {
         categorical: Option<CategoricalMetadata>,
     ) -> Self {
         let len = codes.len();
-        let mut words = vec![0_u64; len.div_ceil(64)];
-        for (row, code) in codes.iter_mut().enumerate() {
-            if usize::try_from(*code).is_ok_and(|code| code < categories.len()) {
-                words[row / 64] |= 1_u64 << (row % 64);
-            } else {
-                *code = -1;
-            }
+        // A code below the categories' count (a negative one wraps past it
+        // as u32) is present, any other made -1, a pass of its own that
+        // vectorizes; then a word of validity a 64 codes off their signs. A
+        // bit and a branch a row were 28% of a two-categorical concat
+        // (br-frankenpandas-iqh7m), and one loop doing both still ran a row
+        // at a time (28% of a categorical where; br-frankenpandas-cqub0).
+        let count = u32::try_from(categories.len()).unwrap_or(u32::MAX);
+        for code in &mut codes {
+            *code |= -i32::from((*code as u32) >= count);
         }
+        let words: Vec<u64> = codes
+            .chunks(64)
+            .map(|chunk| {
+                chunk.iter().enumerate().fold(0_u64, |word, (bit, &code)| {
+                    word | (u64::from(code >= 0) << bit)
+                })
+            })
+            .collect();
         Self {
             dtype,
             values: ScalarValues::lazy_category_codes(Arc::new(codes), categories),
@@ -19267,6 +19277,43 @@ impl Column {
         Self::category_codes_column(DType::Categorical, codes, categories, Some(meta))
     }
 
+    /// Categoricals held as codes over `meta`'s categories stacked end to
+    /// end: their codes copied and their validity words joined - each
+    /// piece's codes already -1 where missing, so nothing is derived again a
+    /// row (the codes were validated again: 41% of a two-categorical
+    /// concat, 0.45x pandas; br-frankenpandas-iqh7m). None unless every
+    /// piece holds codes over `meta`.
+    #[must_use]
+    pub fn stack_categorical_codes(pieces: &[&Self], meta: &CategoricalMetadata) -> Option<Self> {
+        let mut held = Vec::with_capacity(pieces.len());
+        for piece in pieces {
+            if piece.categorical.as_ref() != Some(meta) {
+                return None;
+            }
+            held.push(piece.categorical_codes()?);
+        }
+        let len = held.iter().map(|codes| codes.len()).sum();
+        let mut codes = Vec::with_capacity(len);
+        let mut words = vec![0_u64; len.div_ceil(64)];
+        for (piece, piece_codes) in pieces.iter().zip(&held) {
+            piece.validity.or_into_words(&mut words, codes.len());
+            codes.extend_from_slice(piece_codes);
+        }
+        let categories = match pieces.first().map(|piece| &piece.values) {
+            Some(ScalarValues::LazyCategoryCodes { categories, .. }) => Arc::clone(categories),
+            _ => Arc::from(meta.categories.as_slice()),
+        };
+        Some(Self {
+            dtype: DType::Categorical,
+            values: ScalarValues::lazy_category_codes(Arc::new(codes), categories),
+            validity: ValidityMask::from_words(words, len),
+            data: None,
+            categorical: Some(meta.clone()),
+            width: None,
+            pandas_string: false,
+        })
+    }
+
     /// This column's codes over `meta`'s categories - at least as many as
     /// its own, so each code still names its place - its codes and validity
     /// shared, not copied (a categorical's categories renamed or added to:
@@ -20017,6 +20064,21 @@ impl Column {
         // nanos - it built a Scalar a row to ask (br-frankenpandas-vk7y9).
         if let Some((data, validity)) = self.as_temporal_nanos_with_validity() {
             return !validity.all() || data.contains(&i64::MIN);
+        }
+
+        // Codes held: a code naming no category (-1) is the missing value -
+        // the Scalar view a row was built to ask (cat.where(m).fillna(c) of
+        // 200k rows 2.1 ms, pandas 0.39; br-frankenpandas-cqub0).
+        if let ScalarValues::LazyCategoryCodes {
+            codes, categories, ..
+        } = &self.values
+        {
+            let count = u32::try_from(categories.len()).unwrap_or(u32::MAX);
+            return codes.chunks(256).any(|block| {
+                block
+                    .iter()
+                    .fold(false, |seen, &code| seen | (code as u32 >= count))
+            });
         }
 
         self.values.iter().any(Scalar::is_missing)
@@ -42009,6 +42071,78 @@ mod tests {
             uniques.values(),
             &[Scalar::Interval(first), Scalar::Interval(second)]
         );
+    }
+
+    /// The validity of a codes column across word boundaries: a code below
+    /// the categories' count present, -1 and a code past them missing
+    /// (stored as -1) (br-frankenpandas-iqh7m). NEGATIVE: the missing rows
+    /// read back missing, their codes -1.
+    #[test]
+    fn category_codes_validity_spans_words_iqh7m() {
+        let categories = vec![
+            Scalar::Utf8("a".into()),
+            Scalar::Utf8("b".into()),
+            Scalar::Utf8("c".into()),
+        ];
+        let codes: Vec<i32> = (0..150_i32).map(|row| (row % 5) - 1).collect();
+        let column = Column::from_category_codes(DType::Utf8, codes.clone(), categories);
+        for (row, &code) in codes.iter().enumerate() {
+            let present = (0..3).contains(&code);
+            assert_eq!(column.validity().get(row), present, "row {row}");
+        }
+        assert_eq!(column.validity().count_valid(), 90);
+    }
+
+    /// A codes-held categorical answers has_any_missing off its codes, the
+    /// Scalar view left unbuilt - a -1 in the last block too
+    /// (br-frankenpandas-cqub0). NEGATIVE: every code naming a category is
+    /// no missing value.
+    #[test]
+    fn codes_held_categorical_missing_off_its_codes_cqub0() {
+        let categories = vec![Scalar::Utf8("a".into()), Scalar::Utf8("b".into())];
+        let meta = fp_types::CategoricalMetadata::new(categories, false);
+        let mut codes: Vec<i32> = (0..1000_i32).map(|row| row % 2).collect();
+        let present = Column::from_categorical_codes(codes.clone(), meta.clone());
+        assert!(!present.has_any_missing());
+        codes[999] = -1;
+        let gapped = Column::from_categorical_codes(codes, meta);
+        assert!(gapped.has_any_missing());
+        assert!(!present.scalar_cache_is_materialized());
+        assert!(!gapped.scalar_cache_is_materialized());
+    }
+
+    /// Stacked codes-held categoricals are the column of their joined codes:
+    /// pieces of 70, 30 and 3 rows, missing rows across the word joins
+    /// (br-frankenpandas-iqh7m). NEGATIVE: a piece over other categories or
+    /// holding values is no stack.
+    #[test]
+    fn stacked_categorical_codes_match_the_joined_codes_iqh7m() {
+        let categories = vec![
+            Scalar::Utf8("a".into()),
+            Scalar::Utf8("b".into()),
+            Scalar::Utf8("c".into()),
+        ];
+        let meta = fp_types::CategoricalMetadata::new(categories.clone(), false);
+        let first: Vec<i32> = (0..70_i32).map(|row| (row % 4) - 1).collect();
+        let second: Vec<i32> = (0..30_i32).map(|row| row % 3).collect();
+        let third = vec![-1, 2, -1];
+        let pieces: Vec<Column> = [&first, &second, &third]
+            .iter()
+            .map(|codes| Column::from_categorical_codes((*codes).clone(), meta.clone()))
+            .collect();
+        let refs: Vec<&Column> = pieces.iter().collect();
+        let stacked = Column::stack_categorical_codes(&refs, &meta).expect("one set of categories");
+        let joined: Vec<i32> = first.iter().chain(&second).chain(&third).copied().collect();
+        let expected = Column::from_categorical_codes(joined, meta.clone());
+        assert_eq!(stacked.categorical_codes(), expected.categorical_codes());
+        assert_eq!(stacked.validity(), expected.validity());
+        assert_eq!(stacked.dtype(), expected.dtype());
+        assert_eq!(stacked.validity().count_valid(), 52 + 30 + 1);
+        let other = fp_types::CategoricalMetadata::new(categories[..2].to_vec(), false);
+        let foreign = Column::from_categorical_codes(vec![0, 1], other);
+        assert!(Column::stack_categorical_codes(&[&pieces[0], &foreign], &meta).is_none());
+        let values = Column::from_values(vec![Scalar::Utf8("a".into())]).expect("text");
+        assert!(Column::stack_categorical_codes(&[&pieces[0], &values], &meta).is_none());
     }
 
     #[test]

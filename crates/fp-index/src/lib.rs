@@ -1289,17 +1289,24 @@ impl Int64AffineLabels {
     }
 
     fn materialize_i64(self) -> Vec<i64> {
-        let mut labels = Vec::with_capacity(self.len);
-        let mut value = self.start;
-        for offset in 0..self.len {
-            labels.push(value);
-            if offset + 1 < self.len {
-                value = value
-                    .checked_add(self.step)
-                    .expect("validated Int64 affine range end");
-            }
-        }
-        labels
+        // The range was validated whole (its last value fits), so each
+        // value is `start + k * step` without a check a value: a checked
+        // push a value ran a range's materialization at a fraction of the
+        // copy it is (br-frankenpandas-vtbtm).
+        let last = i64::try_from(self.len.saturating_sub(1))
+            .ok()
+            .and_then(|last| self.step.checked_mul(last))
+            .and_then(|span| self.start.checked_add(span));
+        assert!(
+            self.len == 0 || last.is_some(),
+            "validated Int64 affine range end"
+        );
+        (0..self.len)
+            .map(|offset| {
+                self.start
+                    .wrapping_add(self.step.wrapping_mul(offset as i64))
+            })
+            .collect()
     }
 
     fn value_at(self, position: usize) -> i64 {
@@ -1576,8 +1583,11 @@ struct IndexLabels {
     /// raw `i64` view; `None` once computed means the labels are not all
     /// Int64. Pre-seeded by typed constructors so gathers/clones/drops of
     /// Int64-labelled indexes stay on contiguous `i64` storage instead of the
-    /// 32 B enum representation.
-    int64_typed: OnceLock<Option<Arc<Vec<i64>>>>,
+    /// 32 B enum representation. The cell is shared by clones, as
+    /// `materialized`: a range index's view made by a clone (a concat's of
+    /// its pieces) serves them all, where each call's clone made 200k values
+    /// again (a two-categorical concat 25%; br-frankenpandas-iqh7m).
+    int64_typed: Arc<OnceLock<Option<Arc<Vec<i64>>>>>,
     /// Lazy contiguous-Utf8 backing (br-frankenpandas-nbspq): `Some((bytes,
     /// offsets))` means every label is `IndexLabel::Utf8(bytes[off[i]..off[i+1]])`
     /// (valid UTF-8 by construction). Pre-seeded by `new_utf8_contiguous` so a
@@ -1605,7 +1615,7 @@ impl IndexLabels {
             int64_strided: None,
             datetime64_affine: None,
             typed_strided: None,
-            int64_typed: OnceLock::new(),
+            int64_typed: Arc::default(),
             utf8_contiguous: None,
         }
     }
@@ -1620,7 +1630,7 @@ impl IndexLabels {
             int64_strided: None,
             datetime64_affine: None,
             typed_strided: None,
-            int64_typed: OnceLock::new(),
+            int64_typed: Arc::default(),
             utf8_contiguous: None,
         })
     }
@@ -1638,7 +1648,7 @@ impl IndexLabels {
             int64_strided: None,
             datetime64_affine: None,
             typed_strided: None,
-            int64_typed: OnceLock::new(),
+            int64_typed: Arc::default(),
             utf8_contiguous: None,
         })
     }
@@ -1653,7 +1663,7 @@ impl IndexLabels {
             int64_strided: None,
             datetime64_affine: None,
             typed_strided: None,
-            int64_typed: OnceLock::new(),
+            int64_typed: Arc::default(),
             utf8_contiguous: None,
         })
     }
@@ -1668,13 +1678,13 @@ impl IndexLabels {
             int64_strided: Some(view),
             datetime64_affine: None,
             typed_strided: None,
-            int64_typed: OnceLock::new(),
+            int64_typed: Arc::default(),
             utf8_contiguous: None,
         }
     }
 
     fn new_int64_values(values: Arc<Vec<i64>>) -> Self {
-        let int64_typed = OnceLock::new();
+        let int64_typed: Arc<OnceLock<Option<Arc<Vec<i64>>>>> = Arc::default();
         let _ = int64_typed.set(Some(values));
         Self {
             materialized: Arc::default(),
@@ -1700,7 +1710,7 @@ impl IndexLabels {
             int64_strided: None,
             datetime64_affine: Some(Int64AffineLabels::new(start, step, len)?),
             typed_strided: None,
-            int64_typed: OnceLock::new(),
+            int64_typed: Arc::default(),
             utf8_contiguous: None,
         })
     }
@@ -1715,7 +1725,7 @@ impl IndexLabels {
             int64_strided: None,
             datetime64_affine: None,
             typed_strided: Some(TypedStridedLabels { kind, view }),
-            int64_typed: OnceLock::new(),
+            int64_typed: Arc::default(),
             utf8_contiguous: None,
         }
     }
@@ -1770,7 +1780,7 @@ impl IndexLabels {
             int64_strided: None,
             datetime64_affine: None,
             typed_strided: None,
-            int64_typed: OnceLock::new(),
+            int64_typed: Arc::default(),
             utf8_contiguous: Some(Utf8Contiguous::Bytes((bytes, offsets))),
         }
     }
@@ -1785,7 +1795,7 @@ impl IndexLabels {
             int64_strided: None,
             datetime64_affine: None,
             typed_strided: None,
-            int64_typed: OnceLock::new(),
+            int64_typed: Arc::default(),
             utf8_contiguous: Some(Utf8Contiguous::Flat(Arc::new(flat))),
         }
     }
@@ -2037,7 +2047,7 @@ impl IndexLabels {
                 int64_strided: None,
                 datetime64_affine: None,
                 typed_strided: None,
-                int64_typed: OnceLock::new(),
+                int64_typed: Arc::default(),
                 utf8_contiguous: None,
             };
         }
@@ -2054,7 +2064,7 @@ impl IndexLabels {
                 int64_strided: None,
                 datetime64_affine: None,
                 typed_strided: None,
-                int64_typed: OnceLock::new(),
+                int64_typed: Arc::default(),
                 utf8_contiguous: None,
             };
         }
@@ -2171,18 +2181,15 @@ impl IndexLabels {
         self.int64_typed
             .get_or_init(|| {
                 if let Some(range) = self.int64_unit_range {
-                    let mut values = Vec::with_capacity(range.len);
-                    for offset in 0..range.len {
-                        let offset =
-                            i64::try_from(offset).expect("validated Int64 unit range length");
-                        values.push(
-                            range
-                                .start
-                                .checked_add(offset)
-                                .expect("validated Int64 unit range end"),
-                        );
-                    }
-                    return Some(Arc::new(values));
+                    // One exact-size run, `start..end`: a checked push a
+                    // value cost concat([s, s]) of two 200k-row Series 37%
+                    // (each call's index clone made it again;
+                    // br-frankenpandas-vtbtm).
+                    let end = i64::try_from(range.len)
+                        .ok()
+                        .and_then(|len| range.start.checked_add(len))
+                        .expect("validated Int64 unit range end");
+                    return Some(Arc::new((range.start..end).collect()));
                 }
                 if let Some(range) = self.int64_affine {
                     return Some(Arc::new(range.materialize_i64()));
@@ -2409,10 +2416,6 @@ impl IndexLabels {
 
 impl Clone for IndexLabels {
     fn clone(&self) -> Self {
-        let int64_typed = OnceLock::new();
-        if let Some(view) = self.int64_typed.get() {
-            let _ = int64_typed.set(view.clone());
-        }
         Self {
             // One cell for every clone: labels made by any serve all.
             materialized: Arc::clone(&self.materialized),
@@ -2423,7 +2426,7 @@ impl Clone for IndexLabels {
             int64_strided: self.int64_strided.clone(),
             datetime64_affine: self.datetime64_affine,
             typed_strided: self.typed_strided.clone(),
-            int64_typed,
+            int64_typed: Arc::clone(&self.int64_typed),
             utf8_contiguous: self.utf8_contiguous.clone(),
         }
     }
@@ -22615,6 +22618,249 @@ pub struct MultiIndex {
     /// (last) instead of first. Only [`Self::with_missing_as_level`] sets it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     missing_is_a_level: bool,
+    /// The full-tuple lookup engine ([`TupleLookup`]), built on the first
+    /// full-tuple `get_loc` and kept for this index and its clones.
+    #[serde(skip)]
+    tuple_lookup: Arc<OnceLock<Option<TupleLookup>>>,
+}
+
+/// A MultiIndex's full-tuple lookup, as pandas' MultiIndex engine: every
+/// row's tuple -> its positions, built once. A get_loc / `in` of a full
+/// tuple compared every row's labels (`(7, x) in mi` of 200k rows 0.39 ms,
+/// pandas 0.010; br-frankenpandas-fzbxv).
+struct TupleLookup {
+    rows: TupleRows,
+    /// No two rows hold one tuple.
+    unique: bool,
+}
+
+impl std::fmt::Debug for TupleLookup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TupleLookup")
+            .field("unique", &self.unique)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Each tuple's rows, ascending.
+enum TupleRows {
+    /// Few distinct labels a level, their codes' mixed-radix combinations
+    /// spanning a few slots a row: each level's label -> code, combination
+    /// `c`'s rows `rows[offsets[c]..offsets[c + 1]]` (a counting sort's
+    /// layout).
+    Dense {
+        level_codes: Vec<FxHashMap<IndexLabel, u64>>,
+        weights: Vec<u64>,
+        offsets: Vec<u32>,
+        rows: Vec<u32>,
+    },
+    /// Any other levels: each row's tuple hashed off its levels' distinct
+    /// labels' hashes, a hash's first row and `next` each row's next one
+    /// holding it (`u32::MAX` past the last). Two tuples may share a hash:
+    /// a lookup keeps the rows whose labels equal the key's. A label ->
+    /// code map a level cloned every distinct label, and a list a hash was
+    /// an allocation a repeated tuple (a 200k-row index's first lookup
+    /// 5.5 ms, pandas 2.2).
+    Hashed {
+        levels: Vec<LevelCodes>,
+        first: FxHashMap<u64, u32>,
+        next: Vec<u32>,
+    },
+}
+
+/// A label's hash, equal for equal labels (an integral float as its int).
+fn tuple_label_hash(label: &IndexLabel) -> u64 {
+    let mut hasher = rustc_hash::FxHasher::default();
+    std::hash::Hash::hash(label, &mut hasher);
+    std::hash::Hasher::finish(&hasher)
+}
+
+/// `hash` folded with a level label's `part`.
+fn tuple_hash_step(hash: u64, part: u64) -> u64 {
+    let mixed = (hash.rotate_left(26) ^ part).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    mixed ^ (mixed >> 29)
+}
+
+impl TupleLookup {
+    /// The engine over `levels`, or None past u32 level codes or rows.
+    fn build(levels: &[Level]) -> Option<Self> {
+        let coded: Vec<&LevelCodes> = levels.iter().map(Level::codes).collect::<Option<_>>()?;
+        let len = levels.first().map_or(0, Level::len);
+        u32::try_from(len).ok().filter(|&len| len < u32::MAX)?;
+        let cap = len.saturating_mul(4).saturating_add(1024);
+        let distinct: usize = coded.iter().map(|codes| codes.uniques.len()).sum();
+        if distinct <= len / 8 + 1024
+            && let Some(dense) = Self::dense(&coded, len, cap)
+        {
+            return Some(dense);
+        }
+        Some(Self::hashed(&coded, len))
+    }
+
+    /// The dense layout, or None where the combinations span past `cap`
+    /// slots or a level's uniques hold one label twice (codes a caller gave:
+    /// `1` and `1.0`, whose rows one label code would miss).
+    fn dense(coded: &[&LevelCodes], len: usize, cap: usize) -> Option<Self> {
+        let mut weights = vec![1_u64; coded.len()];
+        let mut span = 1_usize;
+        for (level, codes) in coded.iter().enumerate().rev() {
+            weights[level] = u64::try_from(span).ok()?;
+            span = span
+                .checked_mul(codes.uniques.len().max(1))
+                .filter(|&span| span <= cap)?;
+        }
+        let mut level_codes = Vec::with_capacity(coded.len());
+        for codes in coded {
+            let mut map =
+                FxHashMap::with_capacity_and_hasher(codes.uniques.len(), Default::default());
+            for (code, label) in codes.uniques.iter().enumerate() {
+                if map.insert(label.clone(), code as u64).is_some() {
+                    return None;
+                }
+            }
+            level_codes.push(map);
+        }
+        let mut weighted = coded.iter().zip(&weights);
+        let mut combined: Vec<u64> = weighted.next().map_or_else(Vec::new, |(codes, &weight)| {
+            codes
+                .codes
+                .as_slice()
+                .iter()
+                .map(|&code| u64::from(code) * weight)
+                .collect()
+        });
+        for (codes, &weight) in weighted {
+            for (slot, &code) in combined.iter_mut().zip(codes.codes.as_slice()) {
+                *slot += u64::from(code) * weight;
+            }
+        }
+        let mut unique = true;
+        let mut offsets = vec![0_u32; span + 1];
+        for &code in &combined {
+            let count = &mut offsets[code as usize + 1];
+            unique &= *count == 0;
+            *count += 1;
+        }
+        for slot in 1..offsets.len() {
+            offsets[slot] += offsets[slot - 1];
+        }
+        let mut cursor = offsets.clone();
+        let mut rows = vec![0_u32; len];
+        for (row, &code) in combined.iter().enumerate() {
+            let at = &mut cursor[code as usize];
+            rows[*at as usize] = row as u32;
+            *at += 1;
+        }
+        Some(Self {
+            rows: TupleRows::Dense {
+                level_codes,
+                weights,
+                offsets,
+                rows,
+            },
+            unique,
+        })
+    }
+
+    /// The hashed layout over any coded levels.
+    fn hashed(coded: &[&LevelCodes], len: usize) -> Self {
+        let mut hashes = vec![0_u64; len];
+        for codes in coded {
+            let parts: Vec<u64> = codes.uniques.iter().map(tuple_label_hash).collect();
+            for (hash, &code) in hashes.iter_mut().zip(codes.codes.as_slice()) {
+                *hash = tuple_hash_step(*hash, parts[code as usize]);
+            }
+        }
+        let same_tuple = |a: usize, b: usize| {
+            coded.iter().all(|codes| {
+                let (left, right) = (codes.codes[a], codes.codes[b]);
+                left == right || codes.uniques[left as usize] == codes.uniques[right as usize]
+            })
+        };
+        let mut unique = true;
+        let mut first: FxHashMap<u64, u32> =
+            FxHashMap::with_capacity_and_hasher(len, Default::default());
+        let mut next = vec![u32::MAX; len];
+        for (row, &hash) in hashes.iter().enumerate().rev() {
+            match first.entry(hash) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(row as u32);
+                }
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    let mut later = *slot.get();
+                    while unique && later != u32::MAX {
+                        unique = !same_tuple(row, later as usize);
+                        later = next[later as usize];
+                    }
+                    next[row] = *slot.get();
+                    *slot.get_mut() = row as u32;
+                }
+            }
+        }
+        let levels = coded
+            .iter()
+            .map(|codes| LevelCodes {
+                uniques: Arc::clone(&codes.uniques),
+                codes: codes.codes.clone(),
+            })
+            .collect();
+        Self {
+            rows: TupleRows::Hashed {
+                levels,
+                first,
+                next,
+            },
+            unique,
+        }
+    }
+
+    /// The rows holding `key` (one label a level), ascending.
+    fn positions(&self, key: &[IndexLabel]) -> Vec<usize> {
+        match &self.rows {
+            TupleRows::Dense {
+                level_codes,
+                weights,
+                offsets,
+                rows,
+            } => {
+                let mut combined = 0_u64;
+                for ((label, codes), &weight) in key.iter().zip(level_codes).zip(weights) {
+                    let Some(&code) = codes.get(label) else {
+                        return Vec::new();
+                    };
+                    combined += code * weight;
+                }
+                let code = combined as usize;
+                rows[offsets[code] as usize..offsets[code + 1] as usize]
+                    .iter()
+                    .map(|&row| row as usize)
+                    .collect()
+            }
+            TupleRows::Hashed {
+                levels,
+                first,
+                next,
+            } => {
+                let hash = key.iter().fold(0, |hash, label| {
+                    tuple_hash_step(hash, tuple_label_hash(label))
+                });
+                let mut rows = Vec::new();
+                let mut row = first.get(&hash).copied().unwrap_or(u32::MAX);
+                while row != u32::MAX {
+                    let at = row as usize;
+                    if levels
+                        .iter()
+                        .zip(key)
+                        .all(|(codes, label)| &codes.uniques[codes.codes[at] as usize] == label)
+                    {
+                        rows.push(at);
+                    }
+                    row = next[at];
+                }
+                rows
+            }
+        }
+    }
 }
 
 /// Typed position plan for an outer alignment of two unique MultiIndexes.
@@ -23085,6 +23331,7 @@ impl MultiIndex {
             flat: Arc::default(),
             lexsort_depth: Arc::default(),
             missing_is_a_level: false,
+            tuple_lookup: Arc::default(),
         }
     }
 
@@ -24428,6 +24675,44 @@ impl MultiIndex {
         Some(Self::from_shared_levels_and_names(levels, vec![None; 2]))
     }
 
+    /// `concat(keys=)`'s rows over pieces that all stand on `index`, a
+    /// unique flat index: the keys (`key_labels`, each piece's code into
+    /// them `piece_keys`) the outer level, a piece's code over its rows; the
+    /// index's labels the inner level, shared, each piece's rows coded by
+    /// position - every label was cloned into the level and hashed
+    /// (br-frankenpandas-vtbtm). Unnamed; None for an index with a repeated
+    /// label or past u32 codes.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn keyed_on_one_index(
+        key_labels: Vec<IndexLabel>,
+        piece_keys: &[u32],
+        index: &Index,
+    ) -> Option<Self> {
+        if !index.is_unique() {
+            return None;
+        }
+        let len = index.len();
+        let positions: Vec<u32> = (0..u32::try_from(len).ok()?).collect();
+        let uniques = index
+            .labels
+            .shared_vec()
+            .unwrap_or_else(|| Arc::new(index.labels().to_vec()));
+        let key_codes: Vec<u32> = piece_keys
+            .iter()
+            .flat_map(|&key| std::iter::repeat_n(key, len))
+            .collect();
+        let levels = vec![
+            Level::from_codes(Arc::new(key_labels), CodesWindow::from(key_codes)),
+            Level::from_codes(
+                uniques,
+                CodesWindow::from(positions.repeat(piece_keys.len())),
+            )
+            .zoned(index.tz().map(Arc::from)),
+        ];
+        Some(Self::from_shared_levels_and_names(levels, vec![None; 2]))
+    }
+
     /// [`Self::stacked_cells`] of this MultiIndex's rows: each level's codes
     /// repeated a column at a time, its uniques shared, no label read - a
     /// stack of a MultiIndex frame made each level's labels from its codes
@@ -24634,12 +24919,57 @@ impl MultiIndex {
         std::cmp::Ordering::Equal
     }
 
+    /// The rows (ascending) of a full tuple holding no missing label, off
+    /// the lookup engine built on first use and kept for this index and its
+    /// clones, as pandas' MultiIndex engine; None for any other key or
+    /// levels the engine cannot code, which a scan answers.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn full_tuple_positions(&self, key: &[IndexLabel]) -> Option<Vec<usize>> {
+        if key.len() != self.nlevels() || key.iter().any(IndexLabel::is_missing) {
+            return None;
+        }
+        self.tuple_lookup
+            .get_or_init(|| TupleLookup::build(&self.levels))
+            .as_ref()
+            .map(|engine| engine.positions(key))
+    }
+
+    /// Whether each row's tuple is one of `wanted`, as pandas'
+    /// `MultiIndex.isin(values)`: a full tuple holding no missing label off
+    /// the lookup engine, any other compared row by row (every row's tuple
+    /// was compared with every wanted one).
+    #[must_use]
+    pub fn isin_tuples(&self, wanted: &[Vec<IndexLabel>]) -> Vec<bool> {
+        let mut mask = vec![false; self.len()];
+        let mut rest = Vec::new();
+        for want in wanted {
+            match self.full_tuple_positions(want) {
+                Some(positions) => {
+                    for position in positions {
+                        mask[position] = true;
+                    }
+                }
+                None if want.len() == self.nlevels() => rest.push(want),
+                None => {}
+            }
+        }
+        if !rest.is_empty() {
+            for (row, hit) in mask.iter_mut().enumerate() {
+                *hit = *hit || rest.iter().any(|want| self.row_matches_prefix(row, want));
+            }
+        }
+        mask
+    }
+
     /// Return matching row positions for an exact tuple key.
     pub fn get_loc_tuple(&self, key: &[IndexLabel]) -> Result<Vec<usize>, IndexError> {
         self.validate_key_arity(key, false)?;
-        let positions: Vec<usize> = (0..self.len())
-            .filter(|&row| self.row_matches_prefix(row, key))
-            .collect();
+        let positions: Vec<usize> = self.full_tuple_positions(key).unwrap_or_else(|| {
+            (0..self.len())
+                .filter(|&row| self.row_matches_prefix(row, key))
+                .collect()
+        });
         if positions.is_empty() {
             return Err(IndexError::InvalidArgument(format!(
                 "tuple key not found: {:?}",
@@ -24687,9 +25017,11 @@ impl MultiIndex {
         }
 
         self.validate_key_arity(key, true)?;
-        let positions: Vec<usize> = (0..self.len())
-            .filter(|&row| self.row_matches_prefix(row, key))
-            .collect();
+        let positions: Vec<usize> = self.full_tuple_positions(key).unwrap_or_else(|| {
+            (0..self.len())
+                .filter(|&row| self.row_matches_prefix(row, key))
+                .collect()
+        });
         if positions.is_empty() {
             return Err(IndexError::InvalidArgument(format!(
                 "tuple key not found: {:?}",
@@ -25310,6 +25642,11 @@ impl MultiIndex {
         let len = self.len();
         if len <= 1 {
             return true;
+        }
+        // A built lookup engine holds each tuple's rows: a get_loc of a
+        // full tuple asked this a lookup (fzbxv).
+        if let Some(Some(engine)) = self.tuple_lookup.get() {
+            return engine.unique;
         }
         if let Some(layout) = self.compact_two_level_identity_layout() {
             let mut seen = vec![0_u8; layout.slot_count];
@@ -26010,6 +26347,7 @@ impl MultiIndex {
             flat: Arc::default(),
             lexsort_depth: Arc::default(),
             missing_is_a_level: false,
+            tuple_lookup: Arc::default(),
         })
     }
 
@@ -26056,21 +26394,24 @@ impl MultiIndex {
                 });
             }
         }
-        let identity_codes = capped_identity_codes(codes.clone(), len);
+        // The identity codes wait for their first reader, built off the
+        // levels' codes: every code was copied and scanned for each level's
+        // cardinality up front (12.6% of concat(keys=) of 2 x 200k;
+        // br-frankenpandas-vtbtm).
         let levels: Vec<Level> = uniques
             .into_iter()
             .zip(codes)
             .map(|(uniques, codes)| Level::from_codes(Arc::new(uniques), CodesWindow::from(codes)))
             .collect();
-        debug_assert_eq!(identity_codes, build_multi_index_identity_codes(&levels));
         let names = vec![None; levels.len()];
         Ok(Self {
             levels,
             names,
-            identity_codes: Arc::new(std::sync::OnceLock::from(identity_codes)),
+            identity_codes: Arc::default(),
             flat: Arc::default(),
             lexsort_depth: Arc::default(),
             missing_is_a_level: false,
+            tuple_lookup: Arc::default(),
         })
     }
 
@@ -26124,6 +26465,41 @@ impl MultiIndex {
         }
 
         let nlevels = iterables.len();
+        // Each iterable's distinct labels (first seen first) and every row's
+        // codes by arithmetic: a label a row a level was cloned, then hashed
+        // into the levels again (from_product of 400 x 500 3.8 ms, pandas
+        // 0.33; br-frankenpandas-2k5lw). A missing label keeps the walk.
+        if u32::try_from(total).is_ok() && !iterables.iter().flatten().any(IndexLabel::is_missing) {
+            let mut uniques = Vec::with_capacity(nlevels);
+            let mut codes = Vec::with_capacity(nlevels);
+            let mut stride = total;
+            for iterable in &iterables {
+                let mut seen: FxHashMap<&IndexLabel, u32> = FxHashMap::default();
+                let mut distinct: Vec<IndexLabel> = Vec::new();
+                let own: Vec<u32> = iterable
+                    .iter()
+                    .map(|label| {
+                        *seen.entry(label).or_insert_with(|| {
+                            distinct.push(label.clone());
+                            u32::try_from(distinct.len() - 1).unwrap_or(u32::MAX)
+                        })
+                    })
+                    .collect();
+                // The rows one label of this level spans: each code
+                // `stride` times in one block, the block tiled over the
+                // rows (two divisions a row a level were most of it).
+                stride /= own.len();
+                // Each code's run extended whole (a flat_map pushed a code
+                // at a time).
+                let mut block: Vec<u32> = Vec::with_capacity(own.len() * stride);
+                for &code in &own {
+                    block.extend(std::iter::repeat_n(code, stride));
+                }
+                codes.push(block.repeat(total / block.len()));
+                uniques.push(distinct);
+            }
+            return Self::from_coded_levels(uniques, codes);
+        }
         let mut levels: Vec<Vec<IndexLabel>> =
             (0..nlevels).map(|_| Vec::with_capacity(total)).collect();
 
@@ -41440,6 +41816,189 @@ mod tests {
         Ok(())
     }
 
+    /// concat(keys=)'s rows over pieces on one unique index hold the rows
+    /// the hashed levels made, the index's labels shared
+    /// (br-frankenpandas-vtbtm). NEGATIVE: an index with a repeated label
+    /// declines (None).
+    #[test]
+    fn keyed_on_one_index_matches_the_hashed_levels_vtbtm() -> Result<(), super::IndexError> {
+        let text = |value: &str| IndexLabel::Utf8(value.to_owned());
+        let index = super::Index::new(vec![
+            IndexLabel::Int64(5),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(9),
+        ]);
+        let keyed =
+            super::MultiIndex::keyed_on_one_index(vec![text("a"), text("b")], &[0, 1, 0], &index)
+                .expect("a unique index");
+        let keys: Vec<IndexLabel> = ["a", "a", "a", "b", "b", "b", "a", "a", "a"]
+            .map(text)
+            .to_vec();
+        let rows: Vec<IndexLabel> = [5, 2, 9, 5, 2, 9, 5, 2, 9].map(IndexLabel::Int64).to_vec();
+        let hashed = super::MultiIndex::from_arrays(vec![keys.clone(), rows.clone()])?;
+        assert_eq!(keyed.len(), 9);
+        assert_eq!(keyed.get_level_values(0)?.labels(), keys.as_slice());
+        assert_eq!(keyed.get_level_values(1)?.labels(), rows.as_slice());
+        assert_eq!(keyed.identity_codes(), hashed.identity_codes());
+        let repeated = super::Index::new(vec![IndexLabel::Int64(1), IndexLabel::Int64(1)]);
+        assert!(super::MultiIndex::keyed_on_one_index(vec![text("a")], &[0], &repeated).is_none());
+        Ok(())
+    }
+
+    /// A product of coded levels holds the rows the label walk made - a
+    /// repeated label in an iterable, three levels (br-frankenpandas-2k5lw).
+    /// NEGATIVE: an iterable holding a missing label keeps the walk, the
+    /// same rows.
+    #[test]
+    fn multiindex_from_product_codes_match_the_walk_2k5lw() -> Result<(), super::IndexError> {
+        let int = IndexLabel::Int64;
+        let text = |value: &str| IndexLabel::Utf8(value.to_owned());
+        let iterables = vec![
+            vec![int(3), int(1), int(3)],
+            vec![text("b"), text("a")],
+            vec![int(7), int(8), int(9), int(7)],
+        ];
+        let rows = |iterables: &[Vec<IndexLabel>]| -> Vec<Vec<IndexLabel>> {
+            let mut rows = vec![Vec::new()];
+            for iterable in iterables {
+                rows = rows
+                    .iter()
+                    .flat_map(|row| {
+                        iterable.iter().map(move |label| {
+                            let mut row = row.clone();
+                            row.push(label.clone());
+                            row
+                        })
+                    })
+                    .collect();
+            }
+            rows
+        };
+        let levels_of =
+            |multi: &super::MultiIndex| -> Result<Vec<Vec<IndexLabel>>, super::IndexError> {
+                let columns = (0..multi.nlevels())
+                    .map(|level| Ok(multi.get_level_values(level)?.labels().to_vec()))
+                    .collect::<Result<Vec<_>, super::IndexError>>()?;
+                Ok((0..multi.len())
+                    .map(|row| columns.iter().map(|column| column[row].clone()).collect())
+                    .collect())
+            };
+        let multi = super::MultiIndex::from_product(iterables.clone())?;
+        assert_eq!(multi.len(), 24);
+        assert_eq!(levels_of(&multi)?, rows(&iterables));
+        let with_missing = vec![
+            vec![int(1), IndexLabel::Null(fp_types::NullKind::NaN)],
+            vec![text("a"), text("b")],
+        ];
+        let multi = super::MultiIndex::from_product(with_missing.clone())?;
+        assert_eq!(levels_of(&multi)?, rows(&with_missing));
+        Ok(())
+    }
+
+    /// A full tuple's rows off the lookup engine are the rows a label scan
+    /// finds - unsorted rows, a repeated tuple, an integral float key, a
+    /// taken window whose levels keep labels it no longer holds, a missing
+    /// label and a prefix (br-frankenpandas-fzbxv). NEGATIVE: levels coded
+    /// with one label twice (`1` and `1.0`) answer every row holding it, not
+    /// the first code's rows only.
+    #[test]
+    fn tuple_lookup_matches_the_label_scan_fzbxv() -> Result<(), super::IndexError> {
+        let int = IndexLabel::Int64;
+        let text = |value: &str| IndexLabel::Utf8(value.to_owned());
+        let scan = |multi: &super::MultiIndex,
+                    key: &[IndexLabel]|
+         -> Result<Vec<usize>, super::IndexError> {
+            let columns = (0..key.len())
+                .map(|level| Ok(multi.get_level_values(level)?.labels().to_vec()))
+                .collect::<Result<Vec<_>, super::IndexError>>()?;
+            Ok((0..multi.len())
+                .filter(|&row| {
+                    key.iter()
+                        .zip(&columns)
+                        .all(|(label, column)| &column[row] == label)
+                })
+                .collect())
+        };
+        let multi = super::MultiIndex::from_arrays(vec![
+            vec![int(3), int(1), int(3), int(2), int(1), int(3)],
+            vec![
+                text("b"),
+                text("a"),
+                text("b"),
+                text("c"),
+                text("a"),
+                text("d"),
+            ],
+        ])?;
+        assert_eq!(multi.get_loc_tuple(&[int(3), text("b")])?, vec![0, 2]);
+        assert_eq!(
+            multi.get_loc(&[IndexLabel::Float64(OrderedF64(3.0)), text("d")], None)?,
+            vec![5]
+        );
+        for first in [int(1), int(2), int(3), int(4)] {
+            for second in ["a", "b", "c", "d", "e"] {
+                let key = [first.clone(), text(second)];
+                let expected = scan(&multi, &key)?;
+                match multi.get_loc_tuple(&key) {
+                    Ok(found) => assert_eq!(found, expected, "{key:?}"),
+                    Err(_) => assert!(expected.is_empty(), "{key:?}"),
+                }
+            }
+        }
+        assert_eq!(multi.get_loc(&[int(3)], None)?, vec![0, 2, 5]);
+        assert!(!multi.is_unique());
+        assert_eq!(
+            multi.isin_tuples(&[
+                vec![int(3), text("b")],
+                vec![int(2), text("c")],
+                vec![int(9), text("z")],
+                vec![int(1)],
+            ]),
+            vec![true, false, true, true, false, false]
+        );
+        let window = multi.take(&[3, 4, 0])?;
+        assert_eq!(window.get_loc_tuple(&[int(1), text("a")])?, vec![1]);
+        assert!(window.get_loc_tuple(&[int(3), text("d")]).is_err());
+        assert!(window.is_unique());
+        let nan = IndexLabel::Null(fp_types::NullKind::NaN);
+        let with_missing = super::MultiIndex::from_arrays(vec![
+            vec![nan.clone(), int(1), nan.clone()],
+            vec![text("a"), text("a"), text("b")],
+        ])?;
+        let key = [nan, text("b")];
+        assert_eq!(
+            with_missing.get_loc_tuple(&key)?,
+            scan(&with_missing, &key)?
+        );
+        assert_eq!(
+            with_missing.isin_tuples(&[key.to_vec()]),
+            vec![false, false, true]
+        );
+        let twice = super::MultiIndex::from_coded_levels(
+            vec![
+                vec![int(1), IndexLabel::Float64(OrderedF64(1.0))],
+                vec![text("x")],
+            ],
+            vec![vec![0, 1, 0], vec![0, 0, 0]],
+        )?;
+        assert_eq!(twice.get_loc_tuple(&[int(1), text("x")])?, vec![0, 1, 2]);
+        // Codes spanning more slots than a few a row: the hashed layout.
+        let wide: Vec<IndexLabel> = (0..40).map(int).collect();
+        let hashed = super::MultiIndex::from_coded_levels(
+            vec![wide.clone(), wide],
+            vec![vec![5, 3, 5, 39, 0, 5], vec![7, 2, 7, 39, 0, 7]],
+        )?;
+        assert_eq!(hashed.get_loc_tuple(&[int(5), int(7)])?, vec![0, 2, 5]);
+        assert_eq!(hashed.get_loc_tuple(&[int(39), int(39)])?, vec![3]);
+        assert!(hashed.get_loc_tuple(&[int(1), int(1)]).is_err());
+        assert!(!hashed.is_unique());
+        assert_eq!(
+            hashed.isin_tuples(&[vec![int(3), int(2)], vec![int(0), int(0)]]),
+            vec![false, true, false, false, true, false]
+        );
+        Ok(())
+    }
+
     /// Ordinals converted in one buffer answer as the PeriodIndex's asfreq,
     /// runs of repeats and NaT among them, for every target and boundary
     /// (br-frankenpandas-od7kt). NEGATIVE: an unknown freq or how raises the
@@ -45612,6 +46171,7 @@ mod tests {
             flat: Arc::default(),
             lexsort_depth: Arc::default(),
             missing_is_a_level: false,
+            tuple_lookup: Arc::default(),
         };
         assert!(
             without_sidecar

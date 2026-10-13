@@ -8323,6 +8323,9 @@ pub fn datetime_text_key(
     labels: &[IndexLabel],
     text: &str,
 ) -> Result<Option<DatetimeTextKey>, FrameError> {
+    if let Some(freq) = period_labels_freq(labels) {
+        return period_text_key(labels, freq, text);
+    }
     let Some(nanos) = labels
         .iter()
         .map(|label| match label {
@@ -8368,6 +8371,81 @@ pub fn datetime_text_key(
             .iter()
             .enumerate()
             .filter(|(_, ns)| (first..=last).contains(*ns))
+            .map(|(position, _)| position)
+            .collect(),
+    )))
+}
+
+/// The freq of labels that are all periods of one freq (NaT among them), as
+/// a period index's; None for any other labels.
+fn period_labels_freq(labels: &[IndexLabel]) -> Option<PeriodFreq> {
+    let mut freq = None;
+    for label in labels {
+        let IndexLabel::Period(period) = label else {
+            return None;
+        };
+        if period.ordinal == i64::MIN {
+            continue;
+        }
+        match freq {
+            None => freq = Some(period.freq),
+            Some(own) if own == period.freq => {}
+            Some(_) => return None,
+        }
+    }
+    freq
+}
+
+/// A period's frame error: the index crate's text.
+fn period_frame_error(error: &fp_index::IndexError) -> FrameError {
+    FrameError::CompatibilityRejected(error.to_string())
+}
+
+/// [`datetime_text_key`] on a period index of `freq`, as pandas' period
+/// partial-string indexing: text naming one period of the freq is that
+/// period, coarser text every period inside it (a month over days, a year
+/// over months), finer text none - a KeyError, as a sorted index lying
+/// wholly before or after the text's span. Text was compared as text, so
+/// every date key on a period index raised (br-frankenpandas-cx5xh).
+fn period_text_key(
+    labels: &[IndexLabel],
+    freq: PeriodFreq,
+    text: &str,
+) -> Result<Option<DatetimeTextKey>, FrameError> {
+    let Ok((first, last)) = partial_date_bounds(text) else {
+        return Ok(None);
+    };
+    let period_of =
+        |nanos| fp_index::datetime_nanos_to_period(nanos, freq).map_err(|e| period_frame_error(&e));
+    let (from, to) = (period_of(first)?, period_of(last)?);
+    if from == to {
+        let start =
+            |period| fp_index::period_start_nanos(period).map_err(|e| period_frame_error(&e));
+        if (first, last) != (start(from)?, start(from.shift(1))? - 1) {
+            return Err(FrameError::CompatibilityRejected(format!("'{text}'")));
+        }
+        return Ok(Some(DatetimeTextKey::Instant(IndexLabel::Period(from))));
+    }
+    let ordinals: Vec<Option<i64>> = labels
+        .iter()
+        .map(|label| match label {
+            IndexLabel::Period(period) if period.ordinal != i64::MIN => Some(period.ordinal),
+            _ => None,
+        })
+        .collect();
+    if let (Some(Some(low)), Some(Some(high))) = (ordinals.first(), ordinals.last())
+        && ordinals.windows(2).all(|pair| pair[0] <= pair[1])
+        && (to.ordinal < *low || from.ordinal > *high)
+    {
+        return Err(FrameError::CompatibilityRejected(format!("'{text}'")));
+    }
+    Ok(Some(DatetimeTextKey::Rows(
+        ordinals
+            .iter()
+            .enumerate()
+            .filter(|(_, ordinal)| {
+                ordinal.is_some_and(|ordinal| (from.ordinal..=to.ordinal).contains(&ordinal))
+            })
             .map(|(position, _)| position)
             .collect(),
     )))
@@ -8428,6 +8506,14 @@ pub fn datetime_list_label(labels: &[IndexLabel], label: &IndexLabel) -> IndexLa
         {
             parse_datetime64_nanos(text).map_or_else(|_| label.clone(), IndexLabel::Datetime64)
         }
+        // On a period index the period of its freq holding the text's
+        // start, as pandas' PeriodIndex of the list (br-frankenpandas-cx5xh).
+        IndexLabel::Utf8(text) => period_labels_freq(labels)
+            .and_then(|freq| {
+                let (first, _) = partial_date_bounds(text).ok()?;
+                fp_index::datetime_nanos_to_period(first, freq).ok()
+            })
+            .map_or_else(|| label.clone(), IndexLabel::Period),
         _ => label.clone(),
     }
 }
@@ -8603,14 +8689,26 @@ fn loc_slice_positions(
     let datetime_index = labels
         .iter()
         .all(|label| matches!(label, IndexLabel::Datetime64(_)));
+    // A str bound on a period index is the period of its freq holding the
+    // text's first (start) or last (stop) instant, as pandas reads it ('2024-02'
+    // to a daily index's last day of February; it was looked up as text;
+    // br-frankenpandas-cx5xh).
+    let period_freq = period_labels_freq(labels);
     let resolve =
         |label: Option<&IndexLabel>, end: bool| -> Result<Option<IndexLabel>, FrameError> {
-            Ok(match label {
-                Some(IndexLabel::Utf8(text)) if datetime_index => {
+            Ok(match (label, period_freq) {
+                (Some(IndexLabel::Utf8(text)), _) if datetime_index => {
                     let (first, last) = partial_date_bounds(text)?;
                     Some(IndexLabel::Datetime64(if end { last } else { first }))
                 }
-                other => other.cloned(),
+                (Some(IndexLabel::Utf8(text)), Some(freq)) => {
+                    let (first, last) = partial_date_bounds(text)?;
+                    let period =
+                        fp_index::datetime_nanos_to_period(if end { last } else { first }, freq)
+                            .map_err(|e| period_frame_error(&e))?;
+                    Some(IndexLabel::Period(period))
+                }
+                (other, _) => other.cloned(),
             })
         };
     // pandas slices a decreasing DatetimeIndex by date text through a mask
@@ -12527,6 +12625,32 @@ pub fn normalize_categories(mut categories: Vec<Scalar>) -> Result<Vec<Scalar>, 
     Ok(categories)
 }
 
+/// Each value's code among `categories` by pandas' category equality
+/// (1, 1.0 and True meet; `category_key`), -1 for a missing value or one
+/// outside them: the bindings' construction against given categories
+/// searched them with `semantic_eq`, a value at a time, where 1.0 missed
+/// the category 1 (br-frankenpandas-iqh7m).
+#[must_use]
+#[doc(hidden)]
+pub fn codes_against_categories(values: &[Scalar], categories: &[Scalar]) -> Vec<i64> {
+    let mut code_of: FxHashMap<ScalarKey<'_>, i64> = FxHashMap::default();
+    for (code, category) in categories.iter().enumerate() {
+        code_of
+            .entry(category_key(category))
+            .or_insert_with(|| i64::try_from(code).unwrap_or(-1));
+    }
+    values
+        .iter()
+        .map(|value| {
+            if value.is_missing() {
+                -1
+            } else {
+                code_of.get(&category_key(value)).copied().unwrap_or(-1)
+            }
+        })
+        .collect()
+}
+
 /// A category's key under pandas' equality: a bool, an int a float holds
 /// exactly and a float are one number (1 == 1.0 == True); anything else
 /// keys as itself.
@@ -12850,17 +12974,26 @@ pub fn fill_column(column: &Column, fill_value: &Scalar) -> Result<Column, Frame
             "Cannot setitem on a Categorical with a new category ({shown}), set the categories first"
         )));
     };
-    let codes = column
-        .values()
-        .iter()
-        .map(|value| {
-            if value.is_missing() {
-                fill_code
-            } else {
-                code_of(value).unwrap_or(-1)
-            }
-        })
-        .collect();
+    // The codes, the fill's where missing: a column held as codes reads
+    // them, one held as values matches each through one hash map - every
+    // row searched the categories (cat.where(m).fillna(c) of 200k rows
+    // 54 ms, pandas 0.9; br-frankenpandas-cqub0).
+    if let Some(codes) = column.categorical_codes()
+        && let Ok(fill_code) = i32::try_from(fill_code)
+    {
+        let filled = codes
+            .iter()
+            .map(|&code| if code < 0 { fill_code } else { code })
+            .collect();
+        return Ok(Column::from_categorical_codes(filled, meta.clone()));
+    }
+    let values = column.values();
+    let mut codes = codes_against_categories(values, &meta.categories);
+    for (code, value) in codes.iter_mut().zip(values) {
+        if value.is_missing() {
+            *code = fill_code;
+        }
+    }
     let filled = Series::from_categorical_codes("", codes, meta.categories.clone(), meta.ordered)?;
     Ok(filled.column().clone())
 }
@@ -20375,6 +20508,26 @@ impl Series {
     /// Matches `pd.Series.nunique(dropna=...)`.
     #[must_use]
     pub fn nunique_with_dropna(&self, dropna: bool) -> usize {
+        // A categorical counts its distinct codes, -1 (missing) only with
+        // dropna=False: a value a row was made and hashed (cat.nunique() of
+        // 200k rows 2.7 ms, pandas 0.51; br-frankenpandas-cqub0).
+        if let Some(meta) = &self.categorical
+            && let Some(codes) = self.category_codes()
+        {
+            let mut seen = vec![false; meta.categories.len() + 1];
+            let mut count = 0;
+            for code in codes {
+                if let Some(slot) = usize::try_from(code + 1)
+                    .ok()
+                    .and_then(|slot| seen.get_mut(slot))
+                    && !*slot
+                {
+                    *slot = true;
+                    count += usize::from(code >= 0 || !dropna);
+                }
+            }
+            return count;
+        }
         // Per br-frankenpandas-15f51: O(n) HashMap-driven dedup. Within a
         // single Column values are homogeneous (Column::new validation), so
         // ScalarKey equivalence matches grouped_scalar_eq for in-column
@@ -36954,7 +37107,11 @@ impl Series {
     /// (a `DType::Categorical` column, as a DataFrame column and fp-io do), so
     /// generic operations see the values; the codes are derived here for the
     /// operations that order or count by category (br-frankenpandas-hrxn9).
-    fn category_codes(&self) -> Option<Vec<i64>> {
+    /// Public for the bindings' concat of one categorical dtype, which
+    /// stacks them (br-frankenpandas-iqh7m).
+    #[must_use]
+    #[doc(hidden)]
+    pub fn category_codes(&self) -> Option<Vec<i64>> {
         let meta = self.categorical.as_ref()?;
         // A column held as codes into these categories reads them
         // (br-frankenpandas-5oup5); one held as values hashes each.
@@ -76093,6 +76250,18 @@ fn concat_series_columns_storage(
     series_list: &[&Series],
     total_len: usize,
 ) -> Result<Column, FrameError> {
+    // Categoricals held as codes over one set of categories stack their
+    // codes, a categorical still: their values were stacked and matched back
+    // to the categories (two 200k categoricals' concat 0.24x pandas;
+    // br-frankenpandas-iqh7m).
+    if let Some(first) = series_list.first()
+        && let Some(meta) = first.column().categorical()
+    {
+        let pieces: Vec<&Column> = series_list.iter().map(|series| series.column()).collect();
+        if let Some(stacked) = Column::stack_categorical_codes(&pieces, meta) {
+            return Ok(stacked);
+        }
+    }
     // A nullable (masked) piece makes pandas' masked result: ints Int64, any
     // float beside them Float64, bools boolean; bools beside numbers stay
     // object (Int64 pieces came back an int64 column holding nulls).
@@ -77407,6 +77576,20 @@ pub fn concat_dataframes_with_ignore_index(
                 col_name.clone(),
                 Column::from_f64_all_valid_chunks(chunks, total_len),
             );
+            continue;
+        }
+        // Categoricals held as codes over one set of categories stack their
+        // codes (their values were stacked and factorized again: two
+        // 200k-row frames 14 ms, pandas 0.25; br-frankenpandas-iqh7m).
+        if let Some(first) = frames.first().and_then(|frame| frame.column(col_name))
+            && let Some(meta) = first.categorical()
+            && let Some(pieces) = frames
+                .iter()
+                .map(|frame| frame.column(col_name))
+                .collect::<Option<Vec<&Column>>>()
+            && let Some(stacked) = Column::stack_categorical_codes(&pieces, meta)
+        {
+            columns.insert(col_name.clone(), stacked);
             continue;
         }
         // Typed NUMERIC fallback (sister to concat_series_columns): every frame
@@ -138111,6 +138294,117 @@ mod tests {
         assert_eq!(datetime_text_key(&daily, "abc").unwrap(), None);
         let text_index = vec![IndexLabel::Utf8("2024-02".into())];
         assert_eq!(datetime_text_key(&text_index, "2024-02").unwrap(), None);
+    }
+
+    /// Categoricals held as codes over one set of categories concatenate
+    /// into those codes stacked, a categorical still (br-frankenpandas-iqh7m).
+    /// NEGATIVE: pieces of other categories take the general path (no
+    /// codes stacked under the first's categories).
+    #[test]
+    fn concat_of_one_categorical_dtype_stacks_codes_iqh7m() {
+        let categories = vec![Scalar::Utf8("x".into()), Scalar::Utf8("y".into())];
+        let piece = |codes: Vec<i64>| {
+            Series::from_categorical_codes("c", codes, categories.clone(), false).expect("codes")
+        };
+        let (left, right) = (piece(vec![1, 0, -1]), piece(vec![0, 0]));
+        let stacked = crate::concat_series(&[&left, &right]).expect("concat");
+        assert_eq!(
+            stacked.column().categorical_codes(),
+            Some([1, 0, -1, 0, 0].as_slice())
+        );
+        assert!(stacked.cat().is_some());
+        assert_eq!(stacked.values()[2], Scalar::Null(NullKind::NaN));
+        let other =
+            Series::from_categorical_codes("c", vec![0], vec![Scalar::Utf8("z".into())], false)
+                .expect("codes");
+        let mixed = crate::concat_series(&[&left, &other]).expect("concat");
+        assert_ne!(
+            mixed.column().categorical(),
+            left.column().categorical(),
+            "other categories are not stacked under the first's"
+        );
+    }
+
+    /// Values meet given categories by pandas' equality - 1, 1.0 and True
+    /// one category - first match kept (br-frankenpandas-iqh7m). NEGATIVE:
+    /// a missing value and one outside the categories are -1; text meets
+    /// text only.
+    #[test]
+    fn codes_against_categories_use_pandas_equality_iqh7m() {
+        let categories = [
+            Scalar::Utf8("a".into()),
+            Scalar::Int64(1),
+            Scalar::Float64(2.5),
+        ];
+        let values = [
+            Scalar::Float64(1.0),
+            Scalar::Int64(1),
+            Scalar::Bool(true),
+            Scalar::Utf8("a".into()),
+            Scalar::Float64(2.5),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Utf8("1".into()),
+            Scalar::Int64(3),
+        ];
+        assert_eq!(
+            crate::codes_against_categories(&values, &categories),
+            vec![1, 1, 1, 0, 2, -1, -1, -1]
+        );
+        assert!(
+            crate::codes_against_categories(&values, &[])
+                .iter()
+                .all(|&code| code == -1)
+        );
+    }
+
+    /// pandas 2.2.3 partial-string indexing on a period index: text of the
+    /// index's resolution is that period, coarser text every period inside
+    /// it, finer text a KeyError; slice bounds the period holding the text's
+    /// first / last instant; a list's text its start's period
+    /// (br-frankenpandas-cx5xh). NEGATIVE: text that is no date, a span past
+    /// a sorted index's end, periods of two freqs (text stays text).
+    #[test]
+    fn period_text_keys_follow_the_period_freq_cx5xh() {
+        use crate::{DatetimeTextKey, datetime_list_label, datetime_text_key};
+        let text = |value: &str| IndexLabel::Utf8(value.to_owned());
+        let day = |ordinal| IndexLabel::Period(Period::new(ordinal, PeriodFreq::Daily));
+        let month = |ordinal| IndexLabel::Period(Period::new(ordinal, PeriodFreq::Monthly));
+        // 2024-02-20 .. 2024-03-02; 2023-11 .. 2024-04.
+        let days: Vec<IndexLabel> = (19_773..19_785).map(day).collect();
+        let months: Vec<IndexLabel> = (646..652).map(month).collect();
+        assert_eq!(
+            datetime_text_key(&days, "2024-02-22").unwrap(),
+            Some(DatetimeTextKey::Instant(day(19_775)))
+        );
+        assert_eq!(
+            datetime_text_key(&days, "2024-03").unwrap(),
+            Some(DatetimeTextKey::Rows(vec![10, 11]))
+        );
+        assert_eq!(
+            datetime_text_key(&months, "2024").unwrap(),
+            Some(DatetimeTextKey::Rows(vec![2, 3, 4, 5]))
+        );
+        assert!(datetime_text_key(&days, "2024-02-22 13:00").is_err());
+        assert!(datetime_text_key(&months, "2024-01-15").is_err());
+        assert!(datetime_text_key(&days, "2025-01").is_err());
+        assert_eq!(datetime_text_key(&days, "zzz").unwrap(), None);
+        assert_eq!(
+            super::loc_slice_positions(&days, Some(&text("2024-02-22")), Some(&text("2024-02-24")))
+                .unwrap(),
+            Some((2, 4))
+        );
+        assert_eq!(
+            super::loc_slice_positions(&months, Some(&text("2023-12")), Some(&text("2024-02-10")))
+                .unwrap(),
+            Some((1, 3))
+        );
+        assert_eq!(datetime_list_label(&days, &text("2024-02-24")), day(19_777));
+        let mixed = vec![day(19_773), month(649)];
+        assert_eq!(datetime_text_key(&mixed, "2024-02").unwrap(), None);
+        assert_eq!(
+            datetime_list_label(&mixed, &text("2024-02")),
+            text("2024-02")
+        );
     }
 
     #[test]

@@ -12581,6 +12581,165 @@ fn multiindex_row_keys(py: Python<'_>, levels: &MultiIndex) -> PyResult<Vec<Py<P
         .collect()
 }
 
+/// `MultiIndex.from_arrays` of a list or tuple of one-dimensional numpy
+/// arrays of numbers or bools of one length, none missing: each array's
+/// typed column factorized into its level's first-seen labels and codes -
+/// each element was made a Python object and a label, then hashed
+/// (from_arrays of two 200k int arrays 112 ms, pandas 2.4;
+/// br-frankenpandas-2k5lw). None for anything else, which the labels path
+/// reads.
+fn coded_levels_of_numpy_arrays(
+    py: Python<'_>,
+    arrays: &Bound<'_, PyAny>,
+) -> PyResult<Option<MultiIndex>> {
+    if !(arrays.is_instance_of::<PyList>() || arrays.is_instance_of::<PyTuple>()) {
+        return Ok(None);
+    }
+    let mut uniques: Vec<Vec<IndexLabel>> = Vec::new();
+    let mut codes: Vec<Vec<u32>> = Vec::new();
+    for array in arrays.try_iter()? {
+        let array = array?;
+        if array.get_type().name()? != "ndarray" || array.getattr("ndim")?.extract::<usize>()? != 1
+        {
+            return Ok(None);
+        }
+        let kind = array
+            .getattr("dtype")?
+            .getattr("kind")?
+            .extract::<String>()?;
+        if matches!(kind.as_str(), "O" | "U") {
+            // An array of strs: each coded by its text, borrowed (a pair
+            // with one took every element's labels path: 0.24x pandas;
+            // fzbxv). Anything but a str keeps the labels path.
+            let Some((level_codes, level_uniques)) = text_array_codes(&array)? else {
+                return Ok(None);
+            };
+            codes.push(level_codes);
+            uniques.push(level_uniques);
+            continue;
+        }
+        if !matches!(kind.as_str(), "i" | "u" | "f" | "b") {
+            return Ok(None);
+        }
+        let Some(column) = py_array_like_column(py, &array)? else {
+            return Ok(None);
+        };
+        let Ok((level_codes, level_uniques)) = column.factorize() else {
+            return Ok(None);
+        };
+        let Some(level_codes) = level_codes.as_i64_slice().and_then(|level_codes| {
+            level_codes
+                .iter()
+                .map(|&code| u32::try_from(code).ok())
+                .collect()
+        }) else {
+            // A missing value (code -1) keeps the labels path.
+            return Ok(None);
+        };
+        codes.push(level_codes);
+        uniques.push(
+            level_uniques
+                .values()
+                .iter()
+                .map(scalar_to_index_label_converter)
+                .collect(),
+        );
+    }
+    if codes.is_empty() || codes.iter().any(|level| level.len() != codes[0].len()) {
+        return Ok(None);
+    }
+    Ok(MultiIndex::from_coded_levels(uniques, codes).ok())
+}
+
+/// A 1-D object / unicode array's codes against text `categories`, each
+/// element matched by its borrowed text: a str among none of them, and
+/// anything but a str (None, NaN, a number - which no text category
+/// equals), is -1. The array was made a column of Strings and matched cell
+/// by cell (Categorical(200k objects, categories=) 0.95-1.11x pandas;
+/// br-frankenpandas-iqh7m). None for other values or categories.
+fn text_array_codes_against(
+    values: &Bound<'_, PyAny>,
+    categories: &[Scalar],
+) -> PyResult<Option<Vec<i64>>> {
+    if values.get_type().name()? != "ndarray" || values.getattr("ndim")?.extract::<usize>()? != 1 {
+        return Ok(None);
+    }
+    let kind = values
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?;
+    if !matches!(kind.as_str(), "O" | "U") {
+        return Ok(None);
+    }
+    let mut position: FxHashMap<&str, i64> =
+        FxHashMap::with_capacity_and_hasher(categories.len(), Default::default());
+    for (code, category) in categories.iter().enumerate() {
+        let Scalar::Utf8(text) = category else {
+            return Ok(None);
+        };
+        let Ok(code) = i64::try_from(code) else {
+            return Ok(None);
+        };
+        position.entry(text.as_str()).or_insert(code);
+    }
+    let items = values.call_method0("tolist")?.cast_into::<PyList>()?;
+    // An element object seen before answers by its identity (the list holds
+    // every element, so no address is reused): an array repeats a few str
+    // objects, and hashing each row's text cost more than the column path
+    // (0.83-0.89x pandas). Past 4096 distinct objects only the text is
+    // looked up.
+    let mut by_object: FxHashMap<usize, i64> = FxHashMap::default();
+    let mut codes = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        let object = item.as_ptr() as usize;
+        let code = match by_object.get(&object) {
+            Some(&code) => code,
+            None => {
+                let code = match item.cast::<pyo3::types::PyString>() {
+                    Ok(text) => position.get(text.to_str()?).copied().unwrap_or(-1),
+                    Err(_) => -1,
+                };
+                if by_object.len() < 4096 {
+                    by_object.insert(object, code);
+                }
+                code
+            }
+        };
+        codes.push(code);
+    }
+    Ok(Some(codes))
+}
+
+/// A 1-D object / unicode array's first-seen codes and labels when every
+/// element is a str, factorized over the borrowed text; None at any other
+/// element (a missing one, a number).
+fn text_array_codes(array: &Bound<'_, PyAny>) -> PyResult<Option<(Vec<u32>, Vec<IndexLabel>)>> {
+    let items = array.call_method0("tolist")?.cast_into::<PyList>()?;
+    let mut texts: Vec<Bound<'_, pyo3::types::PyString>> = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        match item.cast_into::<pyo3::types::PyString>() {
+            Ok(text) => texts.push(text),
+            Err(_) => return Ok(None),
+        }
+    }
+    let mut seen: FxHashMap<&str, u32> =
+        FxHashMap::with_capacity_and_hasher(64, Default::default());
+    let mut level_uniques = Vec::new();
+    let mut level_codes = Vec::with_capacity(texts.len());
+    for text in &texts {
+        let text = text.to_str()?;
+        let next = u32::try_from(seen.len()).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("too many distinct labels")
+        })?;
+        let code = *seen.entry(text).or_insert_with(|| {
+            level_uniques.push(IndexLabel::Utf8(text.to_owned()));
+            next
+        });
+        level_codes.push(code);
+    }
+    Ok(Some((level_codes, level_uniques)))
+}
+
 /// The zone of an array of aware instants of one zone - a zoned
 /// DatetimeIndex, a Series of a zoned dtype, a list or tuple of aware
 /// datetimes - for a MultiIndex level made of it (br-frankenpandas-c4v57).
@@ -20574,6 +20733,12 @@ impl PyMultiIndex {
         names: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let _ = sortorder;
+        if let Some(mut inner) = coded_levels_of_numpy_arrays(arrays.py(), arrays)? {
+            if let Some(ns) = extract_index_names_flexible(names)? {
+                inner = inner.set_names(ns);
+            }
+            return Ok(PyMultiIndex { inner });
+        }
         let mut parsed_arrays: Vec<Vec<IndexLabel>> = Vec::new();
         // Each array's zone when it holds aware instants of one: its level's
         // (br-frankenpandas-c4v57).
@@ -20665,7 +20830,33 @@ impl PyMultiIndex {
             for i in 0..len {
                 let it = seq.get_item(i)?;
                 zones.push(array_zone(&it));
-                if let Ok(subseq) = it.cast::<pyo3::types::PySequence>() {
+                // A numpy array of numbers or bools read as its column: an
+                // element a Python object made and converted
+                // (br-frankenpandas-2k5lw).
+                let numeric = it.get_type().name()? == "ndarray"
+                    && it.getattr("ndim")?.extract::<usize>()? == 1
+                    && matches!(
+                        it.getattr("dtype")?
+                            .getattr("kind")?
+                            .extract::<String>()?
+                            .as_str(),
+                        "i" | "u" | "f" | "b"
+                    );
+                if numeric && let Some(column) = py_array_like_column(it.py(), &it)? {
+                    // A NaN is the missing label, as the element path reads it.
+                    parsed_iterables.push(
+                        column
+                            .values()
+                            .iter()
+                            .map(|value| match value {
+                                Scalar::Float64(float) if float.is_nan() => {
+                                    IndexLabel::Null(NullKind::NaN)
+                                }
+                                other => scalar_to_index_label_converter(other),
+                            })
+                            .collect(),
+                    );
+                } else if let Ok(subseq) = it.cast::<pyo3::types::PySequence>() {
                     let sublen = subseq.len()?;
                     let mut row = Vec::with_capacity(sublen);
                     for j in 0..sublen {
@@ -21239,34 +21430,21 @@ impl PyMultiIndex {
     fn get_loc(&self, key: &Bound<'_, PyAny>, level: Option<usize>) -> PyResult<Py<PyAny>> {
         let py = key.py();
         let tuple = key.cast::<PyTuple>().ok();
-        let labels = match &tuple {
-            Some(tuple) => tuple
-                .iter()
-                .map(|item| py_to_index_label(&item))
-                .collect::<PyResult<Vec<_>>>()?,
-            None => vec![py_to_index_label(key)?],
-        };
+        let labels = multiindex_key_labels(key)?;
         let positions = self
             .inner
             .get_loc(&labels, level)
             .map_err(|_| PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone().unbind()))?;
-        if tuple.is_some()
-            && level.is_none()
-            && labels.len() == self.inner.nlevels()
-            && self.inner.is_unique()
-            && let [only] = positions.as_slice()
-        {
-            return only.into_py_any(py);
+        if tuple.is_some() && level.is_none() {
+            return multiindex_tuple_loc(py, &self.inner, &labels, &positions);
         }
+        // pandas' level indexer: a slice over an index sorted on its first
+        // level (the cached lexsort depth; its values were made and
+        // compared a lookup), else a mask.
         let contiguous = positions.windows(2).all(|pair| pair[1] == pair[0] + 1);
-        let sorted_first = || {
-            self.inner
-                .get_level_values(0)
-                .is_ok_and(|values| values.is_monotonic_increasing())
-        };
         if let (Some(first), Some(last)) = (positions.first(), positions.last())
             && contiguous
-            && (tuple.is_some() || sorted_first())
+            && (tuple.is_some() || self.inner.lexsort_depth() >= 1)
         {
             return numpy_slice(py, *first, last + 1);
         }
@@ -21278,10 +21456,14 @@ impl PyMultiIndex {
     }
 
     /// pandas' `key in index`: whether `get_loc` finds it (a first-level
-    /// label too); an unhashable key is TypeError.
+    /// label too); an unhashable key is TypeError. The rows are asked for,
+    /// not get_loc's answer (a repeated key's mask was made).
     fn __contains__(&self, key: &Bound<'_, PyAny>) -> PyResult<bool> {
         key.hash()?;
-        Ok(self.get_loc(key, None).is_ok())
+        let Ok(labels) = multiindex_key_labels(key) else {
+            return Ok(false);
+        };
+        Ok(self.inner.get_loc(&labels, None).is_ok())
     }
 
     fn get_indexer(&self, target: &PyMultiIndex) -> PyResult<Vec<i64>> {
@@ -21990,16 +22172,7 @@ impl PyMultiIndex {
                     .collect::<PyResult<Vec<IndexLabel>>>()
             })
             .collect::<PyResult<Vec<Vec<IndexLabel>>>>()?;
-        Ok((0..self.inner.len())
-            .map(|entry| {
-                self.inner.get_tuple(entry).is_some_and(|tuple| {
-                    wanted
-                        .iter()
-                        .any(|want| want.iter().eq(tuple.iter().copied()))
-                })
-            })
-            .collect::<Vec<bool>>()
-            .into())
+        Ok(self.inner.isin_tuples(&wanted).into())
     }
 
     fn isna(&self) -> Vec<bool> {
@@ -34840,6 +35013,129 @@ fn normalize_series_other(
     )))
 }
 
+/// `astype(str)` of a codes-held categorical of text categories: each row's
+/// category text gathered by its code into one buffer, a missing row 'nan'
+/// as pandas spells it - each cell was a Scalar cast and the column built
+/// again (cat.where(m).astype(str) of 200k rows 15.8 ms, pandas 1.25;
+/// br-frankenpandas-cqub0). None for any other column.
+fn categorical_text_as_str(column: &Column) -> Option<Column> {
+    let codes = column.categorical_codes()?;
+    let texts: Vec<&str> = column
+        .categorical()?
+        .categories
+        .iter()
+        .map(|category| match category {
+            Scalar::Utf8(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Option<_>>()?;
+    let mut bytes = Vec::with_capacity(codes.len() * texts.first().map_or(3, |text| text.len()));
+    let mut offsets = Vec::with_capacity(codes.len() + 1);
+    offsets.push(0);
+    for &code in codes {
+        let text = usize::try_from(code)
+            .ok()
+            .and_then(|code| texts.get(code))
+            .copied()
+            .unwrap_or("nan");
+        bytes.extend_from_slice(text.as_bytes());
+        offsets.push(bytes.len());
+    }
+    Some(Column::from_utf8_contiguous(bytes, offsets))
+}
+
+/// `where` (`keep` true) / `mask` (false) of a categorical by a bool
+/// condition over its own rows - a numpy bool array, a list of bools, or a
+/// bool Series under the same index - with no `other` (NaN): its codes
+/// where the condition is `keep`, -1 (missing) elsewhere, the categories
+/// as they are. The values were made, filled and matched back to the
+/// categories (cat.where(m) of 200k rows 13-34 ms, pandas 0.35;
+/// br-frankenpandas-cqub0). None for any other call.
+fn categorical_where(
+    series: &Series,
+    cond: &Bound<'_, PyAny>,
+    other: Option<&Bound<'_, PyAny>>,
+    keep: bool,
+) -> PyResult<Option<Series>> {
+    let Some(cat) = series.cat() else {
+        return Ok(None);
+    };
+    // A scalar other is its category's code (a missing one -1); one outside
+    // the categories is pandas' TypeError (an object column came back).
+    let other_code = match other {
+        None => -1,
+        Some(other) if api_is_scalar(other) => {
+            let value = py_to_scalar(other.py(), other)?;
+            if value.is_missing() {
+                -1
+            } else {
+                match fp_frame::codes_against_categories(
+                    std::slice::from_ref(&value),
+                    cat.categories(),
+                )[0]
+                {
+                    -1 => {
+                        let shown = match &value {
+                            Scalar::Utf8(text) => text.clone(),
+                            other => other.to_string(),
+                        };
+                        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                            "Cannot setitem on a Categorical with a new category ({shown}), set the categories first"
+                        )));
+                    }
+                    code => i32::try_from(code).unwrap_or(-1),
+                }
+            }
+        }
+        Some(_) => return Ok(None),
+    };
+    let flags = if let Ok(cond_series) = cond.extract::<PyRef<'_, PySeries>>() {
+        match cond_series.inner.column().as_bool_slice() {
+            Some(flags) if cond_series.inner.index() == series.index() => flags.to_vec(),
+            _ => return Ok(None),
+        }
+    } else {
+        match bool_mask_key(cond) {
+            Some(flags) => flags,
+            None => return Ok(None),
+        }
+    };
+    if flags.len() != series.len() {
+        return Ok(None);
+    }
+    let meta = CategoricalMetadata::new(cat.categories().to_vec(), cat.ordered());
+    // `keep` and `other_code` copied into the closures: borrowed, each row
+    // loaded them again and the select did not vectorize (43% of a
+    // categorical where; br-frankenpandas-cqub0).
+    let pick = move |code: i32, flag: bool| if flag == keep { code } else { other_code };
+    // Codes held over these categories read as they are (each was widened
+    // to i64 and narrowed back); values are coded first.
+    let kept = match series.column().categorical_codes() {
+        Some(held) if series.column().categorical() == Some(&meta) => held
+            .iter()
+            .zip(&flags)
+            .map(move |(&code, &flag)| pick(code, flag))
+            .collect(),
+        _ => {
+            let Some(codes) = series.category_codes() else {
+                return Ok(None);
+            };
+            codes
+                .iter()
+                .zip(&flags)
+                .map(move |(&code, &flag)| pick(i32::try_from(code).unwrap_or(-1), flag))
+                .collect()
+        }
+    };
+    Series::new(
+        series.name().clone(),
+        series.index().clone(),
+        Column::from_categorical_codes(kept, meta),
+    )
+    .map(Some)
+    .map_err(frame_error_to_py)
+}
+
 fn execute_series_where(inner: &Series, cond: &Series, other: &SeriesOrScalar) -> PyResult<Series> {
     let result = match other {
         SeriesOrScalar::Scalar(sc) => inner.where_cond(cond, Some(sc)).map_err(frame_error_to_py),
@@ -35179,22 +35475,19 @@ impl PySeries {
         {
             return Ok(None);
         }
-        let module = py.import("frankenpandas")?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("categories", &categories)?;
-        kwargs.set_item("ordered", accessor.getattr("ordered")?)?;
-        let values = module.getattr("Categorical")?.call_method(
-            "from_codes",
-            (accessor.getattr("codes")?,),
-            Some(&kwargs),
-        )?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("index", this.getattr("index")?)?;
-        kwargs.set_item("name", this.getattr("name")?)?;
-        let mapped = module.getattr("Series")?.call((values,), Some(&kwargs))?;
-        Ok(Some(PySeries {
-            inner: mapped.extract::<PyRef<'_, PySeries>>()?.inner.clone(),
-        }))
+        // The same codes under the mapped categories, index and name kept:
+        // they went out to Categorical.from_codes, a Python int a code
+        // (cat.map(dict) of 200k rows 4.2 ms, pandas 0.23;
+        // br-frankenpandas-cqub0).
+        let mapped = categories
+            .try_iter()?
+            .map(|category| py_to_scalar(py, &category?))
+            .collect::<PyResult<Vec<Scalar>>>()?;
+        let Some(cat) = self.inner.cat() else {
+            return Ok(None);
+        };
+        let inner = cat.rename_categories(mapped).map_err(frame_error_to_py)?;
+        Ok(Some(PySeries { inner }))
     }
 
     /// `shift` by one int: the values `periods` rows on (the labels by
@@ -37566,17 +37859,24 @@ impl PySeries {
         // ordering, as pandas' Categorical.unique; an object array dropped
         // them (br-frankenpandas-ba9pc).
         if let Some(meta) = self.inner.column().categorical() {
-            let codes = self
-                .inner
-                .unique()
-                .iter()
-                .map(|value| {
-                    meta.categories
-                        .iter()
-                        .position(|category| !value.is_missing() && category == value)
-                        .map_or(-1, |position| position as i64)
-                })
-                .collect();
+            // The distinct codes in first-seen order (-1 a missing value),
+            // off the codes: each row's value was made and hashed
+            // (cat.unique() of 200k rows 5.3 ms, pandas 0.50;
+            // br-frankenpandas-cqub0).
+            let codes = match self.inner.category_codes() {
+                Some(row_codes) => first_seen_codes(row_codes, meta.categories.len()),
+                None => self
+                    .inner
+                    .unique()
+                    .iter()
+                    .map(|value| {
+                        meta.categories
+                            .iter()
+                            .position(|category| !value.is_missing() && category == value)
+                            .map_or(-1, |position| position as i64)
+                    })
+                    .collect(),
+            };
             let inner = Series::from_categorical_codes(
                 self.inner.name(),
                 codes,
@@ -39124,6 +39424,13 @@ impl PySeries {
         }
         if let Some(inner) = string_dtype_series(&self.inner, &spec)? {
             return Ok(PySeries { inner });
+        }
+        if dtype_arg_text(&spec).is_ok_and(|name| name == "str")
+            && let Some(column) = categorical_text_as_str(self.inner.column())
+        {
+            return Series::new(self.inner.name(), self.inner.index().clone(), column)
+                .map(|inner| PySeries { inner })
+                .map_err(frame_error_to_py);
         }
         // An object column of zoned datetimes to a datetime dtype (an1xe).
         if self.inner.column().holds_non_text()
@@ -41845,6 +42152,14 @@ impl PySeries {
                 "No axis named {ax} for object type Series"
             )));
         }
+        let typed = categorical_where(&slf.borrow().inner, cond, other.0.as_ref(), true)?;
+        if let Some(res_inner) = typed {
+            if inplace.unwrap_or(false) {
+                slf.borrow_mut().inner = res_inner;
+                return Ok(None);
+            }
+            return Ok(Some(PySeries { inner: res_inner }));
+        }
         let res_inner = {
             let this = slf.borrow();
             let cond_series = normalize_series_cond(py, &this.inner, cond)?;
@@ -41893,6 +42208,14 @@ impl PySeries {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "No axis named {ax} for object type Series"
             )));
+        }
+        let typed = categorical_where(&slf.borrow().inner, cond, other.0.as_ref(), false)?;
+        if let Some(res_inner) = typed {
+            if inplace.unwrap_or(false) {
+                slf.borrow_mut().inner = res_inner;
+                return Ok(None);
+            }
+            return Ok(Some(PySeries { inner: res_inner }));
         }
         let res_inner = {
             let this = slf.borrow();
@@ -44956,6 +45279,15 @@ impl PySeriesAt {
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        // A tuple over a MultiIndex reads as `.loc` does, pandas' _get_value:
+        // a non-unique index's rows a Series even when one matches (a
+        // KeyError; fzbxv), a unique one's value off the lookup engine.
+        if self.inner.index().row_multiindex().is_some()
+            && key.cast::<PyTuple>().is_ok()
+            && let Some(found) = series_multiindex_loc(py, &self.inner, key, false)?
+        {
+            return Ok(found);
+        }
         // A point over an IntervalIndex reads the interval holding it.
         let key = &interval_point_key(py, self.inner.index(), key, true)?;
         // Date text on a DatetimeIndex is its instant.
@@ -63667,10 +63999,6 @@ fn resolve_loc_rows(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<LocRows>
     }
 }
 
-/// The row POSITIONS a `.loc` row indexer selects, for writes: a boolean
-/// Series (aligned on the index), a boolean list/array, an inclusive label
-/// slice, a list of labels or one label (every row carrying it); resolved in
-/// the order `resolve_loc_rows` uses.
 /// The positions of a mask's true flags, written branch-free: a random
 /// mask mispredicts a branch on a flag half its rows (18% of
 /// df.loc[mask, text] = 'X'; br-frankenpandas-1ofpy).
@@ -63686,6 +64014,10 @@ fn true_positions(flags: &[bool]) -> Vec<usize> {
     positions
 }
 
+/// The row POSITIONS a `.loc` row indexer selects, for writes: a boolean
+/// Series (aligned on the index), a boolean list/array, an inclusive label
+/// slice, a list of labels or one label (every row carrying it); resolved in
+/// the order `resolve_loc_rows` uses.
 fn resolve_loc_row_positions(
     labels: &[IndexLabel],
     slice_positions: impl Fn(Option<&IndexLabel>, Option<&IndexLabel>) -> Result<Vec<usize>, FrameError>,
@@ -64111,13 +64443,33 @@ fn list_float_column(
         .map_err(column_error_to_py)
 }
 
+/// `column` with `cells` written at `positions` ([`write_typed_cells`]): a
+/// pandas `string` column takes a str or a missing value and stays
+/// `string` - every write left it object (s[mask] = 'X', df.loc[rows, col],
+/// .iloc, .at; br-frankenpandas-1ofpy) - any other value is pandas'
+/// TypeError.
+fn write_cells(column: &Column, positions: &[usize], cells: Vec<Scalar>) -> PyResult<Column> {
+    if !column.is_pandas_string() {
+        return write_typed_cells(column, positions, cells);
+    }
+    if let Some(other) = cells
+        .iter()
+        .find(|cell| !cell.is_missing() && !matches!(cell, Scalar::Utf8(_)))
+    {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "Cannot set non-string value '{other}' into a StringArray."
+        )));
+    }
+    Ok(write_typed_cells(column, positions, cells)?.as_pandas_string())
+}
+
 /// `column` with `cells` written at `positions`, typed as pandas types the
 /// result: a cell the column's dtype holds keeps that dtype (a category,
 /// a timezone and the nullable dtypes included; an int joining a float
 /// column is a float); otherwise the values are inferred again - an int64
 /// column taking a float or a NaN is float64, one taking a string is
 /// object.
-fn write_cells(column: &Column, positions: &[usize], cells: Vec<Scalar>) -> PyResult<Column> {
+fn write_typed_cells(column: &Column, positions: &[usize], cells: Vec<Scalar>) -> PyResult<Column> {
     let dtype = column.dtype();
     // A categorical takes only its own categories (pandas' TypeError).
     if let Some(meta) = column.categorical()
@@ -65475,6 +65827,15 @@ fn multiindex_prefix_positions(
             return Ok((rows, Vec::new()));
         }
     }
+    // A full key's rows off the index's lookup engine, built once for it
+    // and its clones: an unsorted index compared every row's codes a
+    // lookup (fzbxv). No rows: the paths below answer (a date string).
+    if let Some(rows) = multi
+        .full_tuple_positions(key)
+        .filter(|rows| !rows.is_empty())
+    {
+        return Ok((rows, Vec::new()));
+    }
     let leading: Vec<usize> = (0..key.len()).collect();
     if let Some(rows) = coded_key_rows(multi, &leading, key) {
         return Ok((rows, Vec::new()));
@@ -65560,6 +65921,77 @@ fn level_key_rows<L: AsRef<[IndexLabel]>>(
         })
         .collect();
     (rows, periods)
+}
+
+/// A MultiIndex key's labels: a tuple's items, any other key one label.
+fn multiindex_key_labels(key: &Bound<'_, PyAny>) -> PyResult<Vec<IndexLabel>> {
+    match key.cast::<PyTuple>() {
+        Ok(tuple) => tuple
+            .iter()
+            .map(|item| py_to_index_label(&item))
+            .collect::<PyResult<Vec<_>>>(),
+        Err(_) => Ok(vec![py_to_index_label(key)?]),
+    }
+}
+
+/// pandas' `MultiIndex.get_loc` answer for a tuple key's rows (`positions`,
+/// ascending, at least one): a full key's row on a unique index an int;
+/// else the run of the key's leading labels the index is sorted on (its
+/// lexsort depth; bisected, np.int64 bounds) or every row - that run a
+/// slice when the key ends inside the sorted depth or all of it matched,
+/// else the rows a slice of Python ints when evenly spaced, or a mask.
+fn multiindex_tuple_loc(
+    py: Python<'_>,
+    multi: &fp_index::MultiIndex,
+    labels: &[IndexLabel],
+    positions: &[usize],
+) -> PyResult<Py<PyAny>> {
+    if labels.len() == multi.nlevels()
+        && let [only] = positions
+        && multi.is_unique()
+    {
+        return only.into_py_any(py);
+    }
+    let python_slice = |start: usize, stop: usize, step: Option<usize>| -> PyResult<Py<PyAny>> {
+        py.import("builtins")?
+            .getattr("slice")?
+            .call1((start, stop, step))
+            .map(Bound::unbind)
+    };
+    let (Some(&first), Some(&last)) = (positions.first(), positions.last()) else {
+        return python_slice(0, 0, None);
+    };
+    let depth = multi.lexsort_depth().min(labels.len());
+    let lead = &labels[..depth];
+    let run = if depth == 0 {
+        None
+    } else {
+        multi
+            .sorted_prefix_position(lead, false)
+            .zip(multi.sorted_prefix_position(lead, true))
+            .filter(|&(start, stop)| start <= first && last < stop)
+    };
+    match run {
+        Some((start, stop)) if depth == labels.len() || positions.len() == stop - start => {
+            return numpy_slice(py, start, stop);
+        }
+        None if depth == 0 && positions.len() == multi.len() => {
+            return python_slice(0, multi.len(), None);
+        }
+        _ => {}
+    }
+    if let [only] = positions {
+        return python_slice(*only, only + 1, None);
+    }
+    let step = positions[1] - positions[0];
+    if positions.windows(2).all(|pair| pair[1] - pair[0] == step) {
+        return python_slice(first, last + 1, Some(step));
+    }
+    let mut mask = vec![false; multi.len()];
+    for &position in positions {
+        mask[position] = true;
+    }
+    BoolArray::from(mask).into_py_any(py)
 }
 
 /// The position of `level` - an int (negative from the end) or a level
@@ -66041,9 +66473,15 @@ fn series_multiindex_loc(
     }
     let full_key = labels.len() == multi.nlevels() && periods.is_empty();
     // A full key's value is pandas' numpy scalar, as a flat label's (it was
-    // a Python one).
-    if full_key && positions.len() == 1 {
-        return element_to_py(py, series.column(), &series.values()[positions[0]]).map(Some);
+    // a Python one), on a unique MultiIndex only: pandas' get_loc answers a
+    // non-unique one a slice, its rows a Series even when one matches
+    // (fzbxv). The value read alone (every row's was made).
+    if full_key
+        && positions.len() == 1
+        && multi.is_unique()
+        && let Some(value) = series.column().scalar_at(positions[0])
+    {
+        return element_to_py(py, series.column(), &value).map(Some);
     }
     let rows: Vec<i64> = positions.iter().map(|&row| row as i64).collect();
     let taken = series.take(&rows).map_err(frame_error_to_py)?;
@@ -84161,8 +84599,59 @@ fn keyed_rows(
         Some(multi) => multi.names().get(level).cloned().flatten(),
         None => piece.name().cloned(),
     };
+    let names = names.unwrap_or_else(|| {
+        let mut names = vec![None; key_levels];
+        names.extend((0..index_levels).map(|level| {
+            let first = pieces.first().and_then(|piece| level_name(piece, level));
+            first.filter(|name| {
+                pieces
+                    .iter()
+                    .all(|piece| level_name(piece, level).as_ref() == Some(name))
+            })
+        }));
+        names
+    });
+    if names.len() != key_levels + index_levels {
+        return Err(not_implemented(
+            "concat(names=...) naming other than every key and index level",
+        ));
+    }
     let rows: usize = pieces.iter().map(|piece| piece.len()).sum();
     let too_many = || not_implemented("concat(keys=...) past u32 rows or keys");
+    // One key level over pieces on one unique flat index - a concat of like
+    // objects - is the keys coded a piece at a time over the index's labels
+    // shared: every row's label was cloned and hashed into the level
+    // (concat(keys=) of 2 x 200k floats 13.9 ms, pandas 0.49;
+    // br-frankenpandas-vtbtm).
+    if key_levels == 1
+        && index_levels == 1
+        && let Some(first) = pieces.first()
+        && first.row_multiindex().is_none()
+        && pieces.iter().all(|piece| {
+            piece.row_multiindex().is_none()
+                && piece.label_kinds() == first.label_kinds()
+                && *piece == *first
+        })
+    {
+        let mut key_labels: Vec<IndexLabel> = Vec::new();
+        let mut piece_keys: Vec<u32> = Vec::with_capacity(keys.len());
+        for key in keys {
+            let code = match key_labels.iter().position(|seen| seen == &key[0]) {
+                Some(code) => code,
+                None => {
+                    key_labels.push(key[0].clone());
+                    key_labels.len() - 1
+                }
+            };
+            piece_keys.push(u32::try_from(code).map_err(|_| too_many())?);
+        }
+        if let Some(levels) =
+            fp_index::MultiIndex::keyed_on_one_index(key_labels, &piece_keys, first)
+        {
+            let levels = levels.set_names(names);
+            return Ok((levels.to_flat_index(MULTIINDEX_FLAT_SEP), levels));
+        }
+    }
     let mut uniques: Vec<Vec<IndexLabel>> = Vec::with_capacity(key_levels + index_levels);
     let mut codes: Vec<Vec<u32>> = Vec::with_capacity(key_levels + index_levels);
     for level in 0..key_levels {
@@ -84183,7 +84672,28 @@ fn keyed_rows(
         uniques.push(level_uniques);
         codes.push(level_codes);
     }
+    // Pieces on one unique flat index - a concat of like objects - code each
+    // row by its position in it, tiled a piece: every row's label was
+    // cloned and hashed into the level (concat(keys=) of 2 x 200k floats
+    // 13.9 ms, pandas 0.49; br-frankenpandas-vtbtm).
+    if index_levels == 1
+        && let Some(first) = pieces.first()
+        && first.row_multiindex().is_none()
+        && pieces.iter().all(|piece| {
+            piece.row_multiindex().is_none()
+                && piece.label_kinds() == first.label_kinds()
+                && *piece == *first
+        })
+        && first.is_unique()
+    {
+        let len = u32::try_from(first.len()).map_err(|_| too_many())?;
+        uniques.push(first.labels().to_vec());
+        codes.push((0..len).collect::<Vec<u32>>().repeat(pieces.len()));
+    }
     for level in 0..index_levels {
+        if codes.len() == key_levels + index_levels {
+            break;
+        }
         let mut labels: Vec<IndexLabel> = Vec::with_capacity(rows);
         for piece in pieces {
             match piece.row_multiindex() {
@@ -84204,23 +84714,6 @@ fn keyed_rows(
         }
         uniques.push(level_uniques);
         codes.push(level_codes);
-    }
-    let names = names.unwrap_or_else(|| {
-        let mut names = vec![None; key_levels];
-        names.extend((0..index_levels).map(|level| {
-            let first = pieces.first().and_then(|piece| level_name(piece, level));
-            first.filter(|name| {
-                pieces
-                    .iter()
-                    .all(|piece| level_name(piece, level).as_ref() == Some(name))
-            })
-        }));
-        names
-    });
-    if names.len() != key_levels + index_levels {
-        return Err(not_implemented(
-            "concat(names=...) naming other than every key and index level",
-        ));
     }
     let levels = fp_index::MultiIndex::from_coded_levels(uniques, codes)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
@@ -84275,11 +84768,11 @@ fn concat(
         None => None,
     };
     let objs = converted.as_ref().unwrap_or(objs);
-    let result = concat_objects(py, objs, axis, join, ignore_index, keys, sort, copy, kwargs)?;
     let stacked = !axis.is_some_and(|axis| {
         axis.extract::<i64>().is_ok_and(|axis| axis == 1)
             || axis.extract::<String>().is_ok_and(|axis| axis == "columns")
     });
+    let result = concat_objects(py, objs, axis, join, ignore_index, keys, sort, copy, kwargs)?;
     if !stacked {
         return Ok(result);
     }
@@ -84431,6 +84924,31 @@ fn concat_mixed_zones<'py>(
     }
 }
 
+/// The categorical column of categorical Series pieces of one set of
+/// categories (and ordering), their codes stacked in order; None for any
+/// other pieces.
+fn stacked_category_codes(pieces: &[Bound<'_, PyAny>]) -> PyResult<Option<Column>> {
+    let mut codes: Vec<i32> = Vec::new();
+    let mut meta: Option<CategoricalMetadata> = None;
+    for piece in pieces {
+        let series = piece.extract::<PyRef<'_, PySeries>>()?;
+        let (Some(cat), Some(piece_codes)) = (series.inner.cat(), series.inner.category_codes())
+        else {
+            return Ok(None);
+        };
+        let piece_meta = CategoricalMetadata::new(cat.categories().to_vec(), cat.ordered());
+        match &meta {
+            Some(meta) if *meta != piece_meta => return Ok(None),
+            Some(_) => {}
+            None => meta = Some(piece_meta),
+        }
+        for code in piece_codes {
+            codes.push(i32::try_from(code).unwrap_or(-1));
+        }
+    }
+    Ok(meta.map(|meta| Column::from_categorical_codes(codes, meta)))
+}
+
 /// The dtypes pandas' concat keeps stacking `pieces`, set on `result` (they
 /// became object; br-frankenpandas-5mxxn): a categorical Series - or frame
 /// column - every piece holds under one categorical dtype stays that
@@ -84469,6 +84987,31 @@ fn concat_kept_dtypes<'py>(
             .map(|piece| piece.getattr("dtype"))
             .collect::<PyResult<Vec<_>>>()?;
         if same_categorical(&dtypes)? {
+            // Stacked as that categorical already (fp-frame stacks codes
+            // held over one set of categories): as it is - every piece's
+            // codes were taken again (br-frankenpandas-iqh7m).
+            if let Ok(stacked) = result.extract::<PyRef<'_, PySeries>>()
+                && let Ok(first) = first.extract::<PyRef<'_, PySeries>>()
+                && stacked.inner.column().categorical_codes().is_some()
+                && stacked.inner.column().categorical() == first.inner.column().categorical()
+            {
+                return Ok(result.clone());
+            }
+            // Pieces of one categorical dtype held as codes stack their
+            // codes: the stacked values were matched back to the
+            // categories (br-frankenpandas-iqh7m).
+            if let Ok(stacked) = result.extract::<PyRef<'_, PySeries>>()
+                && let Some(column) = stacked_category_codes(pieces)?
+                && column.len() == stacked.inner.len()
+            {
+                let inner = Series::new(
+                    stacked.inner.name().clone(),
+                    stacked.inner.index().clone(),
+                    column,
+                )
+                .map_err(frame_error_to_py)?;
+                return PySeries { inner }.into_bound_py_any(result.py());
+            }
             return result.call_method1("astype", (first.getattr("dtype")?,));
         }
         let names = dtypes
@@ -85449,6 +85992,52 @@ fn refuse_masked_int_list(data: &Bound<'_, PyAny>, dtype: &Bound<'_, PyAny>) -> 
     Ok(())
 }
 
+/// The distinct category codes among `codes` (-1 a missing value) in the
+/// order they first appear, over `categories` categories.
+fn first_seen_codes(codes: Vec<i64>, categories: usize) -> Vec<i64> {
+    let mut seen = vec![false; categories + 1];
+    codes
+        .into_iter()
+        .filter(|&code| {
+            usize::try_from(code + 1)
+                .ok()
+                .and_then(|slot| seen.get_mut(slot))
+                .is_some_and(|slot| !std::mem::replace(slot, true))
+        })
+        .collect()
+}
+
+/// Each row's code among `categories` (pandas' equality: 1 meets 1.0), -1
+/// for a missing value or one outside them. Each distinct value is matched
+/// once, its rows gathering the code: every row searched the categories
+/// (two 200k categoricals' concat 62 ms, pandas 0.19;
+/// br-frankenpandas-iqh7m).
+fn category_codes_of(column: &Column, categories: &[Scalar]) -> Vec<i64> {
+    // An object column's cells are their own values (its factorize reads
+    // them as text: 1.0 met no float category); text in one buffer
+    // factorizes.
+    if is_object_column(column) && column.as_utf8_window().is_none() {
+        return fp_frame::codes_against_categories(column.values(), categories);
+    }
+    let factorized = column.factorize().ok().and_then(|(codes, uniques)| {
+        let codes = codes.as_i64_slice()?;
+        let category_codes = fp_frame::codes_against_categories(uniques.values(), categories);
+        Some(
+            codes
+                .iter()
+                .map(|&code| {
+                    usize::try_from(code)
+                        .ok()
+                        .and_then(|code| category_codes.get(code))
+                        .copied()
+                        .unwrap_or(-1)
+                })
+                .collect(),
+        )
+    });
+    factorized.unwrap_or_else(|| fp_frame::codes_against_categories(column.values(), categories))
+}
+
 /// `series` as the categorical `dtype` describes when it is a
 /// `CategoricalDtype` with categories or ordered=True: those categories in
 /// their order (a value outside them missing) and that ordering - they were
@@ -85462,21 +86051,24 @@ fn categorical_with_dtype(series: &Series, dtype: &Bound<'_, PyAny>) -> PyResult
     if categorical.categories.is_none() && !categorical.ordered {
         return Ok(None);
     }
-    let values = series.column().values();
+    // Its own categories and ordering already: itself (each row was
+    // matched again; br-frankenpandas-iqh7m).
+    if let (Some(cat), Some(categories)) = (series.cat(), &categorical.categories)
+        && cat.categories() == categories.as_slice()
+        && cat.ordered() == categorical.ordered
+    {
+        return Ok(Some(series.clone()));
+    }
     let built = match &categorical.categories {
-        None => Series::from_categorical(series.name(), values.to_vec(), true),
+        None => Series::from_categorical(series.name(), series.column().values().to_vec(), true),
         Some(categories) => {
-            let categories = categories.clone();
-            let codes = values
-                .iter()
-                .map(|value| {
-                    categories
-                        .iter()
-                        .position(|category| !value.is_missing() && category.semantic_eq(value))
-                        .map_or(-1, |position| i64::try_from(position).unwrap_or(-1))
-                })
-                .collect();
-            Series::from_categorical_codes(series.name(), codes, categories, categorical.ordered)
+            let codes = category_codes_of(series.column(), categories);
+            Series::from_categorical_codes(
+                series.name(),
+                codes,
+                categories.clone(),
+                categorical.ordered,
+            )
         }
     }
     .map_err(frame_error_to_py)?;
@@ -90961,6 +91553,18 @@ fn binning_series(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<(Series, boo
     {
         return Err(not_one_dimensional());
     }
+    // A numpy array of numbers or bools is read off its typed column:
+    // tolist() made a Python object an element, each converted back
+    // (cut(V, 100) of 200k 11.7 ms, pandas 8.1; br-frankenpandas-u195h).
+    if x.get_type().name()? == "ndarray"
+        && let Some(column) = py_array_like_column(py, x)?
+        && matches!(column.dtype(), DType::Int64 | DType::Float64 | DType::Bool)
+    {
+        let index = Index::from_i64_values((0..column.len() as i64).collect());
+        return Series::new("", index, column)
+            .map(|series| (series, false))
+            .map_err(frame_error_to_py);
+    }
     let items = if x.hasattr("tolist")? {
         x.call_method0("tolist")?
     } else {
@@ -96136,11 +96740,31 @@ impl PyInterval {
 /// Interval endpoints as floats, and whether pandas keeps them int64: an
 /// integer array or Index, or every one a Python int (a bool is not).
 fn interval_endpoints(values: &Bound<'_, PyAny>) -> PyResult<(Vec<f64>, bool)> {
-    let int_array = values
+    let kind = values
         .getattr("dtype")
         .and_then(|dtype| dtype.getattr("kind"))
-        .and_then(|kind| kind.extract::<String>())
-        .is_ok_and(|kind| kind == "i" || kind == "u");
+        .and_then(|kind| kind.extract::<String>());
+    let int_array = kind.as_ref().is_ok_and(|kind| kind == "i" || kind == "u");
+    // A one-dimensional numpy array of numbers is read off its typed column:
+    // a Python object and an f64 extract a break (from_breaks of 50k 2.0
+    // ms, pandas 0.21; br-frankenpandas-goal5). A float one holding NaN
+    // takes the element path.
+    if kind
+        .as_ref()
+        .is_ok_and(|kind| matches!(kind.as_str(), "i" | "u" | "f"))
+        && values.get_type().name()? == "ndarray"
+        && values.getattr("ndim")?.extract::<usize>()? == 1
+        && let Some(column) = py_array_like_column(values.py(), values)?
+    {
+        if let Some(data) = column.as_i64_slice() {
+            return Ok((data.iter().map(|&value| value as f64).collect(), int_array));
+        }
+        if let Some(data) = column.as_f64_slice()
+            && !data.iter().any(|value| value.is_nan())
+        {
+            return Ok((data.to_vec(), false));
+        }
+    }
     let mut ints = true;
     let mut endpoints = Vec::new();
     for value in values.try_iter()? {
@@ -96270,12 +96894,18 @@ impl PyIntervalIndex {
     ) -> PyResult<Self> {
         let closed_str = interval_side(closed.unwrap_or("right"))?;
         let (breaks, ints) = interval_endpoints(breaks)?;
-        if breaks.len() < 2 {
+        // Fewer than two breaks bound no interval: pandas' empty index (it
+        // raised); a NaN break missing on one side of an interval only is
+        // pandas' ValueError (it made the interval).
+        if breaks
+            .windows(2)
+            .any(|pair| pair[0].is_nan() != pair[1].is_nan())
+        {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "breaks must have at least 2 elements",
+                "missing values must be missing in the same location both left and right sides",
             ));
         }
-        let mut intervals = Vec::with_capacity(breaks.len() - 1);
+        let mut intervals = Vec::with_capacity(breaks.len().saturating_sub(1));
         for pair in breaks.windows(2) {
             let mut interval = PyInterval::floats(pair[0], pair[1], closed_str)?;
             interval.int_endpoints = ints;
@@ -98189,27 +98819,36 @@ impl PyCategorical {
         ordered: Option<bool>,
     ) -> PyResult<Self> {
         let ordered = ordered.unwrap_or(false);
-        let values = values
-            .try_iter()?
-            .map(|item| py_to_scalar(py, &item?))
-            .collect::<PyResult<Vec<Scalar>>>()?;
         let inner = match categories.filter(|c| !c.is_none()) {
-            None => Series::from_categorical("", values, ordered),
+            None => {
+                let values = values
+                    .try_iter()?
+                    .map(|item| py_to_scalar(py, &item?))
+                    .collect::<PyResult<Vec<Scalar>>>()?;
+                Series::from_categorical("", values, ordered)
+            }
             Some(categories) => {
                 let categories = categories
                     .try_iter()?
                     .map(|item| py_to_scalar(py, &item?))
                     .collect::<PyResult<Vec<Scalar>>>()?;
+                // An array's values read as its column (an object a row was
+                // made and converted; br-frankenpandas-iqh7m), any other
+                // iterable a value at a time.
                 // A value outside the given categories is missing, as pandas.
-                let codes: Vec<i64> = values
-                    .iter()
-                    .map(|value| {
-                        categories
-                            .iter()
-                            .position(|category| !value.is_missing() && category.semantic_eq(value))
-                            .map_or(-1, |position| position as i64)
-                    })
-                    .collect();
+                let codes = if let Some(codes) = text_array_codes_against(values, &categories)? {
+                    codes
+                } else if let Some(column) = py_array_like_column(py, values)? {
+                    category_codes_of(&column, &categories)
+                } else {
+                    fp_frame::codes_against_categories(
+                        &values
+                            .try_iter()?
+                            .map(|item| py_to_scalar(py, &item?))
+                            .collect::<PyResult<Vec<Scalar>>>()?,
+                        &categories,
+                    )
+                };
                 Series::from_categorical_codes("", codes, categories, ordered)
             }
         }
@@ -101181,10 +101820,18 @@ pub fn interval_range(
     // were made a second time to ask).
     let mut whole = ints;
     let mut left = edge(0);
+    // The side read once (br-frankenpandas-goal5).
+    let side = interval_side(closed)?;
     for i in 0..count {
         let right = edge(i + 1);
         whole = whole && left.fract() == 0.0;
-        intervals.push(PyInterval::floats(left, right, closed)?);
+        intervals.push(PyInterval {
+            left,
+            right,
+            closed: side,
+            int_endpoints: false,
+            temporal: None,
+        });
         left = right;
     }
     if whole && left.fract() == 0.0 {

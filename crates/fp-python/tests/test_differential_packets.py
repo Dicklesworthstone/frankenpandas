@@ -42755,7 +42755,53 @@ _JMKB7_CASES = {
     # NEGATIVE: a missing / non-str write, a bool Series with a missing value.
     "loc[mask, text] = None (NEGATIVE)": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__((_JMKB7_V > 1.0, "city"), None)),
     "loc[mask, text] = 5 (NEGATIVE)": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__((_JMKB7_V > 1.0, "city"), 5)),
+    # NEGATIVE: a pandas string column, a categorical column and a text
+    # column with a gap keep their own write paths (1ofpy).
+    "loc[mask, string column] (NEGATIVE)": lambda m: _jmkb7_set(m, lambda f: (f.__setitem__("city", f["city"].astype("string")), f.loc.__setitem__((_JMKB7_V > 0.5, "city"), "X"))),
+    "loc[mask, categorical column] (NEGATIVE)": lambda m: _jmkb7_set(m, lambda f: (f.__setitem__("city", f["city"].astype("category")), f.loc.__setitem__((_JMKB7_V > 0.5, "city"), "Nice"))),
+    "loc[mask, text column with a gap] (NEGATIVE)": lambda m: _jmkb7_set(m, lambda f: (f.loc.__setitem__((np.arange(3000) % 7 == 0, "city"), None), f.loc.__setitem__((_JMKB7_V > 0.5, "city"), "X"))),
 }
+
+
+_1OFPY_MASK = np.array([True, False, True, False])
+
+
+def _1ofpy_string_series(m: Any, write: Any) -> Any:
+    series = m.Series(["a", "b", None, "d"], dtype="string", name="s")
+    write(series)
+    return series
+
+
+def _1ofpy_string_frame(m: Any, write: Any) -> Any:
+    frame = m.DataFrame({"c": m.Series(["a", "b", None, "d"], dtype="string"), "v": [1.0, 2.0, 3.0, 4.0]})
+    write(frame)
+    return frame
+
+
+_1OFPY_STRING_CASES = {
+    "s[mask] = str": lambda m: _1ofpy_string_series(m, lambda s: s.__setitem__(_1OFPY_MASK, "X")),
+    "s.loc[mask] = str": lambda m: _1ofpy_string_series(m, lambda s: s.loc.__setitem__(_1OFPY_MASK, "X")),
+    "s.iloc[[0]] = str": lambda m: _1ofpy_string_series(m, lambda s: s.iloc.__setitem__([0], "X")),
+    "s[1] = None": lambda m: _1ofpy_string_series(m, lambda s: s.__setitem__(1, None)),
+    "s.at = str": lambda m: _1ofpy_string_series(m, lambda s: s.at.__setitem__(3, "Z")),
+    "df.loc[mask, c] = str": lambda m: _1ofpy_string_frame(m, lambda f: f.loc.__setitem__((_1OFPY_MASK, "c"), "X")),
+    "df.loc[1, c] = str": lambda m: _1ofpy_string_frame(m, lambda f: f.loc.__setitem__((1, "c"), "X")),
+    "df.iloc[1, 0] = str": lambda m: _1ofpy_string_frame(m, lambda f: f.iloc.__setitem__((1, 0), "X")),
+    "df.at[1, c] = str": lambda m: _1ofpy_string_frame(m, lambda f: f.at.__setitem__((1, "c"), "X")),
+    "df.loc[mask, c] = None": lambda m: _1ofpy_string_frame(m, lambda f: f.loc.__setitem__((_1OFPY_MASK, "c"), None)),
+    "df.loc[mask, c] = nan": lambda m: _1ofpy_string_frame(m, lambda f: f.loc.__setitem__((_1OFPY_MASK, "c"), np.nan)),
+    # NEGATIVE: a non-str value is pandas' TypeError.
+    "s[mask] = 5 (NEGATIVE)": lambda m: _1ofpy_string_series(m, lambda s: s.__setitem__(_1OFPY_MASK, 5)),
+    "df.loc[mask, c] = 1.5 (NEGATIVE)": lambda m: _1ofpy_string_frame(m, lambda f: f.loc.__setitem__((_1OFPY_MASK, "c"), 1.5)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_1OFPY_STRING_CASES))
+def test_string_column_writes_like_pandas_1ofpy(case: str) -> None:
+    # A pandas string column written with a str or a missing value stays
+    # string (every write left it object; br-frankenpandas-1ofpy).
+    _more9_check(_1OFPY_STRING_CASES, case)
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
@@ -44382,6 +44428,20 @@ _0J3AB_CASES = {
     "zone": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17 13:45+01:00")),
     "zone Z": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17T13:45:10Z")),
     "ten digits": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17 13:45:10.1234567891")),
+    # Each of the four spellings with a T and a space, and their ordinals.
+    "hour space": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17 13")),
+    "minute space": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17 13:45")),
+    "second T": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17T13:45:10")),
+    "milli T": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17T13:45:10.5")),
+    "ordinals": lambda m: [
+        m.Period(text).ordinal
+        for text in [
+            "2020-05-17T13", "2020-05-17 13", "2020-05-17T13:45", "2020-05-17 13:45",
+            "2020-05-17T13:45:10", "2020-05-17 13:45:10", "2020-05-17T13:45:10.5", "2020-05-17 13:45:10.5",
+        ]
+    ],
+    # NEGATIVE: a month string stays a month period.
+    "month kept": lambda m: (lambda p: (str(p), p.freqstr, p.ordinal))(m.Period("2020-05")),
     # NEGATIVE: a clock that is no clock raises.
     "bad clock (NEGATIVE)": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17 1x:45")),
 }
@@ -44408,6 +44468,9 @@ _5IBZP_CASES = {
     "text index outer": lambda m: (lambda d: d.align(d.iloc[[3, 1]], join="outer"))(_5ibzp_frame(m).set_index(m.Index(list("pqrstuvwxy"))))[1],
     "columns outer": lambda m: (lambda d: d.align(d[["b"]].assign(c=1.0), join="outer", axis=1))(_5ibzp_frame(m))[1],
     "equal indexes": lambda m: (lambda d: d.align(d * 2))(_5ibzp_frame(m))[0],
+    # NEGATIVE: a union / intersection that is itself a range.
+    "outer contiguous slice": lambda m: (lambda d: d.align(d.iloc[2:7], join="outer"))(_5ibzp_frame(m))[1],
+    "inner contiguous slice": lambda m: (lambda d: d.align(d.iloc[2:7], join="inner"))(_5ibzp_frame(m))[0],
     "MultiIndex rows": lambda m: (lambda d: d.align(d.iloc[::2]))(_5ibzp_frame(m).set_index(m.MultiIndex.from_arrays([np.arange(10) % 3, np.arange(10)])))[1],
 }
 
@@ -44634,3 +44697,363 @@ def test_period_asfreq_args_and_counts_like_pandas_od7kt(case: str) -> None:
     # into a column (two PeriodIndex objects a call: 0.35x pandas) and its
     # value_counts tally its ordinals (0.83x; br-frankenpandas-od7kt).
     _more9_check(_OD7KT_MORE_CASES, case)
+
+
+def _cx5xh_days(m: Any) -> Any:
+    return m.Series(np.arange(12.0), index=m.period_range("2024-02-20", periods=12, freq="D", name="p"))
+
+
+def _cx5xh_months(m: Any) -> Any:
+    return m.Series(np.arange(6.0), index=m.period_range("2023-11", periods=6, freq="M"))
+
+
+_CX5XH_CASES = {
+    "slice days": lambda m: _cx5xh_days(m).loc["2024-02-22":"2024-02-24"],
+    "slice month": lambda m: _cx5xh_days(m).loc["2024-02":"2024-02"],
+    "slice open start": lambda m: _cx5xh_days(m).loc[:"2024-02-21"],
+    "slice past end": lambda m: _cx5xh_days(m).loc["2024-02-28":"2024-04-01"],
+    "key day": lambda m: _cx5xh_days(m).loc["2024-02-22"],
+    "key month": lambda m: _cx5xh_days(m).loc["2024-02"],
+    "getitem day": lambda m: _cx5xh_days(m)["2024-02-22"],
+    "getitem month": lambda m: _cx5xh_days(m)["2024-03"],
+    "frame row": lambda m: _cx5xh_days(m).to_frame("v").loc["2024-02-25"],
+    "frame month rows": lambda m: _cx5xh_days(m).to_frame("v").loc["2024-03"],
+    "monthly key year": lambda m: _cx5xh_months(m).loc["2024"],
+    "monthly slice finer stop": lambda m: _cx5xh_months(m).loc["2023-12":"2024-02-10"],
+    "list of strs": lambda m: _cx5xh_days(m).loc[["2024-02-22", "2024-02-24"]],
+    # NEGATIVE: finer text, text that is no date and a missing period raise.
+    "finer key (NEGATIVE)": lambda m: _cx5xh_days(m).loc["2024-02-22 13:00"],
+    "monthly key day (NEGATIVE)": lambda m: _cx5xh_months(m).loc["2024-01-15"],
+    "bad text (NEGATIVE)": lambda m: _cx5xh_days(m).loc["zzz"],
+    "missing day (NEGATIVE)": lambda m: _cx5xh_days(m).loc["2025-01-01"],
+    "int key (NEGATIVE)": lambda m: _cx5xh_days(m).loc[5],
+    "int key on a frame (NEGATIVE)": lambda m: _cx5xh_days(m).to_frame("v").loc[5],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_CX5XH_CASES))
+def test_period_partial_string_loc_like_pandas_cx5xh(case: str) -> None:
+    # A str key or slice bound on a period index names the period(s) of its
+    # freq the text covers, as pandas' partial-string indexing (it was looked
+    # up as text: a KeyError; br-frankenpandas-cx5xh).
+    _more9_check(_CX5XH_CASES, case)
+
+
+_IQH7M_TEXT = np.array(["b", "a", "c", "a", "zz"], dtype=object)[np.arange(60) % 5]
+
+_IQH7M_CASES = {
+    "concat same categories": lambda m: m.concat([m.Series(_IQH7M_TEXT).astype("category")] * 2),
+    "concat ordered": lambda m: m.concat([m.Series(_IQH7M_TEXT, dtype=m.CategoricalDtype(["c", "b", "a", "zz"], ordered=True))] * 2),
+    "concat with NaN": lambda m: m.concat([m.Series(["a", None, "b"]).astype("category"), m.Series(["b", "a", None]).astype("category")]),
+    "concat other categories": lambda m: m.concat([m.Series(["a", "b"]).astype("category"), m.Series(["b", "c"]).astype("category")]),
+    "concat keys": lambda m: m.concat([m.Series(["a", "b"], name="s").astype("category")] * 2, keys=["x", "y"]),
+    "frames with a categorical column": lambda m: m.concat([m.DataFrame({"c": m.Series(_IQH7M_TEXT[:6]).astype("category"), "v": np.arange(6)})] * 2),
+    "frames, categories differ": lambda m: m.concat([m.DataFrame({"c": m.Series(["a", "b"]).astype("category")}), m.DataFrame({"c": m.Series(["b", "z"]).astype("category")})]),
+    "concat ignore_index": lambda m: m.concat([m.Series(["a", "b"], index=[5, 6]).astype("category")] * 2, ignore_index=True),
+    "concat on a CategoricalIndex": lambda m: m.concat([m.Series(["a", "b"], index=m.CategoricalIndex(["p", "q"])).astype("category")] * 2),
+    "concat verify_integrity (NEGATIVE)": lambda m: m.concat([m.Series(["a", "b"]).astype("category")] * 2, verify_integrity=True),
+    "Categorical(values, categories)": lambda m: m.Series(m.Categorical(_IQH7M_TEXT, categories=["a", "b", "c"])),
+    "Categorical ordered": lambda m: m.Series(m.Categorical(_IQH7M_TEXT, categories=["c", "b", "a", "zz"], ordered=True)),
+    "Categorical of a list": lambda m: m.Series(m.Categorical(["a", "b", None, "a"], categories=["b", "a"])),
+    "Categorical of mixed objects": lambda m: m.Series(m.Categorical(["a", 1, 1.0, None], categories=["a", 1])),
+    "Categorical of an object array with None and numbers": lambda m: m.Series(m.Categorical(np.array(["a", None, 1, "b", np.nan, "zz"], dtype=object), categories=["a", "b"])),
+    "Categorical of a unicode array": lambda m: m.Series(m.Categorical(np.array(["b", "a", "zz", "b"]), categories=["a", "b"], ordered=True)),
+    "Categorical of an array, number categories": lambda m: m.Series(m.Categorical(np.array([1, "1", 2.0], dtype=object), categories=[1, 2])),
+    "astype CategoricalDtype": lambda m: m.Series(_IQH7M_TEXT).astype(m.CategoricalDtype(["zz", "a"])),
+    "Series(dtype=CategoricalDtype)": lambda m: m.Series(list(_IQH7M_TEXT), dtype=m.CategoricalDtype(["a", "b", "c", "zz"])),
+    "int values, float categories": lambda m: m.Series([1, 2, 3, 2]).astype(m.CategoricalDtype([1.0, 2.0])),
+    # NEGATIVE: values outside the categories are NaN; a bad dtype raises.
+    "all outside (NEGATIVE)": lambda m: m.Series(["q", "r"]).astype(m.CategoricalDtype(["a"])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_IQH7M_CASES))
+def test_categorical_against_categories_like_pandas_iqh7m(case: str) -> None:
+    # Values matched to given categories once a distinct value, and pieces
+    # of one categorical dtype concatenated by their codes (a row searched
+    # the categories: concat 0.00x pandas; br-frankenpandas-iqh7m).
+    _more9_check(_IQH7M_CASES, case)
+
+
+def _2k5lw_shown(mi: Any) -> Any:
+    return (
+        [repr(level.tolist()) for level in mi.levels],
+        [repr(list(codes)) for codes in mi.codes],
+        repr(list(mi.names)),
+        repr(mi.tolist()),
+    )
+
+
+_2K5LW_A = np.array([3, 1, 3, 2, 1, 3], dtype=np.int64)
+_2K5LW_B = np.array([0.5, 0.25, 0.5, 2.0, 0.25, 0.75])
+
+_2K5LW_CASES = {
+    "ints and floats": lambda m: _2k5lw_shown(m.MultiIndex.from_arrays([_2K5LW_A, _2K5LW_B])),
+    "named": lambda m: _2k5lw_shown(m.MultiIndex.from_arrays([_2K5LW_A, _2K5LW_B], names=["a", "b"])),
+    "bools": lambda m: _2k5lw_shown(m.MultiIndex.from_arrays([_2K5LW_A % 2 == 0, _2K5LW_A])),
+    "tuple of arrays": lambda m: _2k5lw_shown(m.MultiIndex.from_arrays((_2K5LW_B, _2K5LW_A))),
+    "uint8": lambda m: _2k5lw_shown(m.MultiIndex.from_arrays([_2K5LW_A.astype(np.uint8), _2K5LW_A])),
+    "as frame index": lambda m: m.DataFrame({"v": np.arange(6.0)}, index=m.MultiIndex.from_arrays([_2K5LW_A, _2K5LW_B])).sort_index(),
+    "with NaN": lambda m: _2k5lw_shown(m.MultiIndex.from_arrays([_2K5LW_A, np.array([0.5, np.nan, 0.5, 1.0, np.nan, 0.5])])),
+    "lists": lambda m: _2k5lw_shown(m.MultiIndex.from_arrays([["x", "y", "x"], [1, 2, 1]])),
+    # NEGATIVE: arrays of unequal length raise; a None element and an aware
+    # datetime array keep the labels path.
+    "unequal lengths (NEGATIVE)": lambda m: m.MultiIndex.from_arrays([_2K5LW_A, _2K5LW_B[:4]]),
+    "with None (NEGATIVE)": lambda m: _2k5lw_shown(m.MultiIndex.from_arrays([np.array([1, None, 1], dtype=object), _2K5LW_A[:3]])),
+    "aware datetimes (NEGATIVE)": lambda m: _2k5lw_shown(m.MultiIndex.from_arrays([m.date_range("2024-01-01", periods=3, tz="UTC"), _2K5LW_A[:3]])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case",
+    _more9_params(_2K5LW_CASES, {"with None (NEGATIVE)": "br-frankenpandas-ffrkp: a None label stays None, pandas' nan"}),
+)
+def test_multiindex_from_arrays_like_pandas_2k5lw(case: str) -> None:
+    # numpy arrays become their levels through a factorize of their typed
+    # columns (an object and a label an element: 0.02x pandas;
+    # br-frankenpandas-2k5lw); NaN, lists and others keep the labels path.
+    _more9_check(_2K5LW_CASES, case)
+
+
+def _cqub0_cat(m: Any, ordered: bool = False) -> Any:
+    dtype = m.CategoricalDtype(["c", "b", "a", "unused"], ordered=ordered)
+    return m.Series(["a", "b", None, "a", "c", None, "b"], dtype=dtype, name="k")
+
+
+_CQUB0_CASES = {
+    "fillna": lambda m: _cqub0_cat(m).fillna("c"),
+    "where then fillna": lambda m: _cqub0_cat(m).where(m.Series([True, False, True, True, False, True, True])).fillna("b"),
+    "fillna ordered": lambda m: _cqub0_cat(m, ordered=True).fillna("a"),
+    "fillna no missing": lambda m: _cqub0_cat(m).dropna().fillna("a"),
+    "map dict one-to-one": lambda m: _cqub0_cat(m).map({"a": "A", "b": "B", "c": "C", "unused": "U"}),
+    "map dict many-to-one": lambda m: _cqub0_cat(m).map({"a": "x", "b": "x", "c": "y", "unused": "z"}),
+    "map callable": lambda m: _cqub0_cat(m, ordered=True).dropna().map(str.upper),
+    "map missing NaN key": lambda m: _cqub0_cat(m).dropna().map({"a": 1, "b": 2, "c": 3, "unused": 4}),
+    "unique": lambda m: repr(_cqub0_cat(m).unique()),
+    "unique ordered": lambda m: repr(_cqub0_cat(m, ordered=True).unique()),
+    "unique no missing": lambda m: repr(_cqub0_cat(m).dropna().unique()),
+    "nunique": lambda m: _cqub0_cat(m).nunique(),
+    "nunique dropna=False": lambda m: _cqub0_cat(m).nunique(dropna=False),
+    "nunique no missing dropna=False": lambda m: _cqub0_cat(m).dropna().nunique(dropna=False),
+    "where ndarray": lambda m: _cqub0_cat(m).where(np.array([True, False, True, True, False, True, False])),
+    "where list": lambda m: _cqub0_cat(m, ordered=True).where([False, True, True, True, True, True, True]),
+    "where Series same index": lambda m: _cqub0_cat(m).where(m.Series([True, True, False, True, True, True, False])),
+    "where Series misaligned": lambda m: _cqub0_cat(m).where(m.Series([True, False, True], index=[6, 0, 3])),
+    "mask ndarray": lambda m: _cqub0_cat(m).mask(np.array([True, False, True, True, False, True, False])),
+    "where inplace": lambda m: (lambda s: (s.where(np.array([True, False] * 3 + [True]), inplace=True), s)[1])(_cqub0_cat(m)),
+    "where other category": lambda m: _cqub0_cat(m).where(np.array([True, False] * 3 + [True]), "b"),
+    "astype(str)": lambda m: _cqub0_cat(m).dropna().astype(str),
+    "astype(str) ordered": lambda m: _cqub0_cat(m, ordered=True).dropna().astype(str),
+    "where then astype(str)": lambda m: _cqub0_cat(m).where(np.array([True, False] * 3 + [True])).astype(str),
+    "astype(str) number categories": lambda m: m.Series([1.5, 2.0, 1.5], dtype="category").astype(str),
+    # NEGATIVE: a fill value outside the categories raises; so does an
+    # other outside them.
+    "fillna new category (NEGATIVE)": lambda m: _cqub0_cat(m).fillna("zz"),
+    "where other new category (NEGATIVE)": lambda m: _cqub0_cat(m).where(np.array([True, False] * 3 + [True]), "zz"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case",
+    _more9_params(
+        _CQUB0_CASES,
+        {"where then astype(str)": "br-frankenpandas-ekmhv: a missing row is pandas' np.str_('nan'), fp's a Python 'nan'"},
+    ),
+)
+def test_categorical_ops_like_pandas_cqub0(case: str) -> None:
+    # Categorical fillna / map / unique / nunique over the codes and the
+    # categories (a row searched or boxed: 0.02x-0.19x pandas;
+    # br-frankenpandas-cqub0).
+    _more9_check(_CQUB0_CASES, case)
+
+
+_2K5LW_PRODUCT_CASES = {
+    "two ranges": lambda m: _2k5lw_shown(m.MultiIndex.from_product([np.arange(3), np.arange(4)])),
+    "named three levels": lambda m: _2k5lw_shown(m.MultiIndex.from_product([["b", "a"], [1, 2], [0.5]], names=["x", "y", "z"])),
+    "repeated label": lambda m: _2k5lw_shown(m.MultiIndex.from_product([[3, 1, 3], ["p", "q"]])),
+    "with NaN": lambda m: _2k5lw_shown(m.MultiIndex.from_product([[1.0, np.nan], ["p"]])),
+    "ndarray with NaN": lambda m: _2k5lw_shown(m.MultiIndex.from_product([np.array([1.0, np.nan]), ["p", "q"]])),
+    "ndarrays": lambda m: _2k5lw_shown(m.MultiIndex.from_product([np.arange(3), np.array([0.5, 1.5]), np.array([True, False])])),
+    "frame on it": lambda m: m.DataFrame({"v": np.arange(6.0)}, index=m.MultiIndex.from_product([[2, 1], ["a", "b", "c"]])).sort_index(),
+    # NEGATIVE: an empty iterable makes an empty index of two levels (its
+    # levels catalog, [1, 2] in pandas, fp derives from rows: empty -
+    # noted on br-frankenpandas-2k5lw, not this lever's).
+    "empty iterable (NEGATIVE)": lambda m: (lambda mi: (len(mi), mi.nlevels, repr(mi.tolist())))(m.MultiIndex.from_product([[1, 2], []])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_2K5LW_PRODUCT_CASES))
+def test_multiindex_from_product_like_pandas_2k5lw(case: str) -> None:
+    # from_product's levels coded by arithmetic over each iterable's
+    # distinct labels (a label a row a level: 0.09x pandas;
+    # br-frankenpandas-2k5lw).
+    _more9_check(_2K5LW_PRODUCT_CASES, case)
+
+
+_VTBTM_V = np.random.default_rng(71).normal(size=40)
+
+_VTBTM_CASES = {
+    "floats": lambda m: m.concat([m.Series(_VTBTM_V)] * 2, keys=["a", "b"]),
+    "text": lambda m: m.concat([m.Series(["p", "q", "r"], name="t")] * 3, keys=[1, 2, 3]),
+    "frames": lambda m: m.concat([m.DataFrame({"v": _VTBTM_V, "w": _VTBTM_V * 2})] * 2, keys=["x", "y"]),
+    "string index": lambda m: m.concat([m.Series([1.0, 2.0], index=["r", "s"], name="n")] * 2, keys=["a", "b"]),
+    "named levels": lambda m: m.concat([m.Series(_VTBTM_V[:5])] * 2, keys=["a", "b"], names=["k", "i"]),
+    "different indexes": lambda m: m.concat([m.Series([1.0, 2.0]), m.Series([3.0], index=[7])], keys=["a", "b"]),
+    "repeated label": lambda m: m.concat([m.Series([1.0, 2.0], index=[0, 0])] * 2, keys=["a", "b"]),
+    "level values": lambda m: repr(m.concat([m.Series(_VTBTM_V[:4])] * 2, keys=["a", "b"]).index.get_level_values(1).tolist()),
+    # NEGATIVE: no objects is an error; MultiIndex pieces keep the hashed
+    # path.
+    "no objects (NEGATIVE)": lambda m: m.concat([], keys=[]),
+    "MultiIndex pieces (NEGATIVE)": lambda m: m.concat([m.Series([1.0, 2.0, 3.0], index=m.MultiIndex.from_arrays([[1, 1, 2], ["x", "y", "x"]]))] * 2, keys=["a", "b"]),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_VTBTM_CASES))
+def test_concat_keys_like_pandas_vtbtm(case: str) -> None:
+    # Pieces on one unique index code their rows by position under keys=
+    # (each label cloned and hashed: 0.04x pandas; br-frankenpandas-vtbtm).
+    _more9_check(_VTBTM_CASES, case)
+
+
+_GOAL5_CASES = {
+    "from_breaks floats": lambda m: repr(m.IntervalIndex.from_breaks(np.linspace(0, 1, 6))),
+    "from_breaks ints": lambda m: repr(m.IntervalIndex.from_breaks(np.arange(0, 12, 3))),
+    "from_breaks uint8 left": lambda m: repr(m.IntervalIndex.from_breaks(np.array([1, 4, 9], dtype=np.uint8), closed="left")),
+    "from_breaks named": lambda m: repr(m.IntervalIndex.from_breaks(np.array([0.5, 1.5, 2.5]), name="b")),
+    "from_breaks list": lambda m: repr(m.IntervalIndex.from_breaks([0, 2, 5])),
+    "one break": lambda m: repr(m.IntervalIndex.from_breaks(np.array([1.0]))),
+    "all-NaN breaks": lambda m: repr(m.IntervalIndex.from_breaks(np.array([np.nan, np.nan]))),
+    "interval_range closed both": lambda m: repr(m.interval_range(0, 10, periods=4, closed="both")),
+    "interval_range ints": lambda m: repr(m.interval_range(0, 12, freq=3)),
+    # NEGATIVE: a bad side and a NaN break missing on one side raise.
+    "bad closed (NEGATIVE)": lambda m: m.interval_range(0, 10, periods=4, closed="middle"),
+    "one-sided NaN break (NEGATIVE)": lambda m: m.IntervalIndex.from_breaks(np.array([0.0, np.nan, 2.0])),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case",
+    _more9_params(
+        _GOAL5_CASES,
+        {
+            "from_breaks uint8 left": "unsigned interval subtype (br-frankenpandas-n7qbg)",
+            "one break": "an empty from_breaks' subtype: float breaks float64 in pandas (br-frankenpandas-n7qbg)",
+        },
+    ),
+)
+def test_interval_constructors_like_pandas_goal5(case: str) -> None:
+    # A numpy array's breaks read off its column (a Python float a break:
+    # 0.10x pandas; br-frankenpandas-goal5).
+    _more9_check(_GOAL5_CASES, case)
+
+
+_U195H_V = np.random.default_rng(83).normal(size=200)
+
+_U195H_CASES = {
+    "cut floats": lambda m: repr(m.cut(_U195H_V, 7)),
+    "cut ints labels False": lambda m: repr(m.cut(np.arange(30), 4, labels=False).tolist()),
+    "cut bools": lambda m: repr(m.cut(np.array([True, False, True]), 2)),
+    "cut retbins": lambda m: repr(m.cut(_U195H_V, 5, retbins=True)[1].tolist()),
+    "cut with NaN": lambda m: repr(m.cut(np.array([0.5, np.nan, 2.5, 1.0]), 2)),
+    "qcut floats": lambda m: repr(m.qcut(_U195H_V, 4)),
+    "cut list": lambda m: repr(m.cut([1.0, 2.0, 3.0, 4.0], 2)),
+    # NEGATIVE: a 2-D array raises.
+    "cut 2-D (NEGATIVE)": lambda m: m.cut(np.ones((2, 2)), 2),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_U195H_CASES))
+def test_cut_numpy_input_like_pandas_u195h(case: str) -> None:
+    # cut / qcut read a numpy array off its typed column (tolist() and a
+    # Python float an element: 0.69x pandas; br-frankenpandas-u195h).
+    _more9_check(_U195H_CASES, case)
+
+
+_FZBXV_A = (np.arange(60) * 7) % 13
+_FZBXV_B = np.array(["x", "y", "z"], dtype=object)[(np.arange(60) * 5) % 3]
+
+
+def _fzbxv_mi(m: Any, unique: bool = False) -> Any:
+    """An unsorted two-level MultiIndex, its tuples repeated (or unique)."""
+    first = np.arange(60)[::-1] if unique else _FZBXV_A
+    return m.MultiIndex.from_arrays([first, _FZBXV_B], names=["a", "b"])
+
+
+def _fzbxv_loc(found: Any) -> Any:
+    """get_loc's answer, a mask as its list."""
+    return repr(np.asarray(found).tolist()) if isinstance(found, np.ndarray) else repr(found)
+
+
+_FZBXV_CASES = {
+    "in present": lambda m: (3, "y") in _fzbxv_mi(m),
+    "in absent": lambda m: (3, "q") in _fzbxv_mi(m),
+    "in float key": lambda m: (3.0, "y") in _fzbxv_mi(m),
+    "in first level": lambda m: 3 in _fzbxv_mi(m),
+    "in twice": lambda m: [(key in mi) for mi in [_fzbxv_mi(m)] for key in [(3, "y"), (12, "z"), (99, "x")]],
+    "get_loc unique": lambda m: _fzbxv_loc(_fzbxv_mi(m, unique=True).get_loc((50, "x"))),
+    "get_loc one of repeated index": lambda m: _fzbxv_loc(_fzbxv_mi(m).get_loc((3, "y"))),
+    "get_loc repeated": lambda m: _fzbxv_loc(_fzbxv_mi(m).get_loc((7, "z"))),
+    "get_loc sorted repeated": lambda m: _fzbxv_loc(_fzbxv_mi(m).sort_values().get_loc((7, "z"))),
+    "get_loc sorted one": lambda m: _fzbxv_loc(_fzbxv_mi(m).sort_values().get_loc((3, "y"))),
+    "get_loc evenly spaced": lambda m: _fzbxv_loc(m.MultiIndex.from_arrays([[1, 2, 1, 3], ["x", "y", "x", "z"]]).get_loc((1, "x"))),
+    "get_loc run": lambda m: _fzbxv_loc(m.MultiIndex.from_arrays([[2, 1, 1, 3], ["y", "x", "x", "z"]]).get_loc((1, "x"))),
+    "get_loc first level sorted, one": lambda m: _fzbxv_loc(m.MultiIndex.from_arrays([[1, 1, 2, 2], ["y", "x", "x", "x"]]).get_loc((1, "x"))),
+    "get_loc first level sorted, all": lambda m: _fzbxv_loc(m.MultiIndex.from_arrays([[1, 1, 2, 2], ["y", "x", "x", "x"]]).get_loc((2, "x"))),
+    "get_loc every row": lambda m: _fzbxv_loc(m.MultiIndex.from_arrays([[2, 2], ["x", "x"]]).get_loc((2, "x"))),
+    "get_loc partial tuple": lambda m: _fzbxv_loc(m.MultiIndex.from_arrays([[1, 2, 1, 3], ["x", "y", "x", "z"]]).get_loc((1,))),
+    "get_loc partial": lambda m: _fzbxv_loc(_fzbxv_mi(m).get_loc(3)),
+    "get_loc partial sorted": lambda m: _fzbxv_loc(_fzbxv_mi(m).sort_values().get_loc(3)),
+    "isin": lambda m: repr(np.asarray(_fzbxv_mi(m).isin([(3, "y"), (5, "x"), (99, "z")])).tolist()),
+    "isin float key": lambda m: repr(np.asarray(_fzbxv_mi(m).isin([(3.0, "y")])).tolist()),
+    "isin with NaN": lambda m: repr(np.asarray(m.MultiIndex.from_arrays([[1.0, np.nan, np.nan], ["x", "x", "y"]]).isin([(np.nan, "x")])).tolist()),
+    "frame loc repeated": lambda m: m.DataFrame({"v": np.arange(60)}, index=_fzbxv_mi(m)).loc[(7, "z")],
+    "frame loc one of repeated index": lambda m: m.DataFrame({"v": np.arange(60)}, index=_fzbxv_mi(m)).loc[(3, "y")],
+    "frame loc unique": lambda m: m.DataFrame({"v": np.arange(60)}, index=_fzbxv_mi(m, unique=True)).loc[(50, "x")],
+    "series loc repeated": lambda m: m.Series(np.arange(60.0), index=_fzbxv_mi(m)).loc[(7, "z")],
+    "series loc one of repeated index": lambda m: m.Series(np.arange(60.0), index=_fzbxv_mi(m)).loc[(3, "y")],
+    "series [] one of repeated index": lambda m: m.Series(np.arange(60.0), index=_fzbxv_mi(m))[(3, "y")],
+    "series at one of repeated index": lambda m: m.Series(np.arange(60.0), index=_fzbxv_mi(m)).at[(3, "y")],
+    "series loc unique": lambda m: m.Series(np.arange(60.0), index=_fzbxv_mi(m, unique=True)).loc[(50, "x")],
+    "series at unique": lambda m: m.Series(np.arange(60.0), index=_fzbxv_mi(m, unique=True)).at[(50, "x")],
+    "in NaN key": lambda m: (np.nan, "x") in m.MultiIndex.from_arrays([[1.0, np.nan], ["x", "x"]]),
+    "from_arrays text": lambda m: m.Series(np.arange(60), index=m.MultiIndex.from_arrays([_FZBXV_B, np.arange(60)[::-1]], names=["t", "i"])),
+    "from_arrays unicode array": lambda m: m.Series(np.arange(3), index=m.MultiIndex.from_arrays([np.array(["b", "a", "b"]), np.arange(3)])),
+    "from_arrays text with None": lambda m: m.Series(np.arange(3), index=m.MultiIndex.from_arrays([np.array(["b", None, "b"], dtype=object), np.arange(3)])),
+    "from_arrays mixed object": lambda m: m.Series(np.arange(3), index=m.MultiIndex.from_arrays([np.array(["b", 1, 1.0], dtype=object), np.arange(3)])),
+    "from_arrays text levels": lambda m: repr([list(level) for level in m.MultiIndex.from_arrays([_FZBXV_B, _FZBXV_A]).levels]),
+    "from_arrays text lookup": lambda m: _fzbxv_loc(m.MultiIndex.from_arrays([_FZBXV_B, np.arange(60)]).get_loc(("z", 1))),
+    # NEGATIVE: an absent tuple is a KeyError; a list is unhashable.
+    "get_loc absent (NEGATIVE)": lambda m: _fzbxv_mi(m).get_loc((3, "q")),
+    "frame loc absent (NEGATIVE)": lambda m: m.DataFrame({"v": np.arange(60)}, index=_fzbxv_mi(m)).loc[(99, "x")],
+    "series at absent (NEGATIVE)": lambda m: m.Series(np.arange(60.0), index=_fzbxv_mi(m)).at[(3, "q")],
+    "in list (NEGATIVE)": lambda m: [3, "y"] in _fzbxv_mi(m),
+    "in key of another type (NEGATIVE)": lambda m: ("3", "y") in _fzbxv_mi(m),
+    "get_loc key of another type (NEGATIVE)": lambda m: _fzbxv_mi(m).get_loc(("3", "y")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case",
+    _more9_params(
+        _FZBXV_CASES,
+        {
+            "frame loc unique": "br-frankenpandas-13bjo: the row's name holds Python scalars, pandas' the index's numpy ones",
+            "from_arrays text with None": "br-frankenpandas-ffrkp: a None label stays None, pandas' nan",
+            "from_arrays mixed object": "br-frankenpandas-ffrkp: 1 and 1.0 stay two level values",
+        },
+    ),
+)
+def test_multiindex_tuple_lookup_like_pandas_fzbxv(case: str) -> None:
+    # A full tuple's rows read off a lookup engine built once for the index
+    # (every row's labels were compared a lookup: (7, x) in mi 0.03x pandas;
+    # br-frankenpandas-fzbxv).
+    _more9_check(_FZBXV_CASES, case)
