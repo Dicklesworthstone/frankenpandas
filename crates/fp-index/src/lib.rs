@@ -1486,6 +1486,10 @@ enum StridedKind {
     Timedelta,
     /// `f64::to_bits` of each value, NaN the missing label (br-frankenpandas-smlca).
     Float64,
+    /// Period ordinals of one frequency, NaT as i64::MIN - a PeriodIndex's
+    /// labels, which every Python PeriodIndex made as a 32 B enum a period
+    /// (br-frankenpandas-od7kt).
+    Period(PeriodFreq),
 }
 
 impl StridedKind {
@@ -1494,6 +1498,7 @@ impl StridedKind {
             Self::Datetime => IndexLabel::Datetime64(value),
             Self::Timedelta => IndexLabel::Timedelta64(value),
             Self::Float64 => float64_label(f64::from_bits(value.cast_unsigned())),
+            Self::Period(freq) => IndexLabel::Period(Period::new(value, freq)),
         }
     }
 }
@@ -3582,11 +3587,30 @@ impl Index {
         ))
     }
 
+    /// An index of periods of `freq` over a typed backing - the ordinals
+    /// held as they are (NaT as i64::MIN), labels made only when something
+    /// reads them, slices views and takes gathers of the ordinals, as
+    /// [`Self::from_datetime64_values`] holds instants. Every Python
+    /// PeriodIndex's base index was a 32 B enum a period (0.42 ms for 50k;
+    /// br-frankenpandas-od7kt).
+    #[must_use]
+    #[doc(hidden)]
+    pub fn from_period_values(ordinals: Vec<i64>, freq: PeriodFreq) -> Self {
+        Self::from_typed_values(StridedKind::Period(freq), ordinals)
+    }
+
     fn from_typed_values(kind: StridedKind, nanos: Vec<i64>) -> Self {
+        // An empty period index has no label to show its freq, nor a
+        // declared dtype for one: the PeriodIndex keeps it (built_freq).
         let declared = match kind {
-            StridedKind::Datetime => DeclaredDtype::Datetime64,
-            StridedKind::Timedelta => DeclaredDtype::Timedelta64,
-            StridedKind::Float64 => DeclaredDtype::Float64,
+            StridedKind::Datetime => Some(DeclaredDtype::Datetime64),
+            StridedKind::Timedelta => Some(DeclaredDtype::Timedelta64),
+            StridedKind::Float64 => Some(DeclaredDtype::Float64),
+            StridedKind::Period(_) => None,
+        };
+        let declared_if_empty = |index: Self| match declared {
+            Some(dtype) => index.declared_if_empty(dtype),
+            None => index,
         };
         let len = nanos.len();
         let values = Arc::new(nanos);
@@ -3595,13 +3619,12 @@ impl Index {
             return match kind {
                 StridedKind::Datetime => Self::from_datetime64(nanos),
                 StridedKind::Timedelta => Self::from_timedelta64(nanos),
-                StridedKind::Float64 => {
-                    Self::new(nanos.into_iter().map(|bits| kind.label(bits)).collect())
-                        .declared_if_empty(declared)
-                }
+                StridedKind::Float64 | StridedKind::Period(_) => declared_if_empty(Self::new(
+                    nanos.into_iter().map(|bits| kind.label(bits)).collect(),
+                )),
             };
         };
-        Self {
+        declared_if_empty(Self {
             labels: IndexLabels::new_typed_strided(kind, view),
             name: None,
             label_identity: next_index_label_identity(),
@@ -3615,8 +3638,7 @@ impl Index {
             range: None,
             declared: None,
             categories: None,
-        }
-        .declared_if_empty(declared)
+        })
     }
 
     /// No labels show a type, so an empty index built as `dtype` declares
@@ -9097,6 +9119,195 @@ fn datetime_period_ordinal_at_boundary(
     datetime_period_ordinal(nanos, freq)
 }
 
+/// The nanoseconds one period of a fixed-span frequency covers (its periods
+/// start at the epoch and every multiple of it), or None for a calendar one
+/// (week, business day, month, quarter, year).
+const fn fixed_period_span_nanos(freq: PeriodFreq) -> Option<i64> {
+    match freq {
+        PeriodFreq::Daily => Some(Timedelta::NANOS_PER_DAY),
+        PeriodFreq::Hourly => Some(Timedelta::NANOS_PER_HOUR),
+        PeriodFreq::Minutely => Some(Timedelta::NANOS_PER_MIN),
+        PeriodFreq::Secondly => Some(Timedelta::NANOS_PER_SEC),
+        PeriodFreq::Milliseconds => Some(Timedelta::NANOS_PER_MILLI),
+        PeriodFreq::Microseconds => Some(Timedelta::NANOS_PER_MICRO),
+        PeriodFreq::Nanoseconds => Some(1),
+        _ => None,
+    }
+}
+
+/// The month count since 1970-01 `month` as a period of a month-based
+/// `target` - a month, or the fiscal quarter / year holding it.
+fn month_ordinal_at(month: i64, target: PeriodFreq) -> Option<i64> {
+    let months = month.checked_add(target.fiscal_month_shift())?;
+    match target {
+        PeriodFreq::Monthly => Some(months),
+        PeriodFreq::Quarterly(_) => Some(months.div_euclid(3)),
+        PeriodFreq::Annual(_) => Some(months.div_euclid(12)),
+        _ => None,
+    }
+}
+
+/// `period` at `target`'s frequency by integer arithmetic alone - what
+/// [`period_boundary_nanos`] then [`datetime_period_ordinal_at_boundary`]
+/// give it through chrono, about 40 ns a period (`dt.asfreq('M')` of 50k
+/// days 0.13x pandas; br-frankenpandas-od7kt): a fixed-span period's
+/// boundary instant at another fixed span, or the month (quarter, year) of
+/// its day; a month's quarter or year. None where that needs the calendar
+/// walk (a week, a business day, a quarter or year source) or overflows,
+/// which the exact path reports.
+fn period_asfreq_ordinal_fast(
+    period: Period,
+    target: PeriodFreq,
+    boundary: PeriodBoundary,
+) -> Option<i64> {
+    if period.freq == PeriodFreq::Monthly {
+        return month_ordinal_at(period.ordinal, target);
+    }
+    let span = fixed_period_span_nanos(period.freq)?;
+    let nanos = match boundary {
+        PeriodBoundary::Start => period.ordinal.checked_mul(span)?,
+        PeriodBoundary::End => period
+            .ordinal
+            .checked_add(1)?
+            .checked_mul(span)?
+            .checked_sub(1)?,
+    };
+    if nanos == i64::MIN {
+        return None;
+    }
+    if let Some(target_span) = fixed_period_span_nanos(target) {
+        return Some(nanos.div_euclid(target_span));
+    }
+    // A day's ordinal is its day count since the epoch.
+    let days = if period.freq == PeriodFreq::Daily {
+        period.ordinal
+    } else {
+        nanos.div_euclid(Timedelta::NANOS_PER_DAY)
+    };
+    let (year, month, _) = civil_from_epoch_days(days);
+    month_ordinal_at((year - 1970) * 12 + month - 1, target)
+}
+
+/// The period frequency an asfreq names.
+fn asfreq_target(freq: &str) -> Result<PeriodFreq, IndexError> {
+    PeriodFreq::parse(freq).ok_or_else(|| {
+        IndexError::InvalidArgument(format!("asfreq: unsupported frequency '{freq}'"))
+    })
+}
+
+/// `period` (no NaT) at `target`'s frequency, as pandas' asfreq: the
+/// integer kernel where it answers, else the calendar walk from the
+/// period's boundary instant.
+fn period_asfreq_ordinal(
+    period: Period,
+    target: PeriodFreq,
+    boundary: PeriodBoundary,
+) -> Result<i64, IndexError> {
+    if let Some(ordinal) = period_asfreq_ordinal_fast(period, target, boundary) {
+        return Ok(ordinal);
+    }
+    let nanos = period_boundary_nanos(period, boundary)?;
+    // pandas rolls a weekend day of a day or finer source the other way to
+    // a business day: its end forward to Monday, its start back to Friday
+    // (a week's or month's end rolls back); it rolled every source like a
+    // week's (br-frankenpandas-od7kt).
+    let flips = target == PeriodFreq::Business && fixed_period_span_nanos(period.freq).is_some();
+    let roll = match (flips, boundary) {
+        (true, PeriodBoundary::Start) => PeriodBoundary::End,
+        (true, PeriodBoundary::End) => PeriodBoundary::Start,
+        (false, boundary) => boundary,
+    };
+    datetime_period_ordinal_at_boundary(nanos, target, roll)
+}
+
+/// One asfreq's conversions, a run of source periods sharing an answer
+/// converted once: periods repeat in runs (a day's every timestamp), and a
+/// day's month, quarter or year is every day of it - distinct days walked
+/// the calendar each, 0.93x pandas (br-frankenpandas-od7kt).
+struct AsfreqRuns {
+    from: PeriodFreq,
+    target: PeriodFreq,
+    boundary: PeriodBoundary,
+    /// The run's source ordinals `lo..hi` and their answer.
+    run: Option<(i64, i64, i64)>,
+}
+
+impl AsfreqRuns {
+    const fn new(from: PeriodFreq, target: PeriodFreq, boundary: PeriodBoundary) -> Self {
+        Self {
+            from,
+            target,
+            boundary,
+            run: None,
+        }
+    }
+
+    /// A period of `from` (no NaT) at the target: the run's answer where
+    /// it holds the ordinal - checked inline, the per-row cost - else
+    /// [`Self::convert_new`].
+    #[inline]
+    fn convert(&mut self, ordinal: i64) -> Result<i64, IndexError> {
+        match self.run {
+            Some((lo, hi, answer)) if lo <= ordinal && ordinal < hi => Ok(answer),
+            _ => self.convert_new(ordinal),
+        }
+    }
+
+    /// `ordinal` converted, its run the new one.
+    #[inline(never)]
+    fn convert_new(&mut self, ordinal: i64) -> Result<i64, IndexError> {
+        let answer =
+            period_asfreq_ordinal(Period::new(ordinal, self.from), self.target, self.boundary)?;
+        // A day lies wholly in one month, quarter or year: every day of
+        // the answer's has it, whichever boundary.
+        let days = (self.from == PeriodFreq::Daily
+            && matches!(
+                self.target,
+                PeriodFreq::Monthly | PeriodFreq::Quarterly(_) | PeriodFreq::Annual(_)
+            ))
+        .then(|| target_day_span(answer, self.target))
+        .flatten();
+        let (lo, hi) = days.unwrap_or((ordinal, ordinal.saturating_add(1)));
+        self.run = Some((lo, hi, answer));
+        Ok(answer)
+    }
+}
+
+/// The days (`lo..hi` since the epoch) a period of a month-based freq
+/// spans, or None where its bounds are past the nanosecond range.
+fn target_day_span(ordinal: i64, freq: PeriodFreq) -> Option<(i64, i64)> {
+    let start = period_start_nanos(Period::new(ordinal, freq)).ok()?;
+    let next = period_start_nanos(Period::new(ordinal.checked_add(1)?, freq)).ok()?;
+    Some((
+        start.div_euclid(Timedelta::NANOS_PER_DAY),
+        next.div_euclid(Timedelta::NANOS_PER_DAY),
+    ))
+}
+
+/// [`PeriodIndex::asfreq_with_how`] of periods held as ordinals of `from`
+/// (NaT as i64::MIN, kept): the converted ordinals in one buffer and the
+/// target freq, no Period a row made and collected twice (an asfreq of a
+/// period column cost 0.4 ms for 50k whatever its target, pandas 0.15;
+/// br-frankenpandas-od7kt).
+pub fn asfreq_period_ordinals(
+    ordinals: &[i64],
+    from: PeriodFreq,
+    freq: &str,
+    how: &str,
+) -> Result<(Vec<i64>, PeriodFreq), IndexError> {
+    let target = asfreq_target(freq)?;
+    let mut runs = AsfreqRuns::new(from, target, parse_period_boundary_how(how, "asfreq")?);
+    let mut out = Vec::with_capacity(ordinals.len());
+    for &ordinal in ordinals {
+        out.push(if ordinal == i64::MIN {
+            i64::MIN
+        } else {
+            runs.convert(ordinal)?
+        });
+    }
+    Ok((out, target))
+}
+
 /// The period of `freq` holding the wall-clock instant `nanos`, as pandas'
 /// `Timestamp.to_period(freq)` (a NaT or out-of-range instant is an error).
 pub fn datetime_nanos_to_period(nanos: i64, freq: PeriodFreq) -> Result<Period, IndexError> {
@@ -14554,15 +14765,25 @@ impl PeriodIndex {
     #[must_use]
     pub fn to_index(&self) -> Index {
         // Period labels, so a Series / DataFrame on this index keeps it (it
-        // was their text; 45fzr).
-        Index::new(
-            self.values
-                .iter()
-                .copied()
-                .map(IndexLabel::Period)
-                .collect(),
-        )
-        .set_names(self.name.clone())
+        // was their text; 45fzr) - periods of one freq held as ordinals,
+        // labels made only when read (br-frankenpandas-od7kt).
+        let freq = self.values.first().map(|period| period.freq);
+        let index = match freq {
+            Some(freq) if self.values.iter().all(|period| period.freq == freq) => {
+                Index::from_period_values(
+                    self.values.iter().map(|period| period.ordinal).collect(),
+                    freq,
+                )
+            }
+            _ => Index::new(
+                self.values
+                    .iter()
+                    .copied()
+                    .map(IndexLabel::Period)
+                    .collect(),
+            ),
+        };
+        index.set_names(self.name.clone())
     }
 
     /// The PeriodIndex `index` holds: its labels periods of one freq (NaT
@@ -14738,24 +14959,24 @@ impl PeriodIndex {
     /// Supported `how` values mirror pandas' common aliases:
     /// `start` / `s` / `begin` and `end` / `e` / `finish`.
     pub fn asfreq_with_how(&self, freq: &str, how: &str) -> Result<Self, IndexError> {
-        let target_freq = PeriodFreq::parse(freq).ok_or_else(|| {
-            IndexError::InvalidArgument(format!("asfreq: unsupported frequency '{freq}'"))
-        })?;
+        let target_freq = asfreq_target(freq)?;
         let boundary = parse_period_boundary_how(how, "asfreq")?;
-        let values = self
-            .values
-            .iter()
-            .copied()
-            .map(|period| {
-                // NaT stays NaT at the new frequency.
-                if period.ordinal == i64::MIN {
-                    return Ok(Period::new(i64::MIN, target_freq));
-                }
-                let nanos = period_boundary_nanos(period, boundary)?;
-                datetime_period_ordinal_at_boundary(nanos, target_freq, boundary)
-                    .map(|ordinal| Period::new(ordinal, target_freq))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        // Runs of the periods' freq (an index's periods share one); a
+        // period of another converted alone.
+        let from = self.freq().unwrap_or(target_freq);
+        let mut runs = AsfreqRuns::new(from, target_freq, boundary);
+        let mut values = Vec::with_capacity(self.values.len());
+        for &period in &self.values {
+            // NaT stays NaT at the new frequency.
+            let ordinal = if period.ordinal == i64::MIN {
+                i64::MIN
+            } else if period.freq == from {
+                runs.convert(period.ordinal)?
+            } else {
+                period_asfreq_ordinal(period, target_freq, boundary)?
+            };
+            values.push(Period::new(ordinal, target_freq));
+        }
         Ok(Self {
             values,
             name: self.name.clone(),
@@ -14825,13 +15046,25 @@ impl PeriodIndex {
     /// Sunday - and a sub-daily period its own start (the hour it is). NaT
     /// stays NaT. The fields read the start (day 1, month 1 of a quarter).
     fn field_instants(&self) -> Result<DatetimeIndex, IndexError> {
+        Ok(DatetimeIndex::new(self.field_nanos()?))
+    }
+
+    /// [`Self::field_instants`]' instants: a day or a sub-daily period's is
+    /// its start, `ordinal * span` (the calendar walk spent ~25 ns a day;
+    /// br-frankenpandas-od7kt).
+    fn field_nanos(&self) -> Result<Vec<i64>, IndexError> {
         const DAY: i64 = 86_400_000_000_000;
-        let nanos = self
-            .values
+        self.values
             .iter()
             .map(|&period| {
                 if period.ordinal == i64::MIN {
                     return Ok(i64::MIN);
+                }
+                if let Some(nanos) = fixed_period_span_nanos(period.freq)
+                    .and_then(|span| period.ordinal.checked_mul(span))
+                    .filter(|&nanos| nanos != i64::MIN)
+                {
+                    return Ok(nanos);
                 }
                 match period.freq {
                     PeriodFreq::Hourly
@@ -14843,23 +15076,41 @@ impl PeriodIndex {
                     _ => period_end_nanos(period).map(|end| end - end.rem_euclid(DAY)),
                 }
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(DatetimeIndex::new(nanos))
+            .collect()
+    }
+
+    /// A date field of each period's field instant by Hinnant's civil
+    /// arithmetic (`pick` of its year, month, day; NaT None), not a chrono
+    /// date a period through Datetime64 labels.
+    fn field_dates<T>(
+        &self,
+        pick: impl Fn((i64, i64, i64)) -> Option<T>,
+    ) -> Result<Vec<Option<T>>, IndexError> {
+        const DAY: i64 = 86_400_000_000_000;
+        Ok(self
+            .field_nanos()?
+            .into_iter()
+            .map(|nanos| {
+                (nanos != i64::MIN)
+                    .then(|| pick(civil_from_epoch_days(nanos.div_euclid(DAY))))
+                    .flatten()
+            })
+            .collect())
     }
 
     /// Year component for each period, matching `pd.PeriodIndex.year`.
     pub fn year(&self) -> Result<Vec<Option<i32>>, IndexError> {
-        Ok(self.field_instants()?.year())
+        self.field_dates(|(year, _, _)| i32::try_from(year).ok())
     }
 
     /// Month component (1-12), matching `pd.PeriodIndex.month`.
     pub fn month(&self) -> Result<Vec<Option<u32>>, IndexError> {
-        Ok(self.field_instants()?.month())
+        self.field_dates(|(_, month, _)| u32::try_from(month).ok())
     }
 
     /// Day of month (1-31), matching `pd.PeriodIndex.day`.
     pub fn day(&self) -> Result<Vec<Option<u32>>, IndexError> {
-        Ok(self.field_instants()?.day())
+        self.field_dates(|(_, _, day)| u32::try_from(day).ok())
     }
 
     /// Hour (0-23), matching `pd.PeriodIndex.hour`.
@@ -41057,6 +41308,261 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    /// The integer asfreq kernel answers exactly as the chrono walk it
+    /// stands in front of, for every source / target pair it takes, both
+    /// boundaries, pre- and post-epoch ordinals and month / fiscal edges
+    /// (br-frankenpandas-od7kt).
+    #[test]
+    fn period_asfreq_fast_kernel_matches_the_calendar_walk_od7kt() {
+        use super::{PeriodBoundary, period_asfreq_ordinal_fast, period_boundary_nanos};
+
+        let fixed = [
+            PeriodFreq::Daily,
+            PeriodFreq::Hourly,
+            PeriodFreq::Minutely,
+            PeriodFreq::Secondly,
+            PeriodFreq::Milliseconds,
+            PeriodFreq::Microseconds,
+            PeriodFreq::Nanoseconds,
+        ];
+        let mut targets = fixed.to_vec();
+        targets.push(PeriodFreq::Monthly);
+        for month in 1..=12 {
+            targets.push(PeriodFreq::Annual(month));
+            targets.push(PeriodFreq::Quarterly(month));
+        }
+        // Days around the epoch, month ends, a leap day, 1678 and 2261.
+        let days: Vec<i64> = [-106_000, -36_525, -366, -61, -32, -1, 0, 30, 58, 59, 19_782]
+            .into_iter()
+            .chain((19_700..19_800).step_by(7))
+            .chain([106_000])
+            .collect();
+        let mut compared = 0;
+        for &source in fixed.iter().chain([&PeriodFreq::Monthly]) {
+            for &day in &days {
+                // A month inside the walk's nanosecond range (1677-2262).
+                let ordinal = match source {
+                    PeriodFreq::Monthly => day / 31,
+                    other => {
+                        let span = super::fixed_period_span_nanos(other).expect("fixed span");
+                        // A period inside that day, or the day itself.
+                        i64::try_from(
+                            i128::from(day) * i128::from(Timedelta::NANOS_PER_DAY)
+                                / i128::from(span),
+                        )
+                        .expect("in range")
+                            + 3
+                    }
+                };
+                let period = Period::new(ordinal, source);
+                for &target in &targets {
+                    for boundary in [PeriodBoundary::Start, PeriodBoundary::End] {
+                        let exact = period_boundary_nanos(period, boundary).and_then(|nanos| {
+                            super::datetime_period_ordinal_at_boundary(nanos, target, boundary)
+                        });
+                        let fast = period_asfreq_ordinal_fast(period, target, boundary);
+                        if source == PeriodFreq::Monthly
+                            && super::fixed_period_span_nanos(target).is_some()
+                        {
+                            assert_eq!(fast, None, "{period:?} -> {target:?} takes the walk");
+                            continue;
+                        }
+                        assert_eq!(fast, exact.ok(), "{period:?} -> {target:?}");
+                        compared += 1;
+                    }
+                }
+            }
+        }
+        assert!(compared > 10_000, "{compared}");
+        // NEGATIVE: a week, a business day, a fiscal source, and an
+        // overflowing boundary decline to the walk.
+        let day = Period::new(19_782, PeriodFreq::Daily);
+        assert_eq!(
+            period_asfreq_ordinal_fast(day, PeriodFreq::WEEKLY, PeriodBoundary::End),
+            None
+        );
+        assert_eq!(
+            period_asfreq_ordinal_fast(day, PeriodFreq::Business, PeriodBoundary::End),
+            None
+        );
+        assert_eq!(
+            period_asfreq_ordinal_fast(
+                Period::new(54, PeriodFreq::ANNUAL),
+                PeriodFreq::Monthly,
+                PeriodBoundary::Start
+            ),
+            None
+        );
+        assert_eq!(
+            period_asfreq_ordinal_fast(
+                Period::new(i64::MAX / 2, PeriodFreq::Daily),
+                PeriodFreq::Hourly,
+                PeriodBoundary::End
+            ),
+            None
+        );
+    }
+
+    /// pandas rolls a weekend day of a day or finer source to a business
+    /// day the other way from a week's: the end forward to Monday, the start
+    /// back to Friday; a week's end back to Friday (br-frankenpandas-od7kt).
+    #[test]
+    fn period_asfreq_business_rolls_like_pandas_od7kt() -> Result<(), super::IndexError> {
+        let business = |period: Period, how: &str| -> Result<i64, super::IndexError> {
+            Ok(super::PeriodIndex::new(vec![period])
+                .asfreq_with_how("B", how)?
+                .values()[0]
+                .ordinal)
+        };
+        // 2023-12-01 Friday, 02 Saturday, 04 Monday.
+        let day = |ordinal| Period::new(ordinal, PeriodFreq::Daily);
+        let friday = business(day(19_692), "end")?;
+        let monday = business(day(19_695), "end")?;
+        assert_eq!(monday, friday + 1);
+        assert_eq!(business(day(19_693), "end")?, monday);
+        assert_eq!(business(day(19_693), "start")?, friday);
+        // An hour of that Saturday rolls as its day.
+        let hour = Period::new(19_693 * 24 + 5, PeriodFreq::Hourly);
+        assert_eq!(business(hour, "end")?, monday);
+        assert_eq!(business(hour, "start")?, friday);
+        // NEGATIVE: the week ending Sunday 2023-12-03 ends on its Friday.
+        let week = Period::new(2_814, PeriodFreq::WEEKLY);
+        assert_eq!(
+            super::PeriodIndex::new(vec![week])
+                .to_timestamp("end")?
+                .asi8()[0]
+                / 86_400_000_000_000,
+            19_694
+        );
+        assert_eq!(business(week, "end")?, friday);
+        Ok(())
+    }
+
+    /// Ordinals converted in one buffer answer as the PeriodIndex's asfreq,
+    /// runs of repeats and NaT among them, for every target and boundary
+    /// (br-frankenpandas-od7kt). NEGATIVE: an unknown freq or how raises the
+    /// same errors.
+    #[test]
+    fn asfreq_period_ordinals_match_the_index_asfreq_od7kt() -> Result<(), super::IndexError> {
+        let ordinals = [
+            19_692,
+            19_692,
+            19_693,
+            i64::MIN,
+            19_693,
+            19_695,
+            -400,
+            19_692,
+        ];
+        let periods: Vec<Period> = ordinals
+            .iter()
+            .map(|&ordinal| Period::new(ordinal, PeriodFreq::Daily))
+            .collect();
+        let index = super::PeriodIndex::new(periods);
+        for freq in ["M", "Q-NOV", "Y", "h", "min", "B", "W-WED", "D"] {
+            for how in ["start", "end"] {
+                let (converted, target) =
+                    super::asfreq_period_ordinals(&ordinals, PeriodFreq::Daily, freq, how)?;
+                let want = index.asfreq_with_how(freq, how)?;
+                assert_eq!(Some(target), want.freq(), "{freq} {how}");
+                assert_eq!(converted, want.asi8(), "{freq} {how}");
+            }
+        }
+        assert_eq!(
+            super::asfreq_period_ordinals(&ordinals, PeriodFreq::Daily, "Z", "end")
+                .unwrap_err()
+                .to_string(),
+            index.asfreq_with_how("Z", "end").unwrap_err().to_string()
+        );
+        assert!(
+            super::asfreq_period_ordinals(&ordinals, PeriodFreq::Daily, "M", "middle").is_err()
+        );
+        // A run of consecutive days answers as each day converted alone:
+        // the month / quarter / year a day's answer spans holds exactly its
+        // days, pre- and post-epoch, fiscal anchors among them.
+        let days: Vec<i64> = (-800..800).chain(19_600..19_800).collect();
+        for freq in ["M", "Q-NOV", "Y-JUN", "Y"] {
+            for how in ["start", "end"] {
+                let (converted, target) =
+                    super::asfreq_period_ordinals(&days, PeriodFreq::Daily, freq, how)?;
+                let boundary = super::parse_period_boundary_how(how, "asfreq")?;
+                let alone: Vec<i64> = days
+                    .iter()
+                    .map(|&day| {
+                        super::period_asfreq_ordinal(
+                            Period::new(day, PeriodFreq::Daily),
+                            target,
+                            boundary,
+                        )
+                    })
+                    .collect::<Result<_, _>>()?;
+                assert_eq!(converted, alone, "{freq} {how}");
+            }
+        }
+        Ok(())
+    }
+
+    /// Period year / month / day by civil arithmetic read what the chrono
+    /// route through the field instants reads (br-frankenpandas-od7kt).
+    #[test]
+    fn period_date_fields_match_the_field_instants_od7kt() -> Result<(), super::IndexError> {
+        let mut periods = Vec::new();
+        for ordinal in [-800_i64, -366, -1, 0, 58, 59, 19_782, 100_000] {
+            periods.push(Period::new(ordinal, PeriodFreq::Daily));
+            periods.push(Period::new(ordinal * 24 + 5, PeriodFreq::Hourly));
+            periods.push(Period::new(ordinal / 7, PeriodFreq::WEEKLY));
+            periods.push(Period::new(ordinal / 30, PeriodFreq::Monthly));
+            periods.push(Period::new(ordinal / 91, PeriodFreq::Quarterly(11)));
+            periods.push(Period::new(ordinal / 365, PeriodFreq::ANNUAL));
+        }
+        periods.push(Period::new(i64::MIN, PeriodFreq::Daily));
+        let index = super::PeriodIndex::new(periods);
+        let instants = index.field_instants()?;
+        assert_eq!(index.year()?, instants.year());
+        assert_eq!(index.month()?, instants.month());
+        assert_eq!(index.day()?, instants.day());
+        // pandas: a month's day is its last (2024-02 has 29), a NaT's None.
+        let feb = super::PeriodIndex::new(vec![
+            Period::new(649, PeriodFreq::Monthly),
+            Period::new(i64::MIN, PeriodFreq::Monthly),
+        ]);
+        assert_eq!(feb.day()?, vec![Some(29), None]);
+        assert_eq!(feb.year()?, vec![Some(2024), None]);
+        Ok(())
+    }
+
+    /// A PeriodIndex's index of one freq holds its ordinals: the same labels
+    /// as the boxed periods, through a take, a slice and a NaT; mixed freqs
+    /// stay boxed (br-frankenpandas-od7kt).
+    #[test]
+    fn period_index_to_index_holds_ordinals_od7kt() {
+        let monthly = |ordinal| Period::new(ordinal, PeriodFreq::Monthly);
+        let periods = vec![monthly(649), monthly(i64::MIN), monthly(-3), monthly(650)];
+        let boxed: Vec<IndexLabel> = periods.iter().copied().map(IndexLabel::Period).collect();
+        let index = super::PeriodIndex::new(periods).set_name("p").to_index();
+        assert!(index.labels.typed_strided.is_some());
+        assert_eq!(index.labels(), boxed.as_slice());
+        assert_eq!(index.name().map(ToString::to_string), Some("p".to_owned()));
+        assert_eq!(
+            index.take(&[3, 1]).labels(),
+            [boxed[3].clone(), boxed[1].clone()]
+        );
+        assert_eq!(index.slice(1, 2).labels(), &boxed[1..3]);
+        assert_eq!(index.label_at(2), Some(boxed[2].clone()));
+        // NEGATIVE: periods of two freqs keep each its own.
+        let mixed = vec![monthly(649), Period::new(19_782, PeriodFreq::Daily)];
+        let mixed_index = super::PeriodIndex::new(mixed.clone()).to_index();
+        assert!(mixed_index.labels.typed_strided.is_none());
+        assert_eq!(
+            mixed_index.labels(),
+            mixed
+                .into_iter()
+                .map(IndexLabel::Period)
+                .collect::<Vec<_>>()
+        );
+        assert!(super::PeriodIndex::new(Vec::new()).to_index().is_empty());
     }
 
     #[test]

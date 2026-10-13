@@ -38989,12 +38989,7 @@ def test_frame_align_like_pandas_skv4q(case: str) -> None:
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 @pytest.mark.parametrize(
     "case",
-    [
-        pytest.param(case, marks=pytest.mark.xfail(strict=True, reason="br-frankenpandas-5ibzp"))
-        if case in ("full half", "half full", "inner join", "named", "names differ", "text column")
-        else case
-        for case in _SKV4Q_ALIGN_CASES
-    ],
+    list(_SKV4Q_ALIGN_CASES),
 )
 def test_frame_align_index_class_like_pandas_5ibzp(case: str) -> None:
     assert _skv4q_align_answer(fpd, case, "class") == _skv4q_align_answer(pd, case, "class")
@@ -42752,6 +42747,11 @@ _JMKB7_CASES = {
     "loc[mask, text] = str (1ofpy)": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__((_JMKB7_V > 0.5, "city"), "X")),
     "loc[mask, text] = non-ASCII (1ofpy)": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__((_JMKB7_V > 1.0, "city"), "日本")),
     "loc[rows, text] = str (1ofpy)": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__(([3, 1, 2], "city"), "Z")),
+    "loc[all-true mask, text] (1ofpy)": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__((np.ones(3000, dtype=bool), "city"), "A")),
+    "loc[all-false mask, text] (1ofpy)": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__((np.zeros(3000, dtype=bool), "city"), "A")),
+    "loc[first and last rows, text] (1ofpy)": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__((np.isin(np.arange(3000), [0, 2999]), "city"), "Ends")),
+    "loc[Series mask, text] (1ofpy)": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__((f["v"] < -0.3, "city"), "S")),
+    "loc[mask, text] of a row slice (1ofpy)": lambda m: (lambda f: (f.loc.__setitem__((_JMKB7_V[100:400] > 0.2, "city"), "Q"), f)[1])(_jmkb7_frame(m).iloc[100:400].copy()),
     # NEGATIVE: a missing / non-str write, a bool Series with a missing value.
     "loc[mask, text] = None (NEGATIVE)": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__((_JMKB7_V > 1.0, "city"), None)),
     "loc[mask, text] = 5 (NEGATIVE)": lambda m: _jmkb7_set(m, lambda f: f.loc.__setitem__((_JMKB7_V > 1.0, "city"), 5)),
@@ -44314,3 +44314,323 @@ def test_combine_first_keeps_dtype_like_pandas_7zc6m(case: str) -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", FutureWarning)
         _more9_check(_7ZC6M_CASES, case)
+
+
+def _yre6v_frame(m: Any) -> Any:
+    return m.DataFrame({"a": [1.0, 2.0, np.nan, 4.0], "b": [4, 3, 2, 1]}, index=[10, 20, 30, 40])
+
+
+_YRE6V_CASES = {
+    "rolling Series obj": lambda m: _yre6v_frame(m)["a"].rolling(2).obj,
+    "rolling frame obj": lambda m: _yre6v_frame(m).rolling(2).obj,
+    "rolling selected obj": lambda m: _yre6v_frame(m).rolling(2)["b"].obj,
+    "expanding obj": lambda m: _yre6v_frame(m).expanding().obj,
+    "ewm obj": lambda m: _yre6v_frame(m)["b"].ewm(span=2).obj,
+    "window obj": lambda m: _yre6v_frame(m)["a"].rolling(2, win_type="boxcar").obj,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case",
+    _more9_params(
+        _YRE6V_CASES,
+        {"rolling selected obj": "br-frankenpandas-yre6v: a selection's .obj is the column, pandas the whole frame"},
+    ),
+)
+def test_window_obj_like_pandas_yre6v(case: str) -> None:
+    # A window's .obj is the Series / DataFrame it runs over (it was missing;
+    # br-frankenpandas-yre6v).
+    _more9_check(_YRE6V_CASES, case)
+
+
+def _tgbj7_frame(m: Any) -> Any:
+    return m.DataFrame({"k": ["a", "b", "a", "b"], "f": m.array([True, False, True, None], dtype="boolean"), "v": [1.0, 2.0, 3.0, 4.0]})
+
+
+_TGBJ7_CASES = {
+    "crosstab labels": lambda m: (lambda r: ([bool(c) for c in r.columns], r[True].tolist()))(m.crosstab(_tgbj7_frame(m)["k"], _tgbj7_frame(m)["f"])),
+    "pivot_table labels": lambda m: (lambda r: ([bool(c) for c in r.columns], r[False].tolist()))(_tgbj7_frame(m).pivot_table(index="k", columns="f", values="v", aggfunc="sum")),
+    "Int64 columns": lambda m: (lambda r: ([int(c) for c in r.columns], r[2].tolist()))(m.crosstab(m.Series(["a", "b", "a"]), m.Series([1, 2, 1], dtype="Int64"))),
+    # The axis dtype pandas gives a masked column's values ('boolean').
+    "crosstab axis dtype": lambda m: str(m.crosstab(_tgbj7_frame(m)["k"], _tgbj7_frame(m)["f"]).columns.dtype),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "case",
+    _more9_params(_TGBJ7_CASES, {"crosstab axis dtype": "br-frankenpandas-tgbj7: bool, pandas boolean (no masked Index dtype)"}),
+)
+def test_masked_value_labels_like_pandas_tgbj7(case: str) -> None:
+    # A masked column's values label crosstab / pivot_table columns typed
+    # (they were the text 'False' / 'True'; br-frankenpandas-tgbj7).
+    _more9_check(_TGBJ7_CASES, case)
+
+
+_0J3AB_CASES = {
+    "hour": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17T13")),
+    "minute": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17T13:45")),
+    "second": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17 13:45:10")),
+    "milli": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17 13:45:10.5")),
+    "micro": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17 13:45:10.123456")),
+    "nano": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17 13:45:10.123456789")),
+    "midnight minute": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2021-01-01 00:00")),
+    "day kept": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17")),
+    # A zone suffix is left out (the wall time kept); a fraction past 9
+    # digits is cut to nanoseconds.
+    "zone": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17 13:45+01:00")),
+    "zone Z": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17T13:45:10Z")),
+    "ten digits": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17 13:45:10.1234567891")),
+    # NEGATIVE: a clock that is no clock raises.
+    "bad clock (NEGATIVE)": lambda m: (lambda p: (str(p), p.freqstr))(m.Period("2020-05-17 1x:45")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_0J3AB_CASES))
+def test_period_text_resolution_like_pandas_0j3ab(case: str) -> None:
+    # Period(text with a time of day) reads its resolution (it raised;
+    # br-frankenpandas-0j3ab).
+    _more9_check(_0J3AB_CASES, case)
+
+
+def _5ibzp_frame(m: Any) -> Any:
+    return m.DataFrame({"a": np.arange(10.0), "b": np.arange(10) * 2})
+
+
+_5IBZP_CASES = {
+    "outer": lambda m: (lambda d: d.align(d.iloc[::2], join="outer"))(_5ibzp_frame(m))[0],
+    "inner other side": lambda m: (lambda d: d.align(d.iloc[::2], join="inner"))(_5ibzp_frame(m))[1],
+    "left": lambda m: (lambda d: d.align(d.iloc[::3], join="left"))(_5ibzp_frame(m))[1],
+    "right": lambda m: (lambda d: d.align(d.iloc[::3], join="right"))(_5ibzp_frame(m))[0],
+    "Series outer": lambda m: (lambda s: s.align(s.iloc[::3]))(_5ibzp_frame(m)["a"])[1],
+    "text index outer": lambda m: (lambda d: d.align(d.iloc[[3, 1]], join="outer"))(_5ibzp_frame(m).set_index(m.Index(list("pqrstuvwxy"))))[1],
+    "columns outer": lambda m: (lambda d: d.align(d[["b"]].assign(c=1.0), join="outer", axis=1))(_5ibzp_frame(m))[1],
+    "equal indexes": lambda m: (lambda d: d.align(d * 2))(_5ibzp_frame(m))[0],
+    "MultiIndex rows": lambda m: (lambda d: d.align(d.iloc[::2]))(_5ibzp_frame(m).set_index(m.MultiIndex.from_arrays([np.arange(10) % 3, np.arange(10)])))[1],
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_5IBZP_CASES))
+def test_align_joins_like_pandas_5ibzp(case: str) -> None:
+    # An outer / inner align joins the indexes as pandas' join does (a
+    # RangeIndex beside its step-slice stayed a RangeIndex;
+    # br-frankenpandas-5ibzp).
+    _more9_check(_5IBZP_CASES, case)
+
+
+_OD7KT_PI = pd.Series(pd.date_range("2023-12-25", periods=40, freq="7h"))
+
+_OD7KT_CASES = {
+    "daily + 1": lambda m: m.Series(_OD7KT_PI).dt.to_period("D") + 1,
+    "daily - 3": lambda m: m.Series(_OD7KT_PI).dt.to_period("D") - 3,
+    "monthly + 13": lambda m: m.Series(_OD7KT_PI).dt.to_period("M") + 13,
+    "hourly + 5": lambda m: m.Series(_OD7KT_PI).dt.to_period("h") + 5,
+    "weekly + 2": lambda m: m.Series(_OD7KT_PI).dt.to_period("W-SUN") + 2,
+    "radd": lambda m: 2 + m.Series(_OD7KT_PI).dt.to_period("D"),
+    "NaT kept": lambda m: m.Series([m.Period("2024-01", "M"), m.NaT]).astype("period[M]") + 1,
+    # NEGATIVE: a bool and a float step raise.
+    "bool (NEGATIVE)": lambda m: m.Series(_OD7KT_PI).dt.to_period("D") + True,
+    "float (NEGATIVE)": lambda m: m.Series(_OD7KT_PI).dt.to_period("D") + 1.5,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_OD7KT_CASES))
+def test_period_shift_like_pandas_od7kt(case: str) -> None:
+    # A typed period column shifts its ordinals in one pass (a Scalar a
+    # period: pi + 1 0.28x pandas; br-frankenpandas-od7kt).
+    _more9_check(_OD7KT_CASES, case)
+
+
+def _od7kt_days(m: Any, start: str = "2023-11-28", n: int = 40, name: str | None = "d") -> Any:
+    return m.Series(pd.date_range(start, periods=n, freq="13h"), name=name).dt.to_period("D")
+
+
+_OD7KT_ASFREQ_CASES = {
+    "D to M": lambda m: _od7kt_days(m).dt.asfreq("M"),
+    "D to Q-NOV start": lambda m: _od7kt_days(m).dt.asfreq("Q-NOV", how="start"),
+    "D to Y-JUN": lambda m: _od7kt_days(m).dt.asfreq("Y-JUN"),
+    "D to h start": lambda m: _od7kt_days(m).dt.asfreq("h", how="start"),
+    "D to h end": lambda m: _od7kt_days(m).dt.asfreq("h"),
+    "D to ns end": lambda m: _od7kt_days(m, n=3).dt.asfreq("ns"),
+    "pre-epoch D to min": lambda m: _od7kt_days(m, start="1969-12-30").dt.asfreq("min", how="start"),
+    "pre-epoch D to M": lambda m: _od7kt_days(m, start="1969-11-29").dt.asfreq("M"),
+    "h to D": lambda m: m.Series(pd.date_range("2024-02-28", periods=40, freq="5h")).dt.to_period("h").dt.asfreq("D"),
+    "s to h end": lambda m: m.Series(pd.date_range("2024-02-28 23:58", periods=40, freq="7s")).dt.to_period("s").dt.asfreq("h"),
+    "M to Q": lambda m: m.Series(pd.date_range("2023-01-31", periods=14, freq="ME")).dt.to_period("M").dt.asfreq("Q"),
+    "M to Y-MAR start": lambda m: m.Series(pd.date_range("2023-01-31", periods=14, freq="ME")).dt.to_period("M").dt.asfreq("Y-MAR", how="s"),
+    "M to D end": lambda m: m.Series(pd.date_range("2024-01-31", periods=3, freq="ME")).dt.to_period("M").dt.asfreq("D"),
+    "D to W-WED": lambda m: _od7kt_days(m).dt.asfreq("W-WED"),
+    "D to B end": lambda m: _od7kt_days(m).dt.asfreq("B"),
+    "D to B start": lambda m: _od7kt_days(m).dt.asfreq("B", how="start"),
+    "h to B end and start": lambda m: m.DataFrame({h: m.Series(pd.date_range("2023-12-01 20:00", periods=60, freq="h")).dt.to_period("h").dt.asfreq("B", how=h) for h in ("end", "start")}),
+    "W to B end and start": lambda m: m.DataFrame({h: m.Series(pd.date_range("2023-11-26", periods=8, freq="D")).dt.to_period("W-SUN").dt.asfreq("B", how=h) for h in ("end", "start")}),
+    "M to B end": lambda m: m.Series(pd.date_range("2023-08-31", periods=6, freq="ME")).dt.to_period("M").dt.asfreq("B"),
+    "Q to M": lambda m: m.Series(pd.date_range("2023-01-31", periods=5, freq="QE")).dt.to_period("Q").dt.asfreq("M", how="start"),
+    "with NaT": lambda m: m.Series([m.Period("2024-01-30", "D"), None, m.Period("2024-03-01", "D")]).astype("period[D]").dt.asfreq("M"),
+    "index asfreq": lambda m: repr(m.PeriodIndex(_od7kt_days(m)).asfreq("Q", how="start")),
+    # NEGATIVE: an unknown freq and an unknown how raise.
+    "bad freq (NEGATIVE)": lambda m: _od7kt_days(m).dt.asfreq("Z"),
+    "bad how (NEGATIVE)": lambda m: _od7kt_days(m).dt.asfreq("M", how="middle"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_OD7KT_ASFREQ_CASES))
+def test_period_asfreq_like_pandas_od7kt(case: str) -> None:
+    # asfreq from a fixed-span period (or a month) to a fixed span, a month,
+    # quarter or year is integer arithmetic, the rest the calendar walk (40 ns
+    # a period: dt.asfreq('M') 0.13x pandas; br-frankenpandas-od7kt).
+    _more9_check(_OD7KT_ASFREQ_CASES, case)
+
+
+_OD7KT_CTOR_CASES = {
+    "of a Series": lambda m: repr(m.PeriodIndex(_od7kt_days(m))),
+    "of a Series, freq same": lambda m: repr(m.PeriodIndex(_od7kt_days(m), freq="D")),
+    "of a Series, freq M": lambda m: repr(m.PeriodIndex(_od7kt_days(m), freq="M")),
+    "of a Series, freq h": lambda m: repr(m.PeriodIndex(_od7kt_days(m), freq="h")),
+    "of a Series, name given": lambda m: repr(m.PeriodIndex(_od7kt_days(m), name="g")),
+    "of an unnamed Series": lambda m: repr(m.PeriodIndex(_od7kt_days(m, name=None))),
+    "of a PeriodIndex, freq Y": lambda m: repr(m.PeriodIndex(m.PeriodIndex(_od7kt_days(m)), freq="Y")),
+    "of a str Series": lambda m: repr(m.PeriodIndex(m.Series(["2024-01", "2024-02"], name="z"), freq="M")),
+    "of a NaT Series": lambda m: repr(m.PeriodIndex(m.Series([m.Period("2024-01", "M"), None], name="n").astype("period[M]"))),
+    "list same freq": lambda m: repr(m.PeriodIndex([m.Period("2024-01-30", "D")], freq="D")),
+    "to_series": lambda m: m.PeriodIndex(_od7kt_days(m)).to_series(),
+    # NEGATIVE: a Period at another freq than the given one raises.
+    "list other freq (NEGATIVE)": lambda m: m.PeriodIndex([m.Period("2024-01-30", "D")], freq="h"),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_OD7KT_CTOR_CASES))
+def test_period_index_ctor_like_pandas_od7kt(case: str) -> None:
+    # PeriodIndex(Series of periods) reads its ordinals and takes its name; a
+    # given freq converts it as asfreq(how='end') (it was kept; 3.4 ms for
+    # 50k; br-frankenpandas-od7kt).
+    _more9_check(_OD7KT_CTOR_CASES, case)
+
+
+_OD7KT_CMP_CASES = {
+    "eq": lambda m: _od7kt_days(m) == _od7kt_days(m),
+    "eq shifted": lambda m: _od7kt_days(m) == (_od7kt_days(m) + 1),
+    "ne shifted": lambda m: _od7kt_days(m) != _od7kt_days(m).shift(-1).fillna(m.Period("2024-01-01", "D")),
+    "lt": lambda m: _od7kt_days(m) < (_od7kt_days(m) + 1),
+    "ge": lambda m: _od7kt_days(m) >= (_od7kt_days(m) - 1),
+    "gt reversed": lambda m: _od7kt_days(m).sort_values(ascending=False).reset_index(drop=True) > _od7kt_days(m),
+    "names differ": lambda m: _od7kt_days(m) == _od7kt_days(m, name="e"),
+    "string index": lambda m: _od7kt_days(m).set_axis([f"r{i}" for i in range(40)]) <= _od7kt_days(m).set_axis([f"r{i}" for i in range(40)]),
+    "with NaT": lambda m: m.Series([m.Period("2024-01", "M"), None]).astype("period[M]") == m.Series([m.Period("2024-01", "M"), None]).astype("period[M]"),
+    "eq other freq": lambda m: _od7kt_days(m) == _od7kt_days(m).dt.asfreq("M"),
+    # NEGATIVE: ordering at another freq and misaligned labels raise.
+    "lt other freq (NEGATIVE)": lambda m: _od7kt_days(m) < _od7kt_days(m).dt.asfreq("M"),
+    "misaligned (NEGATIVE)": lambda m: _od7kt_days(m) == _od7kt_days(m).set_axis(range(1, 41)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_OD7KT_CMP_CASES))
+def test_period_series_comparison_like_pandas_od7kt(case: str) -> None:
+    # Two identically labeled Series of periods compare by ordinal (the cell
+    # comparison: 0.07x pandas; br-frankenpandas-od7kt).
+    _more9_check(_OD7KT_CMP_CASES, case)
+
+
+_OD7KT_FIELD_CASES = {
+    "D year": lambda m: _od7kt_days(m).dt.year,
+    "D month": lambda m: _od7kt_days(m).dt.month,
+    "D day": lambda m: _od7kt_days(m).dt.day,
+    "D quarter": lambda m: _od7kt_days(m).dt.quarter,
+    "D dayofweek": lambda m: _od7kt_days(m).dt.dayofweek,
+    "pre-epoch D day": lambda m: _od7kt_days(m, start="1969-12-27").dt.day,
+    "M day (its last)": lambda m: m.Series(pd.date_range("2023-12-31", periods=4, freq="ME")).dt.to_period("M").dt.day,
+    "Q-NOV month": lambda m: m.Series(pd.date_range("2023-12-31", periods=6, freq="ME")).dt.to_period("Q-NOV").dt.month,
+    "W-WED year": lambda m: m.Series(pd.date_range("2023-12-25", periods=6, freq="D")).dt.to_period("W-WED").dt.year,
+    "h hour and day": lambda m: m.DataFrame({"h": m.Series(pd.date_range("2024-02-28 20:00", periods=9, freq="h")).dt.to_period("h").dt.hour, "d": m.Series(pd.date_range("2024-02-28 20:00", periods=9, freq="h")).dt.to_period("h").dt.day}),
+    "NaT year": lambda m: m.Series([m.Period("2024-01", "M"), None]).astype("period[M]").dt.year,
+    "index year": lambda m: repr(m.PeriodIndex(_od7kt_days(m)).year),
+    "index day": lambda m: repr(m.PeriodIndex(_od7kt_days(m)).day),
+    # NEGATIVE: a field periods have no reading of raises.
+    "nanosecond-less field (NEGATIVE)": lambda m: _od7kt_days(m).dt.nonexistent_field,
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_OD7KT_FIELD_CASES))
+def test_period_fields_like_pandas_od7kt(case: str) -> None:
+    # A period's year / month / day read its field instant by civil
+    # arithmetic, and `.dt` fields come back typed (0.47x pandas;
+    # br-frankenpandas-od7kt).
+    _more9_check(_OD7KT_FIELD_CASES, case)
+
+
+_OD7KT_SHUFFLED = np.random.default_rng(7).permutation(40)
+
+
+def _od7kt_pidx(m: Any, freq: str = "D", n: int = 12, name: str | None = "p") -> Any:
+    return m.period_range("2024-02-20", periods=n, freq=freq, name=name)
+
+
+_OD7KT_INDEX_CASES = {
+    "period_range D": lambda m: repr(_od7kt_pidx(m)),
+    "period_range M": lambda m: repr(_od7kt_pidx(m, "M")),
+    "slice": lambda m: repr(_od7kt_pidx(m)[2:9:3]),
+    "take": lambda m: repr(_od7kt_pidx(m).take([5, 0, 5])),
+    "one label": lambda m: repr(_od7kt_pidx(m)[3]),
+    "get_loc": lambda m: _od7kt_pidx(m).get_loc(m.Period("2024-02-25", "D")),
+    "union": lambda m: repr(_od7kt_pidx(m)[:8].union(_od7kt_pidx(m, n=15)[5:])),
+    "intersection": lambda m: repr(_od7kt_pidx(m)[3:].intersection(_od7kt_pidx(m)[:6])),
+    "isin": lambda m: repr(_od7kt_pidx(m).isin([m.Period("2024-02-21", "D")])),
+    "Series on it": lambda m: m.Series(np.arange(12.0), index=_od7kt_pidx(m)).loc[m.Period("2024-02-22", "D"):m.Period("2024-02-24", "D")],
+    "to_series": lambda m: _od7kt_pidx(m).to_series(),
+    "Series of it": lambda m: m.Series(_od7kt_pidx(m)),
+    # Distinct periods: pandas' default quicksort leaves ties in no set order.
+    "sort_values desc": lambda m: m.Series([m.Period("2024-01-01", "D") + int(k) for k in _OD7KT_SHUFFLED]).sort_values(ascending=False),
+    "sort_values asc": lambda m: (_od7kt_days(m) + 0).sort_values(),
+    "sort_values with NaT": lambda m: m.Series([m.Period("2024-03", "M"), None, m.Period("2024-01", "M")]).astype("period[M]").sort_values(na_position="first"),
+    "index sort_values": lambda m: repr(_od7kt_pidx(m).take([4, 1, 9]).sort_values()),
+    "unique": lambda m: repr(list(_od7kt_days(m).unique())),
+    "unique with NaT": lambda m: repr(list(m.Series([m.Period("2024-03", "M"), None, m.Period("2024-03", "M")]).astype("period[M]").unique())),
+    # Distinct counts, as above: equal counts sort in no set order.
+    "value_counts": lambda m: m.Series([m.Period("2024-01-01", "D") + k for k in (0, 0, 0, 1, 2, 2, 2, 2, 3, 3, 4, 4, 4, 4, 4)]).value_counts(),
+    "nunique": lambda m: _od7kt_days(m).nunique(),
+    "drop_duplicates": lambda m: _od7kt_days(m).drop_duplicates(keep="last"),
+    # NEGATIVE: a period it does not hold is a KeyError.
+    "get_loc missing (NEGATIVE)": lambda m: _od7kt_pidx(m).get_loc(m.Period("2025-01-01", "D")),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_OD7KT_INDEX_CASES))
+def test_period_index_typed_like_pandas_od7kt(case: str) -> None:
+    # A PeriodIndex's base index holds its ordinals (a 32 B enum a period:
+    # 0.42 ms an object for 50k) and a period column sorts by its ordinals
+    # (0.55x pandas; br-frankenpandas-od7kt).
+    _more9_check(_OD7KT_INDEX_CASES, case)
+
+
+_OD7KT_MORE_CASES = {
+    "dt.asfreq kw freq": lambda m: _od7kt_days(m).dt.asfreq(freq="M"),
+    "dt.asfreq kw how start": lambda m: _od7kt_days(m).dt.asfreq("h", how="s"),
+    "dt.asfreq positional how": lambda m: _od7kt_days(m).dt.asfreq("h", "start"),
+    "dt.asfreq offset object": lambda m: _od7kt_days(m).dt.asfreq(m.offsets.MonthEnd()),
+    "Period.asfreq QuarterEnd": lambda m: repr(m.Period("2024-01-30", "D").asfreq(m.offsets.QuarterEnd())),
+    "PeriodIndex.asfreq YearEnd": lambda m: repr(m.PeriodIndex(_od7kt_days(m)).asfreq(m.offsets.YearEnd(), how="start")),
+    "value_counts dropna=False with NaT": lambda m: m.Series([m.Period("2024-01", "M"), None, m.Period("2024-01", "M"), None, None]).astype("period[M]").value_counts(dropna=False),
+    "value_counts normalize": lambda m: m.Series([m.Period("2024-01-01", "D") + k for k in (0, 0, 1)]).value_counts(normalize=True),
+    "value_counts ascending": lambda m: m.Series([m.Period("2024-01-01", "D") + k for k in (0, 0, 0, 1, 2, 2)]).value_counts(ascending=True),
+    # NEGATIVE: a bad freq and a bad keyword raise.
+    "dt.asfreq bad freq (NEGATIVE)": lambda m: _od7kt_days(m).dt.asfreq("Z"),
+    "dt.asfreq bad keyword (NEGATIVE)": lambda m: _od7kt_days(m).dt.asfreq("M", nonsense=1),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_OD7KT_MORE_CASES))
+def test_period_asfreq_args_and_counts_like_pandas_od7kt(case: str) -> None:
+    # .dt.asfreq of a typed period column converts its ordinals straight
+    # into a column (two PeriodIndex objects a call: 0.35x pandas) and its
+    # value_counts tally its ordinals (0.83x; br-frankenpandas-od7kt).
+    _more9_check(_OD7KT_MORE_CASES, case)

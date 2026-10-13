@@ -12620,6 +12620,13 @@ fn radix_argsort_u64(keys: &[u64]) -> Vec<usize> {
     if n < 2 {
         return (0..n).collect();
     }
+    // Keys already in order - a sorted column sorted again - are their own
+    // stable permutation: one pass, where the passes below scattered every
+    // key (an ascending 50k int64 sort_values 0.45 ms, pandas 0.24;
+    // br-frankenpandas-od7kt). Unsorted keys leave at their first inversion.
+    if keys.windows(2).all(|pair| pair[0] <= pair[1]) {
+        return (0..n).collect();
+    }
     // The exact-current 10M Float64 profile after the co-permuted-payload keep
     // put 73.3% of this kernel in the stable scatter and 20.6% in its histogram.
     // The eight LSD passes are dependent, but elements WITHIN a pass are not.
@@ -24615,7 +24622,49 @@ impl Column {
     #[must_use]
     #[doc(hidden)]
     pub fn put_text(&self, indices: &[usize], text: &str) -> Option<Self> {
+        if indices.windows(2).all(|pair| pair[0] < pair[1]) {
+            return self.text_runs_written(indices, text);
+        }
         self.text_rows_written(indices.iter().map(|&i| (i, text)))
+    }
+
+    /// [`Self::put_text`] at ascending distinct rows (a mask's): each run of
+    /// rows between two written ones copied whole, its offsets shifted, and
+    /// the text at each written row - a copy and a table entry a row, 44% of
+    /// df.loc[mask, text] = 'X' (br-frankenpandas-1ofpy).
+    fn text_runs_written(&self, indices: &[usize], text: &str) -> Option<Self> {
+        if self.dtype != DType::Utf8 || self.categorical.is_some() || self.pandas_string {
+            return None;
+        }
+        let rows = self.len();
+        if indices.last().is_some_and(|&last| last >= rows) {
+            return None;
+        }
+        let (bytes, offsets) = self.as_utf8_window()?;
+        let text = text.as_bytes();
+        let overwritten: usize = indices.iter().map(|&i| offsets[i + 1] - offsets[i]).sum();
+        let mut out_bytes = Vec::with_capacity(
+            offsets[rows] - offsets[0] - overwritten + indices.len() * text.len(),
+        );
+        let mut out_offsets = Vec::with_capacity(rows + 1);
+        out_offsets.push(0);
+        // Rows `from..to` keep their spans: one copy, their offsets shifted.
+        let keep_run =
+            |out_bytes: &mut Vec<u8>, out_offsets: &mut Vec<usize>, from: usize, to: usize| {
+                let (start, end) = (offsets[from], offsets[to]);
+                let base = out_bytes.len();
+                out_bytes.extend_from_slice(&bytes[start..end]);
+                out_offsets.extend(offsets[from + 1..=to].iter().map(|&o| o - start + base));
+            };
+        let mut kept_from = 0;
+        for &row in indices {
+            keep_run(&mut out_bytes, &mut out_offsets, kept_from, row);
+            out_bytes.extend_from_slice(text);
+            out_offsets.push(out_bytes.len());
+            kept_from = row + 1;
+        }
+        keep_run(&mut out_bytes, &mut out_offsets, kept_from, rows);
+        Some(Self::from_utf8_contiguous(out_bytes, out_offsets))
     }
 
     /// The column [`Self::put_text`] and [`Self::put`] write: each row its
@@ -43704,6 +43753,32 @@ mod tests {
         assert!(crate::combined_counting_argsort(&[a, wide], n).is_none());
     }
 
+    /// Keys already in order are their own stable permutation, ties in
+    /// their order (br-frankenpandas-od7kt). NEGATIVE: one inversion at the
+    /// very end, keys in reverse and scattered keys sort as the stable sort.
+    #[test]
+    fn radix_argsort_of_ordered_keys_is_the_identity_od7kt() {
+        let n = 3000_usize;
+        let stable = |keys: &[u64]| {
+            let mut want: Vec<usize> = (0..keys.len()).collect();
+            want.sort_by_key(|&i| keys[i]);
+            want
+        };
+        let ordered: Vec<u64> = (0..n).map(|i| (i / 7) as u64).collect();
+        assert_eq!(
+            crate::radix_argsort_u64(&ordered),
+            (0..n).collect::<Vec<_>>()
+        );
+        let mut late = ordered.clone();
+        late[n - 1] = 0;
+        let reversed: Vec<u64> = ordered.iter().rev().copied().collect();
+        let scattered: Vec<u64> = (0..n).map(|i| ((i * 7919) % 101) as u64).collect();
+        for keys in [&late, &reversed, &scattered] {
+            assert_eq!(crate::radix_argsort_u64(keys), stable(keys));
+        }
+        assert_ne!(crate::radix_argsort_u64(&late), (0..n).collect::<Vec<_>>());
+    }
+
     #[test]
     fn pct_change_values_are_the_row_rule_faizi() {
         // The kernel's ratios are the row loop's bits - 4 lanes where the
@@ -44095,6 +44170,46 @@ mod tests {
             text(&head.take_positions(&[4, 1, 0])),
             ["tail", "abcdefghijklmnopq", "a"]
         );
+    }
+
+    #[test]
+    fn text_runs_written_match_the_row_writer_1ofpy() {
+        // br-frankenpandas-1ofpy: ascending rows written by runs make the
+        // column the row-at-a-time writer makes - whole and windowed, the
+        // first / last rows, adjacent rows, none and all. NEGATIVE: a row
+        // past the end declines (None), as the row writer does.
+        let cells = ["ab", "", "é", "cd", "e", "日本", "f"];
+        let mut bytes = Vec::new();
+        let mut offsets = vec![0];
+        for cell in cells {
+            bytes.extend_from_slice(cell.as_bytes());
+            offsets.push(bytes.len());
+        }
+        let source = Column::from_utf8_contiguous(bytes, offsets);
+        let window = source.take_contiguous_range(2, 4);
+        for column in [&source, &window] {
+            let rows = column.len();
+            let sets: Vec<Vec<usize>> = vec![
+                vec![0],
+                vec![rows - 1],
+                vec![0, 1, 2],
+                vec![1, 3],
+                Vec::new(),
+                (0..rows).collect(),
+            ];
+            for set in sets {
+                let runs = column.text_runs_written(&set, "Zé").unwrap();
+                let by_row = column
+                    .text_rows_written(set.iter().map(|&row| (row, "Zé")))
+                    .unwrap();
+                assert_eq!(runs.values(), by_row.values(), "{set:?}");
+                assert_eq!(
+                    column.put_text(&set, "Zé").unwrap().values(),
+                    by_row.values()
+                );
+            }
+            assert!(column.text_runs_written(&[0, rows], "Z").is_none());
+        }
     }
 
     #[test]

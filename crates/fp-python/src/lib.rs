@@ -382,6 +382,9 @@ fn column_period_freq(column: &Column) -> Option<PeriodFreq> {
     if holds_only_typed_cells(&column.dtype()) || column.as_utf8_contiguous().is_some() {
         return None;
     }
+    if let Some((_, freq)) = column.as_period_slice() {
+        return Some(freq);
+    }
     // A categorical held as codes holds its categories only: no period among
     // them, none among its cells - which every comparison boxed a million of
     // to scan (`s == 'key7'` spent 59% here; br-frankenpandas-mwpo1).
@@ -394,15 +397,27 @@ fn column_period_freq(column: &Column) -> Option<PeriodFreq> {
     {
         return None;
     }
-    column.values().iter().find_map(|value| match value {
-        Scalar::Period(period) => Some(period.freq),
-        _ => None,
-    })
+    // A gathered NaT is a daily one (missing_for_dtype): the column's freq
+    // is its periods' (a sorted period[M] column with its NaT first read
+    // period[D]; br-frankenpandas-od7kt), a NaT's only when it holds none.
+    let values = column.values();
+    let freq_of = |nat: bool| {
+        values.iter().find_map(|value| match value {
+            Scalar::Period(period) if nat || period.ordinal != i64::MIN => Some(period.freq),
+            _ => None,
+        })
+    };
+    freq_of(false).or_else(|| freq_of(true))
 }
 
 /// A Period column's values as the PeriodIndex pandas' `.dt` of periods
 /// reads (a missing value NaT at the column's frequency).
 fn column_period_index(column: &Column) -> fp_index::PeriodIndex {
+    // Typed ordinals are the periods without a Scalar each (the accessor
+    // boxed 50k for every `.dt` call; br-frankenpandas-od7kt).
+    if let Some((ordinals, freq)) = column.as_period_slice() {
+        return fp_index::PeriodIndex::from_ordinals(ordinals, freq);
+    }
     let freq = column_period_freq(column).unwrap_or(PeriodFreq::Daily);
     fp_index::PeriodIndex::new(
         column
@@ -431,6 +446,33 @@ fn period_comparison(
     let Some(freq) = column_period_freq(series.column()) else {
         return Ok(None);
     };
+    // Two identically labeled Series of periods at one freq, neither NaT,
+    // compare by ordinal (they went through the generic cell comparison:
+    // 50k 0.07x pandas; br-frankenpandas-od7kt).
+    if let Ok(other_series) = other.extract::<PyRef<'_, PySeries>>() {
+        if let Some((own, own_freq)) = series.column().as_period_slice()
+            && let Some((theirs, their_freq)) = other_series.inner.column().as_period_slice()
+            && own_freq == their_freq
+            && own.len() == theirs.len()
+            && !own.contains(&i64::MIN)
+            && !theirs.contains(&i64::MIN)
+            && series.index() == other_series.inner.index()
+        {
+            let flags = own
+                .iter()
+                .zip(theirs)
+                .map(|(own, theirs)| holds(own.cmp(theirs)))
+                .collect();
+            return Series::new(
+                op_result_name(series, other)?,
+                series.index().clone(),
+                Column::from_bool_values(flags),
+            )
+            .map(Some)
+            .map_err(frame_error_to_py);
+        }
+        return Ok(None);
+    }
     let period = if let Ok(period) = other.extract::<PyRef<'_, PyPeriod>>() {
         period.inner
     } else if let Ok(text) = other.extract::<String>() {
@@ -471,6 +513,23 @@ fn shifted_periods(series: &Series, n: &Bound<'_, PyAny>, sign: i64) -> PyResult
     let Some(steps) = n.extract::<i64>().ok().and_then(|n| n.checked_mul(sign)) else {
         return Ok(None);
     };
+    // An all-valid typed period column with no NaT datum shifts its
+    // ordinals in one pass: each period went through a Scalar and the
+    // column was inferred again (pi + 1 0.28x pandas; br-frankenpandas-od7kt).
+    if let Some((ordinals, freq)) = series.column().as_period_slice()
+        && !ordinals.contains(&i64::MIN)
+    {
+        let column = Column::from_period_values_owned(
+            ordinals
+                .iter()
+                .map(|&ordinal| ordinal.saturating_add(steps))
+                .collect(),
+            freq,
+        );
+        return Series::new(series.name(), series.index().clone(), column)
+            .map(Some)
+            .map_err(frame_error_to_py);
+    }
     let values = series
         .column()
         .values()
@@ -6499,6 +6558,28 @@ impl PyTimestamp {
     }
 }
 
+/// The period frequency an asfreq `freq` names: a str as it is, a pandas
+/// offset by its freqstr with the end-anchored month / quarter / year
+/// spelled as a period's ('ME' is 'M', 'QE-DEC' 'Q-DEC', as pandas reads
+/// `asfreq(MonthEnd())`; an offset raised "not an instance of 'str'";
+/// br-frankenpandas-od7kt).
+fn period_freq_text(freq: &Bound<'_, PyAny>) -> PyResult<String> {
+    if let Ok(text) = freq.extract::<String>() {
+        return Ok(text);
+    }
+    let freqstr: String = freq.getattr("freqstr")?.extract()?;
+    let (head, anchor) = freqstr
+        .split_once('-')
+        .map_or((freqstr.as_str(), None), |(head, anchor)| {
+            (head, Some(anchor))
+        });
+    let head = match head {
+        "ME" | "QE" | "YE" => &head[..1],
+        other => other,
+    };
+    Ok(anchor.map_or_else(|| head.to_owned(), |anchor| format!("{head}-{anchor}")))
+}
+
 fn convert_period_freq(p: Period, target_freq: &str, how: &str) -> PyResult<Period> {
     if p.ordinal == i64::MIN {
         return Ok(p);
@@ -6508,6 +6589,51 @@ fn convert_period_freq(p: Period, target_freq: &str, how: &str) -> PyResult<Peri
         .asfreq_with_how(target_freq, how)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
     Ok(res.values().first().copied().unwrap_or(p))
+}
+
+/// The resolution pandas' `Period(text)` gives a text naming a time of day,
+/// and the wall-clock text it reads: '2020-05-17T13' hourly, '... 13:45'
+/// minutely, '... 13:45:10' by the second, a fraction of 1-3 / 4-6 / 7+
+/// digits ms / us / ns (past 9 cut to 9); a zone suffix ('+01:00', 'Z') is
+/// left out, the wall time kept, as pandas does. None for a text with no
+/// time of day, or one this does not read.
+fn period_text_time_resolution(text: &str) -> Option<(&'static str, String)> {
+    let text = text.trim();
+    let (date, time) = text.split_once(['T', ' '])?;
+    let time = time.strip_suffix('Z').unwrap_or(time);
+    // A '+HH:MM' / '-HH:MM' zone after the clock (a '-' at the clock's
+    // start would be no clock).
+    let time = match time.rfind(['+', '-']) {
+        Some(at) if at > 0 => &time[..at],
+        _ => time,
+    };
+    let (clock, fraction) = match time.split_once('.') {
+        Some((clock, fraction)) => (clock, Some(fraction)),
+        None => (time, None),
+    };
+    if clock.is_empty() || !clock.chars().all(|c| c.is_ascii_digit() || c == ':') {
+        return None;
+    }
+    let freq = match (clock.matches(':').count(), fraction) {
+        (0, None) => "h",
+        (1, None) => "min",
+        (2, None) => "s",
+        (2, Some(fraction))
+            if !fraction.is_empty() && fraction.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            match fraction.len() {
+                1..=3 => "ms",
+                4..=6 => "us",
+                _ => "ns",
+            }
+        }
+        _ => return None,
+    };
+    let wall = match fraction {
+        Some(fraction) => format!("{date} {clock}.{}", &fraction[..fraction.len().min(9)]),
+        None => format!("{date} {clock}"),
+    };
+    Some((freq, wall))
 }
 
 /// A Period from its text, as pandas' `Period(text, freq)` reads it: period
@@ -6528,7 +6654,16 @@ fn period_from_text(text: &str, freq: Option<&str>) -> PyResult<Period> {
             _ => convert_period_freq(period, freq, "start"),
         },
         (Ok(period), None) => Ok(period),
-        (Err(err), None) => Err(unreadable(err.to_string())),
+        // A time of day names its resolution, as pandas reads it (it
+        // raised; br-frankenpandas-0j3ab).
+        // A text read as nothing is pandas' DateParseError (a ValueError).
+        (Err(_), None) => match period_text_time_resolution(text) {
+            Some((freq, wall)) => period_from_text(&wall, Some(freq)),
+            None => Err(DateParseError::new_err(format!(
+                "Unknown datetime string format, unable to parse: {}",
+                text.to_uppercase()
+            ))),
+        },
         (Err(err), Some(freq)) => {
             let target = PeriodFreq::parse(freq)
                 .ok_or_else(|| unreadable(format!("unsupported frequency '{freq}'")))?;
@@ -6892,8 +7027,8 @@ impl PyPeriod {
     }
 
     #[pyo3(signature = (freq, how="end"))]
-    fn asfreq(&self, freq: &str, how: &str) -> PyResult<Self> {
-        let p = convert_period_freq(self.inner, freq, how)?;
+    fn asfreq(&self, freq: &Bound<'_, PyAny>, how: &str) -> PyResult<Self> {
+        let p = convert_period_freq(self.inner, &period_freq_text(freq)?, how)?;
         Ok(Self { inner: p })
     }
 
@@ -11180,6 +11315,9 @@ fn py_index_arg_name(obj: &Bound<'_, PyAny>) -> Option<LabelName> {
     } else if let Ok(categorical) = obj.extract::<PyRef<'_, PyCategoricalIndex>>() {
         // A CategoricalIndex's name too (it was dropped; cld41).
         categorical.inner.name().cloned()
+    } else if let Ok(periods) = obj.extract::<PyRef<'_, PyPeriodIndex>>() {
+        // A PeriodIndex's too (it was dropped; br-frankenpandas-od7kt).
+        periods.inner.name().cloned()
     } else if let Ok(series) = obj.extract::<PyRef<'_, PySeries>>() {
         let name = series.inner.name();
         (!name.is_empty()).then(|| name.clone())
@@ -13031,6 +13169,10 @@ fn index_arg_index(index: &Bound<'_, PyAny>) -> PyResult<Index> {
     Ok(
         if let Ok(dti) = index.extract::<PyRef<'_, PyDatetimeIndex>>() {
             dti.inner.as_index().clone()
+        } else if let Ok(periods) = index.extract::<PyRef<'_, PyPeriodIndex>>() {
+            // A PeriodIndex's ordinals and name (its labels were copied out
+            // and its name dropped; br-frankenpandas-od7kt).
+            periods.inner.to_index()
         } else if let Ok(plain) = plain_index_ref(index) {
             // An Index is its own rows, its labels shared: they were copied
             // out and rebuilt (Series(v, index=Index(arr)) 14.7 ms a million;
@@ -24413,25 +24555,39 @@ pub struct PyPeriodIndex {
 
 index_subclass_object!(PyPeriodIndex);
 
-/// pandas' PeriodIndex field (year, month, quarter, ...): an int64 Index, a
-/// NaT period's field -1 (pandas' period field arrays). It was a list
-/// holding None.
-fn period_field_index<T: Into<i64>>(
-    py: Python<'_>,
-    values: Result<Vec<Option<T>>, fp_index::IndexError>,
-) -> PyResult<Py<PyAny>> {
-    let labels = values
-        .map_err(index_error_to_py)?
-        .into_iter()
-        .map(|value| IndexLabel::Int64(value.map_or(-1, Into::into)))
-        .collect();
-    PyIndex {
-        inner: Index::new(labels),
-    }
-    .into_py_any(py)
+/// Periods of one frequency, none NaT, as a typed period column - the
+/// ordinals, no Scalar a row nor the dtype inferred again (a `.dt` result
+/// of 50k periods spent 2 ms there; br-frankenpandas-od7kt). None for no
+/// period, a NaT or mixed frequencies, which [`Column::from_values`] reads.
+fn typed_period_column(periods: &[Period]) -> Option<Column> {
+    let freq = periods.first()?.freq;
+    let ordinals = periods
+        .iter()
+        .map(|period| (period.freq == freq && period.ordinal != i64::MIN).then_some(period.ordinal))
+        .collect::<Option<Vec<i64>>>()?;
+    Some(Column::from_period_values_owned(ordinals, freq))
 }
 
 impl PyPeriodIndex {
+    /// pandas' PeriodIndex field (year, month, quarter, ...): an int64 Index
+    /// under this index's name (it was unnamed), a NaT period's field -1
+    /// (pandas' period field arrays). It was a list holding None.
+    fn field_index<T: Into<i64>>(
+        &self,
+        py: Python<'_>,
+        values: Result<Vec<Option<T>>, fp_index::IndexError>,
+    ) -> PyResult<Py<PyAny>> {
+        let values = values
+            .map_err(index_error_to_py)?
+            .into_iter()
+            .map(|value| value.map_or(-1, Into::into))
+            .collect();
+        PyIndex {
+            inner: Index::from_i64_values(values).rename_index(self.inner.name().cloned()),
+        }
+        .into_py_any(py)
+    }
+
     /// Its labels as an Index under its name, which a set op reads (the
     /// conversion dropped it; br-frankenpandas-ff5ik).
     fn named_index(&self) -> Index {
@@ -24442,6 +24598,9 @@ impl PyPeriodIndex {
 
     /// Its labels as a column: a period one (to_series / to_frame).
     fn series_column(&self) -> PyResult<Column> {
+        if let Some(column) = typed_period_column(self.inner.values()) {
+            return Ok(column);
+        }
         let periods = self.inner.values().iter().copied().map(Scalar::Period);
         Column::from_values(periods.collect()).map_err(column_error_to_py)
     }
@@ -24489,16 +24648,51 @@ impl PyPeriodIndex {
             })
             .transpose()?;
         let period_freq = given_freq.unwrap_or(PeriodFreq::Daily);
-        let mut inner = if let Some(d) = data {
+        // A PeriodIndex or a Series of periods is its periods at the given
+        // freq - converted as `asfreq(freq, how='end')` (it kept its own) -
+        // under its own name unless one is given (the Series' was dropped);
+        // a Series of periods read from its ordinals, not an object a row
+        // (3.4 ms for 50k, pandas wraps it; br-frankenpandas-od7kt).
+        let typed = if let Some(d) = data {
             if let Ok(pi) = d.extract::<PyRef<'_, PyPeriodIndex>>() {
-                pi.inner.clone()
-            } else if let Ok(list) = d.extract::<Vec<Bound<'_, PyAny>>>() {
+                Some(pi.inner.clone())
+            } else if let Ok(series) = d.extract::<PyRef<'_, PySeries>>()
+                && series.inner.column().dtype() == DType::Period
+            {
+                Some(column_period_index(series.inner.column()))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let inner = if let Some(inner) = typed {
+            match given_freq {
+                Some(freq) if inner.freq().is_some_and(|own| own != freq) => inner
+                    .asfreq_with_how(freq.alias(), "end")
+                    .map_err(index_error_to_py)?,
+                _ => inner,
+            }
+        } else if let Some(d) = data {
+            if let Ok(list) = d.extract::<Vec<Bound<'_, PyAny>>>() {
                 // A missing entry (None, NaN, NaT) is NaT at the index's
                 // frequency - the given one, else the periods' (it raised
                 // TypeError); a Period is itself.
                 let mut periods: Vec<Option<Period>> = Vec::with_capacity(list.len());
                 for item in list {
                     if let Ok(period) = item.extract::<PyRef<'_, PyPeriod>>() {
+                        // A period at another freq than the given one is
+                        // pandas' IncompatibleFrequency (it was kept at its
+                        // own; br-frankenpandas-od7kt).
+                        if let Some(freq) = given_freq
+                            && period.inner.freq != freq
+                        {
+                            return Err(IncompatibleFrequency::new_err(format!(
+                                "Input has different freq={} from PeriodIndex(freq={})",
+                                period.inner.freqstr(),
+                                freq.alias()
+                            )));
+                        }
                         periods.push(Some(period.inner));
                     } else if let Ok(s) = item.extract::<String>() {
                         // At another resolution than the given freq it is the
@@ -24573,40 +24767,44 @@ impl PyPeriodIndex {
         } else {
             PeriodIndex::new(Vec::new())
         };
-        if let Some(n) = name {
-            inner = inner.set_name(n);
-        }
+        // The given name, else the data's - a Series' or an Index's, as
+        // pandas (a Series' was dropped).
+        let inner = match (name, data.and_then(py_index_arg_name)) {
+            (Some(n), _) => inner.set_name(n),
+            (None, Some(own)) => inner.set_name(own),
+            (None, None) => inner,
+        };
         Ok(Self { inner })
     }
 
     #[getter]
     pub fn year(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        period_field_index(py, self.inner.year())
+        self.field_index(py, self.inner.year())
     }
 
     #[getter]
     pub fn month(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        period_field_index(py, self.inner.month())
+        self.field_index(py, self.inner.month())
     }
 
     #[getter]
     pub fn day(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        period_field_index(py, self.inner.day())
+        self.field_index(py, self.inner.day())
     }
 
     #[getter]
     pub fn hour(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        period_field_index(py, self.inner.hour())
+        self.field_index(py, self.inner.hour())
     }
 
     #[getter]
     pub fn minute(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        period_field_index(py, self.inner.minute())
+        self.field_index(py, self.inner.minute())
     }
 
     #[getter]
     pub fn second(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        period_field_index(py, self.inner.second())
+        self.field_index(py, self.inner.second())
     }
 
     #[getter]
@@ -24708,10 +24906,10 @@ impl PyPeriodIndex {
     }
 
     #[pyo3(signature = (freq, how="end"))]
-    pub fn asfreq(&self, freq: &str, how: &str) -> PyResult<Self> {
+    pub fn asfreq(&self, freq: &Bound<'_, PyAny>, how: &str) -> PyResult<Self> {
         let res = self
             .inner
-            .asfreq_with_how(freq, how)
+            .asfreq_with_how(&period_freq_text(freq)?, how)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         Ok(Self { inner: res })
     }
@@ -25307,32 +25505,32 @@ impl PyPeriodIndex {
 
     #[getter]
     fn day_of_week(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        period_field_index(py, self.inner.day_of_week())
+        self.field_index(py, self.inner.day_of_week())
     }
 
     #[getter]
     fn day_of_year(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        period_field_index(py, self.inner.day_of_year())
+        self.field_index(py, self.inner.day_of_year())
     }
 
     #[getter]
     fn dayofweek(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        period_field_index(py, self.inner.dayofweek())
+        self.field_index(py, self.inner.dayofweek())
     }
 
     #[getter]
     fn dayofyear(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        period_field_index(py, self.inner.dayofyear())
+        self.field_index(py, self.inner.dayofyear())
     }
 
     #[getter]
     fn days_in_month(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        period_field_index(py, self.inner.days_in_month())
+        self.field_index(py, self.inner.days_in_month())
     }
 
     #[getter]
     fn daysinmonth(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        period_field_index(py, self.inner.daysinmonth())
+        self.field_index(py, self.inner.daysinmonth())
     }
 
     fn delete(&self, loc: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -25738,7 +25936,7 @@ impl PyPeriodIndex {
 
     #[getter]
     fn quarter(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        period_field_index(py, self.inner.quarter())
+        self.field_index(py, self.inner.quarter())
     }
 
     #[getter]
@@ -25747,7 +25945,7 @@ impl PyPeriodIndex {
             .inner
             .qyear()
             .map(|years| years.into_iter().map(Some).collect());
-        period_field_index(py, years)
+        self.field_index(py, years)
     }
 
     fn ravel(&self) -> Self {
@@ -25913,17 +26111,17 @@ impl PyPeriodIndex {
 
     #[getter]
     fn week(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        period_field_index(py, self.inner.week())
+        self.field_index(py, self.inner.week())
     }
 
     #[getter]
     fn weekday(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        period_field_index(py, self.inner.weekday())
+        self.field_index(py, self.inner.weekday())
     }
 
     #[getter]
     fn weekofyear(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        period_field_index(py, self.inner.weekofyear())
+        self.field_index(py, self.inner.weekofyear())
     }
 
     #[pyo3(signature = (cond, other=None))]
@@ -44794,9 +44992,28 @@ fn aligned_axis<'py>(
     if left.call_method1("equals", (right,))?.is_truthy()? {
         return Ok(None);
     }
+    // An outer / inner join is the indexes' join, as pandas' align takes it:
+    // a RangeIndex joined with its step-slice is a plain int64 Index (the
+    // union kept the range; br-frankenpandas-5ibzp).
+    // A MultiIndex axis keeps its union / intersection (its tuples align).
+    let multi = left.extract::<PyRef<'_, PyMultiIndex>>().is_ok()
+        || right.extract::<PyRef<'_, PyMultiIndex>>().is_ok();
+    let joined = |how: &str| -> PyResult<Bound<'py, PyAny>> {
+        if multi {
+            let method = if how == "outer" {
+                "union"
+            } else {
+                "intersection"
+            };
+            return left.call_method1(method, (right,));
+        }
+        let kwargs = PyDict::new(left.py());
+        kwargs.set_item("how", how)?;
+        left.call_method("join", (right,), Some(&kwargs))
+    };
     Ok(Some(match join {
-        "outer" => left.call_method1("union", (right,))?,
-        "inner" => left.call_method1("intersection", (right,))?,
+        "outer" => joined("outer")?,
+        "inner" => joined("inner")?,
         "left" => left.clone(),
         "right" => right.clone(),
         other => {
@@ -63454,6 +63671,21 @@ fn resolve_loc_rows(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<LocRows>
 /// Series (aligned on the index), a boolean list/array, an inclusive label
 /// slice, a list of labels or one label (every row carrying it); resolved in
 /// the order `resolve_loc_rows` uses.
+/// The positions of a mask's true flags, written branch-free: a random
+/// mask mispredicts a branch on a flag half its rows (18% of
+/// df.loc[mask, text] = 'X'; br-frankenpandas-1ofpy).
+fn true_positions(flags: &[bool]) -> Vec<usize> {
+    let count: usize = flags.iter().map(|&keep| usize::from(keep)).sum();
+    let mut positions = vec![0; count + 1];
+    let mut written = 0;
+    for (position, &keep) in flags.iter().enumerate() {
+        positions[written] = position;
+        written += usize::from(keep);
+    }
+    positions.truncate(count);
+    positions
+}
+
 fn resolve_loc_row_positions(
     labels: &[IndexLabel],
     slice_positions: impl Fn(Option<&IndexLabel>, Option<&IndexLabel>) -> Result<Vec<usize>, FrameError>,
@@ -63497,12 +63729,7 @@ fn resolve_loc_row_positions(
         let same_slice = std::ptr::eq(own.as_ptr(), labels.as_ptr()) && own.len() == labels.len();
         if same_slice || own == labels {
             if let Some(flags) = mask.inner.column().as_bool_slice() {
-                return Ok(flags
-                    .iter()
-                    .enumerate()
-                    .filter(|&(_, &keep)| keep)
-                    .map(|(position, _)| position)
-                    .collect());
+                return Ok(true_positions(flags));
             }
             return Ok(mask
                 .inner
@@ -63537,7 +63764,7 @@ fn resolve_loc_row_positions(
                 labels.len()
             )));
         }
-        return Ok((0..mask.len()).filter(|&position| mask[position]).collect());
+        return Ok(true_positions(&mask));
     }
     if let Some(wanted) = loc_label_list(key) {
         let mut positions = Vec::new();
@@ -68300,6 +68527,25 @@ impl PySeriesPeriodAccessor {
         if !per_row {
             return Ok(result.unbind());
         }
+        // Periods and int fields (year, month, ...) read typed into the
+        // column, not a Series built from the index's labels.
+        let typed = if let Ok(periods) = result.extract::<PyRef<'_, PyPeriodIndex>>() {
+            typed_period_column(periods.inner.values())
+        } else if let Ok(index) = plain_index_ref(&result)
+            && index.inner.declared_dtype().is_none()
+        {
+            index
+                .inner
+                .int64_label_values()
+                .map(|values| Column::from_i64_values(values.as_ref().clone()))
+        } else {
+            None
+        };
+        if let Some(column) = typed {
+            let inner = Series::new(series.name(), series.index().clone(), column)
+                .map_err(frame_error_to_py)?;
+            return PySeries { inner }.into_py_any(py);
+        }
         let values = py.get_type::<PySeries>().call1((result,))?;
         let column = values
             .extract::<PyRef<'_, PySeries>>()?
@@ -68343,12 +68589,59 @@ impl PySeriesPeriodMethod {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        if self.name == "asfreq"
+            && let Some(column) = self.typed_asfreq(args, kwargs)?
+        {
+            let inner = Series::new(self.series.name(), self.series.index().clone(), column)
+                .map_err(frame_error_to_py)?;
+            return PySeries { inner }.into_py_any(py);
+        }
         let result = PySeriesPeriodAccessor::index(&self.series, py)?.call_method(
             self.name.as_str(),
             args,
             kwargs,
         )?;
         PySeriesPeriodAccessor::wrapped(&self.series, result)
+    }
+}
+
+impl PySeriesPeriodMethod {
+    /// `.dt.asfreq(freq, how='end')` of a typed period column: its periods
+    /// converted straight into a typed column - two Python PeriodIndex
+    /// objects were made and their periods copied four times
+    /// (dt.asfreq('h') 0.35x pandas; br-frankenpandas-od7kt). None for any
+    /// other column or argument, which the PeriodIndex's own asfreq reads.
+    fn typed_asfreq(
+        &self,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Option<Column>> {
+        let Some((ordinals, from)) = self.series.column().as_period_slice() else {
+            return Ok(None);
+        };
+        if args.len() > 2 || ordinals.contains(&i64::MIN) {
+            return Ok(None);
+        }
+        let mut freq = args.get_item(0).ok();
+        let mut how = args.get_item(1).ok();
+        if let Some(kwargs) = kwargs {
+            for (key, value) in kwargs.iter() {
+                match key.extract::<String>()?.as_str() {
+                    "freq" if freq.is_none() => freq = Some(value),
+                    "how" if how.is_none() => how = Some(value),
+                    _ => return Ok(None),
+                }
+            }
+        }
+        let (Some(Ok(freq)), Ok(how)) = (
+            freq.map(|freq| period_freq_text(&freq)),
+            how.map_or(Ok("end".to_owned()), |how| how.extract::<String>()),
+        ) else {
+            return Ok(None);
+        };
+        let (converted, target) = fp_index::asfreq_period_ordinals(ordinals, from, &freq, &how)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        Ok(Some(Column::from_period_values_owned(converted, target)))
     }
 }
 
@@ -71712,6 +72005,12 @@ impl PyWindow {
 
 #[pymethods]
 impl PyWindow {
+    /// pandas' `.obj` (see [`window_obj`]).
+    #[getter]
+    fn obj(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        window_obj(py, self.series.as_ref(), self.dataframe.as_ref())
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "Window [window={},center={},win_type={},axis=0,method=single]",
@@ -71876,8 +72175,40 @@ impl PyWindow {
     }
 }
 
+/// pandas' `.obj` of a window: the Series or DataFrame its windows run over
+/// (it was missing; br-frankenpandas-yre6v).
+fn window_obj(
+    py: Python<'_>,
+    series: Option<&Series>,
+    frame: Option<&DataFrame>,
+) -> PyResult<Py<PyAny>> {
+    match (series, frame) {
+        (Some(series), _) => Ok(Py::new(
+            py,
+            PySeries {
+                inner: series.clone(),
+            },
+        )?
+        .into_any()),
+        (None, Some(frame)) => Ok(Py::new(
+            py,
+            PyDataFrame {
+                inner: frame.clone(),
+            },
+        )?
+        .into_any()),
+        (None, None) => Ok(py.None()),
+    }
+}
+
 #[pymethods]
 impl PyRolling {
+    /// pandas' `.obj` (see [`window_obj`]).
+    #[getter]
+    fn obj(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        window_obj(py, self.series.as_ref(), self.dataframe.as_ref())
+    }
+
     /// pandas' column selection: `df.rolling(2)['w']` / `[['w', 'v']]`
     /// (see [`PyRolling::selected`]; br-frankenpandas-cdqwd).
     fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -72520,6 +72851,12 @@ impl PyExpanding {
 
 #[pymethods]
 impl PyExpanding {
+    /// pandas' `.obj` (see [`window_obj`]).
+    #[getter]
+    fn obj(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        window_obj(py, self.series.as_ref(), self.dataframe.as_ref())
+    }
+
     /// pandas' column selection, as Rolling's (br-frankenpandas-cdqwd).
     fn __getitem__(&self, key: &Bound<'_, PyAny>) -> PyResult<Self> {
         let select = window_select(self.dataframe.as_ref(), key)?;
@@ -73131,6 +73468,12 @@ impl PyExponentialMovingWindow {
 
 #[pymethods]
 impl PyExponentialMovingWindow {
+    /// pandas' `.obj` (see [`window_obj`]).
+    #[getter]
+    fn obj(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        window_obj(py, self.series.as_ref(), self.dataframe.as_ref())
+    }
+
     #[getter]
     pub fn ndim(&self) -> usize {
         if self.series.is_some() { 1 } else { 2 }

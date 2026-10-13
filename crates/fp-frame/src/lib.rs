@@ -2662,6 +2662,9 @@ struct Float64ValueCount {
 enum TemporalValueCountKind {
     Datetime64,
     Timedelta64,
+    /// Period ordinals of one freq (each period was keyed as a Scalar:
+    /// 0.83x pandas; br-frankenpandas-od7kt).
+    Period(PeriodFreq),
 }
 
 #[derive(Clone, Copy)]
@@ -2704,6 +2707,7 @@ fn materialize_temporal_value_counts_output(
         labels.push(match kind {
             TemporalValueCountKind::Datetime64 => IndexLabel::Datetime64(entry.ns),
             TemporalValueCountKind::Timedelta64 => IndexLabel::Timedelta64(entry.ns),
+            TemporalValueCountKind::Period(freq) => IndexLabel::Period(Period::new(entry.ns, freq)),
         });
         values.push(Scalar::Int64(
             i64::try_from(entry.count).unwrap_or(i64::MAX),
@@ -17724,6 +17728,16 @@ impl Series {
             let order = self.column.argsort_with(ascending);
             return self.sorted_by_positions(&order);
         }
+        // A period column of one freq with no NaT sorts by its ordinals, as
+        // the comparator compares them (it boxed each: 0.55x pandas;
+        // br-frankenpandas-od7kt).
+        if self.categorical.is_none()
+            && let Some((ordinals, _)) = self.column.as_period_slice()
+            && !ordinals.contains(&i64::MIN)
+        {
+            let order = Column::from_i64_values(ordinals.to_vec()).argsort_with(ascending);
+            return self.sorted_by_positions(&order);
+        }
         // Typed NULLABLE Float64 fast path: the all-valid radix path above bails on
         // any missing, so a Float64 column WITH nulls fell to the O(n log n) generic
         // Scalar comparator (`compare_scalars_with_na_position` over per-position
@@ -19486,6 +19500,13 @@ impl Series {
                 TemporalValueCountKind::Timedelta64,
             )
         } else if self.categorical.is_none()
+            && let Some((ordinals, freq)) = self.column.as_period_slice()
+        {
+            ValueCountsTally::Temporal(
+                temporal_value_counts(ordinals, i64::MIN),
+                TemporalValueCountKind::Period(freq),
+            )
+        } else if self.categorical.is_none()
             && let Some(slice) = self.column.as_f64_slice()
         {
             // All-valid Float64 bit-tally (br-frankenpandas-vcf64): hash the
@@ -19730,13 +19751,18 @@ impl Series {
         // br-frankenpandas-d9b5z). A naive datetime / timedelta column's too:
         // its nanos tallied, NaT left out (d.dt.floor('D').value_counts() of
         // dates holding NaT 0.42x pandas at 1M rows; br-frankenpandas-vk7y9).
+        // A period column's ordinals too (br-frankenpandas-od7kt).
         if !normalize
             && sort
             && !ascending
             && dropna
             && matches!(
                 self.column.dtype(),
-                DType::Float64 | DType::Int64 | DType::Datetime64 { .. } | DType::Timedelta64
+                DType::Float64
+                    | DType::Int64
+                    | DType::Datetime64 { .. }
+                    | DType::Timedelta64
+                    | DType::Period
             )
             && self.column.timezone().is_none()
         {
@@ -20253,6 +20279,20 @@ impl Series {
                 }
             }
             return out;
+        }
+
+        // A period column of one freq with no NaT dedups its ordinals, first
+        // seen first (each period was keyed as a Scalar: 0.49x pandas;
+        // br-frankenpandas-od7kt).
+        if self.categorical.is_none()
+            && let Some((ordinals, freq)) = self.column.as_period_slice()
+            && !ordinals.contains(&i64::MIN)
+        {
+            let (_, distinct) = Self::oa_distinct_i64(ordinals, true);
+            return distinct
+                .into_iter()
+                .map(|ordinal| Scalar::Period(Period::new(ordinal, freq)))
+                .collect();
         }
 
         // A float column's distinct floats ([`Self::unique_f64_values`]), the
@@ -87665,10 +87705,15 @@ impl DataFrame {
             .column_order
             .iter()
             .filter_map(|name| {
+                // A masked column's values label as its plain dtype's (a
+                // nullable boolean's were the text 'False' / 'True';
+                // br-frankenpandas-tgbj7).
                 let label = match dtype {
-                    DType::Int64 => IndexLabel::Int64(name.parse().ok()?),
-                    DType::Float64 => IndexLabel::Float64(fp_index::OrderedF64(name.parse().ok()?)),
-                    DType::Bool => match name.as_str() {
+                    DType::Int64 | DType::Int64Nullable => IndexLabel::Int64(name.parse().ok()?),
+                    DType::Float64 | DType::Float64Nullable => {
+                        IndexLabel::Float64(fp_index::OrderedF64(name.parse().ok()?))
+                    }
+                    DType::Bool | DType::BoolNullable => match name.as_str() {
                         "True" => IndexLabel::Bool(true),
                         "False" => IndexLabel::Bool(false),
                         _ => return None,
