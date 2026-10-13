@@ -11132,6 +11132,54 @@ fn typed_column_label(obj: &Bound<'_, PyAny>) -> Option<IndexLabel> {
     py_to_index_label(obj).ok()
 }
 
+/// Whether two record keys name one column label: the same object, or two
+/// `str`s of the same text (keys of another type are compared by identity:
+/// 1 == 1.0 == True name three labels).
+fn same_record_key(key: &Bound<'_, PyAny>, other: &Bound<'_, PyAny>) -> bool {
+    if key.is(other) {
+        return true;
+    }
+    match (
+        key.cast_exact::<pyo3::types::PyString>(),
+        other.cast_exact::<pyo3::types::PyString>(),
+    ) {
+        (Ok(key), Ok(other)) => key
+            .to_str()
+            .ok()
+            .is_some_and(|text| other.to_str().ok() == Some(text)),
+        _ => false,
+    }
+}
+
+/// The keys of a list of records in order, each record's that are not the
+/// record's before it: a record keyed by the same keys in the same order as
+/// the one before it ([`same_record_key`]) names no column that one did not.
+/// Records built alike (a comprehension's, one json.loads') name their
+/// columns once, not a record each (DataFrame(records) walked every record's
+/// keys three times: 0.71x pandas; br-frankenpandas-r8h7c).
+fn records_keys<'py>(
+    records: impl IntoIterator<Item = Bound<'py, PyAny>>,
+) -> Vec<Bound<'py, PyAny>> {
+    let mut keys = Vec::new();
+    let mut previous = 0..0;
+    for record in records {
+        let Ok(record) = record.cast_into::<PyDict>() else {
+            continue;
+        };
+        let same = record.len() == previous.len()
+            && record
+                .iter()
+                .zip(&keys[previous.clone()])
+                .all(|((key, _), before)| same_record_key(&key, before));
+        if !same {
+            let start = keys.len();
+            keys.extend(record.iter().map(|(key, _)| key));
+            previous = start..keys.len();
+        }
+    }
+    keys
+}
+
 /// `frame` with the typed column labels its constructor was given - the
 /// items of `columns=`, the keys of a dict or of the records - or, for a
 /// matrix given no `columns=` (a list of lists, a 2-D array, a flat list),
@@ -11198,17 +11246,9 @@ fn constructor_column_labels(
             .is_some_and(|first| first.is_instance_of::<PyDict>())
     });
     if let Some(records) = records {
-        refuse_labels_keyed_alike(
-            records
-                .iter()
-                .filter_map(|record| record.cast_into::<PyDict>().ok())
-                .flat_map(|record| record.keys()),
-        )?;
-        let labels = records
-            .iter()
-            .filter_map(|record| record.cast_into::<PyDict>().ok())
-            .flat_map(|record| record.keys())
-            .filter_map(|key| typed_column_label(&key));
+        let keys = records_keys(records.iter());
+        refuse_labels_keyed_alike(keys.iter().cloned())?;
+        let labels = keys.iter().filter_map(typed_column_label);
         return Ok(frame.with_recorded_column_labels(labels));
     }
     // A matrix's columns are the positions 0..n, pandas' RangeIndex.
@@ -16429,8 +16469,15 @@ impl PyIndex {
         // An int64 array's values read in place, each the Int64 label its
         // numpy scalar reads as: every one was a scalar made and read back
         // (isin of 100k against a million 27 ms, pandas 15;
-        // br-frankenpandas-cs4fd).
-        let labels = if let Some(buffer) = native_int64_buffer(values)? {
+        // br-frankenpandas-cs4fd) - as ints, not labels, but against a
+        // bool index (below).
+        let native = native_int64_buffer(values)?;
+        if let Some(buffer) = &native
+            && self.inner.dtype() != "bool"
+        {
+            return Ok(self.inner.isin_ints(&buffer.to_vec(values.py())?).into());
+        }
+        let labels = if let Some(buffer) = native {
             buffer
                 .to_vec(values.py())?
                 .into_iter()
@@ -18020,25 +18067,55 @@ impl PyIndex {
             // its label's by code: a key was made and looked up a row, and
             // the Index read back from a value a row (pd.Index(strs).map(dict)
             // 0.10x pandas; br-frankenpandas-kt05r).
-            let labels = self.inner.labels();
-            let mut slot_of: FxHashMap<&IndexLabel, usize> = FxHashMap::default();
             let mut distinct: Vec<Bound<'_, PyAny>> = Vec::new();
-            let mut codes: Vec<usize> = Vec::with_capacity(labels.len());
-            for label in labels {
-                let slot = match slot_of.get(label) {
-                    Some(&slot) => slot,
-                    None => {
-                        let key = label_to_py(label)?;
-                        distinct.push(table.get_item(key)?.unwrap_or_else(|| nan.clone()));
-                        slot_of.insert(label, distinct.len() - 1);
-                        distinct.len() - 1
-                    }
-                };
-                codes.push(slot);
+            let mut codes: Vec<usize> = Vec::with_capacity(self.inner.len());
+            // An int index's labels deduplicated as its ints, each label made
+            // once for its lookup (every label was made and hashed:
+            // Index(ints).map(dict) 0.61x pandas).
+            if let Some(ints) = self.inner.int64_label_values() {
+                let mut slot_of: FxHashMap<i64, usize> = FxHashMap::default();
+                for &int in ints.iter() {
+                    let slot = match slot_of.get(&int) {
+                        Some(&slot) => slot,
+                        None => {
+                            let key = label_to_py(&IndexLabel::Int64(int))?;
+                            distinct.push(table.get_item(key)?.unwrap_or_else(|| nan.clone()));
+                            slot_of.insert(int, distinct.len() - 1);
+                            distinct.len() - 1
+                        }
+                    };
+                    codes.push(slot);
+                }
+            } else {
+                let mut slot_of: FxHashMap<&IndexLabel, usize> = FxHashMap::default();
+                for label in self.inner.labels() {
+                    let slot = match slot_of.get(label) {
+                        Some(&slot) => slot,
+                        None => {
+                            let key = label_to_py(label)?;
+                            distinct.push(table.get_item(key)?.unwrap_or_else(|| nan.clone()));
+                            slot_of.insert(label, distinct.len() - 1);
+                            distinct.len() - 1
+                        }
+                    };
+                    codes.push(slot);
+                }
             }
             let values = PyList::new(py, distinct)?;
             let mapped = Self::new(Some(values.as_any()), self.inner.name().cloned())?;
-            let taken = mapped.inner.take(&codes).rename_index(self.inner.name());
+            // Values reading as ints are gathered as ints, a typed index (the
+            // take made a label a row, scanned twice after for kinds and NaN).
+            let taken = match mapped
+                .inner
+                .int64_label_values()
+                .filter(|_| mapped.inner.declared_dtype().is_none())
+            {
+                Some(ints) => {
+                    Index::from_i64_values(codes.iter().map(|&code| ints[code]).collect())
+                }
+                None => mapped.inner.take(&codes),
+            }
+            .rename_index(self.inner.name());
             return Ok(Self {
                 inner: float_labelled(taken),
             });
@@ -32963,8 +33040,14 @@ fn is_pandas_object(value: &Bound<'_, PyAny>) -> bool {
     value.is_instance_of::<PySeries>() || value.is_instance_of::<PyDataFrame>()
 }
 
-/// pandas' `is_sequence`: iterable and sized, and not a string or bytes.
+/// pandas' `is_sequence`: iterable and sized, and not a string or bytes. A
+/// Series, frame or Index is one by its type: iterating one to ask built a
+/// Python object a row (df.apply(f) of three 200k-row columns 3.5 ms of a
+/// no-op f, pandas 0.24).
 fn is_sequence(value: &Bound<'_, PyAny>) -> bool {
+    if is_pandas_object(value) || value.is_instance_of::<PyIndex>() {
+        return true;
+    }
     !value.is_instance_of::<pyo3::types::PyString>()
         && !value.is_instance_of::<pyo3::types::PyBytes>()
         && value.len().is_ok()
@@ -50671,33 +50754,65 @@ impl PyDataFrame {
                     // Case A: List of dicts (records)
                     if let Ok(_first_dict) = first_item.cast::<PyDict>() {
                         let mut col_order = explicit_cols.unwrap_or_default();
+                        // pandas' records: with no columns a record's keys()
+                        // (an AttributeError for a value without them), then
+                        // a record not a dict its dict() (a Series record is
+                        // its items; every non-dict raised TypeError).
+                        let records = (0..len)
+                            .map(|i| {
+                                let item = seq.get_item(i)?;
+                                if let Ok(record) = item.cast::<PyDict>() {
+                                    return Ok(record.clone());
+                                }
+                                if col_order.is_empty() {
+                                    item.getattr("keys")?;
+                                }
+                                Ok(py
+                                    .get_type::<PyDict>()
+                                    .call1((item,))?
+                                    .cast_into::<PyDict>()?)
+                            })
+                            .collect::<PyResult<Vec<Bound<'_, PyDict>>>>()?;
                         // The keys as given, so a record keyed by 0 is read by 0
                         // (it was read by '0': every value NaN; fvsao.32).
                         let mut col_keys: Vec<Bound<'_, PyAny>> = Vec::new();
                         if col_order.is_empty() {
-                            for i in 0..len {
-                                let item = seq.get_item(i)?;
-                                let row_dict = item.cast::<PyDict>()?;
-                                for (k, _) in row_dict.iter() {
-                                    let col_name: String = if let Ok(s) = k.extract::<String>() {
-                                        s
-                                    } else {
-                                        k.str()?.to_str()?.to_string()
-                                    };
-                                    if !col_order.contains(&col_name) {
-                                        col_order.push(col_name);
-                                        col_keys.push(k);
-                                    }
+                            let records = records.iter().map(|record| record.as_any().clone());
+                            for k in records_keys(records) {
+                                let col_name: String = if let Ok(s) = k.extract::<String>() {
+                                    s
+                                } else {
+                                    k.str()?.to_str()?.to_string()
+                                };
+                                if !col_order.contains(&col_name) {
+                                    col_order.push(col_name);
+                                    col_keys.push(k);
                                 }
                             }
                         }
 
+                        // A column's own capacity each (`vec![..; n]` clones
+                        // the first, its capacity not cloned).
                         let mut col_scalars: Vec<Vec<Scalar>> =
-                            vec![Vec::with_capacity(len); col_order.len()];
-                        for i in 0..len {
-                            let item = seq.get_item(i)?;
-                            let row_dict = item.cast::<PyDict>()?;
-                            for (c_idx, col_name) in col_order.iter().enumerate() {
+                            col_order.iter().map(|_| Vec::with_capacity(len)).collect();
+                        for row_dict in &records {
+                            // A record keyed by the columns' own keys in their
+                            // order reads its values in that order (each cell a
+                            // lookup hashing its key).
+                            let mut read = 0;
+                            if !col_keys.is_empty() {
+                                for (key, value) in row_dict.iter() {
+                                    if !col_keys
+                                        .get(read)
+                                        .is_some_and(|column| same_record_key(&key, column))
+                                    {
+                                        break;
+                                    }
+                                    col_scalars[read].push(py_to_cell(py, &value)?);
+                                    read += 1;
+                                }
+                            }
+                            for (c_idx, col_name) in col_order.iter().enumerate().skip(read) {
                                 let val = match col_keys.get(c_idx) {
                                     Some(key) => row_dict.get_item(key)?,
                                     None => row_dict.get_item(col_name)?,
@@ -50711,10 +50826,10 @@ impl PyDataFrame {
                         }
 
                         let mut col_map = BTreeMap::new();
-                        for (i, name) in col_order.iter().enumerate() {
+                        for (name, scalars) in col_order.iter().zip(col_scalars) {
                             // As a dict's lists: dtype=object keeps each cell
                             // (br-frankenpandas-d1ac4).
-                            let col = sequence_column(col_scalars[i].clone()).map_err(|e| {
+                            let col = sequence_column(scalars).map_err(|e| {
                                 PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
                             })?;
                             col_map.insert(name.clone(), col);
@@ -50753,7 +50868,7 @@ impl PyDataFrame {
                             .unwrap_or_else(|| (0..num_cols).map(|i| i.to_string()).collect());
 
                         let mut col_scalars: Vec<Vec<Scalar>> =
-                            vec![Vec::with_capacity(len); num_cols];
+                            (0..num_cols).map(|_| Vec::with_capacity(len)).collect();
                         #[allow(clippy::needless_range_loop)]
                         for r in 0..len {
                             let row_item = seq.get_item(r)?;
@@ -53879,13 +53994,19 @@ impl PyDataFrame {
             let new_labels: Vec<IndexLabel> = pairs.iter().map(|(_, new)| new.clone()).collect();
             // The columns as renamed, each kept one beside them: two keyed
             // by the same text became one label silently ({'a': 0, 'b':
-            // '0'} came back [0, 0]; br-frankenpandas-e672h).
-            refuse_index_labels_keyed_alike(names.iter().map(|old| {
-                pairs
+            // '0'} came back [0, 0]; br-frankenpandas-e672h). Each column's
+            // first pair read from a map of them (a scan of the pairs a
+            // column: rename(columns=str.upper) of 1000 columns 2.6 ms,
+            // pandas 0.17; br-frankenpandas-srwmv).
+            let mut renamed_to: HashMap<&IndexLabel, &IndexLabel> = HashMap::new();
+            for (from, to) in &pairs {
+                renamed_to.entry(from).or_insert(to);
+            }
+            refuse_index_labels_keyed_alike(
+                names
                     .iter()
-                    .find(|(from, _)| from == old)
-                    .map_or(old, |(_, to)| to)
-            }))?;
+                    .map(|old| renamed_to.get(old).copied().unwrap_or(old)),
+            )?;
             let pairs: Vec<(String, String)> = pairs
                 .iter()
                 .map(|(old, new)| (fp_frame::column_key(old), fp_frame::column_key(new)))
@@ -59479,6 +59600,29 @@ impl PyDataFrame {
                 }
                 .into_bound_py_any(py);
             }
+            // Series indexed like the frame are its columns in place, as the
+            // repeated-key case above places them: they went through the
+            // dict constructor, each Series aligned and its cells read
+            // (df.transform(lambda x: x - x.mean()) 0.27x pandas).
+            if all_series {
+                let columns = results
+                    .iter()
+                    .map(|result| {
+                        let series = result.extract::<PyRef<'_, PySeries>>()?;
+                        let index = series.inner.index();
+                        Ok(
+                            (index == frame.index() && index.name() == frame.index().name())
+                                .then(|| series.inner.column().clone()),
+                        )
+                    })
+                    .collect::<PyResult<Option<Vec<Column>>>>()?;
+                if let Some(columns) = columns {
+                    return PyDataFrame {
+                        inner: frame.with_columns_at_positions(columns),
+                    }
+                    .into_bound_py_any(py);
+                }
+            }
             // Keyed by the typed labels, so the columns keep them (fvsao.32).
             for (label, result) in column_labels.iter().zip(&results) {
                 data.set_item(index_label_to_py(py, label)?, result)?;
@@ -62947,12 +63091,15 @@ impl PyDataFrame {
         )?;
         call_kwargs.set_item("args", args)?;
         let result = slf.call_method("apply", (func,), Some(&call_kwargs))?;
-        let rows = slf.borrow().inner.index().labels().to_vec();
+        // The rows compared as indexes, typed, as pandas' Index.equals (every
+        // label was cloned and compared a label at a time).
+        let this = slf.borrow();
+        let rows = this.inner.index();
         let transformed = match result.extract::<PyRef<'_, PyDataFrame>>() {
-            Ok(frame) => frame.inner.index().labels() == rows,
+            Ok(frame) => frame.inner.index() == rows,
             Err(_) => result
                 .extract::<PyRef<'_, PySeries>>()
-                .is_ok_and(|series| series.inner.index().labels() == rows),
+                .is_ok_and(|series| series.inner.index() == rows),
         };
         if !transformed {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(

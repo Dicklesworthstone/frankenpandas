@@ -161,7 +161,7 @@ frankenpandas/
 │   ├── fp-columnar/      # Column with typed Arc<[f64]>/Arc<[i64]> backings, ValidityMask, vectorized kernels (more than 60,000 lines)
 │   ├── fp-dot-kernel/    # The one crate compiled with +avx2,+fma: f64 dot product and elementwise kernels, runtime-dispatched (more than 2,500 lines)
 │   ├── fp-index/         # Index, MultiIndex, 5 typed variants, alignment planning (more than 40,000 lines)
-│   ├── fp-frame/         # DataFrame, Series, Categorical, accessors, windows, resample (more than 200,000 lines)
+│   ├── fp-frame/         # DataFrame, Series, Categorical, accessors, windows, resample (more than 250,000 lines)
 │   ├── fp-expr/          # Expression parser, eval()/query(), @local + backtick (more than 9,000 lines)
 │   ├── fp-groupby/       # GroupBy with 3 execution paths (more than 8,000 lines)
 │   ├── fp-join/          # Inner/Left/Right/Outer/Cross/Asof joins, merge_asof tolerance/by (more than 20,000 lines)

@@ -4160,9 +4160,26 @@ enum ScalarValues {
         len: usize,
         values: OnceLock<Vec<Scalar>>,
     },
+    /// A strided view of a contiguous Utf8 buffer (`iloc[::k]`, `iloc[::-1]`
+    /// of an all-valid text column): row `i` is source row `start + i * step`,
+    /// `bytes[offsets[r]..offsets[r + 1]]`. O(1), as pandas' slice is a numpy
+    /// view; a reader of the text reads the rows gathered into one
+    /// `LazyContiguousUtf8`, built once and shared by clones
+    /// ([`Self::text_resolved`]): a step slice gathered every text column
+    /// (df.iloc[::2] 0.02x pandas; br-frankenpandas-99g91).
+    LazyStridedUtf8 {
+        bytes: Arc<[u8]>,
+        offsets: Arc<[usize]>,
+        start: usize,
+        step: isize,
+        len: usize,
+        gathered: Arc<OnceLock<ScalarValues>>,
+    },
 }
 
 type Utf8ArcViewSource = (Arc<[u8]>, Arc<[usize]>, usize);
+/// A text column's shared buffers and its rows in them, `offset + i * step`.
+type Utf8ArcAffineSource = (Arc<[u8]>, Arc<[usize]>, usize, isize);
 pub type Utf8ArcBuffers = (Arc<[u8]>, Arc<[usize]>);
 
 impl ScalarValues {
@@ -4967,6 +4984,53 @@ impl ScalarValues {
             start,
             len,
             values: OnceLock::new(),
+        }
+    }
+
+    /// Rows `start + i * step` of a contiguous Utf8 buffer as a view: O(1).
+    fn lazy_strided_utf8(
+        bytes: Arc<[u8]>,
+        offsets: Arc<[usize]>,
+        start: usize,
+        step: isize,
+        len: usize,
+    ) -> Self {
+        debug_assert!(
+            affine_positions_fit(start, step, len, offsets.len() - 1),
+            "view rows must lie within the source offsets"
+        );
+        Self::LazyStridedUtf8 {
+            bytes,
+            offsets,
+            start,
+            step,
+            len,
+            gathered: Arc::default(),
+        }
+    }
+
+    /// The backing a reader of text reads: a strided view's rows gathered
+    /// into one `LazyContiguousUtf8` (once, shared by the view's clones), any
+    /// other backing itself.
+    fn text_resolved(&self) -> &Self {
+        match self {
+            Self::LazyStridedUtf8 {
+                bytes,
+                offsets,
+                start,
+                step,
+                len,
+                gathered,
+            } => gathered.get_or_init(|| {
+                let (bytes, offsets) = gather_utf8_spans(
+                    bytes,
+                    offsets,
+                    || affine_positions(*start, *step, *len),
+                    *len,
+                );
+                Self::lazy_contiguous_utf8(bytes, offsets)
+            }),
+            other => other,
         }
     }
 
@@ -6949,6 +7013,7 @@ impl ScalarValues {
                         .collect()
                 })
                 .as_slice(),
+            Self::LazyStridedUtf8 { .. } => self.text_resolved().as_slice(),
             Self::LazyLowerHexSequenceUtf8 {
                 prefix,
                 start,
@@ -7520,6 +7585,16 @@ impl ScalarValues {
                 start,
                 ..
             } => text(bytes, offsets[start + idx], offsets[start + idx + 1]),
+            Self::LazyStridedUtf8 {
+                bytes,
+                offsets,
+                start,
+                step,
+                ..
+            } => {
+                let row = affine_position(*start, *step, idx);
+                text(bytes, offsets[row], offsets[row + 1])
+            }
             _ => self.as_slice()[idx].clone(),
         }
     }
@@ -7580,7 +7655,7 @@ impl ScalarValues {
             Self::LazyLeftJoinDenseCycleLeftInt64 { total_len, .. } => *total_len,
             Self::LazyLeftJoinDenseCycleRightInt64 { total_len, .. } => *total_len,
             Self::LazyNullableRepeatPositionsI64AsFloat64 { total_len, .. } => *total_len,
-            Self::LazyUtf8Slice { len, .. } => *len,
+            Self::LazyUtf8Slice { len, .. } | Self::LazyStridedUtf8 { len, .. } => *len,
         }
     }
 
@@ -7645,8 +7720,44 @@ impl ScalarValues {
             | Self::LazyNullableTimedelta64 { values, .. } => values.get().is_some(),
             // Its view is shared by clones (an Arc around the OnceLock).
             Self::LazyNullableUtf8 { values, .. } => values.get().is_some(),
+            Self::LazyStridedUtf8 { gathered, .. } => gathered
+                .get()
+                .is_some_and(Self::scalar_cache_is_materialized),
         }
     }
+}
+
+/// The rows at `positions()` (`n` of them) of a contiguous Utf8 buffer
+/// gathered into one. Each span is copied as a WINDOW-byte window of the
+/// source where one fits - a constant-length copy, the next span writing over
+/// the excess, the buffer cut to its length after: a memmove call a row was
+/// most of a gather of short strings (df.iloc[::2] over a text column 0.01x
+/// pandas; br-frankenpandas-99g91).
+fn gather_utf8_spans<I: Iterator<Item = usize>>(
+    bytes: &[u8],
+    offsets: &[usize],
+    positions: impl Fn() -> I,
+    n: usize,
+) -> (Vec<u8>, Vec<usize>) {
+    const WINDOW: usize = 16;
+    let total: usize = positions().map(|pos| offsets[pos + 1] - offsets[pos]).sum();
+    let mut new_bytes = vec![0_u8; total + WINDOW];
+    let mut new_offsets = Vec::with_capacity(n + 1);
+    new_offsets.push(0);
+    let mut at = 0;
+    for pos in positions() {
+        let (start, end) = (offsets[pos], offsets[pos + 1]);
+        let len = end - start;
+        if len <= WINDOW && start + WINDOW <= bytes.len() {
+            new_bytes[at..at + WINDOW].copy_from_slice(&bytes[start..start + WINDOW]);
+        } else {
+            new_bytes[at..at + len].copy_from_slice(&bytes[start..end]);
+        }
+        at += len;
+        new_offsets.push(at);
+    }
+    new_bytes.truncate(total);
+    (new_bytes, new_offsets)
 }
 
 fn contiguous_utf8_offsets_are_strictly_increasing(bytes: &[u8], offsets: &[usize]) -> bool {
@@ -8319,6 +8430,21 @@ impl Clone for ScalarValues {
                 len,
                 ..
             } => Self::lazy_utf8_slice(Arc::clone(bytes), Arc::clone(offsets), *start, *len),
+            Self::LazyStridedUtf8 {
+                bytes,
+                offsets,
+                start,
+                step,
+                len,
+                gathered,
+            } => Self::LazyStridedUtf8 {
+                bytes: Arc::clone(bytes),
+                offsets: Arc::clone(offsets),
+                start: *start,
+                step: *step,
+                len: *len,
+                gathered: Arc::clone(gathered),
+            },
         }
     }
 }
@@ -16630,7 +16756,7 @@ impl Column {
         if self.dtype != DType::Utf8 || !self.validity.all() {
             return None;
         }
-        match &self.values {
+        match self.values.text_resolved() {
             ScalarValues::LazyContiguousUtf8 { bytes, offsets, .. } => {
                 Some((bytes.as_ref(), offsets.as_ref()))
             }
@@ -16706,7 +16832,7 @@ impl Column {
         if self.dtype != DType::Utf8 || !self.validity.all() {
             return None;
         }
-        match &self.values {
+        match self.values.text_resolved() {
             ScalarValues::LazyContiguousUtf8 { bytes, offsets, .. } => {
                 Some((Arc::clone(bytes), Arc::clone(offsets)))
             }
@@ -16795,7 +16921,7 @@ impl Column {
         if self.dtype != DType::Utf8 || !self.validity.all() {
             return None;
         }
-        match &self.values {
+        match self.values.text_resolved() {
             ScalarValues::LazyContiguousUtf8 { bytes, offsets, .. } => {
                 Some((Arc::clone(bytes), Arc::clone(offsets)))
             }
@@ -16817,7 +16943,7 @@ impl Column {
         if self.dtype != DType::Utf8 || !self.validity.all() {
             return None;
         }
-        let witness = match &self.values {
+        let witness = match self.values.text_resolved() {
             ScalarValues::LazyContiguousUtf8 {
                 bytes,
                 offsets,
@@ -16863,7 +16989,7 @@ impl Column {
         if self.dtype != DType::Utf8 || !self.validity.all() {
             return None;
         }
-        match &self.values {
+        match self.values.text_resolved() {
             ScalarValues::LazyContiguousUtf8 { bytes, offsets, .. } => {
                 Some((Arc::clone(bytes), Arc::clone(offsets), 0))
             }
@@ -17108,7 +17234,7 @@ impl Column {
         if self.dtype != DType::Utf8 || !self.validity.all() {
             return None;
         }
-        match &self.values {
+        match self.values.text_resolved() {
             ScalarValues::LazyContiguousUtf8 {
                 bytes,
                 offsets,
@@ -17149,7 +17275,7 @@ impl Column {
         if self.dtype != DType::Utf8 || !self.validity.all() {
             return None;
         }
-        match &self.values {
+        match self.values.text_resolved() {
             ScalarValues::LazyContiguousUtf8 {
                 bytes,
                 offsets,
@@ -17643,32 +17769,8 @@ impl Column {
             // window (a third of merge(how='outer') over df.head(50_000);
             // br-frankenpandas-a4ii9).
             if let Some((bytes, offsets)) = self.as_utf8_window() {
-                let total: usize = positions
-                    .iter()
-                    .map(|&pos| offsets[pos + 1] - offsets[pos])
-                    .sum();
-                // Each span copied as a WINDOW-byte window of the source where
-                // one fits - a constant-length copy, the next span writing over
-                // the excess, the buffer cut to `total` after: a memmove call a
-                // row was most of a gather of short strings (df.iloc[::2] over
-                // a text column 0.01x pandas; br-frankenpandas-99g91).
-                const WINDOW: usize = 16;
-                let mut new_bytes = vec![0_u8; total + WINDOW];
-                let mut new_offsets = Vec::with_capacity(n + 1);
-                new_offsets.push(0);
-                let mut at = 0;
-                for &pos in positions {
-                    let (start, end) = (offsets[pos], offsets[pos + 1]);
-                    let len = end - start;
-                    if len <= WINDOW && start + WINDOW <= bytes.len() {
-                        new_bytes[at..at + WINDOW].copy_from_slice(&bytes[start..start + WINDOW]);
-                    } else {
-                        new_bytes[at..at + len].copy_from_slice(&bytes[start..end]);
-                    }
-                    at += len;
-                    new_offsets.push(at);
-                }
-                new_bytes.truncate(total);
+                let (new_bytes, new_offsets) =
+                    gather_utf8_spans(bytes, offsets, || positions.iter().copied(), n);
                 return Self {
                     dtype: self.dtype.clone(),
                     values: ScalarValues::lazy_contiguous_utf8(new_bytes, new_offsets),
@@ -18772,6 +18874,19 @@ impl Column {
                     return None;
                 }
                 ScalarValues::lazy_strided_float64(data, start, step, len)
+            } else if let Some((bytes, offsets, offset, source_step)) =
+                self.all_valid_utf8_affine_source()
+            {
+                let (start, step) = compose_affine(start, step, offset, source_step)?;
+                if !affine_positions_fit(start, step, len, offsets.len() - 1) {
+                    return None;
+                }
+                // A run of rows is a window, which its readers read in place.
+                if step == 1 {
+                    ScalarValues::lazy_utf8_slice(bytes, offsets, start, len)
+                } else {
+                    ScalarValues::lazy_strided_utf8(bytes, offsets, start, step, len)
+                }
             } else if let Some((data, offset, source_step)) = self.all_valid_bool_affine_source() {
                 let (start, step) = compose_affine(start, step, offset, source_step)?;
                 if !affine_positions_fit(start, step, len, data.len()) {
@@ -18793,8 +18908,37 @@ impl Column {
             data: None,
             categorical: None,
             width: self.width,
-            pandas_string: false,
+            pandas_string: self.pandas_string,
         })
+    }
+
+    /// This all-valid Utf8 column as rows `offset + i * step` of a shared
+    /// contiguous buffer - a whole one, a row window of one, or a strided view
+    /// (whose selection then composes) - as
+    /// [`Self::all_valid_float64_affine_source`].
+    fn all_valid_utf8_affine_source(&self) -> Option<Utf8ArcAffineSource> {
+        if self.dtype != DType::Utf8 || !self.validity.all() {
+            return None;
+        }
+        match &self.values {
+            ScalarValues::LazyContiguousUtf8 { bytes, offsets, .. } => {
+                Some((Arc::clone(bytes), Arc::clone(offsets), 0, 1))
+            }
+            ScalarValues::LazyUtf8Slice {
+                bytes,
+                offsets,
+                start,
+                ..
+            } => Some((Arc::clone(bytes), Arc::clone(offsets), *start, 1)),
+            ScalarValues::LazyStridedUtf8 {
+                bytes,
+                offsets,
+                start,
+                step,
+                ..
+            } => Some((Arc::clone(bytes), Arc::clone(offsets), *start, *step)),
+            _ => None,
+        }
     }
 
     /// This all-valid Float64 column as rows `offset + i * step` of a shared
@@ -44366,6 +44510,155 @@ mod tests {
             text(&head.take_positions(&[4, 1, 0])),
             ["tail", "abcdefghijklmnopq", "a"]
         );
+    }
+
+    #[test]
+    fn strided_text_view_reads_as_the_gather_99g91() {
+        // br-frankenpandas-99g91: a stepped selection of one-buffer text is a
+        // view whose cells, contiguous buffers and factorize read as the
+        // gather of the same rows - forwards, backwards, a view of a view
+        // (composed), of a row window; a run of rows a window; clones share
+        // the one gather. NEGATIVE: a missing row, fewer than 1024 rows,
+        // Scalar-backed text and an out-of-bounds view decline.
+        let n = 8_000;
+        let cells: Vec<String> = (0..n)
+            .map(|i| match i % 5 {
+                0 => String::new(),
+                1 => format!("r{i}"),
+                2 => format!("long cell past sixteen bytes {i}"),
+                3 => format!("日本{i}"),
+                _ => "x".repeat(i % 17),
+            })
+            .collect();
+        let mut bytes = Vec::new();
+        let mut offsets = vec![0];
+        for cell in &cells {
+            bytes.extend_from_slice(cell.as_bytes());
+            offsets.push(bytes.len());
+        }
+        let source = Column::from_utf8_contiguous(bytes, offsets);
+        let window = source.take_contiguous_range(100, 7_000);
+        let gathered = |column: &Column, start: usize, step: isize, len: usize| {
+            column.take_positions(&affine_positions(start, step, len).collect::<Vec<_>>())
+        };
+        // A strided view reads as the gather through every text reader; a
+        // run of rows (a view of a view composing to step 1) is a window,
+        // which answers its text as one (as_utf8_window) and holds no
+        // factorize witness, as take_positions' windows do.
+        let read_alike = |view: &Column, expected: &Column, name: &str| {
+            assert_eq!(view.len(), expected.len(), "{name}");
+            assert_eq!(view.dtype(), expected.dtype(), "{name}");
+            assert_eq!(view.values(), expected.values(), "{name}");
+            // A window's offsets index its source's whole buffer: compared
+            // by the text of its spans.
+            let spans = |column: &Column| {
+                column.as_utf8_window().map(|(bytes, offsets)| {
+                    offsets
+                        .windows(2)
+                        .map(|pair| bytes[pair[0]..pair[1]].to_vec())
+                        .collect::<Vec<_>>()
+                })
+            };
+            assert_eq!(spans(view), spans(expected), "{name}");
+            if matches!(view.values, ScalarValues::LazyStridedUtf8 { .. }) {
+                assert_eq!(
+                    view.as_utf8_contiguous(),
+                    expected.as_utf8_contiguous(),
+                    "{name}"
+                );
+                let (codes, uniques) = view.utf8_default_factorize_columns().expect(name);
+                let (expected_codes, expected_uniques) =
+                    expected.utf8_default_factorize_columns().expect(name);
+                assert_eq!(codes.values(), expected_codes.values(), "{name}");
+                assert_eq!(uniques.values(), expected_uniques.values(), "{name}");
+            } else {
+                assert!(
+                    matches!(view.values, ScalarValues::LazyUtf8Slice { .. }),
+                    "{name}"
+                );
+            }
+        };
+        for (name, column) in [("source", &source), ("window", &window)] {
+            let rows = column.len();
+            for (start, step, len) in [
+                (0, 2, rows / 2),
+                (rows - 1, -1, rows),
+                (5, 6, (rows - 6) / 6 + 1),
+                (rows - 1, -3, rows / 3),
+            ] {
+                let view = column
+                    .take_affine_positions_without_materialized_positions(start, step, len)
+                    .expect("a view");
+                assert!(
+                    matches!(view.values, ScalarValues::LazyStridedUtf8 { .. }),
+                    "{name} {start} {step}"
+                );
+                let expected = gathered(column, start, step, len);
+                // A cell read before any gather, then every reader.
+                assert_eq!(
+                    view.scalar_at(len - 1),
+                    expected.scalar_at(len - 1),
+                    "{name}"
+                );
+                assert!(!view.values.scalar_cache_is_materialized(), "{name}");
+                read_alike(&view, &expected, &format!("{name} {start} {step}"));
+                // A view of the view composes: reversed, it reads its rows
+                // backwards; a clone reads the gather the view made.
+                let back = view
+                    .take_affine_positions_without_materialized_positions(len - 1, -1, len)
+                    .expect("a view of a view");
+                read_alike(&back, &gathered(&expected, len - 1, -1, len), name);
+                let clone = view.clone();
+                let (
+                    ScalarValues::LazyStridedUtf8 { gathered: a, .. },
+                    ScalarValues::LazyStridedUtf8 { gathered: b, .. },
+                ) = (&view.values, &clone.values)
+                else {
+                    panic!("{name}: a clone is a view");
+                };
+                assert!(Arc::ptr_eq(a, b), "{name}");
+            }
+        }
+        // Every other row twice over is rows 0, 4, 8, ..; a run of rows of
+        // the source a window of its buffer.
+        let twice = source
+            .take_affine_positions_without_materialized_positions(0, 2, 4_000)
+            .and_then(|view| view.take_affine_positions_without_materialized_positions(0, 2, 2_000))
+            .expect("a view of a view");
+        read_alike(&twice, &gathered(&source, 0, 4, 2_000), "twice");
+        let run = source
+            .take_affine_positions_without_materialized_positions(10, 1, 2_000)
+            .expect("a run");
+        assert!(matches!(run.values, ScalarValues::LazyUtf8Slice { .. }));
+        read_alike(&run, &source.take_contiguous_range(10, 2_000), "run");
+        // NEGATIVE: each declines.
+        let (bytes, offsets) = source.as_utf8_contiguous().expect("one buffer");
+        let mut holes = ValidityMask::all_valid(n);
+        holes.set(9, false);
+        let missing =
+            Column::from_utf8_values_with_validity(bytes.to_vec(), offsets.to_vec(), holes);
+        let scalars = Column::new(
+            DType::Utf8,
+            cells
+                .iter()
+                .map(|cell| Scalar::Utf8(cell.clone()))
+                .collect(),
+        )
+        .expect("utf8 column");
+        assert!(matches!(scalars.values, ScalarValues::Eager(_)));
+        for (name, column, start, len) in [
+            ("missing", &missing, 0, 4_000),
+            ("scalars", &scalars, 0, 4_000),
+            ("short", &source, 0, 1_000),
+            ("past the end", &source, 2, 4_000),
+        ] {
+            assert!(
+                column
+                    .take_affine_positions_without_materialized_positions(start, 2, len)
+                    .is_none(),
+                "{name}"
+            );
+        }
     }
 
     #[test]

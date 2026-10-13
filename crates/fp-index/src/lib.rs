@@ -5366,6 +5366,33 @@ impl Index {
         self.labels.iter().map(|l| set.contains_key(l)).collect()
     }
 
+    /// [`Self::isin`] of int needles - an int64 array's values, each the
+    /// Int64 label it reads as - without a label a needle: a unit range marks
+    /// each needle's row, an int buffer probes the needles' bitset or set
+    /// (each needle was a label made and read back: Index.isin(ndarray)
+    /// 0.64-0.88x pandas; br-frankenpandas-cs4fd).
+    #[must_use]
+    pub fn isin_ints(&self, needles: &[i64]) -> Vec<bool> {
+        if let Some(range) = self.labels.int64_unit_range {
+            let mut found = vec![false; range.len];
+            for &needle in needles {
+                if let Some(row) = needle
+                    .checked_sub(range.start)
+                    .and_then(|offset| usize::try_from(offset).ok())
+                    .filter(|&row| row < range.len)
+                {
+                    found[row] = true;
+                }
+            }
+            return found;
+        }
+        if let Some(labels) = self.labels.int64_view() {
+            return Self::isin_i64(&labels, needles);
+        }
+        let needles: Vec<IndexLabel> = needles.iter().copied().map(IndexLabel::Int64).collect();
+        self.isin(&needles)
+    }
+
     // ── Pandas Index Model: deduplication ──────────────────────────────
 
     #[must_use]
@@ -31877,6 +31904,48 @@ mod tests {
         let plain = Index::from_i64_values(vec![1, 5]);
         assert!(repeated.sorted_union_increasing_i64(&plain).is_none());
         assert!(plain.sorted_union_increasing_i64(&descending).is_none());
+    }
+
+    /// `isin_ints` answers as `isin` of the needles' Int64 labels: a unit
+    /// range (its first and last rows, needles past either end and at
+    /// i64's extremes), an affine range, an int buffer, repeats
+    /// (br-frankenpandas-cs4fd). NEGATIVE: a float, datetime and text index
+    /// keep the labels' answer (a number never a datetime).
+    #[test]
+    fn int_needles_answer_as_their_labels_cs4fd() {
+        let needles = [-5, -4, 0, 11, 12, 6, 6, 117, 120, i64::MIN, i64::MAX, 3, -3];
+        let indexes = [
+            Index::new_known_unique_int64_unit_range(-4, 16),
+            Index::new_known_unique_int64_unit_range(i64::MAX - 3, 3),
+            Index::new_known_unique_int64_affine_range(0, 3, 40).expect("affine"),
+            Index::new_known_unique_int64_affine_range(30, -4, 8).expect("affine"),
+            Index::from_i64_values(vec![5, -3, 6, 6, 120, 0]),
+            Index::from_f64_values(vec![1.0, 3.0, 6.5, f64::NAN]),
+            Index::from_datetime64_values(vec![0, 3, 6]),
+            Index::new(vec![IndexLabel::Utf8("6".to_owned()), IndexLabel::Int64(6)]),
+            Index::new(Vec::new()),
+        ];
+        for index in &indexes {
+            for count in [0, 1, needles.len()] {
+                let labels: Vec<IndexLabel> = needles[..count]
+                    .iter()
+                    .copied()
+                    .map(IndexLabel::Int64)
+                    .collect();
+                assert_eq!(
+                    index.isin_ints(&needles[..count]),
+                    index.isin(&labels),
+                    "{index:?} {count}"
+                );
+            }
+        }
+        assert_eq!(
+            indexes[0].isin_ints(&needles),
+            (-4..12)
+                .map(|label| [-4, 0, 11, 6, 3, -3].contains(&label))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(indexes[6].isin_ints(&needles), vec![false; 3]);
     }
 
     #[test]

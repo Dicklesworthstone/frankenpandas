@@ -30117,25 +30117,69 @@ impl Series {
 
     /// The `n` best (position, value) pairs of `data`, best first - `better`
     /// strictly orders two values, positions ascending among equals as
-    /// pandas' keep='first' - read in one pass: a buffer of the best `n`
-    /// that a value enters only past the `n`-th. Every pair was collected
-    /// and selected among (s.nlargest(5) 2.8 ms over 300k floats, pandas
-    /// 2.45; br-frankenpandas-84b8p). `n` at least 1.
+    /// pandas' keep='first' - read in one pass: a heap of the best `n` so
+    /// far, its worst at the root, that a value enters only past that worst
+    /// (O(log n) a value that enters, one compare one that does not). Every
+    /// pair was collected and selected among (s.nlargest(5) 2.8 ms over 300k
+    /// floats, pandas 2.45; br-frankenpandas-84b8p); a sorted buffer a value
+    /// was inserted into moved up to `n` pairs a value (rising data), which
+    /// held it to `n` <= 64 (nlargest(100) 0.48x pandas). `n` at least 1.
     fn best_n_by<T: Copy>(
         data: &[T],
         n: usize,
         better: impl Fn(&T, &T) -> bool,
     ) -> Vec<(usize, T)> {
-        let mut best: Vec<(usize, T)> = Vec::with_capacity(n + 1);
+        // `a` ranks above `b`: a better value, or an equal one earlier.
+        let above = |a: &(usize, T), b: &(usize, T)| {
+            better(&a.1, &b.1) || (!better(&b.1, &a.1) && a.0 < b.0)
+        };
+        let mut heap: Vec<(usize, T)> = Vec::with_capacity(n);
         for (position, &value) in data.iter().enumerate() {
-            if best.len() == n && !better(&value, &best[n - 1].1) {
-                continue;
+            if heap.len() < n {
+                // Up while the parent ranks above the new pair.
+                heap.push((position, value));
+                let mut at = heap.len() - 1;
+                while at > 0 {
+                    let parent = (at - 1) / 2;
+                    if !above(&heap[parent], &heap[at]) {
+                        break;
+                    }
+                    heap.swap(parent, at);
+                    at = parent;
+                }
+            } else if better(&value, &heap[0].1) {
+                // A later position than every held one: it enters only
+                // strictly better than the worst; down while a child ranks
+                // below it.
+                heap[0] = (position, value);
+                let mut at = 0;
+                loop {
+                    let (left, right) = (2 * at + 1, 2 * at + 2);
+                    let mut lowest = at;
+                    if left < n && above(&heap[lowest], &heap[left]) {
+                        lowest = left;
+                    }
+                    if right < n && above(&heap[lowest], &heap[right]) {
+                        lowest = right;
+                    }
+                    if lowest == at {
+                        break;
+                    }
+                    heap.swap(at, lowest);
+                    at = lowest;
+                }
             }
-            let at = best.partition_point(|(_, held)| !better(&value, held));
-            best.insert(at, (position, value));
-            best.truncate(n);
         }
-        best
+        heap.sort_unstable_by(|a, b| {
+            if above(a, b) {
+                std::cmp::Ordering::Less
+            } else if above(b, a) {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        });
+        heap
     }
 
     fn nlargest_storage(&self, n: usize) -> Result<Self, FrameError> {
@@ -30151,12 +30195,11 @@ impl Series {
         // fp-types), tie-break (position ascending) identical. Skips the `values()`
         // Vec<Scalar> materialization and per-compare semantic_cmp dispatch.
         if let Some(data) = self.column.as_f64_slice() {
-            let mut indexed: Vec<(usize, f64)> =
-                if n > 0 && n <= 64 && n.saturating_mul(2) <= data.len() {
-                    Self::best_n_by(data, n, |a, b| a > b)
-                } else {
-                    data.iter().copied().enumerate().collect()
-                };
+            let mut indexed: Vec<(usize, f64)> = if n > 0 && n.saturating_mul(8) <= data.len() {
+                Self::best_n_by(data, n, |a, b| a > b)
+            } else {
+                data.iter().copied().enumerate().collect()
+            };
             let len = indexed.len();
             let cmp = |a: &(usize, f64), b: &(usize, f64)| {
                 b.1.partial_cmp(&a.1)
@@ -30184,12 +30227,11 @@ impl Series {
         // with position-ascending tie-break — bit-identical to the Scalar
         // `semantic_cmp` path. Skips the values() Scalar materialization.
         if let Some(data) = self.column.as_i64_slice() {
-            let mut indexed: Vec<(usize, i64)> =
-                if n > 0 && n <= 64 && n.saturating_mul(2) <= data.len() {
-                    Self::best_n_by(data, n, |a, b| a > b)
-                } else {
-                    data.iter().copied().enumerate().collect()
-                };
+            let mut indexed: Vec<(usize, i64)> = if n > 0 && n.saturating_mul(8) <= data.len() {
+                Self::best_n_by(data, n, |a, b| a > b)
+            } else {
+                data.iter().copied().enumerate().collect()
+            };
             let len = indexed.len();
             let cmp = |a: &(usize, i64), b: &(usize, i64)| b.1.cmp(&a.1).then(a.0.cmp(&b.0));
             if n > 0 && n.saturating_mul(2) <= len {
@@ -30289,12 +30331,11 @@ impl Series {
         // `semantic_cmp` on Float64 is exactly `partial_cmp().unwrap_or(Equal)` (fp-types) so
         // this is BIT-IDENTICAL; skips the values() Vec<Scalar> + semantic_cmp dispatch.
         if let Some(data) = self.column.as_f64_slice() {
-            let mut indexed: Vec<(usize, f64)> =
-                if n > 0 && n <= 64 && n.saturating_mul(2) <= data.len() {
-                    Self::best_n_by(data, n, |a, b| a < b)
-                } else {
-                    data.iter().copied().enumerate().collect()
-                };
+            let mut indexed: Vec<(usize, f64)> = if n > 0 && n.saturating_mul(8) <= data.len() {
+                Self::best_n_by(data, n, |a, b| a < b)
+            } else {
+                data.iter().copied().enumerate().collect()
+            };
             let len = indexed.len();
             let cmp = |a: &(usize, f64), b: &(usize, f64)| {
                 a.1.partial_cmp(&b.1)
@@ -30321,12 +30362,11 @@ impl Series {
         // Typed Int64 fast path (mirror): ascending with position tie-break,
         // bit-identical to the Scalar semantic_cmp path. Skips values() materialization.
         if let Some(data) = self.column.as_i64_slice() {
-            let mut indexed: Vec<(usize, i64)> =
-                if n > 0 && n <= 64 && n.saturating_mul(2) <= data.len() {
-                    Self::best_n_by(data, n, |a, b| a < b)
-                } else {
-                    data.iter().copied().enumerate().collect()
-                };
+            let mut indexed: Vec<(usize, i64)> = if n > 0 && n.saturating_mul(8) <= data.len() {
+                Self::best_n_by(data, n, |a, b| a < b)
+            } else {
+                data.iter().copied().enumerate().collect()
+            };
             let len = indexed.len();
             let cmp = |a: &(usize, i64), b: &(usize, i64)| a.1.cmp(&b.1).then(a.0.cmp(&b.0));
             if n > 0 && n.saturating_mul(2) <= len {
@@ -38351,7 +38391,9 @@ impl RollingMomentState {
         }
         let m3 = self.central_m3();
         let s2 = m2 / (n - 1.0);
-        let s3 = s2.powf(1.5);
+        // s2^1.5 as s2 * sqrt(s2), as pandas' calc_skew cubes the root: a
+        // pow call a row was half of s.rolling(20).skew() (0.68x pandas).
+        let s3 = s2 * s2.sqrt();
         Scalar::Float64((n / ((n - 1.0) * (n - 2.0))) * (m3 / s3))
     }
 
@@ -48792,30 +48834,61 @@ pub fn cov_matrix_all_valid(
     if len == 0 || len < min || divisor <= 0.0 || columns.iter().any(|column| column.len() != len) {
         return matrix;
     }
+    // Each column's sum in row order (the same additions in the same order
+    // as a fold a column), up to eight columns' sums in one pass over the
+    // rows: a pass a column waited on each addition in turn, the sums'
+    // chains run side by side here (num.cov() of 200k x 3 0.74x pandas;
+    // br-frankenpandas-jy2f4).
+    let sums: Vec<f64> = if k <= 8 {
+        let mut sums = [0.0_f64; 8];
+        for row in 0..len {
+            for (sum, column) in sums.iter_mut().zip(columns) {
+                *sum += column[row];
+            }
+        }
+        sums[..k].to_vec()
+    } else {
+        columns
+            .iter()
+            .map(|column| column.iter().fold(0.0_f64, |sum, &value| sum + value))
+            .collect()
+    };
     #[allow(clippy::cast_precision_loss)] // pandas' float count
-    let means: Vec<f64> = columns
-        .iter()
-        .map(|column| column.iter().fold(0.0_f64, |sum, &value| sum + value) / len as f64)
-        .collect();
+    let means: Vec<f64> = sums.iter().map(|&sum| sum / len as f64).collect();
     let pairs: Vec<(usize, usize)> = (0..k).flat_map(|a| (a..k).map(move |b| (a, b))).collect();
     // Six columns or more: each column's pairs a slice product, four pairs
     // a lane-wide step where the CPU has AVX2 - the same bits, each pair
     // still its own accumulator in row order (50k x 10 0.30x pandas;
     // br-frankenpandas-jy2f4). Fewer pairs measured faster a pair at a time.
-    let cross = if k >= 6 {
-        fp_columnar::cov_cross_sums(columns, &means, len)
-    } else {
-        let mut cross = vec![0.0_f64; pairs.len()];
-        let mut centered = vec![0.0_f64; k];
+    // Up to five columns: the pairs' accumulators and the centered values
+    // a fixed-size array a column count, unrolled into registers - a Vec
+    // of them loaded, added and stored each pair a row (num.cov() of 200k x
+    // 3 0.87x pandas after the one-pass sums). The same additions in the
+    // same order a pair.
+    fn small_cross<const K: usize>(columns: &[&[f64]], means: &[f64], len: usize) -> Vec<f64> {
+        let columns: [&[f64]; K] = std::array::from_fn(|at| &columns[at][..len]);
+        let means: [f64; K] = std::array::from_fn(|at| means[at]);
+        let mut sums = [[0.0_f64; K]; K];
         for row in 0..len {
-            for (slot, (column, &mean)) in centered.iter_mut().zip(columns.iter().zip(&means)) {
-                *slot = column[row] - mean;
-            }
-            for (sum, &(a, b)) in cross.iter_mut().zip(&pairs) {
-                *sum += centered[a] * centered[b];
+            let centered: [f64; K] = std::array::from_fn(|at| columns[at][row] - means[at]);
+            for a in 0..K {
+                for b in a..K {
+                    sums[a][b] += centered[a] * centered[b];
+                }
             }
         }
-        cross
+        (0..K)
+            .flat_map(|a| (a..K).map(move |b| (a, b)))
+            .map(|(a, b)| sums[a][b])
+            .collect()
+    }
+    let cross = match k {
+        1 => small_cross::<1>(columns, &means, len),
+        2 => small_cross::<2>(columns, &means, len),
+        3 => small_cross::<3>(columns, &means, len),
+        4 => small_cross::<4>(columns, &means, len),
+        5 => small_cross::<5>(columns, &means, len),
+        _ => fp_columnar::cov_cross_sums(columns, &means, len),
     };
     for (&sum, &(a, b)) in cross.iter().zip(&pairs) {
         let value = sum / divisor;
@@ -49099,6 +49172,10 @@ pub struct DenseGroupLayout {
     /// A single int key's dense grouping, with the `sort`, key length, least
     /// key and key range it was made for.
     int_dense: OnceLock<((bool, usize, i64, usize), Utf8KeyGrouping)>,
+    /// A single int or text key's `ngroup()`: each row's group number in
+    /// result order, and the group count, with the `sort` and key length
+    /// they were made for.
+    ngroup: OnceLock<(bool, usize, Arc<[i64]>, usize)>,
 }
 
 /// A contiguous-text key's dense aggregation grouping: each row's group id,
@@ -52539,6 +52616,66 @@ impl SeriesGroupBy<'_> {
     }
 
     /// Apply an aggregation that reduces each group to a single f64 value.
+    /// [`Self::agg_numeric`] over rows' group ids (first seen) and their
+    /// labels: each group's present numbers in row order, its result
+    /// `func` of them (missing for a group holding none, as the branches
+    /// below emit it). None for a value column not read as numbers.
+    fn agg_numeric_by_gids<F>(
+        &self,
+        gids: &[usize],
+        ngroups: usize,
+        order: Vec<IndexLabel>,
+        func: &F,
+        name: &str,
+    ) -> Option<Result<Series, FrameError>>
+    where
+        F: Fn(&[f64]) -> f64,
+    {
+        let column = &self.series.column;
+        let mut buckets: Vec<Vec<f64>> = vec![Vec::new(); ngroups];
+        if let Some(data) = column.as_f64_slice() {
+            for (row, &g) in gids.iter().enumerate() {
+                buckets[g].push(data[row]);
+            }
+        } else if let Some(data) = column.as_i64_slice() {
+            for (row, &g) in gids.iter().enumerate() {
+                buckets[g].push(data[row] as f64);
+            }
+        } else if let Some((data, validity)) = column.as_i64_slice_with_validity() {
+            for (row, &g) in gids.iter().enumerate() {
+                if validity.get(row) {
+                    buckets[g].push(data[row] as f64);
+                }
+            }
+        } else if let Some((data, validity)) = column.as_f64_slice_with_validity() {
+            for (row, &g) in gids.iter().enumerate() {
+                if validity.get(row) && !data[row].is_nan() {
+                    buckets[g].push(data[row]);
+                }
+            }
+        } else {
+            return None;
+        }
+        let values: Vec<Scalar> = buckets
+            .iter()
+            .map(|nums| {
+                if nums.is_empty() {
+                    Scalar::Null(NullKind::NaN)
+                } else {
+                    Scalar::Float64(func(nums))
+                }
+            })
+            .collect();
+        let by_name = self.by.name();
+        let idx_name = (!by_name.is_empty()).then_some(by_name);
+        let index = Index::new(order).rename_index(idx_name);
+        Some(
+            Column::from_values(values)
+                .map_err(FrameError::from)
+                .and_then(|column| Series::new(name, index, column)),
+        )
+    }
+
     fn agg_numeric<F>(&self, func: F, name: &str) -> Result<Series, FrameError>
     where
         F: Fn(&[f64]) -> f64,
@@ -52774,6 +52911,16 @@ impl SeriesGroupBy<'_> {
         // `Float64(func(nums))`, same by-name index (all groups non-empty since the
         // value column is all-valid).
         if let Some((bytes, offsets)) = self.by.column.as_utf8_contiguous() {
+            // The rows' group ids the groupby object keeps for its calls and
+            // selections (first seen, as below): each call hashed every row's
+            // key again (gw.median() of a reused text-key groupby 0.78x
+            // pandas; br-frankenpandas-srwmv).
+            if let Some((gids, ngroups)) = self.dense_group_ids()
+                && let Some(order) = self.dense_group_labels(&gids, ngroups)
+                && let Some(result) = self.agg_numeric_by_gids(&gids, ngroups, order, &func, name)
+            {
+                return result;
+            }
             let vf = self.series.column.as_f64_slice();
             let vi = self.series.column.as_i64_slice();
             if vf.is_some() || vi.is_some() {
@@ -58306,8 +58453,12 @@ impl SeriesGroupBy<'_> {
         // per-group find (first() previously ALWAYS built_groups, even for i64
         // keys). Bit-identical: all-valid ⇒ first row == first non-missing; the
         // first-seen gid order == build_groups order; typed emit == from_values.
+        // An all-valid text column too, its first rows gathered as text: it
+        // went through build_groups and a String a row (gt['word'].first()
+        // 0.73x pandas).
         if (self.series.column.as_f64_slice().is_some()
-            || self.series.column.as_i64_slice().is_some())
+            || self.series.column.as_i64_slice().is_some()
+            || is_text_key_column(&self.series.column))
             && let Some((gids, ngroups)) = self.dense_group_ids()
             && let Some(order) = self.dense_group_labels(&gids, ngroups)
         {
@@ -58324,9 +58475,10 @@ impl SeriesGroupBy<'_> {
             }
             let column = if let Some(data) = self.series.column.as_f64_slice() {
                 Column::from_f64_values(first_row.iter().map(|&r| data[r]).collect())
-            } else {
-                let data = self.series.column.as_i64_slice().unwrap();
+            } else if let Some(data) = self.series.column.as_i64_slice() {
                 Column::from_i64_values_owned(first_row.iter().map(|&r| data[r]).collect())
+            } else {
+                self.series.column.take_positions(&first_row)
             };
             let by_name = self.by.name();
             let idx_name = if by_name.is_empty() {
@@ -58503,7 +58655,8 @@ impl SeriesGroupBy<'_> {
         // Track last_row per gid (overwrite each occurrence) in one pass.
         // Bit-identical to the build_groups path for an all-valid column.
         if (self.series.column.as_f64_slice().is_some()
-            || self.series.column.as_i64_slice().is_some())
+            || self.series.column.as_i64_slice().is_some()
+            || is_text_key_column(&self.series.column))
             && let Some((gids, ngroups)) = self.dense_group_ids()
             && let Some(order) = self.dense_group_labels(&gids, ngroups)
         {
@@ -58513,9 +58666,10 @@ impl SeriesGroupBy<'_> {
             }
             let column = if let Some(data) = self.series.column.as_f64_slice() {
                 Column::from_f64_values(last_row.iter().map(|&r| data[r]).collect())
-            } else {
-                let data = self.series.column.as_i64_slice().unwrap();
+            } else if let Some(data) = self.series.column.as_i64_slice() {
                 Column::from_i64_values_owned(last_row.iter().map(|&r| data[r]).collect())
+            } else {
+                self.series.column.take_positions(&last_row)
             };
             let by_name = self.by.name();
             let idx_name = if by_name.is_empty() {
@@ -108450,6 +108604,67 @@ impl DataFrame {
             out.allows_duplicate_labels = self.allows_duplicate_labels;
             return Ok(out.with_labels_of(self));
         }
+        // Float columns holding missing cells (NaN or a cleared bit) beside
+        // all-valid floats and ints: the same row runs a column at a time off
+        // the typed buffers, a missing cell skipped - and without skipna every
+        // later cell of its row missing - as the Scalar path below runs them,
+        // which looked each column up and boxed a Scalar a cell
+        // (df.cumsum(axis=1) of 200k x 3 holding NaN 15 ms, pandas 14;
+        // br-frankenpandas-srwmv).
+        'nullable: {
+            let n = self.len();
+            let mut columns: Vec<(std::borrow::Cow<'_, [f64]>, Option<&ValidityMask>)> =
+                Vec::with_capacity(n_cols);
+            for pos in 0..n_cols {
+                let col = self.column_at(pos).expect("column in bounds");
+                if let Some(data) = col.as_f64_slice() {
+                    columns.push((std::borrow::Cow::Borrowed(data), None));
+                } else if let Some(data) = col.as_i64_slice() {
+                    let floats = data.iter().map(|&v| v as f64).collect();
+                    columns.push((std::borrow::Cow::Owned(floats), None));
+                } else if let Some((data, validity)) = col.as_canonical_nullable_f64() {
+                    columns.push((std::borrow::Cow::Borrowed(data), Some(validity)));
+                } else {
+                    break 'nullable;
+                }
+            }
+            let mut acc = vec![init; n];
+            let mut poisoned = vec![false; n];
+            let mut pairs = Vec::with_capacity(n_cols);
+            let mut column_order = Vec::with_capacity(n_cols);
+            for (pos, (data, validity)) in columns.iter().enumerate() {
+                let mut out = Vec::with_capacity(n);
+                let mut words = vec![0_u64; n.div_ceil(64)];
+                for row in 0..n {
+                    let x = data[row];
+                    let present = validity.is_none_or(|validity| validity.get(row)) && !x.is_nan();
+                    if present && !poisoned[row] {
+                        acc[row] = op(acc[row], x);
+                        out.push(acc[row]);
+                        words[row / 64] |= 1_u64 << (row % 64);
+                    } else {
+                        poisoned[row] |= !skipna;
+                        out.push(0.0);
+                    }
+                }
+                let name = self.column_name_at(pos).expect("column in bounds");
+                let validity = ValidityMask::from_words(words, n);
+                pairs.push((
+                    name.clone(),
+                    Column::from_f64_values_with_validity(out, validity),
+                ));
+                column_order.push(name);
+            }
+            let mut out = Self::new_with_axes(
+                self.index.clone(),
+                self.row_multiindex.clone(),
+                ColumnStore::from_pairs(pairs),
+                column_order,
+                self.column_multiindex.clone(),
+            )?;
+            out.allows_duplicate_labels = self.allows_duplicate_labels;
+            return Ok(out.with_labels_of(self));
+        }
 
         let n_cols = self.num_columns();
         let mut per_column: Vec<Vec<Scalar>> = (0..n_cols)
@@ -116352,6 +116567,11 @@ impl DataFrameGroupBy<'_> {
                 return Ok((codes, index.with_row_multiindex(levels)?));
             }
         }
+        if self.by.len() == 1
+            && let Some(coded) = self.single_float_group_codes()
+        {
+            return coded;
+        }
         let (group_order, groups) = self.build_groups();
         let mut codes = vec![None; self.df.len()];
         let mut labels = Vec::with_capacity(group_order.len());
@@ -116380,6 +116600,122 @@ impl DataFrameGroupBy<'_> {
             None => index,
         };
         Ok((codes, index))
+    }
+
+    /// [`Self::group_codes`] of one float key read off its buffer: groups
+    /// numbered first seen through an open-addressing table of the values'
+    /// bits (-0.0 meeting 0.0, pandas' float hash), the missing rows one
+    /// group (dropna=False) or none, each group labelled by its first row's
+    /// cell as build_groups labels it, ordered by value (missing last) when
+    /// `sort`. build_groups made a Vec<ScalarKey> a row, sorted them and
+    /// looked the key column up by name a row (groupby(floats with NaN,
+    /// dropna=False) 0.28x pandas; br-frankenpandas-n8lfk). None for any
+    /// other key.
+    fn single_float_group_codes(&self) -> Option<Result<(Column, Index), FrameError>> {
+        let key_col = &self.df.columns[&self.by[0]];
+        if key_col.dtype() != DType::Float64 || key_col.categorical().is_some() {
+            return None;
+        }
+        let (data, validity) = key_col.as_canonical_nullable_f64()?;
+        let rows = data.len();
+        let cap = rows
+            .saturating_add(rows / 2)
+            .max(2)
+            .checked_next_power_of_two()?;
+        const EMPTY: u64 = u64::MAX;
+        let shift = 64 - cap.trailing_zeros();
+        let mask = cap - 1;
+        let mut table = vec![EMPTY; cap];
+        let mut table_gid = vec![0_usize; cap];
+        // Each group's first row; the missing rows' group, once seen.
+        let mut first_rows: Vec<usize> = Vec::new();
+        let mut missing_gid: Option<usize> = None;
+        let gids: Vec<Option<usize>> = data
+            .iter()
+            .enumerate()
+            .map(|(row, &value)| {
+                if !validity.get(row) || value.is_nan() {
+                    if self.dropna {
+                        return None;
+                    }
+                    return Some(*missing_gid.get_or_insert_with(|| {
+                        first_rows.push(row);
+                        first_rows.len() - 1
+                    }));
+                }
+                let key = if value == 0.0 { 0 } else { value.to_bits() };
+                let hash = fp_types::spread_float_bits(key).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                let mut slot = (hash >> shift) as usize;
+                loop {
+                    let held = table[slot];
+                    if held == EMPTY {
+                        table[slot] = key;
+                        table_gid[slot] = first_rows.len();
+                        first_rows.push(row);
+                        return Some(first_rows.len() - 1);
+                    }
+                    if held == key {
+                        return Some(table_gid[slot]);
+                    }
+                    slot = (slot + 1) & mask;
+                }
+            })
+            .collect();
+        let order: Vec<usize> = if self.sort {
+            // Each present group's value as a key ordered as total_cmp
+            // orders it, sorted with its group beside it (distinct values:
+            // no ties); the missing group last.
+            let mut keyed: Vec<(u64, usize)> = first_rows
+                .iter()
+                .enumerate()
+                .filter(|&(gid, _)| Some(gid) != missing_gid)
+                .map(|(gid, &row)| {
+                    let bits = data[row].to_bits();
+                    let key = if bits >> 63 == 1 {
+                        !bits
+                    } else {
+                        bits | (1 << 63)
+                    };
+                    (key, gid)
+                })
+                .collect();
+            keyed.sort_unstable();
+            keyed
+                .into_iter()
+                .map(|(_, gid)| gid)
+                .chain(missing_gid)
+                .collect()
+        } else {
+            (0..first_rows.len()).collect()
+        };
+        let mut rank = vec![0_i64; order.len()];
+        for (code, &gid) in order.iter().enumerate() {
+            rank[gid] = i64::try_from(code).ok()?;
+        }
+        let labels: Vec<IndexLabel> = order
+            .iter()
+            .map(|&gid| {
+                let cell = key_col
+                    .scalar_at(first_rows[gid])
+                    .unwrap_or(Scalar::Null(NullKind::NaN));
+                Self::group_key_scalar_label(&cell)
+            })
+            .collect();
+        let codes = if gids.iter().all(Option::is_some) {
+            Column::from_i64_values_owned(gids.iter().flatten().map(|&gid| rank[gid]).collect())
+        } else {
+            match Column::from_values(
+                gids.iter()
+                    .map(|gid| {
+                        gid.map_or(Scalar::Null(NullKind::NaN), |gid| Scalar::Int64(rank[gid]))
+                    })
+                    .collect(),
+            ) {
+                Ok(codes) => codes,
+                Err(error) => return Some(Err(error.into())),
+            }
+        };
+        Some(Ok((codes, Index::new(labels))))
     }
 
     /// A group key's label, typed as pandas types a groupby result's index and
@@ -126587,38 +126923,61 @@ impl DataFrameGroupBy<'_> {
         if self.by.len() != 1 {
             return Ok(None);
         }
-        // A text key's dense grouping too: it went through build_groups, a
-        // Scalar a row out (groupby(text).ngroup() 0.79x pandas;
-        // br-frankenpandas-ezot5).
+        // The rows' group numbers, made once for the groupby object that
+        // shares its layout: a reused groupby cloned its grouping and
+        // numbered every row each call (gb.ngroup() 0.07x pandas, whose
+        // grouper keeps them; br-frankenpandas-haxi0).
+        let rows = self.df.len();
+        let cached = self
+            .layout
+            .as_ref()
+            .and_then(|layout| layout.ngroup.get())
+            .filter(|(sort, len, _, _)| *sort == self.sort && *len == rows)
+            .map(|(_, _, numbers, ng)| (Arc::clone(numbers), *ng));
+        let (numbers, ng) = match cached {
+            Some(made) => made,
+            None => {
+                let Some((numbers, ng)) = self.ngroup_numbers() else {
+                    return Ok(None);
+                };
+                let numbers: Arc<[i64]> = Arc::from(numbers);
+                if let Some(layout) = &self.layout {
+                    let _ = layout
+                        .ngroup
+                        .set((self.sort, rows, Arc::clone(&numbers), ng));
+                }
+                (numbers, ng)
+            }
+        };
+        let column = if ascending {
+            Column::from_i64_arc(numbers)
+        } else {
+            let last = ng as i64 - 1;
+            Column::from_i64_values_owned(numbers.iter().map(|&number| last - number).collect())
+        };
+        let index = self.df.index().clone();
+        Ok(Some(Series::new(String::new(), index, column)?))
+    }
+
+    /// Each row's group number in result order and the group count, of a
+    /// single int or text key's dense grouping (a text key went through
+    /// build_groups, a Scalar a row out: groupby(text).ngroup() 0.79x
+    /// pandas; br-frankenpandas-ezot5); None for any other key.
+    fn ngroup_numbers(&self) -> Option<(Vec<i64>, usize)> {
         let key_col = &self.df.columns[&self.by[0]];
         let (gid_per_row, ng, order, _out_index) = if let Some(keys) = key_col.as_i64_slice() {
-            let Some((min, range)) = i64_dense_histogram_range(keys) else {
-                return Ok(None);
-            };
+            let (min, range) = i64_dense_histogram_range(keys)?;
             self.int64_dense_grouping(keys, min, range)
         } else if is_text_key_column(key_col) {
             self.single_utf8_key_dense_grouping(key_col)
         } else {
-            return Ok(None);
+            return None;
         };
         let mut pos_of_gid = vec![0_i64; ng];
         for (pos, &g) in order.iter().enumerate() {
             pos_of_gid[g] = pos as i64;
         }
-        let ng_i = ng as i64;
-        let out: Vec<i64> = gid_per_row
-            .iter()
-            .map(|&g| {
-                if ascending {
-                    pos_of_gid[g]
-                } else {
-                    ng_i - 1 - pos_of_gid[g]
-                }
-            })
-            .collect();
-        let index = self.df.index().clone();
-        let column = Column::from_i64_values_owned(out);
-        Ok(Some(Series::new(String::new(), index, column)?))
+        Some((gid_per_row.iter().map(|&g| pos_of_gid[g]).collect(), ng))
     }
 
     pub fn ngroup_with_ascending(&self, ascending: bool) -> Result<Series, FrameError> {
@@ -190764,6 +191123,302 @@ mod tests {
     }
 
     #[test]
+    fn float_key_codes_read_off_the_buffer_n8lfk() {
+        // One float key's group codes read off its buffer answer as
+        // build_groups' over the same cells (an eager column takes that
+        // path): sort / first-seen order, dropna on / off, missing rows
+        // first, inside and last, infinities. -0.0 meets 0.0 as pandas'
+        // float hash, labelled by its first row. NEGATIVE: an eager column
+        // is not read off a buffer.
+        let nan = f64::NAN;
+        let cases: [Vec<f64>; 4] = [
+            vec![1.5, nan, -2.0, 1.5, 7.0, f64::INFINITY, nan, -2.0],
+            vec![nan, nan, 3.0, f64::NEG_INFINITY, 3.0],
+            vec![2.0, 1.0, 2.0, 0.5],
+            vec![nan, nan],
+        ];
+        let frame = |column: Column| {
+            let rows = column.len() as i64;
+            let mut columns = BTreeMap::new();
+            columns.insert("k".to_owned(), column);
+            DataFrame::new_with_column_order(
+                Index::from_range(0, rows, 1),
+                columns,
+                vec!["k".to_owned()],
+            )
+            .unwrap()
+        };
+        for keys in &cases {
+            let typed = frame(Column::from_f64_values(keys.clone()));
+            let eager = frame(
+                Column::new(
+                    DType::Float64,
+                    keys.iter().map(|&k| Scalar::Float64(k)).collect(),
+                )
+                .unwrap(),
+            );
+            assert!(
+                typed
+                    .column("k")
+                    .unwrap()
+                    .as_canonical_nullable_f64()
+                    .is_some()
+            );
+            assert!(
+                eager
+                    .column("k")
+                    .unwrap()
+                    .as_canonical_nullable_f64()
+                    .is_none()
+            );
+            for sort in [true, false] {
+                for dropna in [true, false] {
+                    let coded = |df: &DataFrame| {
+                        let (codes, groups) = df
+                            .groupby_full_options(&["k"], true, sort, dropna)
+                            .unwrap()
+                            .group_codes()
+                            .unwrap();
+                        let codes: Vec<Option<f64>> = codes
+                            .values()
+                            .iter()
+                            .map(|code| (!code.is_missing()).then(|| code.to_f64().unwrap()))
+                            .collect();
+                        let labels: Vec<String> = groups
+                            .labels()
+                            .iter()
+                            .map(|label| format!("{label:?}"))
+                            .collect();
+                        (codes, labels)
+                    };
+                    assert_eq!(coded(&typed), coded(&eager), "{keys:?} {sort} {dropna}");
+                }
+            }
+        }
+        let zeros = frame(Column::from_f64_values(vec![-0.0, 1.0, 0.0, nan]));
+        let (codes, groups) = zeros
+            .groupby_full_options(&["k"], true, true, false)
+            .unwrap()
+            .group_codes()
+            .unwrap();
+        assert_eq!(codes.values(), [0_i64, 1, 0, 2].map(Scalar::Int64));
+        let labels = groups.labels();
+        assert!(
+            matches!(labels[0], IndexLabel::Float64(zero) if zero.0 == 0.0 && zero.0.is_sign_negative())
+        );
+        assert!(labels[2].is_missing());
+    }
+
+    #[test]
+    fn row_runs_over_gapped_floats_read_the_buffers_srwmv() {
+        // cumsum / cumprod / cummax / cummin(axis=1) over float columns
+        // holding NaN beside ints answer as the Scalar path over the same
+        // cells (eager columns take it): a missing cell skipped, and without
+        // skipna every later cell of its row missing. NEGATIVE: an eager
+        // column takes the Scalar path.
+        let nan = f64::NAN;
+        let a = vec![1.5, nan, -2.0, 4.0, nan, 0.25];
+        let b = vec![nan, 3.0, 2.0, nan, nan, -1.0];
+        let c = vec![7_i64, -1, 0, 2, 5, 9];
+        let frame = |eager: bool| {
+            let floats = |values: &[f64]| {
+                if eager {
+                    Column::new(
+                        DType::Float64,
+                        values.iter().map(|&v| Scalar::Float64(v)).collect(),
+                    )
+                    .unwrap()
+                } else {
+                    Column::from_f64_values(values.to_vec())
+                }
+            };
+            let mut columns = BTreeMap::new();
+            columns.insert("a".to_owned(), floats(&a));
+            columns.insert("b".to_owned(), floats(&b));
+            columns.insert("c".to_owned(), Column::from_i64_values(c.clone()));
+            DataFrame::new_with_column_order(
+                Index::from_range(0, 6, 1),
+                columns,
+                vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            )
+            .unwrap()
+        };
+        let (typed, eager) = (frame(false), frame(true));
+        assert!(
+            typed
+                .column("a")
+                .unwrap()
+                .as_canonical_nullable_f64()
+                .is_some()
+        );
+        assert!(
+            eager
+                .column("a")
+                .unwrap()
+                .as_canonical_nullable_f64()
+                .is_none()
+        );
+        let cells = |df: DataFrame| {
+            ["a", "b", "c"].map(|name| {
+                df.column(name)
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .map(|cell| (!cell.is_missing()).then(|| cell.to_f64().unwrap()))
+                    .collect::<Vec<_>>()
+            })
+        };
+        for skipna in [true, false] {
+            assert_eq!(
+                cells(typed.cumsum_axis1_with_skipna(skipna).unwrap()),
+                cells(eager.cumsum_axis1_with_skipna(skipna).unwrap()),
+                "cumsum {skipna}"
+            );
+            assert_eq!(
+                cells(typed.cumprod_axis1_with_skipna(skipna).unwrap()),
+                cells(eager.cumprod_axis1_with_skipna(skipna).unwrap()),
+                "cumprod {skipna}"
+            );
+            assert_eq!(
+                cells(typed.cummax_axis1_with_skipna(skipna).unwrap()),
+                cells(eager.cummax_axis1_with_skipna(skipna).unwrap()),
+                "cummax {skipna}"
+            );
+            assert_eq!(
+                cells(typed.cummin_axis1_with_skipna(skipna).unwrap()),
+                cells(eager.cummin_axis1_with_skipna(skipna).unwrap()),
+                "cummin {skipna}"
+            );
+        }
+        let [_, sums, last] = cells(typed.cumsum_axis1_with_skipna(false).unwrap());
+        assert_eq!(sums, vec![None, None, Some(0.0), None, None, Some(-0.75)]);
+        assert_eq!(last[1], None);
+    }
+
+    #[test]
+    fn text_key_aggregates_read_the_kept_group_ids_srwmv() {
+        // median / std / var over a one-buffer text key read the group ids
+        // the groupby keeps, answering as build_groups over a Scalar-backed
+        // key of the same text: all-valid floats and ints, floats holding
+        // NaN (a group of only NaN missing), first-seen group order.
+        // NEGATIVE: a Scalar-backed key takes build_groups.
+        let words = ["b", "a", "b", "c", "a", "d", "b", "c"];
+        let mut bytes = Vec::new();
+        let mut offsets = vec![0];
+        for word in words {
+            bytes.extend_from_slice(word.as_bytes());
+            offsets.push(bytes.len());
+        }
+        let index = Index::from_range(0, 8, 1);
+        let one_buffer = Series::new(
+            "k",
+            index.clone(),
+            Column::from_utf8_contiguous(bytes, offsets),
+        )
+        .unwrap();
+        let scalars = Series::new(
+            "k",
+            index.clone(),
+            Column::new(
+                DType::Utf8,
+                words
+                    .iter()
+                    .map(|w| Scalar::Utf8((*w).to_owned()))
+                    .collect(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(one_buffer.column().as_utf8_contiguous().is_some());
+        assert!(scalars.column().as_utf8_contiguous().is_none());
+        let nan = f64::NAN;
+        let values = [
+            Column::from_f64_values(vec![1.0, 2.5, 3.0, -4.0, 0.5, 6.0, 7.0, 8.0]),
+            Column::from_i64_values(vec![3, 1, 4, 1, 5, 9, 2, 6]),
+            Column::from_f64_values(vec![1.0, nan, 3.0, nan, 0.5, nan, nan, 8.0]),
+        ];
+        let shown = |s: Series| {
+            let labels: Vec<String> = s
+                .index()
+                .labels()
+                .iter()
+                .map(|l| format!("{l:?}"))
+                .collect();
+            let cells: Vec<Option<f64>> = s
+                .values()
+                .iter()
+                .map(|cell| (!cell.is_missing()).then(|| cell.to_f64().unwrap()))
+                .collect();
+            (labels, cells)
+        };
+        for value in values {
+            let series = Series::new("v", index.clone(), value).unwrap();
+            for key in [&one_buffer, &scalars] {
+                assert_eq!(key.len(), series.len());
+            }
+            let typed = series.groupby(&one_buffer).unwrap();
+            let generic = series.groupby(&scalars).unwrap();
+            assert_eq!(
+                shown(typed.median().unwrap()),
+                shown(generic.median().unwrap())
+            );
+            assert_eq!(shown(typed.std().unwrap()), shown(generic.std().unwrap()));
+            assert_eq!(shown(typed.var().unwrap()), shown(generic.var().unwrap()));
+        }
+    }
+
+    #[test]
+    fn shared_layout_numbers_the_groups_once_haxi0() {
+        // A groupby sharing its layout numbers its rows once and reads them
+        // after: ascending, descending and again, int and text keys, answer
+        // as an unshared groupby. NEGATIVE: the same layout asked by a
+        // sort=False groupby (other numbers) is not read for it.
+        use std::sync::Arc;
+
+        use super::{DataFrameGroupBy, DenseGroupLayout};
+
+        let ints: Vec<Scalar> = [5, 3, 5, 9, 3, 1].map(Scalar::Int64).to_vec();
+        let texts: Vec<Scalar> = ["e", "c", "e", "z", "c", "a"]
+            .map(|text| Scalar::Utf8(text.to_owned()))
+            .to_vec();
+        for keys in [ints, texts] {
+            let values: Vec<Scalar> = (0..6).map(Scalar::Int64).collect();
+            let df = DataFrame::from_dict(&["g", "v"], vec![("g", keys), ("v", values)]).unwrap();
+            let layout = Arc::new(DenseGroupLayout::default());
+            for ascending in [true, false, true] {
+                let shared = df
+                    .groupby(&["g"])
+                    .unwrap()
+                    .sharing(&layout)
+                    .ngroup_with_ascending(ascending)
+                    .unwrap();
+                let plain = df
+                    .groupby(&["g"])
+                    .unwrap()
+                    .ngroup_with_ascending(ascending)
+                    .unwrap();
+                assert_eq!(shared.values(), plain.values(), "{ascending}");
+                assert!(layout.ngroup.get().is_some());
+            }
+            let first_seen = |gb: DataFrameGroupBy<'_>| gb.ngroup().unwrap().values().to_vec();
+            let unsorted = first_seen(
+                df.groupby_full_options(&["g"], true, false, true)
+                    .unwrap()
+                    .sharing(&layout),
+            );
+            assert_eq!(
+                unsorted,
+                first_seen(df.groupby_full_options(&["g"], true, false, true).unwrap())
+            );
+            assert_eq!(
+                unsorted,
+                [0, 1, 0, 2, 1, 3].map(Scalar::Int64).to_vec(),
+                "first seen"
+            );
+        }
+    }
+
+    #[test]
     fn groupby_ngroup_dropna_true_marks_missing_keys_nan() {
         let df = DataFrame::from_dict(
             &["g", "v"],
@@ -214879,6 +215534,78 @@ mod tests {
         // same order; nothing is kept for 0.
         assert_eq!(rows(ints.nlargest(5).unwrap()), at(&[3, 0, 1, 5, 2]));
         assert!(rows(ints.nlargest(0).unwrap()).is_empty());
+    }
+
+    #[test]
+    fn best_rows_heap_keeps_the_first_of_equals_84b8p() {
+        // nlargest / nsmallest of up to an eighth of the rows read them
+        // through a heap of the best so far: the rows and values a stable
+        // sort of every row gives (value, then position), over rising,
+        // falling, constant, tied and scattered data, ints and floats
+        // (br-frankenpandas-84b8p). NEGATIVE: past an eighth of the rows
+        // (the select) answers the same.
+        let len = 1_000_usize;
+        let shapes: Vec<(&str, Vec<i64>)> = vec![
+            ("rising", (0..len as i64).collect()),
+            ("falling", (0..len as i64).rev().collect()),
+            ("constant", vec![5; len]),
+            ("ties", (0..len as i64).map(|i| i % 7).collect()),
+            (
+                "scattered",
+                (0..len as i64).map(|i| (i * 7_919) % 1_009 - 500).collect(),
+            ),
+        ];
+        let rows = |s: &Series| {
+            s.index()
+                .labels()
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Int64(row) => *row,
+                    other => panic!("{other:?}"),
+                })
+                .collect::<Vec<i64>>()
+        };
+        for (shape, values) in &shapes {
+            for largest in [true, false] {
+                let mut order: Vec<usize> = (0..len).collect();
+                order.sort_by(|&a, &b| {
+                    let by_value = values[a].cmp(&values[b]);
+                    if largest {
+                        by_value.reverse()
+                    } else {
+                        by_value
+                    }
+                });
+                for n in [1, 7, 64, 100, 125, 126, 400] {
+                    let want: Vec<i64> = order[..n].iter().map(|&row| row as i64).collect();
+                    let ints = Series::new(
+                        "k",
+                        Index::from_range(0, len as i64, 1),
+                        Column::from_i64_values(values.clone()),
+                    )
+                    .unwrap();
+                    let floats = Series::new(
+                        "x",
+                        Index::from_range(0, len as i64, 1),
+                        Column::from_f64_values(values.iter().map(|&v| v as f64 / 4.0).collect()),
+                    )
+                    .unwrap();
+                    for series in [ints, floats] {
+                        let best = if largest {
+                            series.nlargest(n).unwrap()
+                        } else {
+                            series.nsmallest(n).unwrap()
+                        };
+                        assert_eq!(rows(&best), want, "{shape} {largest} {n}");
+                        let picked: Vec<Scalar> = want
+                            .iter()
+                            .map(|&row| series.values()[row as usize].clone())
+                            .collect();
+                        assert_eq!(best.values(), picked.as_slice(), "{shape} {largest} {n}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
