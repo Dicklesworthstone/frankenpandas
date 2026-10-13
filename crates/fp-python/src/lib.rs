@@ -10333,15 +10333,7 @@ fn narrow_ndarray_column(
 /// row and read back (Series(dates) 35 ms a million rows, pandas 0.03;
 /// br-frankenpandas-vk7y9).
 fn nanos_column(nanos: Vec<i64>, datetime: bool) -> Column {
-    let words = nanos
-        .chunks(64)
-        .map(|chunk| {
-            chunk.iter().enumerate().fold(0_u64, |word, (bit, &ns)| {
-                word | (u64::from(ns != i64::MIN) << bit)
-            })
-        })
-        .collect();
-    let validity = fp_columnar::ValidityMask::from_words(words, nanos.len());
+    let validity = fp_columnar::ValidityMask::from_i64_sentinel(&nanos, i64::MIN);
     match (datetime, validity.all()) {
         // Dates all present: the shared buffer a slice or a window views
         // without a copy (br-frankenpandas-d2xp1), as a DatetimeIndex's was.
@@ -10486,7 +10478,19 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
     let column = match kind.as_str() {
         "M" => nanos_column(temporal_nanos("datetime64[ns]")?, true),
         "m" => nanos_column(temporal_nanos("timedelta64[ns]")?, false),
-        "i" if native => Column::from_i64_values(ndarray_elements::<i64>(py, obj)?),
+        "i" if native => {
+            // A contiguous buffer read straight into the column's Arc, as the
+            // float64 arm: ndarray_elements' Vec and from_i64_values'
+            // Arc::from copied it twice (a 2-column int frame's build 0.83x
+            // pandas; br-frankenpandas-qpbpa). A strided view copies once.
+            let buffer = pyo3::buffer::PyBuffer::<i64>::get(obj)?;
+            match buffer.as_slice(py) {
+                Some(cells) => Column::from_i64_arc(
+                    cells.iter().map(pyo3::buffer::ReadOnlyCell::get).collect(),
+                ),
+                None => Column::from_i64_values(buffer.to_vec(py)?),
+            }
+        }
         "i" => Column::from_i64_values(obj.call_method0("tolist")?.extract::<Vec<i64>>()?),
         "f" if native && name == "float64" => {
             // A contiguous buffer read straight into the column's Arc: one
@@ -17890,6 +17894,14 @@ impl PyIndex {
             let (joined, left, right) = index_join_indexers(&self.inner, &other_idx, how, sort);
             let indexers = |positions: Option<Vec<i64>>| positions.map(IndexerArray);
             return (PyIndex { inner: joined }, indexers(left), indexers(right)).into_py_any(py);
+        }
+        // Two strictly increasing int indexes' outer join is their merged
+        // union, sorted already (it was hashed, then sorted again;
+        // br-frankenpandas-5ibzp).
+        if how == "outer"
+            && let Some(union) = self.inner.sorted_union_increasing_i64(&other_idx)
+        {
+            return PyIndex { inner: union }.into_py_any(py);
         }
         let joined = self
             .inner
@@ -89054,8 +89066,11 @@ fn index_key_column(index: &Index) -> Result<Column, fp_columnar::ColumnError> {
                 nanos.into_owned(),
             ));
         }
+        // The shared view copied once, straight into the column's Arc: its
+        // Vec clone and from_i64_values' Arc::from copied it twice (9% of an
+        // outer index merge; br-frankenpandas-m3z4g).
         if let Some(ints) = index.int64_label_values() {
-            return Ok(Column::from_i64_values(Arc::unwrap_or_clone(ints)));
+            return Ok(Column::from_i64_arc(Arc::from(ints.as_slice())));
         }
     }
     Column::from_values(index.labels().iter().map(index_label_to_scalar).collect())

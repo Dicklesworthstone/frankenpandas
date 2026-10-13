@@ -1202,6 +1202,102 @@ pub fn sqrt_f64_arc(a: &[f64]) -> std::sync::Arc<[f64]> {
     a.iter().map(|&x| x.sqrt()).collect()
 }
 
+/// Each row's bit of a 64-row word, four lanes a group: group `g`'s lane `l`
+/// is bit `4g + l`.
+const WORD_LANE_BITS: [Simd<i64, 4>; 16] = {
+    let mut groups = [Simd::from_array([0; 4]); 16];
+    let mut group = 0;
+    while group < 16 {
+        let shift = group * 4;
+        groups[group] = Simd::from_array([
+            1 << shift,
+            1 << (shift + 1),
+            1 << (shift + 2),
+            1 << (shift + 3),
+        ]);
+        group += 1;
+    }
+    groups
+};
+
+/// The validity words of `a` - a bit a row, set where the value is not NaN,
+/// 64 rows a word, the last word's unused bits clear - and whether every
+/// value is finite, in one pass of 4-lane `v == v` compares, each lane's
+/// all-ones mask and-ed with its bit and or-ed into the word's lanes (one
+/// `reduce_or` a word), `v * 0`'s NaN masks or-ed alongside (NaN for an
+/// infinity or a NaN only). A bit a row folded into its word, after a
+/// pass of its own for NaN and infinity, ran a row a cycle (46% of a float
+/// column's frame build, 0.47x pandas); a mask's `to_bitmask` packed and
+/// permuted it first (br-frankenpandas-qpbpa).
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`sqrt_f64_collect`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn nan_validity_words(a: &[f64]) -> (Vec<u64>, bool) {
+    use std::simd::num::SimdInt;
+    const LANES: usize = 4;
+    let zero = Simd::<f64, LANES>::splat(0.0);
+    let mut words = Vec::with_capacity(a.len().div_ceil(64));
+    // `v * 0` is NaN only for an infinity or a NaN; its masks or-ed (a sum
+    // of them chained an add's latency a group).
+    let mut non_finite = Simd::<i64, LANES>::splat(0);
+    let (blocks, rest) = a.as_chunks::<64>();
+    for block in blocks {
+        let mut lanes = Simd::<i64, LANES>::splat(0);
+        for (quad, bits) in block.as_chunks::<LANES>().0.iter().zip(&WORD_LANE_BITS) {
+            let values = Simd::<f64, LANES>::from_array(*quad);
+            let probe = values * zero;
+            non_finite |= probe.simd_ne(probe).to_simd();
+            lanes |= values.simd_eq(values).to_simd() & *bits;
+        }
+        words.push(lanes.reduce_or() as u64);
+    }
+    let mut finite = non_finite.reduce_or() == 0;
+    if !rest.is_empty() {
+        let mut word = 0_u64;
+        for (bit, &value) in rest.iter().enumerate() {
+            finite &= value.is_finite();
+            word |= u64::from(!value.is_nan()) << bit;
+        }
+        words.push(word);
+    }
+    (words, finite)
+}
+
+/// The validity words of `a` against a sentinel - a bit a row, set where the
+/// value is not `missing` (NaT's `i64::MIN`), 64 rows a word, the last
+/// word's unused bits clear - in 4-lane compares (one register) packed into
+/// the words: a bit a row folded into its word ran a row a cycle (40% of a
+/// datetime column's frame build, 0.58x pandas; br-frankenpandas-qpbpa).
+///
+/// ⚠️ `#[inline(never)]` and non-generic, as [`sqrt_f64_collect`]; the CALLER
+/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+#[inline(never)]
+#[must_use]
+pub fn i64_validity_words(a: &[i64], missing: i64) -> Vec<u64> {
+    use std::simd::num::SimdInt;
+    const LANES: usize = 4;
+    let sentinel = Simd::<i64, LANES>::splat(missing);
+    let mut words = Vec::with_capacity(a.len().div_ceil(64));
+    let (blocks, rest) = a.as_chunks::<64>();
+    for block in blocks {
+        // Each lane's mask and-ed with its bit ([`WORD_LANE_BITS`]), one
+        // reduce a word: a mask's to_bitmask packed and permuted it first.
+        let mut lanes = Simd::<i64, LANES>::splat(0);
+        for (quad, bits) in block.as_chunks::<LANES>().0.iter().zip(&WORD_LANE_BITS) {
+            lanes |= Simd::from_array(*quad).simd_ne(sentinel).to_simd() & *bits;
+        }
+        words.push(lanes.reduce_or() as u64);
+    }
+    if !rest.is_empty() {
+        words.push(rest.iter().enumerate().fold(0_u64, |word, (bit, &value)| {
+            word | (u64::from(value != missing) << bit)
+        }));
+    }
+    words
+}
+
 /// The eight `bool`s of every 8-lane compare mask, bit `i` -> lane `i`.
 const MASK_BYTES: [[bool; 8]; 256] = {
     let mut table = [[false; 8]; 256];
@@ -3008,5 +3104,86 @@ mod int_extremes_e186m {
         // NEGATIVE: a later equal value is not the position (ties to the first).
         let ties = [5_i64; 40];
         assert_eq!((argmin_i64(&ties), argmax_i64(&ties)), (Some(0), Some(0)));
+    }
+}
+
+#[cfg(test)]
+mod nan_validity_words_qpbpa {
+    //! The 8-lane validity words equal a bit-a-row reference at every length
+    //! across the 64-row word and 8-lane boundaries (br-frankenpandas-qpbpa).
+
+    use super::nan_validity_words;
+
+    fn reference(a: &[f64]) -> (Vec<u64>, bool) {
+        let mut words = vec![0_u64; a.len().div_ceil(64)];
+        for (row, value) in a.iter().enumerate() {
+            if !value.is_nan() {
+                words[row / 64] |= 1 << (row % 64);
+            }
+        }
+        (words, a.iter().all(|value| value.is_finite()))
+    }
+
+    #[test]
+    fn words_match_a_bit_a_row_at_every_length() {
+        for len in (0..=140).chain([255, 256, 257, 1000]) {
+            let values: Vec<f64> = (0..len)
+                .map(|row| match row % 11 {
+                    0 => f64::NAN,
+                    5 if row % 7 == 0 => -0.0,
+                    _ => row as f64 * 0.5,
+                })
+                .collect();
+            assert_eq!(nan_validity_words(&values), reference(&values), "len {len}");
+        }
+    }
+
+    /// A NaN in the last lane of a word and in the tail clears just its bit
+    /// (and is not finite). NEGATIVE: an infinity is present (its bit set)
+    /// yet not finite; only all-finite values are finite.
+    #[test]
+    fn infinities_are_valid_but_not_finite() {
+        let mut values = vec![1.0_f64; 70];
+        assert_eq!(
+            nan_validity_words(&values),
+            (vec![u64::MAX, (1 << 6) - 1], true)
+        );
+        values[10] = f64::NEG_INFINITY;
+        values[66] = f64::INFINITY;
+        assert_eq!(
+            nan_validity_words(&values),
+            (vec![u64::MAX, (1 << 6) - 1], false)
+        );
+        values[63] = f64::NAN;
+        values[69] = f64::NAN;
+        let (words, finite) = nan_validity_words(&values);
+        assert_eq!(words, vec![u64::MAX >> 1, (1 << 5) - 1]);
+        assert!(!finite);
+        assert_eq!(nan_validity_words(&values), reference(&values));
+    }
+
+    /// The sentinel words equal a bit-a-row reference at every length, NaT
+    /// across the lane and word joins. NEGATIVE: a value one above the
+    /// sentinel, and i64::MAX, are present.
+    #[test]
+    fn sentinel_words_match_a_bit_a_row_at_every_length() {
+        use super::i64_validity_words;
+        for len in (0..=140).chain([255, 256, 257, 1000]) {
+            let values: Vec<i64> = (0..len)
+                .map(|row: i64| match row % 9 {
+                    0 => i64::MIN,
+                    4 => i64::MIN + 1,
+                    7 => i64::MAX,
+                    _ => row * 1_000,
+                })
+                .collect();
+            let mut want = vec![0_u64; values.len().div_ceil(64)];
+            for (row, &value) in values.iter().enumerate() {
+                if value != i64::MIN {
+                    want[row / 64] |= 1 << (row % 64);
+                }
+            }
+            assert_eq!(i64_validity_words(&values, i64::MIN), want, "len {len}");
+        }
     }
 }

@@ -457,6 +457,12 @@ impl ValidityMask {
     #[must_use]
     pub fn from_f64(data: &[f64]) -> Self {
         let len = data.len();
+        // fp-dot-kernel's 8-lane NaN masks packed into the words where AVX2
+        // is there: the fold below runs a row a cycle (br-frankenpandas-qpbpa).
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            return Self::from_words(fp_dot_kernel::nan_validity_words(data).0, len);
+        }
         // A 64-row word at a time, without a branch: a bit and a branch per
         // row was 1.5 ms a million rows, this 0.3 (br-frankenpandas-cmgnp).
         let word_of = |rows: &[f64]| {
@@ -485,6 +491,28 @@ impl ValidityMask {
             invalid_ranges: None,
             len,
         }
+    }
+
+    /// A validity mask of `data` with `missing` (NaT's `i64::MIN`) the
+    /// invalid rows: fp-dot-kernel's 8-lane compares packed into the words
+    /// where AVX2 is there, else a word a 64 rows folded - a bit a row ran a
+    /// row a cycle (a datetime column's frame build 0.58x pandas;
+    /// br-frankenpandas-qpbpa).
+    #[must_use]
+    pub fn from_i64_sentinel(data: &[i64], missing: i64) -> Self {
+        #[cfg(target_arch = "x86_64")]
+        if std::arch::is_x86_feature_detected!("avx2") {
+            return Self::from_words(fp_dot_kernel::i64_validity_words(data, missing), data.len());
+        }
+        let words = data
+            .chunks(64)
+            .map(|chunk| {
+                chunk.iter().enumerate().fold(0_u64, |word, (bit, &value)| {
+                    word | (u64::from(value != missing) << bit)
+                })
+            })
+            .collect();
+        Self::from_words(words, data.len())
     }
 
     #[must_use]
@@ -2417,6 +2445,26 @@ fn nan_and_finite(data: &[f64]) -> (bool, bool) {
         return (false, true);
     }
     (data.iter().any(|v| v.is_nan()), false)
+}
+
+/// `data`'s validity (a NaN missing) and whether every value is finite: one
+/// pass of fp-dot-kernel's 8-lane masks where AVX2 is there - a scan for
+/// NaN, then a bit a row for the mask, was 63% of a float column's frame
+/// build (0.47x pandas; br-frankenpandas-qpbpa) - else [`nan_and_finite`]
+/// and [`ValidityMask::from_f64`].
+fn nan_validity_and_finite(data: &[f64]) -> (ValidityMask, bool) {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("avx2") {
+        let (words, finite) = fp_dot_kernel::nan_validity_words(data);
+        return (ValidityMask::from_words(words, data.len()), finite);
+    }
+    let (has_nan, all_finite) = nan_and_finite(data);
+    let validity = if has_nan {
+        ValidityMask::from_f64(data)
+    } else {
+        ValidityMask::all_valid(data.len())
+    };
+    (validity, all_finite)
 }
 
 /// [`power_by_number`] of every value, the exponent's case chosen once: the
@@ -14039,6 +14087,25 @@ impl Column {
         }
     }
 
+    /// [`Self::from_i64_values`] of a buffer already in the `Arc<[i64]>` the
+    /// column keeps, without its `Arc::from(Vec)` copy - for a reader that
+    /// fills the Arc directly (a numpy array's contiguous buffer, as
+    /// [`Self::from_f64_arc`]; the two copies were a 2-column int frame's
+    /// build, 0.83x pandas; br-frankenpandas-qpbpa).
+    #[must_use]
+    pub fn from_i64_arc(data: Arc<[i64]>) -> Self {
+        let len = data.len();
+        Self {
+            dtype: DType::Int64,
+            values: ScalarValues::lazy_all_valid_int64_arc(data),
+            validity: ValidityMask::all_valid(len),
+            data: None,
+            categorical: None,
+            width: None,
+            pandas_string: false,
+        }
+    }
+
     /// `len` copies of `value`, a broadcast number (`df['z'] = 7`): the column
     /// [`from_i64_values`](Self::from_i64_values) makes of `vec![value; len]`,
     /// the copies written straight into its `Arc<[i64]>` - that path filled a
@@ -14926,12 +14993,7 @@ impl Column {
     /// contiguous buffer; br-frankenpandas-br362).
     #[must_use]
     pub fn from_f64_arc(data: Arc<[f64]>) -> Self {
-        let (has_nan, all_finite) = nan_and_finite(&data);
-        let validity = if has_nan {
-            ValidityMask::from_f64(&data)
-        } else {
-            ValidityMask::all_valid(data.len())
-        };
+        let (validity, all_finite) = nan_validity_and_finite(&data);
         Self {
             dtype: DType::Float64,
             values: ScalarValues::lazy_all_valid_float64_arc_nan_exact(data, Some(all_finite)),

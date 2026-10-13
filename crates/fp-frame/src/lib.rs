@@ -12998,6 +12998,35 @@ pub fn fill_column(column: &Column, fill_value: &Scalar) -> Result<Column, Frame
     Ok(filled.column().clone())
 }
 
+/// The rows of a validity word's set bits, `base` the word's first row,
+/// ascending - an exact-size run, so a `Vec` extends by it with one reserve
+/// a word where a push a row checked its capacity
+/// (br-frankenpandas-5olp1).
+struct SetBitRows {
+    word: u64,
+    base: usize,
+}
+
+impl Iterator for SetBitRows {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        if self.word == 0 {
+            return None;
+        }
+        let row = self.base + self.word.trailing_zeros() as usize;
+        self.word &= self.word - 1;
+        Some(row)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let count = self.word.count_ones() as usize;
+        (count, Some(count))
+    }
+}
+
+impl ExactSizeIterator for SetBitRows {}
+
 impl Series {
     pub fn new(
         name: impl Into<LabelName>,
@@ -19128,25 +19157,25 @@ impl Series {
         if self.column.dtype() == DType::Float64
             && let Some((data, validity)) = self.column.as_f64_slice_with_validity()
         {
-            let words = validity.packed_words_for_scan();
-            let mut positions: Vec<usize> = Vec::with_capacity(data.len());
-            let mut kept: Vec<f64> = Vec::with_capacity(data.len());
-            for (w, &word) in words.iter().enumerate() {
-                if word == 0 {
-                    continue;
-                }
-                let base = w * 64;
-                let mut bits = word;
-                while bits != 0 {
-                    let i = base + bits.trailing_zeros() as usize;
-                    bits &= bits - 1;
-                    if !data[i].is_nan() {
-                        positions.push(i);
-                        kept.push(data[i]);
-                    }
-                }
+            // The kept rows a word at a time - the validity and-ed with the
+            // values' own NaN words - each word's rows extended as one
+            // exact-size run, the values gathered after and the positions
+            // handed to the index's owned take: two pushes a row and a
+            // second position buffer for the take were 0.70x pandas over a
+            // RangeIndex (br-frankenpandas-5olp1).
+            let present = validity.and_mask(&fp_columnar::ValidityMask::from_f64(data));
+            let mut positions: Vec<usize> = Vec::with_capacity(present.count_valid());
+            for (at, &word) in present.packed_words_for_scan().iter().enumerate() {
+                positions.extend(SetBitRows {
+                    word,
+                    base: at * 64,
+                });
             }
-            let index = self.index.take(&positions).rename_index(self.index.name());
+            let kept: Vec<f64> = positions.iter().map(|&row| data[row]).collect();
+            let index = self
+                .index
+                .take_owned(positions)
+                .rename_index(self.index.name());
             // Output is all-valid (only present slots kept) → MOVE into the backing.
             return Self::new(
                 self.name.clone(),
@@ -21556,18 +21585,34 @@ impl Series {
             to.fract() == 0.0 && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&to)
         };
         let (mut hits, mut floats) = (0_usize, 0_usize);
-        // Written in place in the column's Arc (a Vec copied in after).
-        let out: Arc<[f64]> = vals
-            .iter()
-            .map(|&value| match replaced(value) {
-                Some(to) => {
-                    hits += 1;
-                    floats += usize::from(!held(to));
-                    to
-                }
-                None => value as f64,
-            })
-            .collect();
+        // Written in place in the column's Arc (a Vec copied in after). One
+        // pair (s.replace(0, np.nan)) is a compare and a select a value, its
+        // value's hold tested once - a search of the pairs and a trunc a hit
+        // were 0.83x pandas (br-frankenpandas-zgu79).
+        let out: Arc<[f64]> = if let [(key, to)] = pairs.as_slice() {
+            let (key, to) = (*key, *to);
+            let out: Arc<[f64]> = vals
+                .iter()
+                .map(|&value| {
+                    let hit = value == key;
+                    hits += usize::from(hit);
+                    if hit { to } else { value as f64 }
+                })
+                .collect();
+            floats = usize::from(hits > 0 && !held(to));
+            out
+        } else {
+            vals.iter()
+                .map(|&value| match replaced(value) {
+                    Some(to) => {
+                        hits += 1;
+                        floats += usize::from(!held(to));
+                        to
+                    }
+                    None => value as f64,
+                })
+                .collect()
+        };
         if hits == 0 {
             return Some(Ok(self.clone()));
         }
@@ -31794,13 +31839,15 @@ impl Series {
             && self.column.width().is_none()
             && self.categorical.is_none()
         {
+            // The buffers moved into their columns (from_*_values copied
+            // each into its Arc).
             let column = if let Some(values) = self.column.as_i64_slice() {
-                repeat_each(values, repeats).map(Column::from_i64_values)
+                repeat_each(values, repeats).map(Column::from_i64_values_owned)
             } else {
                 self.column
                     .as_f64_slice()
                     .and_then(|values| repeat_each(values, repeats))
-                    .map(Column::from_f64_values)
+                    .map(Column::from_f64_values_owned)
             };
             if let Some(column) = column {
                 return Self::new(self.name.clone(), self.index.repeat(repeats), column);
@@ -51163,6 +51210,52 @@ impl SeriesGroupBy<'_> {
             return Some((gid_per_row, ngroups));
         }
 
+        // An all-valid float key numbered first-seen through an
+        // open-addressing table of its bits, -0.0 meeting 0.0 (pandas'
+        // float hash), the bits spread and multiplied and the high bits the
+        // slot (round floats differ in their high bits only): it fell to
+        // build_groups, a Scalar and a hash a row (g['v'].sum() by a float
+        // key of 200k rows 0.47x pandas; br-frankenpandas-n8lfk). A NaN's
+        // bits are the empty slot: an all-valid float column holds none.
+        if self.by.column.dtype() == DType::Float64
+            && let Some(data) = self.by.column.as_f64_slice()
+            && let Some(cap) = data
+                .len()
+                .saturating_add(data.len() / 2)
+                .max(2)
+                .checked_next_power_of_two()
+            && data.len() <= u32::MAX as usize
+        {
+            const EMPTY: u64 = u64::MAX;
+            let shift = 64 - cap.trailing_zeros();
+            let mask = cap - 1;
+            let mut table = vec![EMPTY; cap];
+            let mut table_gid = vec![0_u32; cap];
+            let mut ngroups = 0_usize;
+            let gids = data
+                .iter()
+                .map(|&value| {
+                    let key = if value == 0.0 { 0 } else { value.to_bits() };
+                    let hash = fp_types::spread_float_bits(key).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                    let mut slot = (hash >> shift) as usize;
+                    loop {
+                        let held = table[slot];
+                        if held == EMPTY {
+                            table[slot] = key;
+                            table_gid[slot] = ngroups as u32;
+                            ngroups += 1;
+                            return ngroups - 1;
+                        }
+                        if held == key {
+                            return table_gid[slot] as usize;
+                        }
+                        slot = (slot + 1) & mask;
+                    }
+                })
+                .collect();
+            return Some((gids, ngroups));
+        }
+
         // Object keys whose every cell carries its host's number (a
         // datetime.date's day; HostObject::host_number - cells are equal
         // exactly when their numbers are) numbered by those numbers, first
@@ -51363,6 +51456,19 @@ impl SeriesGroupBy<'_> {
                 }
                 if g == order.len() {
                     order.push(IndexLabel::Int64(ks[i]));
+                }
+            }
+        } else if self.by.column.dtype() == DType::Float64
+            && let Some(ks) = self.by.column.as_f64_slice()
+        {
+            // A float key's group labelled by its first row's value, as
+            // build_groups labels it (br-frankenpandas-n8lfk).
+            for (i, &g) in gids.iter().enumerate() {
+                if order.len() == ngroups {
+                    break;
+                }
+                if g == order.len() {
+                    order.push(IndexLabel::Float64(fp_index::OrderedF64(ks[i])));
                 }
             }
         } else if let Some((bytes, offsets)) = self.by.column.as_utf8_contiguous() {
@@ -76961,13 +77067,37 @@ fn typed_row_truth(columns: &[&Column], rows: usize, any: bool) -> Option<Vec<bo
 }
 
 /// Each of `values` `repeats` times in a row (numpy's repeat of a scalar
-/// count); None when the result cannot be held.
-fn repeat_each<T: Copy>(values: &[T], repeats: usize) -> Option<Vec<T>> {
+/// count); None when the result cannot be held. The buffer is sized once
+/// and each value's run written as a fixed-size array for counts up to 8 -
+/// an extend a value checked the capacity and kept the length in memory
+/// (s.repeat(3) 0.58-0.83x pandas; br-frankenpandas-a2izv).
+fn repeat_each<T: Copy + Default>(values: &[T], repeats: usize) -> Option<Vec<T>> {
+    fn runs<T: Copy, const R: usize>(out: &mut [T], values: &[T]) {
+        for (run, &value) in out.as_chunks_mut::<R>().0.iter_mut().zip(values) {
+            *run = [value; R];
+        }
+    }
+    let total = values.len().checked_mul(repeats)?;
     let mut out = Vec::new();
-    out.try_reserve_exact(values.len().checked_mul(repeats)?)
-        .ok()?;
-    for &value in values {
-        out.extend(std::iter::repeat_n(value, repeats));
+    out.try_reserve_exact(total).ok()?;
+    if repeats == 0 {
+        return Some(out);
+    }
+    out.resize(total, T::default());
+    match repeats {
+        1 => out.copy_from_slice(values),
+        2 => runs::<T, 2>(&mut out, values),
+        3 => runs::<T, 3>(&mut out, values),
+        4 => runs::<T, 4>(&mut out, values),
+        5 => runs::<T, 5>(&mut out, values),
+        6 => runs::<T, 6>(&mut out, values),
+        7 => runs::<T, 7>(&mut out, values),
+        8 => runs::<T, 8>(&mut out, values),
+        _ => {
+            for (run, &value) in out.chunks_exact_mut(repeats).zip(values) {
+                run.fill(value);
+            }
+        }
     }
     Some(out)
 }
@@ -113600,6 +113730,13 @@ impl DataFrame {
                 "No axis named {align_axis} for object type DataFrame"
             )));
         }
+        if align_axis == 1
+            && !keep_shape
+            && !keep_equal
+            && let Some(compared) = self.compare_typed_side_by_side(other, result_names)
+        {
+            return compared;
+        }
 
         let n = self.len();
         let mut has_diff = vec![false; n];
@@ -113718,13 +113855,20 @@ impl DataFrame {
             col_level1.push(IndexLabel::Utf8(result_names.1.to_owned()));
         }
 
-        let new_labels: Vec<IndexLabel> = row_indices
-            .iter()
-            .map(|&i| label_at(&self.index, i))
-            .collect();
         // Per br-frankenpandas-mu31x: pandas df.compare preserves
-        // self.index.name on the result.
-        let new_index = self.index.relabeled(new_labels);
+        // self.index.name on the result. keep_shape keeps every row: the
+        // index itself, a RangeIndex still (its labels relabeled made a
+        // plain Index; br-frankenpandas-x1tcz).
+        let new_index = if keep_shape {
+            self.index.clone()
+        } else {
+            self.index.relabeled(
+                row_indices
+                    .iter()
+                    .map(|&i| label_at(&self.index, i))
+                    .collect(),
+            )
+        };
         // An empty result keeps a flat axis: MultiIndex::from_arrays on empty
         // levels would assert a two-level shape onto a frame with no columns,
         // which pandas does not do either.
@@ -113737,6 +113881,150 @@ impl DataFrame {
             )
         };
         Self::new_with_axes(new_index, None, columns, column_order, column_multiindex)
+    }
+
+    /// [`Self::compare_with_align_axis`]'s default shape (side by side, no
+    /// keep_shape / keep_equal) over numeric column pairs, the differing
+    /// cells read off the typed buffers a word of rows at a time: every cell
+    /// of both sides was cloned as a Scalar, compared by semantic_eq and the
+    /// result built back from Scalars (200k x 3 0.28x pandas; it also held
+    /// an int 1 apart from a float 1.0; br-frankenpandas-x1tcz). Two cells
+    /// are equal when both are missing or both present and `==` (ints
+    /// against floats as floats, numpy's comparison), as pandas' compare
+    /// mask; an int side with an equal cell anywhere is float64 (its padding
+    /// NaN). None for any other pair.
+    fn compare_typed_side_by_side(
+        &self,
+        other: &Self,
+        result_names: (&str, &str),
+    ) -> Option<Result<Self, FrameError>> {
+        /// One side's cells: floats with their validity words, or ints.
+        enum Side<'a> {
+            Float(&'a [f64], Vec<u64>),
+            Int(&'a [i64]),
+        }
+        impl Side<'_> {
+            /// The cell as a number, None where it is missing (a gap or NaN).
+            fn number(&self, row: usize) -> Option<f64> {
+                match self {
+                    Side::Float(data, valid) => ((valid[row / 64] >> (row % 64)) & 1 == 1
+                        && !data[row].is_nan())
+                    .then(|| data[row]),
+                    Side::Int(data) => Some(data[row] as f64),
+                }
+            }
+        }
+        fn side_of(column: &Column) -> Option<Side<'_>> {
+            match column.dtype() {
+                DType::Float64 => {
+                    let (data, valid) = column.as_f64_slice_with_validity()?;
+                    Some(Side::Float(data, valid.packed_words_for_scan()))
+                }
+                DType::Int64 => Some(Side::Int(column.as_i64_slice()?)),
+                _ => None,
+            }
+        }
+        let n = self.len();
+        let mut pairs = Vec::with_capacity(self.column_order.len());
+        for name in &self.column_order {
+            pairs.push((
+                side_of(&self.columns[name])?,
+                side_of(&other.columns[name])?,
+            ));
+        }
+        let differs = |left: &Side<'_>, right: &Side<'_>, row: usize| match (left, right) {
+            (Side::Int(left), Side::Int(right)) => left[row] != right[row],
+            _ => match (left.number(row), right.number(row)) {
+                (Some(left), Some(right)) => left != right,
+                (None, None) => false,
+                _ => true,
+            },
+        };
+        let words = n.div_ceil(64);
+        let mut row_diff = vec![0_u64; words];
+        let mut column_diffs = Vec::with_capacity(pairs.len());
+        for (left, right) in &pairs {
+            let diff: Vec<u64> = (0..words)
+                .map(|word| {
+                    let start = word * 64;
+                    (start..(start + 64).min(n)).fold(0_u64, |bits, row| {
+                        bits | (u64::from(differs(left, right, row)) << (row - start))
+                    })
+                })
+                .collect();
+            for (rows, bits) in row_diff.iter_mut().zip(&diff) {
+                *rows |= bits;
+            }
+            column_diffs.push(diff);
+        }
+        let mut row_indices = Vec::new();
+        for (word, &bits) in row_diff.iter().enumerate() {
+            row_indices.extend(SetBitRows {
+                word: bits,
+                base: word * 64,
+            });
+        }
+        if row_indices.is_empty() {
+            // No differences: pandas' empty frame, the index name kept
+            // (br-frankenpandas-mu31x).
+            let empty_index = Index::new(Vec::new()).rename_index(self.index.name());
+            return Some(Self::new(empty_index, BTreeMap::new()));
+        }
+        let mut columns = BTreeMap::new();
+        let mut column_order = Vec::new();
+        let mut col_level0: Vec<IndexLabel> = Vec::with_capacity(pairs.len() * 2);
+        let mut col_level1: Vec<IndexLabel> = Vec::with_capacity(pairs.len() * 2);
+        for ((name, (left, right)), diff) in self.column_order.iter().zip(&pairs).zip(&column_diffs)
+        {
+            let differing: usize = diff.iter().map(|bits| bits.count_ones() as usize).sum();
+            if differing == 0 {
+                continue;
+            }
+            let is_diff = |row: usize| (diff[row / 64] >> (row % 64)) & 1 == 1;
+            let output = |side: &Side<'_>| match side {
+                // Every cell differing: the ints themselves, each row kept.
+                Side::Int(data) if differing == n => {
+                    Column::from_i64_values(row_indices.iter().map(|&row| data[row]).collect())
+                }
+                _ => Column::from_f64_values(
+                    row_indices
+                        .iter()
+                        .map(|&row| {
+                            if is_diff(row) {
+                                side.number(row).unwrap_or(f64::NAN)
+                            } else {
+                                f64::NAN
+                            }
+                        })
+                        .collect(),
+                ),
+            };
+            let (left_out, right_out) = (output(left), output(right));
+            let left_name = format!("{name}_{}", result_names.0);
+            let right_name = format!("{name}_{}", result_names.1);
+            columns.insert(left_name.clone(), left_out);
+            columns.insert(right_name.clone(), right_out);
+            column_order.push(left_name);
+            column_order.push(right_name);
+            col_level0.push(IndexLabel::Utf8(name.clone()));
+            col_level0.push(IndexLabel::Utf8(name.clone()));
+            col_level1.push(IndexLabel::Utf8(result_names.0.to_owned()));
+            col_level1.push(IndexLabel::Utf8(result_names.1.to_owned()));
+        }
+        let new_labels: Vec<IndexLabel> = row_indices
+            .iter()
+            .map(|&row| label_at(&self.index, row))
+            .collect();
+        let new_index = self.index.relabeled(new_labels);
+        let column_multiindex = fp_index::MultiIndex::from_arrays(vec![col_level0, col_level1])
+            .map(|levels| levels.set_names(vec![None, None]));
+        Some(
+            column_multiindex
+                .map_err(FrameError::from)
+                .and_then(|levels| {
+                    Self::new_with_axes(new_index, None, columns, column_order, Some(levels))
+                }),
+        )
     }
 
     /// Assemble the `align_axis=0` (stacked) compare result: the original

@@ -1352,6 +1352,17 @@ impl Int64AffineLabels {
                 )
             })
     }
+
+    /// Whether `values` are this range's labels, compared as ints: an int
+    /// buffer's labels were made a label a row to compare
+    /// (num.align(num.iloc[::2]) made 200k twice; br-frankenpandas-5ibzp).
+    /// The range's labels were checked to fit i64 when it was made.
+    fn equals_i64(self, values: &[i64]) -> bool {
+        values.len() == self.len
+            && values.iter().zip(0_i64..).all(|(&value, offset)| {
+                value == self.start.wrapping_add(self.step.wrapping_mul(offset))
+            })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2398,13 +2409,36 @@ impl IndexLabels {
         }
         // The bounds as a max, which vectorizes (`all` stops early, so it
         // cannot; br-frankenpandas-fk877).
-        if let Some(Some(values)) = self.int64_typed.get()
-            && indices
+        let in_bounds = |len: usize| {
+            indices
                 .iter()
                 .fold(0_usize, |most, &position| most.max(position))
                 .checked_add(1)
-                .is_some_and(|end| indices.is_empty() || end <= values.len())
+                .is_some_and(|end| indices.is_empty() || end <= len)
+        };
+        // An affine range's labels by arithmetic, as take_i64_values: it fell
+        // to take, which scanned the positions again (br-frankenpandas-5olp1).
+        // In bounds, each value is one of its labels: no overflow.
+        if let Some(range) = self.int64_affine
+            && in_bounds(range.len)
         {
+            return Ok(indices
+                .into_iter()
+                .map(|position| {
+                    range
+                        .start
+                        .wrapping_add(range.step.wrapping_mul(position as i64))
+                })
+                .collect());
+        }
+        // The values a slice, its pointer and length read once: through the
+        // Arc each gather reloaded them, the writes into the positions' own
+        // buffer possibly aliasing (s.dropna() over an int index 0.77x
+        // pandas; br-frankenpandas-5olp1).
+        if let Some(Some(values)) = self.int64_typed.get()
+            && in_bounds(values.len())
+        {
+            let values = values.as_slice();
             return Ok(indices
                 .into_iter()
                 .map(|position| values[position])
@@ -2459,8 +2493,14 @@ impl PartialEq for IndexLabels {
         }
         match (self.int64_affine_range(), other.int64_affine_range()) {
             (Some(left), Some(right)) => left == right,
-            (Some(range), None) => range.equals_slice(other.as_slice()),
-            (None, Some(range)) => range.equals_slice(self.as_slice()),
+            (Some(range), None) => match other.int64_view() {
+                Some(values) => range.equals_i64(&values),
+                None => range.equals_slice(other.as_slice()),
+            },
+            (None, Some(range)) => match self.int64_view() {
+                Some(values) => range.equals_i64(&values),
+                None => range.equals_slice(self.as_slice()),
+            },
             // Two int backings are equal as their ints (7krba).
             (None, None) => match (self.int64_view(), other.int64_view()) {
                 (Some(left), Some(right)) => left == right,
@@ -3253,13 +3293,28 @@ impl Index {
         let (bytes, offsets) = contiguous.backing();
         let span = |position: usize| offsets[position]..offsets[position + 1];
         let total = positions.iter().map(|&position| span(position).len()).sum();
-        let mut gathered = Vec::with_capacity(total);
+        // A label within PAD bytes copied as its PAD-byte run - one fixed
+        // move - into a buffer PAD bytes past the total, cut after; each
+        // label's variable-length copy was a memmove call (s.dropna() over a
+        // str index 0.68x pandas; br-frankenpandas-5olp1). One near the
+        // source's end, or longer, copies its own span.
+        const PAD: usize = 16;
+        let mut gathered = vec![0_u8; total + PAD];
         let mut gathered_offsets = Vec::with_capacity(positions.len() + 1);
         gathered_offsets.push(0);
+        let mut at = 0;
         for &position in positions {
-            gathered.extend_from_slice(&bytes[span(position)]);
-            gathered_offsets.push(gathered.len());
+            let (start, end) = (offsets[position], offsets[position + 1]);
+            let len = end - start;
+            if len <= PAD && start + PAD <= bytes.len() {
+                gathered[at..at + PAD].copy_from_slice(&bytes[start..start + PAD]);
+            } else {
+                gathered[at..at + len].copy_from_slice(&bytes[start..end]);
+            }
+            at += len;
+            gathered_offsets.push(at);
         }
+        gathered.truncate(total);
         Some(Self::from_utf8_contiguous(
             Arc::from(gathered),
             Arc::from(gathered_offsets),
@@ -7842,11 +7897,25 @@ impl Index {
             return self.clone();
         }
         if let Some(values) = self.labels.int64_view() {
-            // A run written a value at a time (each push checked the
-            // capacity; br-frankenpandas-a2izv).
-            let mut out = Vec::with_capacity(repeat_output_capacity(values.len(), repeats));
-            for &value in values.iter() {
-                out.extend(std::iter::repeat_n(value, repeats));
+            // The buffer sized once and each value's run written as a
+            // fixed-size array for counts up to 4 (an extend a value checked
+            // the capacity and kept the length in memory; a push a value
+            // before; br-frankenpandas-a2izv).
+            fn runs<const R: usize>(out: &mut [i64], values: &[i64]) {
+                for (run, &value) in out.as_chunks_mut::<R>().0.iter_mut().zip(values) {
+                    *run = [value; R];
+                }
+            }
+            let mut out = vec![0_i64; repeat_output_capacity(values.len(), repeats)];
+            match repeats {
+                2 => runs::<2>(&mut out, &values),
+                3 => runs::<3>(&mut out, &values),
+                4 => runs::<4>(&mut out, &values),
+                _ => {
+                    for (run, &value) in out.chunks_exact_mut(repeats).zip(values.iter()) {
+                        run.fill(value);
+                    }
+                }
             }
             return self.propagate_name(Self::from_i64_values(out));
         }
@@ -7959,6 +8028,68 @@ impl Index {
     #[must_use]
     pub fn union(&self, other: &Self) -> Self {
         self.union_with(other)
+    }
+
+    /// The sorted union of two indexes whose int64 labels are each strictly
+    /// increasing, merged in one branch-free pass (its steps counted first,
+    /// then collected in place), named and zoned as [`Self::union_with`]: an
+    /// outer join's union was hashed against the left's lookup and sorted
+    /// again (num.align(num.iloc[::2]) of 200k rows 0.55x pandas;
+    /// br-frankenpandas-5ibzp). None for any other pair (a repeated or
+    /// unordered label, another dtype).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn sorted_union_increasing_i64(&self, other: &Self) -> Option<Self> {
+        let (left, right) = (self.labels.int64_view()?, other.labels.int64_view()?);
+        let increasing = |values: &[i64]| values.windows(2).all(|pair| pair[0] < pair[1]);
+        if !increasing(&left) || !increasing(&right) {
+            return None;
+        }
+        let named = |values: Vec<i64>| {
+            let mut result = Self::from_i64_values(values);
+            result.name = self.shared_name(other);
+            result.tz = joined_tz(self, other);
+            result
+        };
+        // A unit range holding the other side's every label - its first and
+        // last within the range, the side increasing - is the union itself
+        // (an index aligned with its own slice or filter; the merge walked
+        // both).
+        let holds = |range: &Self, values: &[i64]| {
+            range.labels.int64_unit_range.is_some_and(|range| {
+                let end = i64::try_from(range.len)
+                    .ok()
+                    .and_then(|len| range.start.checked_add(len));
+                values.first().is_none_or(|&first| first >= range.start)
+                    && values
+                        .last()
+                        .is_none_or(|&last| end.is_some_and(|end| last < end))
+            })
+        };
+        if holds(self, &right) {
+            return Some(named(left.to_vec()));
+        }
+        if holds(other, &left) {
+            return Some(named(right.to_vec()));
+        }
+        let (mut at_left, mut at_right, mut steps) = (0_usize, 0_usize, 0_usize);
+        while at_left < left.len() && at_right < right.len() {
+            let (l, r) = (left[at_left], right[at_right]);
+            at_left += usize::from(l <= r);
+            at_right += usize::from(r <= l);
+            steps += 1;
+        }
+        let mut out = Vec::with_capacity(combined_output_capacity(left.len(), right.len()));
+        let (mut l_at, mut r_at) = (0_usize, 0_usize);
+        out.extend((0..steps).map(|_| {
+            let (l, r) = (left[l_at], right[r_at]);
+            l_at += usize::from(l <= r);
+            r_at += usize::from(r <= l);
+            l.min(r)
+        }));
+        out.extend_from_slice(&left[at_left..]);
+        out.extend_from_slice(&right[at_right..]);
+        Some(named(out))
     }
 
     /// Alias for `sort_values`, matching `pd.Index.sort`.
@@ -28932,6 +29063,33 @@ mod tests {
         );
     }
 
+    /// A contiguous text gather copying fixed 16-byte runs answers the
+    /// labels a String gather does - labels 0 to 40 bytes long, the
+    /// buffer's last label, repeated and reversed positions
+    /// (br-frankenpandas-5olp1). NEGATIVE: no positions is an empty index.
+    #[test]
+    fn padded_utf8_gather_matches_the_label_gather_5olp1() {
+        let texts: Vec<String> = (0..41)
+            .map(|len| "é".repeat(len / 2) + &"k".repeat(len % 2))
+            .collect();
+        let mut bytes = Vec::new();
+        let mut offsets = vec![0];
+        for text in &texts {
+            bytes.extend_from_slice(text.as_bytes());
+            offsets.push(bytes.len());
+        }
+        let index = Index::from_utf8_contiguous(Arc::from(bytes), Arc::from(offsets));
+        let positions: Vec<usize> = (0..41).rev().chain([40, 0, 17, 16, 15, 40]).collect();
+        let gathered = index.take_utf8_contiguous(&positions).expect("one buffer");
+        let wanted: Vec<IndexLabel> = positions
+            .iter()
+            .map(|&position| IndexLabel::Utf8(texts[position].clone()))
+            .collect();
+        assert_eq!(gathered.labels(), wanted.as_slice());
+        let none = index.take_utf8_contiguous(&[]).expect("one buffer");
+        assert!(none.labels().is_empty());
+    }
+
     #[test]
     fn range_positions_by_arithmetic_and_borrowed_levels_e186m() {
         // An ascending range answers its int labels by arithmetic, an
@@ -31661,6 +31819,64 @@ mod tests {
                 "symmetric_difference iter={iter} a={a:?} b={b:?}"
             );
         }
+    }
+
+    /// The merged union of two strictly increasing int indexes is their
+    /// union sorted - interleaved, a subset, disjoint, empty, equal - named
+    /// as union_with names it (br-frankenpandas-5ibzp). NEGATIVE: a
+    /// repeated or descending label takes no merge.
+    #[test]
+    fn sorted_union_of_increasing_ints_is_the_sorted_union_5ibzp() {
+        let evens: Vec<i64> = (0..40).map(|k| k * 2).collect();
+        let threes: Vec<i64> = (0..30).map(|k| k * 3).collect();
+        let cases: [(Vec<i64>, Vec<i64>); 6] = [
+            (evens.clone(), threes.clone()),
+            (threes.clone(), evens.clone()),
+            ((0..80).collect(), evens.clone()),
+            (vec![-5, -1], vec![3, 9]),
+            (evens.clone(), Vec::new()),
+            (evens.clone(), evens.clone()),
+        ];
+        let ints = |index: &Index| {
+            index
+                .int64_label_values()
+                .map(|values| values.to_vec())
+                .unwrap_or_default()
+        };
+        for (left, right) in cases {
+            let (ia, ib) = (
+                Index::from_i64_values(left.clone()).set_name("k"),
+                Index::from_i64_values(right.clone()).set_name("k"),
+            );
+            let merged = ia
+                .sorted_union_increasing_i64(&ib)
+                .expect("increasing ints");
+            let mut want = ints(&ia.union_with(&ib));
+            want.sort_unstable();
+            assert_eq!(ints(&merged), want, "{left:?} {right:?}");
+            assert_eq!(merged.name(), ia.name());
+        }
+        // A unit range holding the other side is the union, either side.
+        let range = Index::new_known_unique_int64_unit_range(0, 80);
+        let evens_index = Index::from_i64_values(evens.clone());
+        for (left, right) in [(&range, &evens_index), (&evens_index, &range)] {
+            let merged = left
+                .sorted_union_increasing_i64(right)
+                .expect("increasing ints");
+            assert_eq!(ints(&merged), (0..80).collect::<Vec<i64>>());
+        }
+        // An affine range equals an int buffer of its labels, compared as
+        // ints - the buffer's labels never made.
+        let stepped = Index::from_range(0, 10, 2);
+        let buffer = Index::from_i64_values(vec![0, 2, 4, 6, 8]);
+        assert!(stepped == buffer && buffer == stepped);
+        assert!(buffer.labels.materialized.get().is_none());
+        assert!(stepped != Index::from_i64_values(vec![0, 2, 4, 6, 9]));
+        let repeated = Index::from_i64_values(vec![1, 2, 2, 3]);
+        let descending = Index::from_i64_values(vec![3, 2, 1]);
+        let plain = Index::from_i64_values(vec![1, 5]);
+        assert!(repeated.sorted_union_increasing_i64(&plain).is_none());
+        assert!(plain.sorted_union_increasing_i64(&descending).is_none());
     }
 
     #[test]

@@ -3231,29 +3231,41 @@ fn ordered_unique_int64_outer_positions(
         strictly_increasing_i64_slice(right_key),
     ) {
         let cap = left_values.len().saturating_add(right_values.len());
-        let mut left_positions = Vec::<Option<usize>>::with_capacity(cap);
-        let mut right_positions = Vec::<Option<usize>>::with_capacity(cap);
+        // Branch-free steps: each side taken where its key is the smaller
+        // (both when equal) and advanced by that flag - the three-way match
+        // mispredicted on interleaved keys (two stepped 200k indexes' outer
+        // merge 57% of 6.7 ms, 0.47x pandas; br-frankenpandas-m3z4g). The
+        // steps counted first, then each side's positions collected over
+        // that many steps, written in place: a push a row spilled both
+        // vectors' lengths.
         let (mut left_idx, mut right_idx) = (0usize, 0usize);
+        let mut steps = 0_usize;
         while left_idx < left_values.len() && right_idx < right_values.len() {
-            match left_values[left_idx].cmp(&right_values[right_idx]) {
-                Ordering::Equal => {
-                    left_positions.push(Some(left_idx));
-                    right_positions.push(Some(right_idx));
-                    left_idx += 1;
-                    right_idx += 1;
-                }
-                Ordering::Less => {
-                    left_positions.push(Some(left_idx));
-                    right_positions.push(None);
-                    left_idx += 1;
-                }
-                Ordering::Greater => {
-                    left_positions.push(None);
-                    right_positions.push(Some(right_idx));
-                    right_idx += 1;
-                }
-            }
+            let (left_value, right_value) = (left_values[left_idx], right_values[right_idx]);
+            left_idx += usize::from(left_value <= right_value);
+            right_idx += usize::from(right_value <= left_value);
+            steps += 1;
         }
+        let side = |left_side: bool| {
+            let mut positions = Vec::<Option<usize>>::with_capacity(cap);
+            let (mut left_at, mut right_at) = (0usize, 0usize);
+            positions.extend((0..steps).map(|_| {
+                let (left_value, right_value) = (left_values[left_at], right_values[right_at]);
+                let take_left = left_value <= right_value;
+                let take_right = right_value <= left_value;
+                let taken = if left_side {
+                    take_left.then_some(left_at)
+                } else {
+                    take_right.then_some(right_at)
+                };
+                left_at += usize::from(take_left);
+                right_at += usize::from(take_right);
+                taken
+            }));
+            positions
+        };
+        let mut left_positions = side(true);
+        let mut right_positions = side(false);
         // The tails (one of them empty) in bulk: a push a row spilled both
         // lengths, and an outer join of two disjoint indexes is all tail
         // (br-frankenpandas-m3z4g).
@@ -12138,11 +12150,11 @@ mod tests {
         build_single_key_dense_i64_right_merge_output,
         build_single_key_inner_contiguous_no_overlap_output, dense_int64_outer_positions,
         join_series, join_series_with_options, join_series_with_trace,
-        lower_hex_overlap_plan_from_certificates, ordered_unique_utf8_inner_position_plan,
-        ordered_unique_utf8_inner_positions, ordered_utf8_lower_hex_overlap_len,
-        scalar_utf8_left_positions, scalar_utf8_outer_positions,
-        sorted_contiguous_utf8_inner_positions, strictly_increasing_utf8_key_spans,
-        utf8_span_lower_bound,
+        lower_hex_overlap_plan_from_certificates, ordered_unique_int64_outer_positions,
+        ordered_unique_utf8_inner_position_plan, ordered_unique_utf8_inner_positions,
+        ordered_utf8_lower_hex_overlap_len, scalar_utf8_left_positions,
+        scalar_utf8_outer_positions, sorted_contiguous_utf8_inner_positions,
+        strictly_increasing_utf8_key_spans, utf8_span_lower_bound,
     };
 
     fn contiguous_utf8_column(values: &[&str]) -> Column {
@@ -21999,6 +22011,51 @@ mod tests {
                 "column {k} differs"
             );
         }
+    }
+
+    /// The branch-free ordered outer merge answers the three-way merge's
+    /// positions - interleaved, equal and disjoint keys, either side
+    /// exhausted first, an empty side (br-frankenpandas-m3z4g). NEGATIVE:
+    /// a key that is not strictly increasing takes no ordered merge.
+    #[test]
+    fn ordered_outer_positions_match_the_three_way_merge_m3z4g() {
+        type Positions = (Vec<Option<usize>>, Vec<Option<usize>>);
+        let reference = |left: &[i64], right: &[i64]| -> Positions {
+            let (mut l, mut r) = (0, 0);
+            let (mut out_left, mut out_right) = (Vec::new(), Vec::new());
+            while l < left.len() || r < right.len() {
+                let take_left = r == right.len() || (l < left.len() && left[l] <= right[r]);
+                let take_right = l == left.len() || (r < right.len() && right[r] <= left[l]);
+                out_left.push(take_left.then_some(l));
+                out_right.push(take_right.then_some(r));
+                l += usize::from(take_left);
+                r += usize::from(take_right);
+            }
+            (out_left, out_right)
+        };
+        let twos: Vec<i64> = (0..40).map(|k| k * 2).collect();
+        let threes: Vec<i64> = (0..40).map(|k| k * 3).collect();
+        let late: Vec<i64> = (100..110).collect();
+        let cases: [(&[i64], &[i64]); 6] = [
+            (&twos, &threes),
+            (&threes, &twos),
+            (&twos, &twos),
+            (&twos, &late),
+            (&late, &twos),
+            (&twos, &[]),
+        ];
+        for (left, right) in cases {
+            let got = ordered_unique_int64_outer_positions(
+                &Column::from_i64_values(left.to_vec()),
+                &Column::from_i64_values(right.to_vec()),
+            );
+            assert_eq!(got, Some(reference(left, right)), "{left:?} {right:?}");
+        }
+        let repeated = Column::from_i64_values(vec![1, 2, 2, 3]);
+        assert!(
+            ordered_unique_int64_outer_positions(&repeated, &Column::from_i64_values(vec![1]))
+                .is_none()
+        );
     }
 }
 

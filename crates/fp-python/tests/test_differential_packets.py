@@ -44964,13 +44964,22 @@ _U195H_CASES = {
     "cut with NaN": lambda m: repr(m.cut(np.array([0.5, np.nan, 2.5, 1.0]), 2)),
     "qcut floats": lambda m: repr(m.qcut(_U195H_V, 4)),
     "cut list": lambda m: repr(m.cut([1.0, 2.0, 3.0, 4.0], 2)),
-    # NEGATIVE: a 2-D array raises.
+    # NEGATIVE: a 2-D array raises; an object array and a datetime array
+    # keep their paths.
     "cut 2-D (NEGATIVE)": lambda m: m.cut(np.ones((2, 2)), 2),
+    "cut object array (NEGATIVE)": lambda m: repr(m.cut(np.array([1.0, 2.5, 4.0], dtype=object), 2)),
+    "cut datetime array (NEGATIVE)": lambda m: repr(m.cut(np.array(["2024-01-01", "2024-02-01", "2024-03-01"], dtype="datetime64[ns]"), 2)),
 }
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.parametrize("case", list(_U195H_CASES))
+@pytest.mark.parametrize(
+    "case",
+    _more9_params(
+        _U195H_CASES,
+        {"cut datetime array (NEGATIVE)": "br-frankenpandas-skfpv: the nanoseconds binned as floats, pandas' Timestamp intervals"},
+    ),
+)
 def test_cut_numpy_input_like_pandas_u195h(case: str) -> None:
     # cut / qcut read a numpy array off its typed column (tolist() and a
     # Python float an element: 0.69x pandas; br-frankenpandas-u195h).
@@ -45057,3 +45066,69 @@ def test_multiindex_tuple_lookup_like_pandas_fzbxv(case: str) -> None:
     # (every row's labels were compared a lookup: (7, x) in mi 0.03x pandas;
     # br-frankenpandas-fzbxv).
     _more9_check(_FZBXV_CASES, case)
+
+
+_N8LFK_K = np.round(np.random.default_rng(91).normal(size=400), 1)
+_N8LFK_V = np.random.default_rng(92).normal(size=400)
+
+
+def _n8lfk_frame(m: Any, keys: Any = None) -> Any:
+    keys = _N8LFK_K if keys is None else keys
+    return m.DataFrame({"k": keys, "v": _N8LFK_V[: len(keys)]})
+
+
+_N8LFK_CASES = {
+    "sum": lambda m: _n8lfk_frame(m).groupby("k")["v"].sum(),
+    "mean": lambda m: _n8lfk_frame(m).groupby("k")["v"].mean(),
+    "max": lambda m: _n8lfk_frame(m).groupby("k")["v"].max(),
+    "count": lambda m: _n8lfk_frame(m).groupby("k")["v"].count(),
+    "sort=False": lambda m: _n8lfk_frame(m).groupby("k", sort=False)["v"].sum(),
+    "cumsum": lambda m: _n8lfk_frame(m).groupby("k")["v"].cumsum(),
+    "signed zero": lambda m: _n8lfk_frame(m, np.array([0.0, -0.0, 1.5, -0.0])).groupby("k")["v"].sum(),
+    "integral floats": lambda m: _n8lfk_frame(m, np.array([1.0, 2.0, 1.0, 3.0])).groupby("k")["v"].sum(),
+    "infinities": lambda m: _n8lfk_frame(m, np.array([np.inf, -np.inf, np.inf, 0.5])).groupby("k")["v"].sum(),
+    "Series by float Series": lambda m: m.Series(_N8LFK_V).groupby(m.Series(_N8LFK_K)).sum(),
+    # NEGATIVE: a NaN key drops its rows (dropna) and keeps the generic path.
+    "NaN key (NEGATIVE)": lambda m: _n8lfk_frame(m, np.array([1.5, np.nan, 1.5, 2.5])).groupby("k")["v"].sum(),
+    "NaN key dropna=False (NEGATIVE)": lambda m: _n8lfk_frame(m, np.array([1.5, np.nan, 1.5, 2.5])).groupby("k", dropna=False)["v"].sum(),
+}
+
+
+_X1TCZ_A = np.array([1.0, 2.0, np.nan, 4.0, np.nan, 6.0, -0.0, np.inf])
+_X1TCZ_B = np.array([1.0, 2.5, np.nan, np.nan, 5.0, 6.0, 0.0, np.inf])
+
+
+def _x1tcz_shown(out: Any) -> Any:
+    return (repr(list(out.columns)), _more7_shown(out))
+
+
+_X1TCZ_CASES = {
+    "floats with NaN": lambda m: _x1tcz_shown(m.DataFrame({"a": _X1TCZ_A, "b": _X1TCZ_A * 2}).compare(m.DataFrame({"a": _X1TCZ_B, "b": _X1TCZ_A * 2}))),
+    "ints every cell differing": lambda m: _x1tcz_shown(m.DataFrame({"i": [1, 2, 3]}).compare(m.DataFrame({"i": [4, 5, 6]}))),
+    "ints partly equal": lambda m: _x1tcz_shown(m.DataFrame({"i": [1, 2, 3], "f": [0.5, 1.5, 2.5]}).compare(m.DataFrame({"i": [1, 5, 3], "f": [0.5, 1.5, 9.5]}))),
+    "result_names": lambda m: _x1tcz_shown(m.DataFrame({"a": _X1TCZ_A}).compare(m.DataFrame({"a": _X1TCZ_B}), result_names=("left", "right"))),
+    "named index": lambda m: _x1tcz_shown(m.DataFrame({"a": _X1TCZ_A}, index=m.Index(list("pqrstuvw"), name="ix")).compare(m.DataFrame({"a": _X1TCZ_B}, index=m.Index(list("pqrstuvw"), name="ix")))),
+    "no differences": lambda m: _x1tcz_shown(m.DataFrame({"a": _X1TCZ_A}).compare(m.DataFrame({"a": _X1TCZ_A.copy()}))),
+    "large": lambda m: _x1tcz_shown(m.DataFrame({"a": np.arange(300.0), "b": np.arange(300)}).compare(m.DataFrame({"a": np.where(np.arange(300) % 7 == 0, -1.0, np.arange(300.0)), "b": np.arange(300)}))),
+    # NEGATIVE: a mixed int / float pair and keep_shape keep the generic path.
+    "int vs float (NEGATIVE)": lambda m: _x1tcz_shown(m.DataFrame({"a": [1, 2, 3]}).compare(m.DataFrame({"a": [1.0, 2.5, 3.0]}))),
+    "keep_shape (NEGATIVE)": lambda m: _x1tcz_shown(m.DataFrame({"a": _X1TCZ_A}).compare(m.DataFrame({"a": _X1TCZ_B}), keep_shape=True)),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_X1TCZ_CASES))
+def test_compare_like_pandas_x1tcz(case: str) -> None:
+    # compare's default shape reads float / int column pairs off their typed
+    # buffers (a Scalar a cell of each side: 0.28x pandas;
+    # br-frankenpandas-x1tcz).
+    _more9_check(_X1TCZ_CASES, case)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_N8LFK_CASES))
+def test_groupby_float_key_like_pandas_n8lfk(case: str) -> None:
+    # An all-valid float key numbered through an open-addressing table of
+    # its bits (a Scalar and a hash a row: 0.47x pandas;
+    # br-frankenpandas-n8lfk).
+    _more9_check(_N8LFK_CASES, case)
