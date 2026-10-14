@@ -223,7 +223,7 @@ frankenpandas/
 │   ├── fp-bench/             # vs-pandas timing harness (FrankenPandas arm)
 │   ├── fp-runtime/           # Strict/Hardened policy, EvidenceLedger, RaptorQ
 │   ├── fp-frankentui/        # Dashboard snapshot value types (no TUI in-tree)
-│   ├── fp-python/            # PyO3 bindings (no wheel/pyproject yet)
+│   ├── fp-python/            # PyO3 bindings (pyproject.toml, maturin wheel CI, .pyi stubs)
 │   └── frankenpandas/        # Unified facade crate (prelude re-exports)
 ```
 
@@ -324,7 +324,7 @@ has a published key, the maintainer toggles GitHub's "Require signed
 commits" for `main`. Until then, signature verification is
 non-enforcing — unsigned commits pass CI but are flagged in review.
 
-**Release provenance (follow-up, br-frankenpandas-4clx).** Tags for
+**Release provenance (follow-up, `br-frankenpandas-rc0923-epic-buildable-everywhere-0zz8y.4`).** Tags for
 every release are signed (`git tag -s vX.Y.Z`) by the release manager.
 release-plz's release job reads the signed tag before publishing to
 crates.io so the chain source → tag → crate is verifiable.
@@ -468,9 +468,11 @@ Returns structured results with file paths, line ranges, and extracted code snip
 
 **Golden Rule:** `ubs <changed-files>` before every commit. Exit 0 = safe. Exit >0 = fix & re-run.
 
-Known fp-frame inventory: `crates/fp-frame/src/lib.rs` has a tracked broad
-scanner backlog in `br-frankenpandas-yavyk`, triaged in
-`artifacts/audits/fp_frame_ubs_inventory_2026-06-17.md`. When touching this
+Known fp-frame inventory: `crates/fp-frame/src/lib.rs` had its broad
+scanner inventory triaged and closed in `br-frankenpandas-yavyk` (see
+`crates/fp-frame/UBS_TRIAGE.md` and
+`artifacts/audits/fp_frame_ubs_inventory_2026-06-17.md`; canonical clean-signal
+invocation: `ubs --only=rust --skip-rust=8 crates/fp-frame/src/lib.rs`). When touching this
 large file, run `timeout 180s ubs crates/fp-frame/src/lib.rs`; fix any new
 focused finding on the touched hunk, but do not fold the pre-existing whole-file
 inventory or timeout/stall behavior into unrelated beads. Cite the audit in the
@@ -790,6 +792,7 @@ git push                # Push to remote
 - Update status as you work (in_progress -> closed)
 - Create new issues with `br create` when you discover tasks
 - Use descriptive titles and set appropriate priority/type
+- **Closure-evidence convention (`br-frankenpandas-rc0923-epic-truth-restoration-h5vo9.4`):** Every bead (and especially umbrella/epic and reality-check beads) carries an explicit `ACCEPT` / `PROBE` contract and closes **only** when the named `PROBE` command's actual output is pasted verbatim in the `--reason` argument to `br close` (never close with bare `"done"` or `"Completed"`). Do not close a peer agent's bead.
 - Always `br sync --flush-only && git add .beads/` before ending session
 - Run `git diff --stat` immediately before every commit. If the staged diff
   includes work from more than one bead, either split it into separate commits
