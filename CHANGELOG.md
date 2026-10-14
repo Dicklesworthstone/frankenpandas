@@ -3,9 +3,100 @@
 All notable changes to FrankenPandas are documented in this file, organized by capability area.
 
 FrankenPandas is a clean-room Rust reimplementation of the full pandas API surface:
-**15 workspace crates, `#![forbid(unsafe_code)]` workspace-wide**. Workspace version is **0.5.0**.
+**15 workspace crates, `#![forbid(unsafe_code)]` workspace-wide**. Workspace version is **0.6.0**.
 
 Repository: <https://github.com/Dicklesworthstone/frankenpandas>
+
+## 0.6.0 (2026-10-14)
+
+214 commits since 0.5.0. The 92 code changes are almost all measured native
+fast paths and pandas-fidelity fixes; most of the rest are tracker updates.
+Published to crates.io (`frankenpandas` and all `fp-*` crates at 0.6.0) and
+to PyPI (`frankenpandas`: CPython 3.13 manylinux_2_28 wheels for x86-64 and,
+new in this release, aarch64, plus the sdist).
+
+### Features
+
+- Objects from the real `pandas` package are read by the constructors and
+  setters; `assign` behaves as `__setitem__`.
+- Text scalar comparisons; temporal `value_counts` / `mode` as pandas.
+- `pd.Interval` of Timestamps / Timedeltas is held exactly.
+- Native `str.translate`, `to_datetime(format=)` fixed-width layouts and a
+  typed `reindex(method=)`.
+
+### Performance
+
+- Datetime and timedelta columns and indexes work on their nanosecond buffers
+  (NaT included): construction from numpy `datetime64` / `timedelta64`,
+  sort, set ops, `isin`, `duplicated`, `unique`, `nunique`, `mode`, min / max,
+  `diff`, `shift`, `floor` / `ceil` / `round`, `tz_localize`, `between`,
+  `clip`, `where`, `dt` fields, `strftime`, time-based rolling windows and
+  `set_index`. `DatetimeIndex` and `TimedeltaIndex` have typed backings.
+- `MultiIndex`: coded levels shared across row operations, a full-tuple
+  lookup engine, `.loc` / `xs` on level codes, lexsort-depth bisection,
+  `from_arrays` / `from_product` built from codes, `stack` / `unstack` from codes.
+- Wide frames: column-parallel passes run on a persistent worker pool per L3
+  domain (Linux), and row gathers, `head` / `tail` / `fillna` / `diff` /
+  `replace` keep the column axis by position.
+- Rolling median / quantile slide a sorted window over the typed buffer;
+  grouped `shift` / `diff` / `pct_change` step a ring cursor; float columns
+  holding NaN stay on typed paths; numpy ufuncs (`exp`, `log`, trig, ...) of
+  float64 / int64 Series run on the column's own kernel.
+- The period family is typed: `shift`, `asfreq` by integer arithmetic,
+  fields, and a `PeriodIndex` held as ordinals (compare, sort, unique,
+  `value_counts`).
+- Categorical operations over their codes; text columns from one buffer
+  (strided views for step slices); the covariance matrix in one pass;
+  `read_json(lines=True)` streams each line into its columns.
+
+### Fixes
+
+- Index dtypes are preserved: narrow numpy widths, masked extension dtypes,
+  float64 indexes held as floats; lossy uint64 index construction is refused.
+- Object columns of numbers keep their values and object dtype; `fillna` /
+  `ffill` / `bfill` of object columns downcast as pandas 2.2 does
+  (`Series([1, None, 2], dtype=object).fillna(0)` was `[1, '0', 2]`).
+- Series operations keep a tz-aware column's zone and a categorical's
+  categories; an aware Timestamp assigned as a column keeps its zone.
+- A `MultiIndex` slice past its lexsort depth is pandas' `UnsortedIndexError`;
+  `.loc` column keys that no column holds are `KeyError`; concat of a
+  `MultiIndex` beside a flat index follows `MultiIndex.append`.
+- `DatetimeIndex` set ops follow pandas (sort keyword, NaT last, names, freq).
+- pandas parity for `read_csv(usecols=)`, `combine_first` dtype and index,
+  `clip` over text and misaligned `where` / `mask`.
+- Exact int64 extrema through the shared lane kernels; boolean `clip` cells
+  compare exactly.
+
+### Distribution
+
+- **New: Linux aarch64** ([#44](https://github.com/Dicklesworthstone/frankenpandas/issues/44)).
+  A `manylinux_2_28_aarch64` cp313 wheel on PyPI, and the GitHub release adds
+  `frankenpandas-v0.6.0-aarch64-unknown-linux-gnu.tar.gz` (with `.sha256` and
+  `.minisig`) beside the x86-64 archive.
+- The fuzz workspace lock (`fuzz/Cargo.lock`) now resolves the current
+  workspace graph (#43).
+
+### Dependencies
+
+- No lockfile refresh in this release (the gate ran on the released graph).
+  New direct dependencies of `fp-frame`, both already in the tree: `rayon`
+  and `rustix` (Linux CPU-affinity calls only).
+
+### Known issues
+
+- [#42](https://github.com/Dicklesworthstone/frankenpandas/issues/42): Excel
+  input is parsed by calamine 0.36.1, which accumulates XLSX cell references
+  without bounds checks (upstream
+  [tafia/calamine#694](https://github.com/tafia/calamine/issues/694), fix
+  pending in [#696](https://github.com/tafia/calamine/pull/696)). A crafted
+  workbook can panic a debug build or yield wrapped coordinates in a release
+  build. Do not pass untrusted `.xlsx` files to `read_excel`.
+- [#38](https://github.com/Dicklesworthstone/frankenpandas/issues/38) merge
+  keys for hashable Python host objects,
+  [#40](https://github.com/Dicklesworthstone/frankenpandas/issues/40)
+  HDF/Pickle snapshots and nullable dtypes,
+  [#41](https://github.com/Dicklesworthstone/frankenpandas/issues/41)
+  stored conformance-report generation.
 
 ## 0.5.0 (2026-10-08)
 

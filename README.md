@@ -1797,6 +1797,7 @@ Uses a deterministic LCG (Linear Congruential Generator) with Fisher-Yates shuff
 | GroupBy.apply has shape-explicit variants | Rust static typing forces `apply_scalar` / `apply_series` / `apply_series_stacked` (see DISC-010) instead of pandas' shape-inferring `apply` | Pick the variant that matches your closure's output shape |
 | The Rust constructors spell ints with a missing value as an `Int64` holding it | Every pandas-observable path promotes as pandas: a numpy int64 column that gains a missing value is float64 with NaN, a nullable `Int64` / `Float64` / `boolean` keeps its dtype with NA. `Series::from_values` / `DataFrame::from_dict` given ints and a missing value still build an `Int64` column holding it, which pandas never produces (DISC-011, br-frankenpandas-ih6ho) | In Rust, build the column as `DType::Int64Nullable` or `DType::Float64` explicitly; the Python binding already converts as pandas |
 | Mixed naive/tz-aware CSV `parse_dates` falls back to raw strings | Without `utc=True`, normalization is ambiguous (DISC-012) | Pass `utc=True` to `to_datetime` or `CsvReadOptions` |
+| Excel input is not hardened against crafted workbooks ([#42](https://github.com/Dicklesworthstone/frankenpandas/issues/42)) | `read_excel` parses XLSX through calamine 0.36.1, which accumulates cell references (`<c r="...">`, `<dimension ref="...">`) without bounds checks (upstream [tafia/calamine#694](https://github.com/tafia/calamine/issues/694), fix pending in [#696](https://github.com/tafia/calamine/pull/696)). An overlong reference panics a debug build and can wrap to a wrong coordinate in a release build | Read only workbooks you trust; convert untrusted ones in a sandbox first |
 
 ## FAQ
 
@@ -1815,9 +1816,11 @@ A: Partly. A PyO3 binding crate (`crates/fp-python`) exposes pandas' top-level n
 Source wheel builds require the pinned `nightly-2026-08-31` toolchain. The x86-64
 release profile enables SSE4.1 in `fp-columnar`, so its wheels require an SSE4.1
 CPU. A manylinux tag describes the glibc baseline; it does not remove that CPU
-requirement. The initial PyPI packaging qualification targets CPython 3.13 on
-Linux x86-64 and a source distribution. Other prebuilt wheel platforms and
-interpreter versions remain unqualified.
+requirement. The aarch64 wheels have no such requirement: the flag is x86-only,
+and aarch64 builds take the portable paths. PyPI wheels target CPython 3.13 on
+Linux x86-64 and, from 0.6.0, Linux aarch64 (both manylinux_2_28), plus a
+source distribution. Other prebuilt wheel platforms and interpreter versions
+remain unqualified.
 
 **Q: What's the `EvidenceLedger`?**
 A: Every alignment decision, dtype coercion, and policy override is logged with Bayesian confidence scores and the evidence terms (log-likelihood ratios) that drove each decision. This creates an auditable trail of exactly how your data was transformed. pandas makes these same decisions silently with no record.
@@ -1850,9 +1853,9 @@ A: As of 2026-09-24 the tracker holds about 4,100 beads, of which 79 are open. M
 
 | Priority | Feature | Status |
 |----------|---------|--------|
-| Done | Release to crates.io | 0.5.0 was published on 2026-10-08 (`frankenpandas`, `fp-*`), after 0.4.0 (2026-10-03) and 0.3.0 (2026-09-12, whose `v0.3.0` tag carries an SSH signature) |
+| Done | Release to crates.io | 0.6.0 was published on 2026-10-14 (`frankenpandas`, `fp-*`), after 0.5.0 (2026-10-08), 0.4.0 (2026-10-03) and 0.3.0 (2026-09-12, whose `v0.3.0` tag carries an SSH signature) |
 | High | Verifiable signed releases | `AUTHORS.md` records the W4 release-worker fingerprint for local signature verification; GitHub signing-key registration and other identity keys remain pending. Qualify the next release through pinned RCH gates and native DSR artifact builds. |
-| In progress | Python packaging for `fp-python` | Version 0.5.0 targets a Linux x86-64 / CPython 3.13 wheel and pinned-toolchain source distribution; other prebuilt platforms remain unqualified. `frankenpandas.pyi` type stubs and differential pytest harness are included. Check the published release and PyPI for availability; the binding is not yet a drop-in replacement (see Limitations) |
+| In progress | Python packaging for `fp-python` | Version 0.6.0 ships CPython 3.13 wheels for Linux x86-64 and aarch64 (manylinux_2_28) and a pinned-toolchain source distribution; other prebuilt platforms remain unqualified. `frankenpandas.pyi` type stubs and differential pytest harness are included. Check the published release and PyPI for availability; the binding is not yet a drop-in replacement (see Limitations) |
 | Done | Tokio-free PostgreSQL `SqlConnection` adapter | `PostgresConnection` behind `sql-postgresql` with pure synchronous wire protocol and live-server integration tests |
 | Done | MySQL `SqlConnection` adapter | `MysqlConnection` behind `sql-mysql`; release qualification includes 38 live MySQL 8.4.11 checks covering prepared-cache eviction, Unicode/nulls, transactions and dataframe writes. TLS and other platforms remain unqualified. |
 | Medium | Rust constructor spelling of ints with a missing value (DISC-011) | Every observable path promotes as pandas; the Rust constructors' `Int64` holding a missing value is the open decision, taken with the harness and the fixtures that pin it (br-frankenpandas-ih6ho) |
