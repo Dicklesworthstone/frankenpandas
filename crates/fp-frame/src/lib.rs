@@ -70219,7 +70219,10 @@ fn has_tz_suffix(s: &str) -> bool {
 fn strip_tz_suffix(s: &str) -> &str {
     let (without_zone, _) = split_zone_annotation(s);
     if let Some(suffix) = fixed_offset_suffix(without_zone) {
-        return &without_zone[..without_zone.len() - suffix.len()];
+        return without_zone
+            .trim_end()
+            .strip_suffix(suffix)
+            .unwrap_or(without_zone);
     }
     without_zone
 }
@@ -70245,7 +70248,7 @@ fn fixed_offset_suffix(s: &str) -> Option<&str> {
     if trimmed.len() < 6 {
         return None;
     }
-    let tail = &trimmed[trimmed.len() - 6..];
+    let tail = trimmed.get(trimmed.len() - 6..)?;
     if is_fixed_offset_suffix(tail) {
         Some(tail)
     } else {
@@ -263939,5 +263942,48 @@ mod test_top_level_and_reshaping {
         assert_eq!(is.start, None);
 
         Ok(())
+    }
+
+    #[test]
+    fn dt_tz_localize_and_floor_multibyte_utf8_do_not_panic_4qg5w_13() {
+        // Formerly panicked at `&trimmed[trimmed.len() - 6..]` in `fixed_offset_suffix`
+        // when `trimmed.len() - 6` landed inside a multi-byte UTF-8 scalar
+        // (e.g. "2024-01-01 €€a" = 18 bytes, where byte 12 is inside '€' at bytes 11..14).
+        let bad = Series::from_values(
+            "ts",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![
+                Scalar::Utf8("2024-01-01 €€a".to_owned()),
+                Scalar::Utf8("αβγδ".to_owned()),
+            ],
+        )
+        .expect("series");
+        let err = bad
+            .dt()
+            .tz_localize(Some("UTC"))
+            .expect_err("invalid multi-byte datetime must return Err rather than panicking");
+        assert!(matches!(err, FrameError::CompatibilityRejected(_)));
+
+        let floored = bad
+            .dt()
+            .floor("D")
+            .expect("dt.floor on invalid multi-byte UTF-8 returns Nulls without panicking");
+        assert!(floored.values().iter().all(Scalar::is_missing));
+
+        // NEGATIVE: valid ISO-8601 naive and tz-aware strings still localize / floor properly.
+        let valid = Series::from_values(
+            "ts",
+            vec![IndexLabel::Int64(0)],
+            vec![Scalar::Utf8("2024-01-01 12:34:56".to_owned())],
+        )
+        .expect("valid series");
+        let localized = valid
+            .dt()
+            .tz_localize(Some("UTC"))
+            .expect("valid naive datetime localizes");
+        assert_eq!(
+            localized.values(),
+            &[Scalar::Utf8("2024-01-01 12:34:56+00:00".to_owned())]
+        );
     }
 }

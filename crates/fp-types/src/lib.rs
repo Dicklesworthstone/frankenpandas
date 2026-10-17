@@ -10142,36 +10142,26 @@ impl Interval {
     /// - '(0, 1]' -> open left, closed right
     pub fn parse(s: &str) -> Result<Self, TypeError> {
         let s = s.trim();
-        if s.len() < 5 {
+        let (left_closed, after_left) = if let Some(rest) = s.strip_prefix('[') {
+            (true, rest)
+        } else if let Some(rest) = s.strip_prefix('(') {
+            (false, rest)
+        } else {
             return Err(TypeError::ValueNotParseable {
                 value: s.to_string(),
                 target: "Interval".to_string(),
             });
-        }
-
-        let first_char = s.chars().next().unwrap();
-        let last_char = s.chars().last().unwrap();
-
-        let left_closed = match first_char {
-            '[' => true,
-            '(' => false,
-            _ => {
-                return Err(TypeError::ValueNotParseable {
-                    value: s.to_string(),
-                    target: "Interval".to_string(),
-                });
-            }
         };
 
-        let right_closed = match last_char {
-            ']' => true,
-            ')' => false,
-            _ => {
-                return Err(TypeError::ValueNotParseable {
-                    value: s.to_string(),
-                    target: "Interval".to_string(),
-                });
-            }
+        let (right_closed, inner) = if let Some(rest) = after_left.strip_suffix(']') {
+            (true, rest)
+        } else if let Some(rest) = after_left.strip_suffix(')') {
+            (false, rest)
+        } else {
+            return Err(TypeError::ValueNotParseable {
+                value: s.to_string(),
+                target: "Interval".to_string(),
+            });
         };
 
         let closed = match (left_closed, right_closed) {
@@ -10181,7 +10171,6 @@ impl Interval {
             (false, false) => IntervalClosed::Neither,
         };
 
-        let inner = &s[1..s.len() - 1];
         let Some((left_text, right_text)) = inner.split_once(',') else {
             return Err(TypeError::ValueNotParseable {
                 value: s.to_string(),
@@ -23529,5 +23518,29 @@ mod pandas_decimal_py3c0 {
         assert_eq!(cell(None, "a"), cell(None, "a"));
         assert_ne!(cell(None, "a"), cell(None, "b"));
         assert_eq!(hash(&cell(None, "ab")), hash(&cell(None, "cd")));
+    }
+
+    #[test]
+    fn interval_parse_rejects_multibyte_and_malformed_inputs_without_panic_4qg5w_13() {
+        use super::{Interval, IntervalClosed, TypeError};
+        for bad in [
+            "",
+            "   ",
+            "€€",
+            "€€€€€",
+            "[αβγ]",
+            "(α, β]",
+            "[1, 2, 3]",
+            "[1 2]",
+            "]1, 2[",
+        ] {
+            let err = Interval::parse(bad).expect_err("malformed interval must return Err");
+            assert!(matches!(err, TypeError::ValueNotParseable { .. }));
+        }
+        // NEGATIVE: valid intervals still parse identically.
+        let parsed = Interval::parse(" [1.5, 3.5) ").expect("valid interval");
+        assert_eq!(parsed.left, 1.5);
+        assert_eq!(parsed.right, 3.5);
+        assert_eq!(parsed.closed, IntervalClosed::Left);
     }
 }

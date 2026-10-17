@@ -1524,7 +1524,7 @@ fn evaluate_scalar_operand_named(
                 .clone(),
             ExprError::UnanchoredLocal(local.clone()),
         ),
-        _ => unreachable!("guarded by is_scalar_operand"),
+        _ => return Err(ExprError::UnanchoredLiteral),
     };
     let index = context.anchor_index.as_ref().ok_or(anchor_error)?;
     Series::broadcast(name, value, index.labels().to_vec()).map_err(ExprError::from)
@@ -10871,6 +10871,31 @@ mod eval_value_2blaf {
         );
         assert!(
             matches!(strict, Ok(EvalValue::Scalar(Scalar::Utf8(ref text))) if text.len() == 80_000_000)
+        );
+    }
+
+    #[test]
+    fn evaluate_scalar_operand_named_rejects_non_scalar_without_panic_4qg5w_13() {
+        use super::{EvalContext, Expr, SeriesRef};
+        let df = frame();
+        let ctx = EvalContext::from_dataframe(&df).expect("ctx");
+        let non_scalar = Expr::Series {
+            name: SeriesRef("a".to_owned()),
+        };
+        let err = super::evaluate_scalar_operand_named(&non_scalar, &ctx, "a")
+            .expect_err("non-scalar operand must return Err rather than panicking");
+        assert!(matches!(err, ExprError::UnanchoredLiteral));
+
+        // NEGATIVE: literal scalar operand succeeds and broadcasts to frame index.
+        let lit = Expr::Literal {
+            value: Scalar::Int64(42),
+        };
+        let broadcasted =
+            super::evaluate_scalar_operand_named(&lit, &ctx, "a").expect("broadcast literal");
+        assert_eq!(broadcasted.name(), "a");
+        assert_eq!(
+            broadcasted.values(),
+            &[Scalar::Int64(42), Scalar::Int64(42)]
         );
     }
 }

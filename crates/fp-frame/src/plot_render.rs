@@ -185,8 +185,9 @@ fn svg_horizontal_axes(scale: &Scale, y_labels: &[String]) -> String {
                 continue;
             }
             let y = MARGIN_TOP + (i as f64 + 0.5) * slot;
-            let truncated = if label.len() > 8 {
-                format!("{}…", &label[..7])
+            let truncated = if label.chars().count() > 8 {
+                let prefix: String = label.chars().take(7).collect();
+                format!("{prefix}…")
             } else {
                 label.clone()
             };
@@ -866,7 +867,8 @@ fn render_plot_with_bw_method(
                 ));
             }
         }
-        PlotKind::Histogram | PlotKind::Box => unreachable!(),
+        PlotKind::Histogram => return histogram_body(&spec.series, 10, &spec.method),
+        PlotKind::Box => return boxplot_body(&spec.series, &spec.method),
     }
 
     let legend_entries: Vec<(String, &str)> = if spec.kind == PlotKind::Pie {
@@ -3705,5 +3707,36 @@ mod tests {
             kde_bandwidth_1d(&sample, KdeBandwidthMethod::Scalar(0.0)).is_err(),
             "zero scalar bandwidth must fail closed"
         );
+    }
+
+    #[test]
+    fn barh_plot_multibyte_utf8_labels_do_not_panic_4qg5w_13() {
+        // Formerly panicked at `&label[..7]` when `label.len() > 8` and byte 7
+        // landed inside a multi-byte UTF-8 scalar (e.g. "αβγδεζη" = 14 bytes,
+        // 7 chars, byte 7 is inside 'δ' at bytes 6..8).
+        let s = Series::from_values(
+            "metrics",
+            vec![
+                IndexLabel::Utf8("αβγδεζη".to_owned()),
+                IndexLabel::Utf8("αβγδεζηθικ".to_owned()),
+                IndexLabel::Utf8("€€€".to_owned()),
+            ],
+            vec![
+                Scalar::Float64(10.0),
+                Scalar::Float64(20.0),
+                Scalar::Float64(30.0),
+            ],
+        )
+        .expect("series");
+        let svg = s
+            .barh()
+            .expect("barh spec")
+            .to_svg()
+            .expect("barh svg render must not panic on multi-byte UTF-8 labels");
+        // 7-char label ("αβγδεζη", 14 bytes) is <= 8 chars so it is preserved whole;
+        // 10-char label ("αβγδεζηθικ") is truncated to 7 chars + ellipsis ("αβγδεζη…").
+        assert!(svg.contains(">αβγδεζη</text>"));
+        assert!(svg.contains(">αβγδεζη…</text>"));
+        assert!(svg.contains(">€€€</text>"));
     }
 }
