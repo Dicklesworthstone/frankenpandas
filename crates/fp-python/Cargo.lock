@@ -1263,7 +1263,7 @@ dependencies = [
 
 [[package]]
 name = "fp-columnar"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "fp-dot-kernel",
  "fp-types",
@@ -1275,11 +1275,11 @@ dependencies = [
 
 [[package]]
 name = "fp-dot-kernel"
-version = "0.5.0"
+version = "0.6.0"
 
 [[package]]
 name = "fp-expr"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "fp-columnar",
  "fp-frame",
@@ -1294,7 +1294,7 @@ dependencies = [
 
 [[package]]
 name = "fp-frame"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -1303,8 +1303,10 @@ dependencies = [
  "fp-runtime",
  "fp-types",
  "mimalloc",
+ "rayon",
  "regex",
  "rustc-hash",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1317,7 +1319,7 @@ dependencies = [
 
 [[package]]
 name = "fp-index"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "criterion",
@@ -1330,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "fp-io"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "arrow",
  "arrow-ipc",
@@ -1356,6 +1358,7 @@ dependencies = [
  "sas7bdat",
  "sas_xport",
  "scraper",
+ "serde",
  "serde-pickle",
  "serde_json",
  "thiserror",
@@ -1363,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "fp-join"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bumpalo",
  "fp-columnar",
@@ -1377,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "fp-python"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "fp-columnar",
  "fp-expr",
@@ -1393,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "fp-runtime"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "asupersync",
  "serde",
@@ -1404,7 +1407,7 @@ dependencies = [
 
 [[package]]
 name = "fp-types"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "chrono-tz",

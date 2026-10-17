@@ -372,12 +372,15 @@ impl TreeCounts {
             let lines = text.matches('\n').count();
             counts.tests_all += tests;
             counts.rust_lines_all += lines;
-            if p.to_string_lossy().contains("/src/") {
+            // Classify by the path below crates/, not the absolute path: a checkout that itself
+            // lives under some `/src/` directory must not count every file as source (#45).
+            let rel = p.strip_prefix(&crates).expect("under crates/");
+            if rel.components().any(|c| c.as_os_str() == "src") {
                 counts.tests_src += tests;
                 counts.rust_lines_src += lines;
                 counts.scope_sites += text.matches("thread::scope").count();
             }
-            let mut parts = p.strip_prefix(&crates).expect("under crates/").iter();
+            let mut parts = rel.iter();
             if let (Some(name), Some(dir)) = (parts.next(), parts.next())
                 && dir == "src"
             {
