@@ -304,8 +304,7 @@ struct TreeCounts {
 impl TreeCounts {
     fn measure(root: &Path) -> Self {
         fn visit(dir: &Path, f: &mut impl FnMut(&Path)) {
-            for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
-            {
+            for entry in fs::read_dir(dir).expect("read directory") {
                 let path = entry.expect("dir entry").path();
                 if path.is_dir() {
                     visit(&path, f);
@@ -334,7 +333,7 @@ impl TreeCounts {
                 .and_then(|(_, rest)| rest.strip_prefix("**"))
                 .and_then(|rest| rest.split_once("**"))
                 .map(|(value, _)| value.to_owned())
-                .unwrap_or_else(|| panic!("SCORECARD.md has no \"{label}**…**\" line"))
+                .expect("SCORECARD.md missing expected bold metric line")
         };
         let mut counts = Self {
             packets: count_json(&root.join("crates/fp-conformance/fixtures/packets")),
@@ -367,7 +366,7 @@ impl TreeCounts {
             if p.extension().and_then(|e| e.to_str()) != Some("rs") {
                 return;
             }
-            let bytes = fs::read(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+            let bytes = fs::read(p).expect("read rust source file");
             let text = String::from_utf8_lossy(&bytes);
             let tests = text.matches("#[test]").count();
             let lines = text.matches('\n').count();
@@ -555,9 +554,10 @@ fn readme_number_violations(readme: &str, tree: &TreeCounts) -> Vec<String> {
     });
     // Census numbers must be the generated scorecard's (the README said 143
     // lanes from a scorecard built on uncommitted, mtime-ordered rows).
-    let (losing, lanes): (Vec<_>, Vec<_>) = number_claims(readme, " certified lanes")
+    let (losing, mut lanes): (Vec<_>, Vec<_>) = number_claims(readme, " certified lanes")
         .into_iter()
         .partition(|claim| claim.tail.starts_with(" still losing"));
+    lanes.extend(number_claims(readme, " certified benchmark lanes"));
     for (label, claims, want) in [
         ("certified lanes", lanes, tree.scorecard_lanes),
         (
@@ -598,28 +598,65 @@ fn readme_number_violations(readme: &str, tree: &TreeCounts) -> Vec<String> {
             ));
         }
     }
+    // Rust_LOC shields.io badge floor ("Rust_LOC-750K%2B-orange.svg"): must be
+    // a `K+` / `K%2B` floor within the 25% band of `tree.rust_lines_all`.
+    for (at, _) in readme.match_indices("Rust_LOC-") {
+        let line = readme[..at].matches('\n').count() + 1;
+        let rest = &readme[at + "Rust_LOC-".len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        let after = &rest[digits.len()..];
+        if let Ok(k) = digits.parse::<usize>()
+            && after.starts_with('K')
+        {
+            let floor_val = k * 1_000;
+            let is_plus = after.starts_with("K%2B") || after.starts_with("K+");
+            if !is_plus || !in_band(floor_val, tree.rust_lines_all) {
+                out.push(format!(
+                    "line {line}: Rust_LOC badge ({floor_val}{}) but crates/ has {}",
+                    if is_plus { "+" } else { "" },
+                    tree.rust_lines_all
+                ));
+            }
+        }
+    }
     // Per-crate floors in the Workspace Structure tree
     // ("│   ├── fp-io/  # ... (more than 35,000 lines)"); every crate needs one.
+    // Prose headings of the form "`fp-frame` (a crate of more than N lines)"
+    // are also checked against the same per-crate `src/` floor.
     let mut listed = BTreeSet::new();
     for (i, text) in readme.lines().enumerate() {
-        let Some((_, entry)) = text.split_once("── ") else {
-            continue;
-        };
-        let Some((name, _)) = entry.split_once('/') else {
-            continue;
-        };
-        let Some(&have) = tree.crate_src_lines.get(name) else {
-            continue;
-        };
-        for claim in number_claims(text, " lines)") {
-            listed.insert(name);
-            if !claim.floor || !in_band(claim.value, have) {
-                out.push(format!(
-                    "line {}: {name} ({}{} lines) but crates/{name}/src has {have}",
-                    i + 1,
-                    if claim.floor { "more than " } else { "" },
-                    claim.value
-                ));
+        if let Some((_, entry)) = text.split_once("── ") {
+            let Some((name, _)) = entry.split_once('/') else {
+                continue;
+            };
+            let Some(&have) = tree.crate_src_lines.get(name) else {
+                continue;
+            };
+            for claim in number_claims(text, " lines)") {
+                listed.insert(name);
+                if !claim.floor || !in_band(claim.value, have) {
+                    out.push(format!(
+                        "line {}: {name} ({}{} lines) but crates/{name}/src has {have}",
+                        i + 1,
+                        if claim.floor { "more than " } else { "" },
+                        claim.value
+                    ));
+                }
+            }
+        } else if text.contains("(a crate of ") {
+            for (name, &have) in &tree.crate_src_lines {
+                if text.contains(name.as_str()) {
+                    for claim in number_claims(text, " lines)") {
+                        if !claim.floor || !in_band(claim.value, have) {
+                            out.push(format!(
+                                "line {}: {name} ({}{} lines) but crates/{name}/src has {have}",
+                                i + 1,
+                                if claim.floor { "more than " } else { "" },
+                                claim.value
+                            ));
+                        }
+                    }
+                }
             }
         }
     }
@@ -709,10 +746,31 @@ fn readme_number_gate_reports_stale_copies_and_bad_floors() {
             "line 8: geomean 4.000x, SCORECARD.md has 3.970x".to_owned(),
         ]
     );
+    let stale_bench_lanes =
+        format!("{good}faster than pandas across 143 certified benchmark lanes\n");
+    assert_eq!(
+        readme_number_violations(&stale_bench_lanes, &tree),
+        vec!["line 9: 143 certified lanes, SCORECARD.md has 146".to_owned()]
+    );
     let stale_losses = good.replace("10 certified lanes still", "14 certified lanes still");
     assert_eq!(
         readme_number_violations(&stale_losses, &tree),
         vec!["line 8: 14 certified lanes still losing, SCORECARD.md has 10".to_owned()]
+    );
+    let stale_badge =
+        format!("{good}[![LOC](https://img.shields.io/badge/Rust_LOC-507K-orange.svg)]\n");
+    assert_eq!(
+        readme_number_violations(&stale_badge, &tree),
+        vec!["line 9: Rust_LOC badge (507000) but crates/ has 651196".to_owned()]
+    );
+    let stale_prose_crate =
+        format!("{good}## A Tour Through `fp-frame` (a crate of more than 150,000 lines)\n");
+    assert_eq!(
+        readme_number_violations(&stale_prose_crate, &tree),
+        vec![
+            "line 9: fp-frame (more than 150000 lines) but crates/fp-frame/src has 221529"
+                .to_owned()
+        ]
     );
 
     // The 2026-05 README called fp-frame "the 87,000-line crate".
@@ -776,5 +834,368 @@ fn readme_number_gate_reports_stale_copies_and_bad_floors() {
     assert_eq!(
         readme_number_violations(&deleted, &tree),
         vec!["no packets claim found".to_owned()]
+    );
+}
+
+/// Structured README capability claim entry (`br-frankenpandas-rc0923-epic-truth-restoration-h5vo9.2`).
+#[derive(Debug, Clone, Copy)]
+struct ReadmeCapabilityClaim {
+    id: &'static str,
+    readme_snippet: &'static str,
+    test_file: &'static str,
+    test_name: &'static str,
+    ci_job: &'static str,
+}
+
+const README_CLAIMS_REGISTRY: &[ReadmeCapabilityClaim] = &[
+    ReadmeCapabilityClaim {
+        id: "CLAIM-01-QUICK-EXAMPLE",
+        readme_snippet: "## Quick Example",
+        test_file: "crates/frankenpandas/tests/readme_quick_example.rs",
+        test_name: "readme_quick_example_compiles_and_runs",
+        ci_job: "test",
+    },
+    ReadmeCapabilityClaim {
+        id: "CLAIM-02-LEAPFROG-JOIN",
+        readme_snippet: "## Leapfrog Triejoin (AG-05) in Detail",
+        test_file: "crates/fp-index/src/lib.rs",
+        test_name: "leapfrog_union_three_indexes",
+        ci_job: "test",
+    },
+    ReadmeCapabilityClaim {
+        id: "CLAIM-03-GROUPBY-PATHS",
+        readme_snippet: "### GroupBy: Three Execution Paths",
+        test_file: "crates/fp-groupby/src/lib.rs",
+        test_name: "dense_int64_groupby_matches_handcomputed_oracle_k3zcv",
+        ci_job: "test",
+    },
+    ReadmeCapabilityClaim {
+        id: "CLAIM-04-JOIN-TYPES",
+        readme_snippet: "### Join Types",
+        test_file: "crates/fp-join/src/lib.rs",
+        test_name: "merge_asof_backward",
+        ci_job: "test",
+    },
+    ReadmeCapabilityClaim {
+        id: "CLAIM-05-EXPR-ENGINE",
+        readme_snippet: "### Expression Engine",
+        test_file: "crates/fp-expr/src/lib.rs",
+        test_name: "evaluate_on_dataframe_matches_manual_context_eval",
+        ci_job: "test",
+    },
+    ReadmeCapabilityClaim {
+        id: "CLAIM-06-IO-POSTGRES",
+        readme_snippet: "Pure synchronous Tokio-free PostgreSQL `PostgresConnection`",
+        test_file: "crates/fp-io/src/lib.rs",
+        test_name: "test_postgres_dtype_sql_mappings",
+        ci_job: "test",
+    },
+    ReadmeCapabilityClaim {
+        id: "CLAIM-07-IO-MYSQL",
+        readme_snippet: "MySQL-backed `SqlConnection` impl",
+        test_file: "crates/fp-io/src/lib.rs",
+        test_name: "mysql_nullable_dtypes_declare_the_same_column_as_their_base",
+        ci_job: "test",
+    },
+    ReadmeCapabilityClaim {
+        id: "CLAIM-08-IO-SAS",
+        readme_snippet: "`read_sas` handles sas7bdat and XPORT",
+        test_file: "crates/fp-io/src/lib.rs",
+        test_name: "read_sas_xport_builds_typed_frame_and_keeps_missing_numeric_as_null_9jvao",
+        ci_job: "test",
+    },
+    ReadmeCapabilityClaim {
+        id: "CLAIM-09-IO-CLIPBOARD",
+        readme_snippet: "Rust `read_clipboard` / `to_clipboard` shell out to OS clipboard tools",
+        test_file: "crates/fp-io/src/lib.rs",
+        test_name: "clipboard_tsv_round_trips_through_read_clipboard_str",
+        ci_job: "test",
+    },
+    ReadmeCapabilityClaim {
+        id: "CLAIM-10-PLOTTING-SPECS",
+        readme_snippet: "Returns backend-neutral `PlotSpec` / `BoxPlotSpec`",
+        test_file: "crates/fp-frame/src/lib.rs",
+        test_name: "dataframe_plotting_methods_return_specs",
+        ci_job: "test",
+    },
+    ReadmeCapabilityClaim {
+        id: "CLAIM-11-RUNTIME-BAYESIAN",
+        readme_snippet: "### Bayesian Runtime Policy",
+        test_file: "crates/fp-runtime/src/lib.rs",
+        test_name: "conformal_guard_calibrates_after_sufficient_data",
+        ci_job: "test",
+    },
+    ReadmeCapabilityClaim {
+        id: "CLAIM-12-RUNTIME-RAPTORQ",
+        readme_snippet: "**`RaptorQ envelope`** wraps durable artifacts",
+        test_file: "crates/fp-runtime/src/lib.rs",
+        test_name: "raptorq_envelope_from_source_bytes_invariants_b9vvk",
+        ci_job: "test",
+    },
+    ReadmeCapabilityClaim {
+        id: "CLAIM-13-CONFORMANCE-PACKETS",
+        readme_snippet: "1,387 packet JSON files spanning 1,400 fixture files",
+        test_file: "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs",
+        test_name: "live_oracle_constructor_dtype_cases_match_pandas_bhyqp",
+        ci_job: "conformance",
+    },
+    ReadmeCapabilityClaim {
+        id: "CLAIM-14-PYTHON-BINDINGS",
+        readme_snippet: "The PyO3 package (`crates/fp-python`) ships in-tree and builds from source via `maturin develop --release`",
+        test_file: "crates/fp-python/src/lib.rs",
+        test_name: "test_py_dataframe_indexers_and_dunders",
+        ci_job: "linux",
+    },
+];
+
+fn test_fn_status_in_source(source: &str, test_name: &str) -> Result<(), &'static str> {
+    let needle = format!("fn {test_name}(");
+    let Some(pos) = source.find(&needle) else {
+        return Err("not_found");
+    };
+    // Inspect the immediately preceding attribute block above `fn <test_name>(`.
+    let prefix = &source[..pos];
+    for line in prefix.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            break;
+        }
+        if trimmed.starts_with("#[ignore") {
+            return Err("ignored");
+        }
+        if !trimmed.starts_with("#[") && !trimmed.starts_with("//") {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn readme_capability_claim_violations(
+    root: &Path,
+    readme: &str,
+    workflows: &[&str],
+    claims: &[ReadmeCapabilityClaim],
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for claim in claims {
+        if !readme.contains(claim.readme_snippet) {
+            violations.push(format!(
+                "{}: README missing snippet {:?}",
+                claim.id, claim.readme_snippet
+            ));
+        }
+        let path = root.join(claim.test_file);
+        match fs::read_to_string(&path) {
+            Ok(source) => match test_fn_status_in_source(&source, claim.test_name) {
+                Ok(()) => {}
+                Err("not_found") => violations.push(format!(
+                    "{}: test `{}` not found in {}",
+                    claim.id, claim.test_name, claim.test_file
+                )),
+                Err("ignored") => violations.push(format!(
+                    "{}: test `{}` in {} is #[ignore]d",
+                    claim.id, claim.test_name, claim.test_file
+                )),
+                Err(other) => violations.push(format!(
+                    "{}: unexpected status `{other}` for `{}` in {}",
+                    claim.id, claim.test_name, claim.test_file
+                )),
+            },
+            Err(_) => violations.push(format!(
+                "{}: test file {} does not exist",
+                claim.id, claim.test_file
+            )),
+        }
+        let job_marker = format!("\n  {}:", claim.ci_job);
+        if !workflows.iter().any(|wf| wf.contains(&job_marker)) {
+            violations.push(format!(
+                "{}: CI job `{}` not found in workflow definitions",
+                claim.id, claim.ci_job
+            ));
+        }
+    }
+    violations
+}
+
+/// Every capability claim in `README_CLAIMS_REGISTRY` must appear in `README.md`,
+/// map to a real, non-`#[ignore]`d test in the tree, and name a real CI job
+/// (`br-frankenpandas-rc0923-epic-truth-restoration-h5vo9.2`).
+#[test]
+fn readme_capability_claims_registry_maps_to_real_unignored_tests_h5vo9_2() {
+    let root = repo_root();
+    let readme = fs::read_to_string(root.join("README.md")).expect("read README.md");
+    let ci_yml = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read ci.yml");
+    let wheels_yml =
+        fs::read_to_string(root.join(".github/workflows/wheels.yml")).expect("read wheels.yml");
+    let violations = readme_capability_claim_violations(
+        &root,
+        &readme,
+        &[&ci_yml, &wheels_yml],
+        README_CLAIMS_REGISTRY,
+    );
+    assert!(
+        violations.is_empty(),
+        "README capability claims registry violations:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn readme_capability_claims_registry_rejects_missing_or_ignored_probes_h5vo9_2() {
+    let root = repo_root();
+    let readme = "## Quick Example\n";
+    let workflows = ["\n  test:\n"];
+    let missing_test = [ReadmeCapabilityClaim {
+        id: "CLAIM-MISSING-FN",
+        readme_snippet: "## Quick Example",
+        test_file: "crates/frankenpandas/tests/readme_quick_example.rs",
+        test_name: "nonexistent_probe_fn_h5vo9_2",
+        ci_job: "test",
+    }];
+    assert_eq!(
+        readme_capability_claim_violations(&root, readme, &workflows, &missing_test),
+        vec![
+            "CLAIM-MISSING-FN: test `nonexistent_probe_fn_h5vo9_2` not found in crates/frankenpandas/tests/readme_quick_example.rs".to_owned()
+        ]
+    );
+
+    let missing_snippet_and_job = [ReadmeCapabilityClaim {
+        id: "CLAIM-DRIFT",
+        readme_snippet: "## Vanished Section",
+        test_file: "crates/frankenpandas/tests/readme_quick_example.rs",
+        test_name: "readme_quick_example_compiles_and_runs",
+        ci_job: "vanished-job",
+    }];
+    assert_eq!(
+        readme_capability_claim_violations(&root, readme, &workflows, &missing_snippet_and_job),
+        vec![
+            "CLAIM-DRIFT: README missing snippet \"## Vanished Section\"".to_owned(),
+            "CLAIM-DRIFT: CI job `vanished-job` not found in workflow definitions".to_owned(),
+        ]
+    );
+
+    let ignored_src = "#[test]\n#[ignore = \"parked\"]\nfn parked_probe() {}\n";
+    assert_eq!(
+        test_fn_status_in_source(ignored_src, "parked_probe"),
+        Err("ignored")
+    );
+    let active_src = "#[test]\nfn active_probe() {}\n";
+    assert_eq!(test_fn_status_in_source(active_src, "active_probe"), Ok(()));
+}
+
+const REQUIRED_THREAT_MODEL_HEADINGS: &[&str] = &[
+    "## 1. CSV Reader & Writer (`fp-io`)",
+    "## 2. JSON & JSON-Lines Reader & Writer (`fp-io`)",
+    "## 3. Excel Workbook Reader & Writer (`fp-io`)",
+    "## 4. Parquet Columnar Reader & Writer (`fp-io`)",
+    "## 5. Arrow IPC / Feather Reader & Writer (`fp-io`)",
+    "## 6. XML Reader & Writer (`fp-io`)",
+    "## 7. HTML Table Reader & Writer (`fp-io`)",
+    "## 8. SAS (`SAS7BDAT` & `XPORT` v5) Reader (`fp-io`)",
+    "## 9. Stata DTA Reader & Writer (`fp-io`)",
+    "## 10. Pickle Snapshot Reader & Writer (`fp-io`)",
+    "## 11. HDF5 Reader & Writer (`fp-io`)",
+    "## 12. SQL Adapters & Identifier Quoting (`fp-io`)",
+    "## 13. Expression Parser & Evaluator (`fp-expr`)",
+    "## 14. Index Alignment & MultiIndex (`fp-index`)",
+    "## 15. Columnar Storage & Vectorized Kernels (`fp-columnar` / `fp-frame` / `fp-groupby` / `fp-join`)",
+    "## 16. Runtime Policy, Conformal Guard & RaptorQ Envelopes (`fp-runtime`)",
+    "## 17. Python FFI Boundary (`fp-python`)",
+    "## 18. Conformance Oracle Subprocess & Fixture Harness (`fp-conformance`)",
+];
+
+fn threat_model_violations(root: &Path, doc: &str, required_headings: &[&str]) -> Vec<String> {
+    let mut violations = Vec::new();
+    for &heading in required_headings {
+        let Some(start) = doc.find(heading) else {
+            violations.push(format!("missing subsystem heading: {heading}"));
+            continue;
+        };
+        let rest = &doc[start + heading.len()..];
+        let end = rest.find("\n## ").unwrap_or(rest.len());
+        let section = &rest[..end];
+        for required_field in [
+            "- **Attack Surface:**",
+            "- **Trust Boundary:**",
+            "- **Mitigations (`file:line`):**",
+            "- **Concrete Hostile Input & Verification Probe:**",
+            "Hostile input:",
+            "- **Known Gaps & Open Beads:**",
+        ] {
+            if !section.contains(required_field) {
+                violations.push(format!("{heading}: missing `{required_field}`"));
+            }
+        }
+        // Every section must cite at least one `crates/...::fn_name` or `fuzz/fuzz_targets/*.rs` probe
+        // and every cited probe must exist on disk.
+        let mut probe_count = 0usize;
+        for token in section.split('`') {
+            if let Some((rel, fn_name)) = token.split_once("::")
+                && rel.starts_with("crates/")
+                && rel.ends_with(".rs")
+            {
+                probe_count += 1;
+                let path = root.join(rel);
+                match fs::read_to_string(&path) {
+                    Ok(source) => {
+                        if test_fn_status_in_source(&source, fn_name) != Ok(()) {
+                            violations.push(format!(
+                                "{heading}: probe `{rel}::{fn_name}` missing or #[ignore]d"
+                            ));
+                        }
+                    }
+                    Err(_) => {
+                        violations.push(format!("{heading}: probe file `{rel}` does not exist"))
+                    }
+                }
+            } else if token.starts_with("fuzz/fuzz_targets/") && token.ends_with(".rs") {
+                probe_count += 1;
+                if !root.join(token).is_file() {
+                    violations.push(format!("{heading}: fuzz target `{token}` does not exist"));
+                }
+            }
+        }
+        if probe_count == 0 {
+            violations.push(format!(
+                "{heading}: names no concrete `crates/...::fn` or `fuzz/fuzz_targets/*.rs` probe"
+            ));
+        }
+    }
+    violations
+}
+
+/// Per-subsystem threat model gate (`br-frankenpandas-rc0923-threat-model-per-subsystem-umlhr`).
+#[test]
+fn threat_model_covers_all_subsystems_with_real_probes_umlhr() {
+    let root = repo_root();
+    let doc = fs::read_to_string(root.join("docs/security/THREAT_MODEL.md"))
+        .expect("read docs/security/THREAT_MODEL.md");
+    let violations = threat_model_violations(&root, &doc, REQUIRED_THREAT_MODEL_HEADINGS);
+    assert!(
+        violations.is_empty(),
+        "docs/security/THREAT_MODEL.md violations:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn threat_model_validator_rejects_missing_probes_or_sections_umlhr() {
+    let root = repo_root();
+    let incomplete_doc = "## 1. CSV Reader & Writer (`fp-io`)\n\
+        - **Attack Surface:** csv\n\
+        - **Trust Boundary:** bytes\n\
+        - **Mitigations (`file:line`):** `crates/fp-io/src/lib.rs:2336`\n\
+        - **Concrete Hostile Input & Verification Probe:**\n\
+        - **Known Gaps & Open Beads:** none\n";
+    assert_eq!(
+        threat_model_violations(
+            &root,
+            incomplete_doc,
+            &["## 1. CSV Reader & Writer (`fp-io`)"]
+        ),
+        vec![
+            "## 1. CSV Reader & Writer (`fp-io`): missing `Hostile input:`".to_owned(),
+            "## 1. CSV Reader & Writer (`fp-io`): names no concrete `crates/...::fn` or `fuzz/fuzz_targets/*.rs` probe".to_owned(),
+        ]
     );
 }

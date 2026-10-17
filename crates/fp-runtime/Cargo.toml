@@ -14,6 +14,7 @@ categories.workspace = true
 [features]
 default = []
 asupersync = ["dep:asupersync"]
+tracing = ["dep:tracing"]
 
 [dependencies]
 asupersync = { version = "0.5.0", optional = true, default-features = false }
@@ -21,6 +22,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.11.0"
 thiserror = { workspace = true }
+tracing = { workspace = true, optional = true }
 
 # br-frankenpandas-3nzz3. `pub mod asupersync` is behind the `asupersync`
 # feature, so the transport A/B cannot compile without it. Declaring the

@@ -273,9 +273,119 @@ fn legend(entries: &[(String, &str)]) -> String {
     out
 }
 
+// ── KDE bandwidth & density helpers (pandas / scipy.stats.gaussian_kde) ────
+
+/// Bandwidth selection rule for 1-D Gaussian Kernel Density Estimation,
+/// matching `scipy.stats.gaussian_kde` (`pandas.Series.plot.kde` / `DataFrame.plot.kde`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum KdeBandwidthMethod {
+    /// Scott's Rule (pandas / `scipy.stats.gaussian_kde` default):
+    /// `factor = n**(-1 / (d + 4)) = n**(-0.2)` in 1-D, `h = factor * std(ddof=1)`.
+    #[default]
+    Scott,
+    /// Silverman's Rule (`bw_method="silverman"` in `scipy.stats.gaussian_kde`):
+    /// `factor = (n * (d + 2) / 4)**(-1 / (d + 4)) = (0.75 * n)**(-0.2)` in 1-D,
+    /// `h = factor * std(ddof=1)`.
+    Silverman,
+    /// Explicit scalar covariance factor (`bw_method=<float>` in `scipy.stats.gaussian_kde`):
+    /// `factor = c`, `h = c * std(ddof=1)`.
+    Scalar(f64),
+}
+
+impl KdeBandwidthMethod {
+    /// Parse a pandas/scipy `bw_method` string (`"scott"` or `"silverman"`).
+    pub fn parse_str(method: &str) -> Result<Self, FrameError> {
+        match method.trim().to_ascii_lowercase().as_str() {
+            "scott" => Ok(Self::Scott),
+            "silverman" => Ok(Self::Silverman),
+            other => Err(FrameError::CompatibilityRejected(format!(
+                "bw_method should be 'scott', 'silverman', or a positive finite scalar; got '{other}'"
+            ))),
+        }
+    }
+
+    /// Construct an explicit scalar covariance factor (`bw_method=<float>`).
+    pub fn from_scalar(factor: f64) -> Result<Self, FrameError> {
+        if !factor.is_finite() || factor <= 0.0 {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "bw_method scalar must be finite and > 0, got {factor}"
+            )));
+        }
+        Ok(Self::Scalar(factor))
+    }
+
+    /// Compute the 1-D `scipy.stats.gaussian_kde` covariance factor for sample size `n`.
+    pub fn covariance_factor_1d(self, n: usize) -> Result<f64, FrameError> {
+        if n == 0 {
+            return Err(FrameError::CompatibilityRejected(
+                "kde plot requires at least one finite numeric value".to_owned(),
+            ));
+        }
+        match self {
+            Self::Scott => Ok((n as f64).powf(-0.2)),
+            Self::Silverman => Ok((0.75 * n as f64).powf(-0.2)),
+            Self::Scalar(c) => {
+                if !c.is_finite() || c <= 0.0 {
+                    Err(FrameError::CompatibilityRejected(format!(
+                        "bw_method scalar must be finite and > 0, got {c}"
+                    )))
+                } else {
+                    Ok(c)
+                }
+            }
+        }
+    }
+}
+
+/// Compute the 1-D Gaussian KDE bandwidth `h = factor * std(ddof=1)` for `finite` samples,
+/// matching `scipy.stats.gaussian_kde`.
+pub fn kde_bandwidth_1d(finite: &[f64], method: KdeBandwidthMethod) -> Result<f64, FrameError> {
+    let n = finite.len();
+    let factor = method.covariance_factor_1d(n)?;
+    let mean = finite.iter().sum::<f64>() / n as f64;
+    let var = if n > 1 {
+        finite.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64
+    } else {
+        1.0
+    };
+    let std_dev = var.sqrt();
+    Ok(factor * std_dev)
+}
+
+/// Evaluate the 1-D Gaussian KDE over `grid` for `finite` samples using `method`,
+/// matching `scipy.stats.gaussian_kde(finite, bw_method=method)(grid)`.
+pub fn evaluate_kde_1d(
+    finite: &[f64],
+    grid: &[f64],
+    method: KdeBandwidthMethod,
+) -> Result<Vec<f64>, FrameError> {
+    let n = finite.len();
+    let raw_h = kde_bandwidth_1d(finite, method)?;
+    let h = if raw_h > 1e-12 { raw_h } else { 1e-6 };
+    let inv_sqrt_2pi = 1.0 / (2.0 * std::f64::consts::PI).sqrt();
+    let norm = inv_sqrt_2pi / (n as f64 * h);
+    let mut densities = Vec::with_capacity(grid.len());
+    for &t in grid {
+        let mut sum = 0.0;
+        for &x_val in finite {
+            let u = (t - x_val) / h;
+            sum += (-0.5 * u * u).exp();
+        }
+        densities.push(sum * norm);
+    }
+    Ok(densities)
+}
+
 // ── PlotSpec rendering (line / area / scatter / bar / pie) ─────────────────
 
 fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
+    render_plot_with_bw_method(spec, KdeBandwidthMethod::Scott)
+}
+
+fn render_plot_with_bw_method(
+    spec: &PlotSpec,
+    bw_method: KdeBandwidthMethod,
+) -> Result<String, FrameError> {
     if spec.kind == PlotKind::Box {
         return boxplot_body(&spec.series, &spec.method);
     }
@@ -623,36 +733,19 @@ fn render_plot(spec: &PlotSpec) -> Result<String, FrameError> {
             let grid_size = 100;
             let step = (eval_max - eval_min) / (grid_size - 1) as f64;
 
+            let grid: Vec<f64> = (0..grid_size).map(|g| eval_min + g as f64 * step).collect();
+
             let mut curves: Vec<Vec<(f64, f64)>> = Vec::new();
             let mut max_density = 0.0f64;
-            let inv_sqrt_2pi = 1.0 / (2.0 * std::f64::consts::PI).sqrt();
 
             for finite in &per_series_finite {
-                let m = finite.len();
-                if m == 0 {
+                if finite.is_empty() {
                     curves.push(Vec::new());
                     continue;
                 }
-                let mean = finite.iter().sum::<f64>() / m as f64;
-                let var = if m > 1 {
-                    finite.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (m - 1) as f64
-                } else {
-                    1.0
-                };
-                let std_dev = var.sqrt().max(1e-6);
-                let bandwidth = (1.06 * std_dev * (m as f64).powf(-0.2)).max(1e-6);
-                let two_h_sq = 2.0 * bandwidth * bandwidth;
-                let norm = 1.0 / (m as f64 * bandwidth) * inv_sqrt_2pi;
-
+                let densities = evaluate_kde_1d(finite, &grid, bw_method)?;
                 let mut curve = Vec::with_capacity(grid_size);
-                for g in 0..grid_size {
-                    let t = eval_min + g as f64 * step;
-                    let mut d = 0.0;
-                    for &x_val in finite {
-                        let diff = t - x_val;
-                        d += (-diff * diff / two_h_sq).exp();
-                    }
-                    d *= norm;
+                for (&t, d) in grid.iter().zip(densities) {
                     max_density = max_density.max(d);
                     curve.push((t, d));
                 }
@@ -1087,6 +1180,16 @@ impl PlotSpec {
         render_plot(self)
     }
 
+    /// Render this spec to a deterministic SVG document using an explicit KDE
+    /// bandwidth selection rule (`Scott`, `Silverman`, or `Scalar(factor)`),
+    /// matching `pandas.Series.plot.kde(bw_method=...)`.
+    pub fn to_svg_with_bw_method(
+        &self,
+        bw_method: KdeBandwidthMethod,
+    ) -> Result<String, FrameError> {
+        render_plot_with_bw_method(self, bw_method)
+    }
+
     /// [`PlotSpec::to_svg`] as UTF-8 bytes (convenience for `write`/HTTP paths).
     pub fn to_svg_bytes(&self) -> Result<Vec<u8>, FrameError> {
         self.to_svg().map(String::into_bytes)
@@ -1429,15 +1532,10 @@ fn scatter_matrix_body(spec: &ScatterMatrixSpec) -> Result<String, FrameError> {
                     let values = &finite_series[i];
                     let x_scale = &scales[i];
                     let n_pts = values.len();
-                    let mean = values.iter().sum::<f64>() / n_pts as f64;
-                    let var = if n_pts > 1 {
-                        values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n_pts - 1) as f64
-                    } else {
-                        1.0
-                    };
-                    let std = var.sqrt();
-                    let h = if std > 1e-9 {
-                        1.06 * std * (n_pts as f64).powf(-0.2)
+                    let scott_h =
+                        kde_bandwidth_1d(values, KdeBandwidthMethod::Scott).unwrap_or(0.0);
+                    let h = if scott_h > 1e-9 {
+                        scott_h
                     } else {
                         (x_scale.max - x_scale.min) / 10.0
                     };
@@ -3399,5 +3497,213 @@ mod tests {
         let _ = std::fs::remove_file(&table_html_file);
         let _ = std::fs::remove_file(&table_s_svg_file);
         let _ = std::fs::remove_dir(&temp_dir);
+    }
+
+    #[test]
+    fn kde_bandwidth_scott_silverman_scalar_parity_4qg5w_14() {
+        use super::{KdeBandwidthMethod, evaluate_kde_1d, kde_bandwidth_1d};
+
+        // Bimodal sample (n = 10, d = 1)
+        let sample = [-2.5_f64, -2.1, -1.9, -1.8, -1.5, 1.4, 1.7, 2.0, 2.2, 2.6];
+        let grid = [-4.0_f64, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0];
+
+        // Exact scipy.stats.gaussian_kde(sample, bw_method=...) reference values
+        let expected_scott_h = 1.333_645_431_005_873_2_f64;
+        let expected_scott = [
+            0.048_241_539_206_662_56_f64,
+            0.109_076_679_731_582_33,
+            0.147_424_402_763_749_46,
+            0.128_498_474_032_941_76,
+            0.104_964_961_354_427_41,
+            0.126_005_169_155_240_76,
+            0.144_981_924_867_471_3,
+            0.109_543_651_218_025_34,
+            0.050_234_173_809_447_35,
+        ];
+
+        let expected_silverman_h = 1.412_629_036_027_239_8_f64;
+        let expected_silverman = [
+            0.051_185_629_733_354_21_f64,
+            0.106_622_674_944_856_49,
+            0.140_820_193_072_384_08,
+            0.128_008_528_694_244_23,
+            0.110_222_595_921_323_41,
+            0.125_795_164_544_679_95,
+            0.138_712_128_056_324_52,
+            0.106_921_518_423_792_13,
+            0.052_911_540_356_832_18,
+        ];
+
+        let expected_scalar_h = 0.739_789_947_665_326_6_f64;
+        let expected_scalar = [
+            0.010_682_315_674_642_397_f64,
+            0.107_869_888_270_476_54,
+            0.244_695_020_633_016_15,
+            0.123_820_230_332_829_35,
+            0.027_829_128_736_136_015,
+            0.122_611_825_200_746_8,
+            0.233_212_259_735_801_87,
+            0.114_989_148_101_662_14,
+            0.013_729_088_316_685_893,
+        ];
+
+        assert_eq!(KdeBandwidthMethod::default(), KdeBandwidthMethod::Scott);
+        assert_eq!(
+            KdeBandwidthMethod::parse_str("scott").unwrap(),
+            KdeBandwidthMethod::Scott
+        );
+        assert_eq!(
+            KdeBandwidthMethod::parse_str("Silverman").unwrap(),
+            KdeBandwidthMethod::Silverman
+        );
+        assert_eq!(
+            KdeBandwidthMethod::from_scalar(0.35).unwrap(),
+            KdeBandwidthMethod::Scalar(0.35)
+        );
+
+        let scott_h = kde_bandwidth_1d(&sample, KdeBandwidthMethod::Scott).unwrap();
+        let silverman_h = kde_bandwidth_1d(&sample, KdeBandwidthMethod::Silverman).unwrap();
+        let scalar_h = kde_bandwidth_1d(&sample, KdeBandwidthMethod::Scalar(0.35)).unwrap();
+
+        assert!(
+            (scott_h - expected_scott_h).abs() / expected_scott_h < 1e-14,
+            "scott bandwidth mismatch: got {scott_h}, expected {expected_scott_h}"
+        );
+        assert!(
+            (silverman_h - expected_silverman_h).abs() / expected_silverman_h < 1e-14,
+            "silverman bandwidth mismatch: got {silverman_h}, expected {expected_silverman_h}"
+        );
+        assert!(
+            (scalar_h - expected_scalar_h).abs() / expected_scalar_h < 1e-14,
+            "scalar bandwidth mismatch: got {scalar_h}, expected {expected_scalar_h}"
+        );
+
+        let scott_vals = evaluate_kde_1d(&sample, &grid, KdeBandwidthMethod::Scott).unwrap();
+        let silverman_vals =
+            evaluate_kde_1d(&sample, &grid, KdeBandwidthMethod::Silverman).unwrap();
+        let scalar_vals =
+            evaluate_kde_1d(&sample, &grid, KdeBandwidthMethod::Scalar(0.35)).unwrap();
+
+        for (i, ((&got, &exp), &t)) in scott_vals
+            .iter()
+            .zip(expected_scott.iter())
+            .zip(grid.iter())
+            .enumerate()
+        {
+            let rel_err = (got - exp).abs() / exp;
+            assert!(
+                rel_err < 1e-12,
+                "scott density mismatch at grid[{i}]={t}: got {got}, expected {exp}, rel_err={rel_err:e}"
+            );
+        }
+        for (i, ((&got, &exp), &t)) in silverman_vals
+            .iter()
+            .zip(expected_silverman.iter())
+            .zip(grid.iter())
+            .enumerate()
+        {
+            let rel_err = (got - exp).abs() / exp;
+            assert!(
+                rel_err < 1e-12,
+                "silverman density mismatch at grid[{i}]={t}: got {got}, expected {exp}, rel_err={rel_err:e}"
+            );
+        }
+        for (i, ((&got, &exp), &t)) in scalar_vals
+            .iter()
+            .zip(expected_scalar.iter())
+            .zip(grid.iter())
+            .enumerate()
+        {
+            let rel_err = (got - exp).abs() / exp;
+            assert!(
+                rel_err < 1e-12,
+                "scalar(0.35) density mismatch at grid[{i}]={t}: got {got}, expected {exp}, rel_err={rel_err:e}"
+            );
+        }
+
+        // Verify SVG output uses Scott by default and differs when Silverman or Scalar is requested
+        let s = Series::from_values(
+            "bimodal",
+            (0..sample.len() as i64).map(IndexLabel::Int64).collect(),
+            sample.iter().copied().map(Scalar::Float64).collect(),
+        )
+        .unwrap();
+        let spec = s.kde().unwrap();
+        let svg_default = spec.to_svg().unwrap();
+        let svg_scott = spec
+            .to_svg_with_bw_method(KdeBandwidthMethod::Scott)
+            .unwrap();
+        let svg_silverman = spec
+            .to_svg_with_bw_method(KdeBandwidthMethod::Silverman)
+            .unwrap();
+        let svg_scalar = spec
+            .to_svg_with_bw_method(KdeBandwidthMethod::Scalar(0.35))
+            .unwrap();
+
+        assert_eq!(
+            svg_default, svg_scott,
+            "default PlotSpec::to_svg() must use Scott's rule"
+        );
+        assert_ne!(
+            svg_scott, svg_silverman,
+            "Scott and Silverman bandwidths must produce distinct KDE SVG curves"
+        );
+        assert_ne!(
+            svg_scott, svg_scalar,
+            "Scott and Scalar(0.35) bandwidths must produce distinct KDE SVG curves"
+        );
+    }
+
+    #[test]
+    fn kde_bandwidth_negative_rejects_106_constant_and_invalid_inputs_4qg5w_14() {
+        use super::{KdeBandwidthMethod, evaluate_kde_1d, kde_bandwidth_1d};
+
+        // NEGATIVE test 1: The legacy hardcoded 1.06 * std * n**(-0.2) bandwidth is neither
+        // Scott's rule (n**(-0.2) * std) nor scipy's exact Silverman's rule ((0.75 * n)**(-0.2) * std).
+        // At bimodal mode t = -2.0, Scott and Silverman differ by > 4.4%, and legacy 1.06 differs
+        // from default Scott by > 4.5% (over 10^10x our 1e-12 tolerance).
+        let sample = [-2.5_f64, -2.1, -1.9, -1.8, -1.5, 1.4, 1.7, 2.0, 2.2, 2.6];
+        let mode_grid = [-2.0_f64, 0.0, 2.0];
+        let scott_mode = evaluate_kde_1d(&sample, &mode_grid, KdeBandwidthMethod::Scott).unwrap();
+        let silverman_mode =
+            evaluate_kde_1d(&sample, &mode_grid, KdeBandwidthMethod::Silverman).unwrap();
+        let legacy_106_factor = 1.06 * (sample.len() as f64).powf(-0.2);
+        let legacy_106_mode = evaluate_kde_1d(
+            &sample,
+            &mode_grid,
+            KdeBandwidthMethod::Scalar(legacy_106_factor),
+        )
+        .unwrap();
+
+        let scott_vs_silverman_rel = (scott_mode[0] - silverman_mode[0]).abs() / scott_mode[0];
+        assert!(
+            scott_vs_silverman_rel > 0.04,
+            "NEGATIVE: Scott and Silverman must differ at bimodal mode t=-2.0 (rel diff = {scott_vs_silverman_rel})"
+        );
+        let scott_vs_legacy106_rel = (scott_mode[0] - legacy_106_mode[0]).abs() / scott_mode[0];
+        assert!(
+            scott_vs_legacy106_rel > 0.04,
+            "NEGATIVE: Default Scott KDE must reject legacy 1.06 multiplier (rel diff = {scott_vs_legacy106_rel})"
+        );
+        // Even against Silverman, 1.06 != (4/3)^0.2 = 1.0592238410488122:
+        let silverman_vs_legacy106_rel =
+            (silverman_mode[0] - legacy_106_mode[0]).abs() / silverman_mode[0];
+        assert!(
+            silverman_vs_legacy106_rel > 5e-4,
+            "NEGATIVE: Exact scipy Silverman ((0.75*n)^(-0.2)) must not use rounded 1.06 constant (rel diff = {silverman_vs_legacy106_rel:e})"
+        );
+
+        // NEGATIVE test 2: Invalid bandwidth strings and non-positive/non-finite scalars fail closed.
+        assert!(KdeBandwidthMethod::parse_str("invalid_rule").is_err());
+        assert!(KdeBandwidthMethod::parse_str("").is_err());
+        assert!(KdeBandwidthMethod::from_scalar(0.0).is_err());
+        assert!(KdeBandwidthMethod::from_scalar(-1.0).is_err());
+        assert!(KdeBandwidthMethod::from_scalar(f64::NAN).is_err());
+        assert!(KdeBandwidthMethod::from_scalar(f64::INFINITY).is_err());
+        assert!(kde_bandwidth_1d(&[], KdeBandwidthMethod::Scott).is_err());
+        assert!(
+            kde_bandwidth_1d(&sample, KdeBandwidthMethod::Scalar(0.0)).is_err(),
+            "zero scalar bandwidth must fail closed"
+        );
     }
 }

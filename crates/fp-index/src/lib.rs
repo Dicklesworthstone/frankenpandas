@@ -23175,6 +23175,10 @@ struct Level {
     /// nanoseconds, as a zoned DatetimeIndex holds them); None for any other
     /// level. A zoned column's level was its text (br-frankenpandas-c4v57).
     zone: Option<Arc<str>>,
+    /// Whether the level's catalog is its codes' uniques in their order -
+    /// a stack's levels, factorized unsorted with every label kept as
+    /// pandas' are - rather than its labels sorted (br-frankenpandas-33b80).
+    declared: bool,
 }
 
 /// A level's distinct labels in first-seen order and each row's code into
@@ -23244,6 +23248,7 @@ impl Level {
             rows: Arc::new(OnceLock::from(Arc::new(rows))),
             codes: Arc::default(),
             zone: None,
+            declared: false,
         }
     }
 
@@ -23253,6 +23258,7 @@ impl Level {
             rows: Arc::default(),
             codes: Arc::new(OnceLock::from(Some(LevelCodes { uniques, codes }))),
             zone: None,
+            declared: false,
         }
     }
 
@@ -23260,6 +23266,22 @@ impl Level {
     fn zoned(mut self, zone: Option<Arc<str>>) -> Self {
         self.zone = zone;
         self
+    }
+
+    /// This level with its catalog its codes' uniques in their order, or
+    /// its labels sorted (the `declared` field).
+    fn declared(mut self, declared: bool) -> Self {
+        self.declared = declared;
+        self
+    }
+
+    /// The declared catalog (the `declared` field): the uniques the codes
+    /// index, unused ones among them.
+    fn declared_catalog(&self) -> Option<&[IndexLabel]> {
+        if !self.declared {
+            return None;
+        }
+        self.codes().map(|coded| coded.uniques.as_slice())
     }
 
     /// `rows` with their first-seen `codes` (a caller's own, checked for
@@ -23344,6 +23366,7 @@ impl Level {
             None => Self::from_rows(take_level_labels(self.rows(), positions)),
         }
         .zoned(self.zone.clone())
+        .declared(self.declared)
     }
 
     /// Rows `start..start + len` (within the length): a window of the codes,
@@ -23357,6 +23380,7 @@ impl Level {
             None => Self::from_rows(self.rows()[start..start + len].to_vec()),
         }
         .zoned(self.zone.clone())
+        .declared(self.declared)
     }
 }
 
@@ -24146,6 +24170,40 @@ impl MultiIndex {
         catalog
     }
 
+    /// The catalog `levels()` / `codes()` report for a level: a declared one
+    /// (a stack's: its labels in the frame's order, unused ones kept) less
+    /// any missing label, else [`Self::level_catalog`] (br-frankenpandas-33b80).
+    fn reported_catalog(level: &Level) -> Vec<IndexLabel> {
+        match level.declared_catalog() {
+            Some(catalog) => catalog
+                .iter()
+                .filter(|label| !label.is_missing())
+                .cloned()
+                .collect(),
+            None => Self::level_catalog(level),
+        }
+    }
+
+    /// Level `level`'s declared catalog (a stack's levels: the frame's
+    /// index and columns in their order, unused labels kept), which
+    /// `levels()` reports and an unstack orders by; None for a level whose
+    /// catalog is its labels sorted (br-frankenpandas-33b80).
+    #[must_use]
+    pub fn declared_level_order(&self, level: usize) -> Option<&[IndexLabel]> {
+        self.levels.get(level)?.declared_catalog()
+    }
+
+    /// This MultiIndex with every level's catalog its labels sorted, as
+    /// pandas' `sort_index` leaves a stack's (its `_sort_levels_monotonic`;
+    /// br-frankenpandas-33b80).
+    #[must_use]
+    pub fn with_sorted_levels(mut self) -> Self {
+        for level in &mut self.levels {
+            level.declared = false;
+        }
+        self
+    }
+
     /// Unique labels for each level, sorted as pandas factorizes them
     /// (br-frankenpandas-98f6w: they kept first-seen order).
     ///
@@ -24157,7 +24215,7 @@ impl MultiIndex {
             .iter()
             .enumerate()
             .map(|(level_idx, level)| {
-                let mut index = Index::new(Self::level_catalog(level));
+                let mut index = Index::new(Self::reported_catalog(level));
                 if let Some(name) = self.names.get(level_idx).and_then(|name| name.as_ref()) {
                     index = index.set_name(name);
                 }
@@ -24192,7 +24250,7 @@ impl MultiIndex {
         self.levels
             .iter()
             .map(|level| {
-                let positions: FxHashMap<IndexLabel, isize> = Self::level_catalog(level)
+                let positions: FxHashMap<IndexLabel, isize> = Self::reported_catalog(level)
                     .into_iter()
                     .enumerate()
                     .map(|(code, label)| (label, isize::try_from(code).unwrap_or(isize::MAX)))
@@ -24886,9 +24944,11 @@ impl MultiIndex {
         let mut levels = Vec::with_capacity(self.levels.len() + 1);
         for level in &self.levels {
             let coded = level.codes()?;
+            // A MultiIndex's levels keep their own catalogs.
             levels.push(
                 Self::stacked_row_level(Arc::clone(&coded.uniques), &coded.codes, columns.len())
-                    .zoned(level.zone.clone()),
+                    .zoned(level.zone.clone())
+                    .declared(level.declared),
             );
         }
         levels.push(Self::stacked_column_level(columns, self.len())?);
@@ -24908,7 +24968,8 @@ impl MultiIndex {
         for &code in codes {
             cells.extend(std::iter::repeat_n(code, column_count));
         }
-        Level::from_codes(uniques, CodesWindow::from(cells))
+        // pandas' stack factorizes the rows unsorted (br-frankenpandas-33b80).
+        Level::from_codes(uniques, CodesWindow::from(cells)).declared(true)
     }
 
     /// The stacked column level: the columns' codes cycled `row_count`
@@ -24917,10 +24978,7 @@ impl MultiIndex {
     fn stacked_column_level(columns: &[IndexLabel], row_count: usize) -> Option<Level> {
         let codes = first_seen_label_codes(columns)?;
         let uniques = Arc::new(first_seen_uniques(columns, &codes));
-        Some(Level::from_codes(
-            uniques,
-            CodesWindow::from(codes.repeat(row_count)),
-        ))
+        Some(Level::from_codes(uniques, CodesWindow::from(codes.repeat(row_count))).declared(true))
     }
 
     /// Rows `start..start + len`: each level a window of its codes, the
@@ -28745,6 +28803,65 @@ mod tests {
         let codes = super::first_seen_label_codes(&unique_text).unwrap();
         assert_eq!(super::first_seen_uniques(&unique_text, &codes), unique_text);
         assert!(super::first_seen_uniques(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn stacked_levels_keep_the_frame_order_33b80() {
+        // A stack's levels are its frame's rows and columns in their order
+        // (pandas factorizes them unsorted), the codes into them; a take, a
+        // window and a swap keep them, unused labels included; sorted levels
+        // after with_sorted_levels (sort_index's). NEGATIVE: from_arrays
+        // keeps sorted levels and declares none.
+        let utf8 = |s: &str| IndexLabel::Utf8(s.to_owned());
+        let rows = [utf8("q"), utf8("p"), utf8("r")];
+        let columns = [utf8("b"), utf8("a")];
+        let multi = MultiIndex::stacked_cells(&[&rows], &columns).unwrap();
+        let levels = |multi: &MultiIndex| -> Vec<Vec<IndexLabel>> {
+            multi
+                .levels()
+                .iter()
+                .map(|level| level.labels().to_vec())
+                .collect()
+        };
+        let frame_order = vec![rows.to_vec(), columns.to_vec()];
+        assert_eq!(levels(&multi), frame_order);
+        assert_eq!(
+            multi.codes(),
+            vec![vec![0, 0, 1, 1, 2, 2], vec![0, 1, 0, 1, 0, 1]]
+        );
+        assert_eq!(multi.declared_level_order(0), Some(&rows[..]));
+        // Rows 2..6 ('p' and 'r'): 'q' unused, still a level label.
+        let taken = multi.take(&[5, 2, 3]).unwrap();
+        assert_eq!(levels(&taken), frame_order);
+        assert_eq!(taken.codes(), vec![vec![2, 1, 1], vec![1, 0, 1]]);
+        let window = multi.slice_rows(2, 4).unwrap();
+        assert_eq!(levels(&window), frame_order);
+        let swapped = multi.swaplevel(0, 1).unwrap();
+        assert_eq!(levels(&swapped), vec![columns.to_vec(), rows.to_vec()]);
+        let sorted = multi.clone().with_sorted_levels();
+        assert_eq!(
+            levels(&sorted),
+            vec![
+                vec![utf8("p"), utf8("q"), utf8("r")],
+                vec![utf8("a"), utf8("b")]
+            ]
+        );
+        assert_eq!(
+            sorted.codes(),
+            vec![vec![1, 1, 0, 0, 2, 2], vec![1, 0, 1, 0, 1, 0]]
+        );
+        assert!(sorted.declared_level_order(0).is_none());
+        let arrays =
+            MultiIndex::from_arrays(vec![rows.to_vec(), vec![utf8("b"), utf8("a"), utf8("a")]])
+                .unwrap();
+        assert_eq!(
+            levels(&arrays),
+            vec![
+                vec![utf8("p"), utf8("q"), utf8("r")],
+                vec![utf8("a"), utf8("b")]
+            ]
+        );
+        assert!(arrays.declared_level_order(0).is_none());
     }
 
     #[test]

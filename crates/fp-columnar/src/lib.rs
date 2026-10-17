@@ -459,9 +459,8 @@ impl ValidityMask {
         let len = data.len();
         // fp-dot-kernel's 8-lane NaN masks packed into the words where AVX2
         // is there: the fold below runs a row a cycle (br-frankenpandas-qpbpa).
-        #[cfg(target_arch = "x86_64")]
-        if std::arch::is_x86_feature_detected!("avx2") {
-            return Self::from_words(fp_dot_kernel::nan_validity_words(data).0, len);
+        if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+            return Self::from_words(fp_dot_kernel::nan_validity_words(isa, data).0, len);
         }
         // A 64-row word at a time, without a branch: a bit and a branch per
         // row was 1.5 ms a million rows, this 0.3 (br-frankenpandas-cmgnp).
@@ -500,9 +499,11 @@ impl ValidityMask {
     /// br-frankenpandas-qpbpa).
     #[must_use]
     pub fn from_i64_sentinel(data: &[i64], missing: i64) -> Self {
-        #[cfg(target_arch = "x86_64")]
-        if std::arch::is_x86_feature_detected!("avx2") {
-            return Self::from_words(fp_dot_kernel::i64_validity_words(data, missing), data.len());
+        if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+            return Self::from_words(
+                fp_dot_kernel::i64_validity_words(isa, data, missing),
+                data.len(),
+            );
         }
         let words = data
             .chunks(64)
@@ -2351,8 +2352,7 @@ fn vectorized_binary_f64(
 /// operand's NaN is not one: four lanes wide where the CPU has AVX2, the
 /// same loop otherwise (br-frankenpandas-cmgnp).
 fn f64_pair_made_nan_into(op: ArithmeticOp, a: &[f64], b: &[f64], out: &mut [f64]) -> Option<bool> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
         let kernel = match op {
             ArithmeticOp::Add => fp_dot_kernel::add_f64_made_nan_into,
             ArithmeticOp::Sub => fp_dot_kernel::sub_f64_made_nan_into,
@@ -2360,7 +2360,7 @@ fn f64_pair_made_nan_into(op: ArithmeticOp, a: &[f64], b: &[f64], out: &mut [f64
             ArithmeticOp::Div => fp_dot_kernel::div_f64_made_nan_into,
             ArithmeticOp::Pow | ArithmeticOp::Mod | ArithmeticOp::FloorDiv => return None,
         };
-        return Some(kernel(a, b, out));
+        return Some(kernel(isa, a, b, out));
     }
     macro_rules! sweep {
         ($apply:expr) => {{
@@ -2387,13 +2387,12 @@ fn f64_pair_made_nan_into(op: ArithmeticOp, a: &[f64], b: &[f64], out: &mut [f64
 /// else a zero-filled one the same sweep writes (a buffer collected into
 /// the Arc after the sweep was a copy; br-frankenpandas-cmgnp).
 fn f64_pair_made_nan_arc(op: ArithmeticOp, a: &[f64], b: &[f64]) -> Option<(Arc<[f64]>, bool)> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
         return match op {
-            ArithmeticOp::Add => Some(fp_dot_kernel::add_f64_made_nan_arc(a, b)),
-            ArithmeticOp::Sub => Some(fp_dot_kernel::sub_f64_made_nan_arc(a, b)),
-            ArithmeticOp::Mul => Some(fp_dot_kernel::mul_f64_made_nan_arc(a, b)),
-            ArithmeticOp::Div => Some(fp_dot_kernel::div_f64_made_nan_arc(a, b)),
+            ArithmeticOp::Add => Some(fp_dot_kernel::add_f64_made_nan_arc(isa, a, b)),
+            ArithmeticOp::Sub => Some(fp_dot_kernel::sub_f64_made_nan_arc(isa, a, b)),
+            ArithmeticOp::Mul => Some(fp_dot_kernel::mul_f64_made_nan_arc(isa, a, b)),
+            ArithmeticOp::Div => Some(fp_dot_kernel::div_f64_made_nan_arc(isa, a, b)),
             ArithmeticOp::Pow | ArithmeticOp::Mod | ArithmeticOp::FloorDiv => None,
         };
     }
@@ -2453,9 +2452,8 @@ fn nan_and_finite(data: &[f64]) -> (bool, bool) {
 /// build (0.47x pandas; br-frankenpandas-qpbpa) - else [`nan_and_finite`]
 /// and [`ValidityMask::from_f64`].
 fn nan_validity_and_finite(data: &[f64]) -> (ValidityMask, bool) {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        let (words, finite) = fp_dot_kernel::nan_validity_words(data);
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+        let (words, finite) = fp_dot_kernel::nan_validity_words(isa, data);
         return (ValidityMask::from_words(words, data.len()), finite);
     }
     let (has_nan, all_finite) = nan_and_finite(data);
@@ -2489,9 +2487,8 @@ fn powers_by_number(data: &[f64], exponent: f64) -> Vec<f64> {
 /// unconditionally - else the baseline 2-lane map. IEEE's quotient, the same
 /// bits, either way (br-frankenpandas-3tk83).
 fn divided_by_number(data: &[f64], s: f64, number_first: bool) -> Vec<f64> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        return fp_dot_kernel::div_by_number_f64(data, s, number_first);
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+        return fp_dot_kernel::div_by_number_f64(isa, data, s, number_first);
     }
     if number_first {
         data.iter().map(|&v| s / v).collect()
@@ -2506,9 +2503,8 @@ fn divided_by_number(data: &[f64], s: f64, number_first: bool) -> Vec<f64> {
 /// br-frankenpandas-3tk83): fp-dot-kernel's 4-lane collect where the CPU has
 /// AVX2, the same quotients otherwise.
 fn divided_by_number_arc(data: &[f64], s: f64, number_first: bool) -> Arc<[f64]> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        return fp_dot_kernel::div_by_number_f64_arc(data, s, number_first);
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+        return fp_dot_kernel::div_by_number_f64_arc(isa, data, s, number_first);
     }
     if number_first {
         data.iter().map(|&v| s / v).collect()
@@ -2524,9 +2520,8 @@ fn divided_by_number_arc(data: &[f64], s: f64, number_first: bool) -> Arc<[f64]>
 /// 2-lane map, the same bits either way (br-frankenpandas-faizi).
 #[must_use]
 pub fn pct_change_values(data: &[f64], periods: usize) -> Vec<f64> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        return fp_dot_kernel::pct_change_f64(data, periods);
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+        return fp_dot_kernel::pct_change_f64(isa, data, periods);
     }
     let lead = periods.min(data.len());
     std::iter::repeat_n(0.0, lead)
@@ -2546,9 +2541,8 @@ pub fn pct_change_values(data: &[f64], periods: usize) -> Vec<f64> {
 /// (br-frankenpandas-jy2f4).
 #[must_use]
 pub fn cov_cross_sums(columns: &[&[f64]], means: &[f64], len: usize) -> Vec<f64> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        return fp_dot_kernel::cov_cross_sums_f64(columns, means, len);
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+        return fp_dot_kernel::cov_cross_sums_f64(isa, columns, means, len);
     }
     let k = columns.len();
     let mut cross = vec![0.0_f64; k * (k + 1) / 2];
@@ -2573,9 +2567,8 @@ pub fn cov_cross_sums(columns: &[&[f64]], means: &[f64], len: usize) -> Vec<f64>
 /// column keeps - not a Vec copied into one, nor a zero-filled Arc written
 /// over (its fill was larger than the roots; br-frankenpandas-cmgnp).
 fn sqrt_values_arc(data: &[f64]) -> Arc<[f64]> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        return fp_dot_kernel::sqrt_f64_arc(data);
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+        return fp_dot_kernel::sqrt_f64_arc(isa, data);
     }
     data.iter().map(|&x| x.sqrt()).collect()
 }
@@ -2585,9 +2578,8 @@ fn sqrt_values_arc(data: &[f64]) -> Arc<[f64]> {
 /// emits AVX2 unconditionally), else the baseline 2-lane map. IEEE's root
 /// either way.
 fn sqrt_values(data: &[f64]) -> Vec<f64> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        return fp_dot_kernel::sqrt_f64_collect(data).0;
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+        return fp_dot_kernel::sqrt_f64_collect(isa, data).0;
     }
     data.iter().map(|&x| x.sqrt()).collect()
 }
@@ -2649,13 +2641,12 @@ fn apply_f64_slices_nan_tracked(op: ArithmeticOp, a: &[f64], b: &[f64]) -> (Vec<
     // the zeroed buffer the kernel then wrote was a memset the size of the
     // op's own stores (x + y a million rows 0.23 ms, pandas 0.18;
     // br-frankenpandas-uf0mw). The values and witnesses the sweep gives.
-    #[cfg(target_arch = "x86_64")]
-    if !parallel && std::arch::is_x86_feature_detected!("avx2") {
+    if !parallel && let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
         let collected = match op {
-            ArithmeticOp::Add => Some(fp_dot_kernel::add_f64_collect(a, b)),
-            ArithmeticOp::Sub => Some(fp_dot_kernel::sub_f64_collect(a, b)),
-            ArithmeticOp::Mul => Some(fp_dot_kernel::mul_f64_collect(a, b)),
-            ArithmeticOp::Div => Some(fp_dot_kernel::div_f64_collect(a, b)),
+            ArithmeticOp::Add => Some(fp_dot_kernel::add_f64_collect(isa, a, b)),
+            ArithmeticOp::Sub => Some(fp_dot_kernel::sub_f64_collect(isa, a, b)),
+            ArithmeticOp::Mul => Some(fp_dot_kernel::mul_f64_collect(isa, a, b)),
+            ArithmeticOp::Div => Some(fp_dot_kernel::div_f64_collect(isa, a, b)),
             ArithmeticOp::Pow | ArithmeticOp::Mod | ArithmeticOp::FloorDiv => None,
         };
         if let Some((data, output_nan)) = collected {
@@ -2786,44 +2777,23 @@ fn apply_f64_slices_nan_tracked_into(
         // rounded and lane-independent, and a lone `a op b` gives `+fma` no
         // `a * b + c` to contract.
         ArithmeticOp::Add => {
-            #[cfg(target_arch = "x86_64")]
-            let dispatched = if std::arch::is_x86_feature_detected!("avx2") {
-                output_nan |= fp_dot_kernel::add_f64_into(a, b, data);
-                true
+            if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+                output_nan |= fp_dot_kernel::add_f64_into(isa, a, b, data);
             } else {
-                false
-            };
-            #[cfg(not(target_arch = "x86_64"))]
-            let dispatched = false;
-            if !dispatched {
                 sweep_propagating!(|x: f64, y: f64| x + y);
             }
         }
         ArithmeticOp::Sub => {
-            #[cfg(target_arch = "x86_64")]
-            let dispatched = if std::arch::is_x86_feature_detected!("avx2") {
-                output_nan |= fp_dot_kernel::sub_f64_into(a, b, data);
-                true
+            if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+                output_nan |= fp_dot_kernel::sub_f64_into(isa, a, b, data);
             } else {
-                false
-            };
-            #[cfg(not(target_arch = "x86_64"))]
-            let dispatched = false;
-            if !dispatched {
                 sweep_propagating!(|x: f64, y: f64| x - y);
             }
         }
         ArithmeticOp::Mul => {
-            #[cfg(target_arch = "x86_64")]
-            let dispatched = if std::arch::is_x86_feature_detected!("avx2") {
-                output_nan |= fp_dot_kernel::mul_f64_into(a, b, data);
-                true
+            if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+                output_nan |= fp_dot_kernel::mul_f64_into(isa, a, b, data);
             } else {
-                false
-            };
-            #[cfg(not(target_arch = "x86_64"))]
-            let dispatched = false;
-            if !dispatched {
                 sweep_propagating!(|x: f64, y: f64| x * y);
             }
         }
@@ -2840,16 +2810,9 @@ fn apply_f64_slices_nan_tracked_into(
         // graceful fallback. The fall-through below is the original kernel and is
         // a complete implementation, never a stub.
         ArithmeticOp::Div => {
-            #[cfg(target_arch = "x86_64")]
-            let dispatched = if std::arch::is_x86_feature_detected!("avx2") {
-                output_nan |= fp_dot_kernel::div_f64_into(a, b, data);
-                true
+            if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+                output_nan |= fp_dot_kernel::div_f64_into(isa, a, b, data);
             } else {
-                false
-            };
-            #[cfg(not(target_arch = "x86_64"))]
-            let dispatched = false;
-            if !dispatched {
                 sweep_propagating!(|x: f64, y: f64| x / y);
             }
         }
@@ -3261,9 +3224,13 @@ fn wrapping_pow_all(data: &[i64], exponent: u64) -> Vec<i64> {
         // Two 32-bit multiplies a square, four lanes at a time where the CPU
         // has AVX2 (k ** 2 0.179 ms a million rows, numpy's square 0.169;
         // br-frankenpandas-uf0mw).
-        #[cfg(target_arch = "x86_64")]
-        2 if std::arch::is_x86_feature_detected!("avx2") => fp_dot_kernel::square_i64_collect(data),
-        2 => data.iter().map(|&v| v.wrapping_mul(v)).collect(),
+        2 => {
+            if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+                fp_dot_kernel::square_i64_collect(isa, data)
+            } else {
+                data.iter().map(|&v| v.wrapping_mul(v)).collect()
+            }
+        }
         3 => data
             .iter()
             .map(|&v| v.wrapping_mul(v).wrapping_mul(v))
@@ -3335,9 +3302,10 @@ fn vectorized_binary_i64(
         // * four lanes wide where the CPU has AVX2: the int64 multiply's
         // emulation two lanes wide was most of k * k (0.28 ms a million
         // rows, pandas 0.21; br-frankenpandas-uf0mw).
-        #[cfg(target_arch = "x86_64")]
-        if matches!(op, ArithmeticOp::Mul) && std::arch::is_x86_feature_detected!("avx2") {
-            return Some((fp_dot_kernel::mul_i64_collect(left, right), combined));
+        if matches!(op, ArithmeticOp::Mul)
+            && let Some(isa) = fp_dot_kernel::Avx2Fma::detect()
+        {
+            return Some((fp_dot_kernel::mul_i64_collect(isa, left, right), combined));
         }
         let out: Vec<i64> = match op {
             ArithmeticOp::Add => left
@@ -5947,17 +5915,12 @@ impl ScalarValues {
         // AVX2 unconditionally, so entering it on a pre-AVX2 CPU is SIGILL, not a
         // graceful fallback. The `else` arm below is the original kernel and must
         // stay a complete implementation, never a stub.
-        #[cfg(target_arch = "x86_64")]
-        {
-            if std::arch::is_x86_feature_detected!("avx2")
-                && std::arch::is_x86_feature_detected!("fma")
-            {
-                let slices: Vec<&[f64]> = a_cols
-                    .iter()
-                    .map(|a_col| &a_col.data[a_col.start..a_col.start + len])
-                    .collect();
-                return fp_dot_kernel::materialize_float64_dot(&slices, b_col, len);
-            }
+        if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+            let slices: Vec<&[f64]> = a_cols
+                .iter()
+                .map(|a_col| &a_col.data[a_col.start..a_col.start + len])
+                .collect();
+            return fp_dot_kernel::materialize_float64_dot(isa, &slices, b_col, len);
         }
         let mut out = vec![0.0_f64; len];
         for (a_col, &b) in a_cols.iter().zip(b_col.iter()) {
@@ -6030,24 +5993,6 @@ impl ScalarValues {
         }
     }
 
-    /// Is the ISA-isolated blocked kernel safe to enter on THIS cpu?
-    ///
-    /// br-frankenpandas-mti15. fp-dot-kernel is compiled `+avx2,+fma` and emits
-    /// those instructions unconditionally, so entering it on a pre-AVX2 CPU is
-    /// SIGILL rather than a graceful error. One predicate rather than a `cfg`
-    /// block per call site, so the guard cannot drift between them.
-    fn dot_kernel_available() -> bool {
-        #[cfg(target_arch = "x86_64")]
-        {
-            std::arch::is_x86_feature_detected!("avx2")
-                && std::arch::is_x86_feature_detected!("fma")
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            false
-        }
-    }
-
     /// The one A panel every pending column shares, or `None` if they do not.
     ///
     /// br-frankenpandas-mti15. `None` is the ordinary case for a batch that mixes
@@ -6105,7 +6050,7 @@ impl ScalarValues {
     /// complete per-column path, never a stub.
     fn materialize_dot_group(group: &[&Self], prepacked: Option<PrepackedPanel<'_>>) {
         {
-            if Self::dot_kernel_available() {
+            if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
                 let mut start = 0;
                 while start < group.len() {
                     let Some(head) = group[start].pending_dot_parts() else {
@@ -6138,6 +6083,7 @@ impl ScalarValues {
                         let produced = match prepacked {
                             Some(panel) if Arc::ptr_eq(panel.a_cols, head.a_cols) => {
                                 fp_dot_kernel::materialize_float64_dot_block_prepacked(
+                                    isa,
                                     panel.packed,
                                     &a_slices,
                                     &b_cols,
@@ -6145,7 +6091,7 @@ impl ScalarValues {
                                 )
                             }
                             _ => fp_dot_kernel::materialize_float64_dot_block(
-                                &a_slices, &b_cols, head.len,
+                                isa, &a_slices, &b_cols, head.len,
                             ),
                         };
                         for (value, column) in run.iter().zip(produced) {
@@ -6365,14 +6311,15 @@ impl ScalarValues {
         // it privately is `m * k * 8` bytes of redundant copying PER WORKER —
         // 8 MB x 64 on this host at `dim = 1000`, against a whole-op time of
         // ~18 ms — and the panel is immutable, so one copy serves all of them.
-        let shared = if Self::dot_kernel_available() {
+        let isa = fp_dot_kernel::Avx2Fma::detect();
+        let shared = if isa.is_some() {
             Self::shared_dot_panel(&pending)
         } else {
             None
         };
-        let packed = shared.as_ref().map(|head| {
+        let packed = shared.as_ref().zip(isa).map(|(head, isa)| {
             let a_slices = Self::dot_panel_slices(head.a_cols, head.len);
-            fp_dot_kernel::pack_a_panel(&a_slices, head.len)
+            fp_dot_kernel::pack_a_panel(isa, &a_slices, head.len)
         });
         let prepacked = match (shared.as_ref(), packed.as_deref()) {
             (Some(head), Some(packed)) => Some(PrepackedPanel {
@@ -8648,16 +8595,15 @@ pub enum ComparisonOp {
 /// blocked SIMD; scalar eq was 0.44x pandas). A comparison is exact, so both
 /// give the same bools.
 fn compare_f64_scalar(data: &[f64], s: f64, op: ComparisonOp) -> Vec<bool> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
         let mut out = vec![false; data.len()];
         match op {
-            ComparisonOp::Gt => fp_dot_kernel::gt_f64_scalar_into(data, s, &mut out),
-            ComparisonOp::Lt => fp_dot_kernel::lt_f64_scalar_into(data, s, &mut out),
-            ComparisonOp::Eq => fp_dot_kernel::eq_f64_scalar_into(data, s, &mut out),
-            ComparisonOp::Ne => fp_dot_kernel::ne_f64_scalar_into(data, s, &mut out),
-            ComparisonOp::Ge => fp_dot_kernel::ge_f64_scalar_into(data, s, &mut out),
-            ComparisonOp::Le => fp_dot_kernel::le_f64_scalar_into(data, s, &mut out),
+            ComparisonOp::Gt => fp_dot_kernel::gt_f64_scalar_into(isa, data, s, &mut out),
+            ComparisonOp::Lt => fp_dot_kernel::lt_f64_scalar_into(isa, data, s, &mut out),
+            ComparisonOp::Eq => fp_dot_kernel::eq_f64_scalar_into(isa, data, s, &mut out),
+            ComparisonOp::Ne => fp_dot_kernel::ne_f64_scalar_into(isa, data, s, &mut out),
+            ComparisonOp::Ge => fp_dot_kernel::ge_f64_scalar_into(isa, data, s, &mut out),
+            ComparisonOp::Le => fp_dot_kernel::le_f64_scalar_into(isa, data, s, &mut out),
         }
         return out;
     }
@@ -8676,15 +8622,14 @@ fn compare_f64_scalar(data: &[f64], s: f64, op: ComparisonOp) -> Vec<bool> {
 /// where that filled a zeroed Vec the column then copied (nx > 0 a million
 /// rows 0.111 ms, pandas 0.108; br-frankenpandas-cmgnp). The same bools.
 fn compare_f64_scalar_arc(data: &[f64], s: f64, op: ComparisonOp) -> Arc<[bool]> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
         return match op {
-            ComparisonOp::Gt => fp_dot_kernel::gt_f64_scalar_arc(data, s),
-            ComparisonOp::Lt => fp_dot_kernel::lt_f64_scalar_arc(data, s),
-            ComparisonOp::Eq => fp_dot_kernel::eq_f64_scalar_arc(data, s),
-            ComparisonOp::Ne => fp_dot_kernel::ne_f64_scalar_arc(data, s),
-            ComparisonOp::Ge => fp_dot_kernel::ge_f64_scalar_arc(data, s),
-            ComparisonOp::Le => fp_dot_kernel::le_f64_scalar_arc(data, s),
+            ComparisonOp::Gt => fp_dot_kernel::gt_f64_scalar_arc(isa, data, s),
+            ComparisonOp::Lt => fp_dot_kernel::lt_f64_scalar_arc(isa, data, s),
+            ComparisonOp::Eq => fp_dot_kernel::eq_f64_scalar_arc(isa, data, s),
+            ComparisonOp::Ne => fp_dot_kernel::ne_f64_scalar_arc(isa, data, s),
+            ComparisonOp::Ge => fp_dot_kernel::ge_f64_scalar_arc(isa, data, s),
+            ComparisonOp::Le => fp_dot_kernel::le_f64_scalar_arc(isa, data, s),
         };
     }
     match op {
@@ -8704,15 +8649,14 @@ fn compare_f64_scalar_arc(data: &[f64], s: f64, op: ComparisonOp) -> Arc<[bool]>
 /// passes the size of the answer (nx > ny 0.18 ms a million rows, pandas
 /// 0.17; br-frankenpandas-cmgnp).
 fn compare_f64_pairs(l: &[f64], r: &[f64], op: ComparisonOp) -> Arc<[bool]> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
         return match op {
-            ComparisonOp::Gt => fp_dot_kernel::gt_f64_pairs_arc(l, r),
-            ComparisonOp::Lt => fp_dot_kernel::lt_f64_pairs_arc(l, r),
-            ComparisonOp::Eq => fp_dot_kernel::eq_f64_pairs_arc(l, r),
-            ComparisonOp::Ne => fp_dot_kernel::ne_f64_pairs_arc(l, r),
-            ComparisonOp::Ge => fp_dot_kernel::ge_f64_pairs_arc(l, r),
-            ComparisonOp::Le => fp_dot_kernel::le_f64_pairs_arc(l, r),
+            ComparisonOp::Gt => fp_dot_kernel::gt_f64_pairs_arc(isa, l, r),
+            ComparisonOp::Lt => fp_dot_kernel::lt_f64_pairs_arc(isa, l, r),
+            ComparisonOp::Eq => fp_dot_kernel::eq_f64_pairs_arc(isa, l, r),
+            ComparisonOp::Ne => fp_dot_kernel::ne_f64_pairs_arc(isa, l, r),
+            ComparisonOp::Ge => fp_dot_kernel::ge_f64_pairs_arc(isa, l, r),
+            ComparisonOp::Le => fp_dot_kernel::le_f64_pairs_arc(isa, l, r),
         };
     }
     let pairs = l.iter().zip(r);
@@ -8761,16 +8705,15 @@ impl IntAgainstFloat {
 /// number read it too; br-frankenpandas-e186m).
 #[must_use]
 pub fn compare_i64_scalar(data: &[i64], s: i64, op: ComparisonOp) -> Vec<bool> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
         let mut out = vec![false; data.len()];
         match op {
-            ComparisonOp::Gt => fp_dot_kernel::gt_i64_scalar_into(data, s, &mut out),
-            ComparisonOp::Lt => fp_dot_kernel::lt_i64_scalar_into(data, s, &mut out),
-            ComparisonOp::Eq => fp_dot_kernel::eq_i64_scalar_into(data, s, &mut out),
-            ComparisonOp::Ne => fp_dot_kernel::ne_i64_scalar_into(data, s, &mut out),
-            ComparisonOp::Ge => fp_dot_kernel::ge_i64_scalar_into(data, s, &mut out),
-            ComparisonOp::Le => fp_dot_kernel::le_i64_scalar_into(data, s, &mut out),
+            ComparisonOp::Gt => fp_dot_kernel::gt_i64_scalar_into(isa, data, s, &mut out),
+            ComparisonOp::Lt => fp_dot_kernel::lt_i64_scalar_into(isa, data, s, &mut out),
+            ComparisonOp::Eq => fp_dot_kernel::eq_i64_scalar_into(isa, data, s, &mut out),
+            ComparisonOp::Ne => fp_dot_kernel::ne_i64_scalar_into(isa, data, s, &mut out),
+            ComparisonOp::Ge => fp_dot_kernel::ge_i64_scalar_into(isa, data, s, &mut out),
+            ComparisonOp::Le => fp_dot_kernel::le_i64_scalar_into(isa, data, s, &mut out),
         }
         return out;
     }
@@ -8791,9 +8734,8 @@ pub fn compare_i64_scalar(data: &[i64], s: i64, op: ComparisonOp) -> Vec<bool> {
 /// independent lanes otherwise. Exact: an integer min in any order.
 #[must_use]
 pub fn min_i64(values: &[i64]) -> Option<i64> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        return fp_dot_kernel::min_i64(values);
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+        return fp_dot_kernel::min_i64(isa, values);
     }
     fold_i64_lanes(values, i64::MAX, i64::min)
 }
@@ -8801,9 +8743,8 @@ pub fn min_i64(values: &[i64]) -> Option<i64> {
 /// The greatest of `values`, `None` when empty; see [`min_i64`].
 #[must_use]
 pub fn max_i64(values: &[i64]) -> Option<i64> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        return fp_dot_kernel::max_i64(values);
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+        return fp_dot_kernel::max_i64(isa, values);
     }
     fold_i64_lanes(values, i64::MIN, i64::max)
 }
@@ -8813,9 +8754,8 @@ pub fn max_i64(values: &[i64]) -> Option<i64> {
 /// through `as f64` could not tell two ints past 2^53 apart.
 #[must_use]
 pub fn argmin_i64(values: &[i64]) -> Option<usize> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        return fp_dot_kernel::argmin_i64(values);
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+        return fp_dot_kernel::argmin_i64(isa, values);
     }
     let least = fold_i64_lanes(values, i64::MAX, i64::min)?;
     values.iter().position(|&value| value == least)
@@ -8824,9 +8764,8 @@ pub fn argmin_i64(values: &[i64]) -> Option<usize> {
 /// The first position of the greatest of `values`; see [`argmin_i64`].
 #[must_use]
 pub fn argmax_i64(values: &[i64]) -> Option<usize> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        return fp_dot_kernel::argmax_i64(values);
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+        return fp_dot_kernel::argmax_i64(isa, values);
     }
     let greatest = fold_i64_lanes(values, i64::MIN, i64::max)?;
     values.iter().position(|&value| value == greatest)
@@ -8839,9 +8778,8 @@ pub fn argmax_i64(values: &[i64]) -> Option<usize> {
 /// (br-frankenpandas-e186m).
 #[must_use]
 pub fn argmin_f64(values: &[f64]) -> Option<usize> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        return fp_dot_kernel::argmin_f64(values);
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+        return fp_dot_kernel::argmin_f64(isa, values);
     }
     first_extreme_f64(values, |value, best| value < best)
 }
@@ -8850,9 +8788,8 @@ pub fn argmin_f64(values: &[f64]) -> Option<usize> {
 /// see [`argmin_f64`].
 #[must_use]
 pub fn argmax_f64(values: &[f64]) -> Option<usize> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        return fp_dot_kernel::argmax_f64(values);
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+        return fp_dot_kernel::argmax_f64(isa, values);
     }
     first_extreme_f64(values, |value, best| value > best)
 }
@@ -8875,9 +8812,10 @@ fn first_extreme_f64(values: &[f64], beats: impl Fn(f64, f64) -> bool) -> Option
 /// answering (br-frankenpandas-e186m).
 #[must_use]
 pub fn numpy_var_i64(values: &[i64], ddof: usize) -> Option<f64> {
-    #[cfg(target_arch = "x86_64")]
-    if values.len() > ddof && std::arch::is_x86_feature_detected!("avx2") {
-        return Some(fp_dot_kernel::numpy_var_i64(values, ddof));
+    if values.len() > ddof
+        && let Some(isa) = fp_dot_kernel::Avx2Fma::detect()
+    {
+        return Some(fp_dot_kernel::numpy_var_i64(isa, values, ddof));
     }
     let _ = (values, ddof);
     None
@@ -8889,9 +8827,8 @@ pub fn numpy_var_i64(values: &[i64], ddof: usize) -> Option<f64> {
 /// summing them the same way (br-frankenpandas-e186m).
 #[must_use]
 pub fn numpy_cast_sum_i64(values: &[i64]) -> Option<f64> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        return Some(fp_dot_kernel::numpy_cast_sum_i64(values));
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+        return Some(fp_dot_kernel::numpy_cast_sum_i64(isa, values));
     }
     let _ = values;
     None
@@ -8900,11 +8837,41 @@ pub fn numpy_cast_sum_i64(values: &[i64]) -> Option<f64> {
 /// `values[i] * s`, wrapping as numpy's int64 product: four lanes a vector
 /// where the CPU has AVX2 ([`fp_dot_kernel::mul_i64_by_number`]), the
 /// baseline's two otherwise (br-frankenpandas-e186m).
+/// Python's `values // s` (`values % s` when `modulo`) by a nonzero int:
+/// four lanes at a time through f64 where the CPU has AVX2 and the values
+/// are below 2^51 (k // 3 a million rows 1.65 ms, pandas 0.62;
+/// br-frankenpandas-uf0mw), or past it with the quotients below it
+/// (ts // 10**9 0.97 ms, pandas 0.61); else a positive divisor divides
+/// through its reciprocal.
+fn floor_by_number_i64(values: &[i64], s: i64, modulo: bool) -> Vec<i64> {
+    debug_assert_ne!(s, 0);
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect()
+        && let Some(out) = fp_dot_kernel::floor_div_by_number_i64(isa, values, s, modulo)
+            .or_else(|| fp_dot_kernel::floor_div_wide_by_number_i64(isa, values, s, modulo))
+    {
+        return out;
+    }
+    if s > 0 {
+        let divisor = ConstDivisorU64::new(s.unsigned_abs());
+        if modulo {
+            par_map_vec_i64(values.len(), |i| divisor.floor_mod(values[i], s))
+        } else {
+            par_map_vec_i64(values.len(), |i| divisor.floor_div(values[i], s))
+        }
+    } else {
+        let apply = if modulo {
+            python_mod_i64
+        } else {
+            python_floor_div_i64
+        };
+        par_map_vec_i64(values.len(), |i| apply(values[i], s))
+    }
+}
+
 #[must_use]
 pub fn mul_i64_by_number(values: &[i64], s: i64) -> Vec<i64> {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        return fp_dot_kernel::mul_i64_by_number(values, s);
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+        return fp_dot_kernel::mul_i64_by_number(isa, values, s);
     }
     values.iter().map(|&value| value.wrapping_mul(s)).collect()
 }
@@ -8914,9 +8881,8 @@ pub fn mul_i64_by_number(values: &[i64], s: i64) -> Vec<i64> {
 /// otherwise. Wrapping addition is associative: the serial fold's sum.
 #[must_use]
 pub fn sum_i64(values: &[i64]) -> i64 {
-    #[cfg(target_arch = "x86_64")]
-    if std::arch::is_x86_feature_detected!("avx2") {
-        return fp_dot_kernel::sum_i64(values);
+    if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+        return fp_dot_kernel::sum_i64(isa, values);
     }
     values.iter().fold(0, |sum, &value| sum.wrapping_add(value))
 }
@@ -15530,11 +15496,11 @@ impl Column {
     #[doc(hidden)]
     #[must_use]
     pub fn pack_dot_panel(a_panel: &Float64DotAPanel, len: usize) -> Vec<f64> {
-        if !ScalarValues::dot_kernel_available() {
+        let Some(isa) = fp_dot_kernel::Avx2Fma::detect() else {
             return Vec::new();
-        }
+        };
         let a_slices = ScalarValues::dot_panel_slices_from(&a_panel.0, len);
-        fp_dot_kernel::pack_a_panel(&a_slices, len)
+        fp_dot_kernel::pack_a_panel(isa, &a_slices, len)
     }
 
     /// SEVERAL output columns of one dot product, in a single pass over the A
@@ -15565,14 +15531,14 @@ impl Column {
         b_cols: &[&[f64]],
         len: usize,
     ) -> Vec<Vec<f64>> {
-        if b_cols.len() < 2 || !ScalarValues::dot_kernel_available() {
+        let Some(isa) = fp_dot_kernel::Avx2Fma::detect().filter(|_| b_cols.len() >= 2) else {
             return b_cols
                 .iter()
                 .map(|b_col| ScalarValues::materialize_float64_dot(&a_panel.0, b_col, len))
                 .collect();
-        }
+        };
         let a_slices = ScalarValues::dot_panel_slices_from(&a_panel.0, len);
-        fp_dot_kernel::materialize_float64_dot_block_prepacked(packed, &a_slices, b_cols, len)
+        fp_dot_kernel::materialize_float64_dot_block_prepacked(isa, packed, &a_slices, b_cols, len)
     }
 
     pub fn from_f64_all_valid_dot_product_shared(
@@ -16891,6 +16857,22 @@ impl Column {
             },
         };
         (data.len() == self.validity.len()).then_some((data, &self.validity))
+    }
+
+    /// `data` under `validity` as a masked Int64 column: the buffer and mask
+    /// int64's constructor holds under the masked dtype, as `astype("Int64")`
+    /// retags them (a missing row NA; br-frankenpandas-pg40q).
+    fn masked_int64_from(data: Vec<i64>, validity: ValidityMask) -> Self {
+        Self {
+            dtype: DType::Int64Nullable,
+            ..Self::from_i64_values_with_validity(data, validity)
+        }
+    }
+
+    /// The ints and mask of an int64 or masked Int64 column's typed backing.
+    fn plain_or_masked_i64_slice(&self) -> Option<(&[i64], &ValidityMask)> {
+        self.as_i64_slice_with_validity()
+            .or_else(|| self.as_masked_i64_slice())
     }
 
     /// Raw packed `&[bool]` backing + validity of a NULLABLE Bool column
@@ -18443,6 +18425,70 @@ impl Column {
                 };
             }
 
+            // A concat's chunked floats: the chunks the range overlaps, each
+            // trimmed to it (one shared buffer's window when the range lies
+            // in one) - the range was copied out of the chunks' materialized
+            // whole (a concat's float column .iloc[1000:150000] 0.12 ms,
+            // pandas 0.009; br-frankenpandas-aykex's census).
+            if self.dtype == DType::Float64
+                && len > 0
+                && let ScalarValues::LazyAllValidFloat64Chunks {
+                    chunks,
+                    all_finite,
+                    nullable_validity: None,
+                    ..
+                } = &self.values
+            {
+                let mut window: Vec<Float64Chunk> = Vec::new();
+                let mut offset = 0;
+                for chunk in chunks.iter() {
+                    let chunk_end = offset + chunk.len;
+                    let (from, to) = (start.max(offset), end.min(chunk_end));
+                    if from < to {
+                        window.push(Float64Chunk {
+                            data: chunk.data.clone(),
+                            start: chunk.start + (from - offset),
+                            len: to - from,
+                        });
+                    }
+                    if chunk_end >= end {
+                        break;
+                    }
+                    offset = chunk_end;
+                }
+                if let [only] = window.as_slice()
+                    && let Float64ChunkBuffer::Shared(data) = &only.data
+                {
+                    return Self {
+                        dtype: self.dtype.clone(),
+                        values: ScalarValues::lazy_all_valid_float64_slice(
+                            Arc::clone(data),
+                            only.start,
+                            len,
+                        ),
+                        validity: ValidityMask::all_valid(len),
+                        data: None,
+                        categorical: None,
+                        width: None,
+                        pandas_string: false,
+                    };
+                }
+                return Self {
+                    dtype: self.dtype.clone(),
+                    values: ScalarValues::lazy_float64_chunks_with_finite_and_validity(
+                        Arc::from(window),
+                        len,
+                        all_finite.get().copied().filter(|&finite| finite),
+                        None,
+                    ),
+                    validity: ValidityMask::all_valid(len),
+                    data: None,
+                    categorical: None,
+                    width: None,
+                    pandas_string: false,
+                };
+            }
+
             if let Some(values) = self.as_f64_slice() {
                 return Self::from_f64_values(values[start..end].to_vec());
             }
@@ -19857,12 +19903,11 @@ impl Column {
         // value collected through a Result were most of x.astype('int32')
         // (3.4 ms a million rows, pandas 0.29; br-frankenpandas-uf0mw). The
         // ints the checked path below makes; it answers anything else.
-        #[cfg(target_arch = "x86_64")]
         if !nullable
             && let Some((mask, sign)) = int_wrap_masks(width)
             && let Some(values) = self.as_f64_slice()
-            && std::arch::is_x86_feature_detected!("avx2")
-            && let Some(ints) = fp_dot_kernel::float_as_int_collect(values, mask, sign)
+            && let Some(isa) = fp_dot_kernel::Avx2Fma::detect()
+            && let Some(ints) = fp_dot_kernel::float_as_int_collect(isa, values, mask, sign)
         {
             return Ok(Self::from_i64_values_owned(ints)
                 .keeping_nullable_dtype(&storage)
@@ -20509,10 +20554,13 @@ impl Column {
                     _ => out.push(0),
                 }
             }
+            // A masked Int64 source stays masked (the gather builds int64;
+            // br-frankenpandas-aykex).
             return Ok(Self::from_i64_values_with_validity(
                 out,
                 ValidityMask::from_words(words, n),
-            ));
+            )
+            .keeping_nullable_dtype(&self.dtype));
         }
         // Nullable Bool source null-introducing gather (sibling of the nullable-Int64 arm).
         // Bool has NO sentinel value — every missing slot (validity-clear, None, or
@@ -20537,7 +20585,8 @@ impl Column {
             return Ok(Self::from_bool_values_with_validity(
                 out,
                 ValidityMask::from_words(words, n),
-            ));
+            )
+            .keeping_nullable_dtype(&self.dtype));
         }
         // NOTE (negative evidence, 2026-07-14 cc_fp): a nullable-TEMPORAL sibling here is a
         // NullKind TRAP — the generic gather fills None/out-of-range with
@@ -20898,8 +20947,7 @@ impl Column {
                 // collected - the int column made into an 8 MB float buffer and
                 // the result a zeroed one first (x + k a million rows 0.62 ms,
                 // pandas 0.46; br-frankenpandas-uf0mw). The same values.
-                #[cfg(target_arch = "x86_64")]
-                if std::arch::is_x86_feature_detected!("avx2")
+                if let Some(isa) = fp_dot_kernel::Avx2Fma::detect()
                     && matches!(
                         op,
                         ArithmeticOp::Add
@@ -20925,7 +20973,7 @@ impl Column {
                             ArithmeticOp::Mul => fp_dot_kernel::mul_f64_i64_collect,
                             _ => fp_dot_kernel::div_f64_i64_collect,
                         };
-                        let (result, output_nan) = kernel(floats, ints, int_first);
+                        let (result, output_nan) = kernel(isa, floats, ints, int_first);
                         return Some(Ok(Self::from_f64_values_owned_tracked(result, output_nan)));
                     }
                     // Two int columns' true division, both converted where
@@ -20935,7 +20983,7 @@ impl Column {
                         && l.len() == r.len()
                         && l.len() < BINARY_BANDWIDTH_PARALLEL_MIN_LEN
                     {
-                        let (result, output_nan) = fp_dot_kernel::div_i64_i64_collect(l, r);
+                        let (result, output_nan) = fp_dot_kernel::div_i64_i64_collect(isa, l, r);
                         return Some(Ok(Self::from_f64_values_owned_tracked(result, output_nan)));
                     }
                 }
@@ -21163,6 +21211,45 @@ impl Column {
                     .collect();
 
                 Some(Self::new(out_dtype.clone(), values))
+            }
+            // A masked Int64 result of two int64 / masked Int64 columns, + - *
+            // // %: the wrapping int64 ops over every row's data (a masked
+            // row's datum is arbitrary, so no mask bit is read a row; a zero
+            // divisor's quotient and remainder 0, as the masked fallback
+            // gives them), the masks and-ed - that fallback built a Scalar a
+            // row (si - s2 11.8 ms at 200k rows, pandas 0.13).
+            DType::Int64Nullable => {
+                let (l, lv) = self.plain_or_masked_i64_slice()?;
+                let (r, rv) = right.plain_or_masked_i64_slice()?;
+                if l.len() != r.len() {
+                    return None;
+                }
+                let pairs = || l.iter().zip(r);
+                let out: Vec<i64> = match op {
+                    ArithmeticOp::Add => pairs().map(|(&a, &b)| a.wrapping_add(b)).collect(),
+                    ArithmeticOp::Sub => pairs().map(|(&a, &b)| a.wrapping_sub(b)).collect(),
+                    ArithmeticOp::Mul => {
+                        if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+                            let out = fp_dot_kernel::mul_i64_collect(isa, l, r);
+                            return Some(Ok(Self::masked_int64_from(out, lv.and_mask(rv))));
+                        }
+                        pairs().map(|(&a, &b)| a.wrapping_mul(b)).collect()
+                    }
+                    ArithmeticOp::FloorDiv => pairs()
+                        .map(|(&a, &b)| {
+                            if b == 0 {
+                                0
+                            } else {
+                                python_floor_div_i64(a, b)
+                            }
+                        })
+                        .collect(),
+                    ArithmeticOp::Mod => pairs()
+                        .map(|(&a, &b)| if b == 0 { 0 } else { python_mod_i64(a, b) })
+                        .collect(),
+                    ArithmeticOp::Div | ArithmeticOp::Pow => return None,
+                };
+                Some(Ok(Self::masked_int64_from(out, lv.and_mask(rv))))
             }
             _ => None, // Bool, Utf8, etc. — use scalar fallback
         }
@@ -21564,32 +21651,7 @@ impl Column {
                     // ms, pandas 0.61); else a positive divisor divides
                     // through its reciprocal.
                     (ArithmeticOp::FloorDiv | ArithmeticOp::Mod, false) if s != 0 => {
-                        let modulo = matches!(op, ArithmeticOp::Mod);
-                        #[cfg(target_arch = "x86_64")]
-                        if std::arch::is_x86_feature_detected!("avx2")
-                            && std::arch::is_x86_feature_detected!("fma")
-                            && let Some(out) =
-                                fp_dot_kernel::floor_div_by_number_i64(data, s, modulo).or_else(
-                                    || fp_dot_kernel::floor_div_wide_by_number_i64(data, s, modulo),
-                                )
-                        {
-                            return Some(Self::from_i64_values_owned(out));
-                        }
-                        if s > 0 {
-                            let divisor = ConstDivisorU64::new(s.unsigned_abs());
-                            if modulo {
-                                par_map_vec_i64(data.len(), |i| divisor.floor_mod(data[i], s))
-                            } else {
-                                par_map_vec_i64(data.len(), |i| divisor.floor_div(data[i], s))
-                            }
-                        } else {
-                            let apply = if modulo {
-                                python_mod_i64
-                            } else {
-                                python_floor_div_i64
-                            };
-                            par_map_vec_i64(data.len(), |i| apply(data[i], s))
-                        }
+                        floor_by_number_i64(data, s, matches!(op, ArithmeticOp::Mod))
                     }
                     (ArithmeticOp::FloorDiv | ArithmeticOp::Mod, true) if !data.contains(&0) => {
                         let apply = if matches!(op, ArithmeticOp::Mod) {
@@ -21623,8 +21685,43 @@ impl Column {
                 let data = self.as_i64_slice()?;
                 Some(Self::int_float_scalar(data, *s, op, scalar_left))
             }
+            (DType::Int64Nullable, Scalar::Int64(s)) => self.masked_i64_scalar(*s, op, scalar_left),
             _ => None,
         }
+    }
+
+    /// `self <op> s` (`s <op> self` when `scalar_left`) of a masked Int64
+    /// column of no narrower width by an int, + - * // %: the wrapping int64
+    /// op over its data, a zero divisor's quotient and remainder 0, its mask
+    /// carried - the cells binary_numeric's masked fallback makes of the
+    /// pair, a missing row NA (si + 1 went through the scalar's broadcast
+    /// and a Scalar a row: 11.5 ms at 200k rows, pandas 0.09). None for any
+    /// other op or column.
+    fn masked_i64_scalar(&self, s: i64, op: ArithmeticOp, scalar_left: bool) -> Option<Self> {
+        if self.width.is_some() {
+            return None;
+        }
+        let (data, validity) = self.as_masked_i64_slice()?;
+        let floor_op = |a: i64, b: i64| match (b, op) {
+            (0, _) => 0,
+            (_, ArithmeticOp::Mod) => python_mod_i64(a, b),
+            _ => python_floor_div_i64(a, b),
+        };
+        let out: Vec<i64> = match (op, scalar_left) {
+            (ArithmeticOp::Add, _) => data.iter().map(|&v| v.wrapping_add(s)).collect(),
+            (ArithmeticOp::Sub, false) => data.iter().map(|&v| v.wrapping_sub(s)).collect(),
+            (ArithmeticOp::Sub, true) => data.iter().map(|&v| s.wrapping_sub(v)).collect(),
+            (ArithmeticOp::Mul, _) => mul_i64_by_number(data, s),
+            (ArithmeticOp::FloorDiv | ArithmeticOp::Mod, false) if s != 0 => {
+                floor_by_number_i64(data, s, matches!(op, ArithmeticOp::Mod))
+            }
+            (ArithmeticOp::FloorDiv | ArithmeticOp::Mod, false) => vec![0; data.len()],
+            (ArithmeticOp::FloorDiv | ArithmeticOp::Mod, true) => {
+                data.iter().map(|&v| floor_op(s, v)).collect()
+            }
+            _ => return None,
+        };
+        Some(Self::masked_int64_from(out, validity.clone()))
     }
 
     /// `self <op> s` (`s <op> self` when `scalar_left`) of a Float64 column
@@ -21765,9 +21862,11 @@ impl Column {
         // converts one int at a time and divides two lanes wide (k / 2 a
         // million rows 0.51 ms, pandas 0.52; br-frankenpandas-uf0mw). The
         // same quotients; + - * gained nothing so.
-        #[cfg(target_arch = "x86_64")]
-        if plain && matches!(op, ArithmeticOp::Div) && std::arch::is_x86_feature_detected!("avx2") {
-            let out = fp_dot_kernel::div_i64_number_collect(data, s, scalar_left);
+        if plain
+            && matches!(op, ArithmeticOp::Div)
+            && let Some(isa) = fp_dot_kernel::Avx2Fma::detect()
+        {
+            let out = fp_dot_kernel::div_i64_number_collect(isa, data, s, scalar_left);
             return Self::from_f64_values_owned_tracked(out, false);
         }
         let out: Option<Vec<f64>> = match (op, scalar_left) {
@@ -23665,8 +23764,7 @@ impl Column {
         // mirror (k > x is x < k) - the ints became an 8 MB float buffer
         // first (x > k a million rows 0.55 ms, pandas 0.40;
         // br-frankenpandas-uf0mw).
-        #[cfg(target_arch = "x86_64")]
-        if std::arch::is_x86_feature_detected!("avx2") {
+        if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
             let mirrored = |op: ComparisonOp| match op {
                 ComparisonOp::Gt => ComparisonOp::Lt,
                 ComparisonOp::Lt => ComparisonOp::Gt,
@@ -23683,12 +23781,12 @@ impl Column {
             };
             if let Some((floats, ints, op)) = pair {
                 let bools = match op {
-                    ComparisonOp::Gt => fp_dot_kernel::gt_f64_i64_collect(floats, ints),
-                    ComparisonOp::Ge => fp_dot_kernel::ge_f64_i64_collect(floats, ints),
-                    ComparisonOp::Lt => fp_dot_kernel::lt_f64_i64_collect(floats, ints),
-                    ComparisonOp::Le => fp_dot_kernel::le_f64_i64_collect(floats, ints),
-                    ComparisonOp::Eq => fp_dot_kernel::eq_f64_i64_collect(floats, ints),
-                    ComparisonOp::Ne => fp_dot_kernel::ne_f64_i64_collect(floats, ints),
+                    ComparisonOp::Gt => fp_dot_kernel::gt_f64_i64_collect(isa, floats, ints),
+                    ComparisonOp::Ge => fp_dot_kernel::ge_f64_i64_collect(isa, floats, ints),
+                    ComparisonOp::Lt => fp_dot_kernel::lt_f64_i64_collect(isa, floats, ints),
+                    ComparisonOp::Le => fp_dot_kernel::le_f64_i64_collect(isa, floats, ints),
+                    ComparisonOp::Eq => fp_dot_kernel::eq_f64_i64_collect(isa, floats, ints),
+                    ComparisonOp::Ne => fp_dot_kernel::ne_f64_i64_collect(isa, floats, ints),
                 };
                 return Ok(Self::from_bool_values(bools));
             }
@@ -24037,6 +24135,31 @@ impl Column {
         {
             return Ok(Self::from_bool_values(compare_nanos_scalar(data, *s, op)));
         }
+        // A masked Int64 column against an int, or a float below 2^53: its
+        // data compared as an int64 column's, its mask the nullable
+        // `boolean`'s - the propagating path's answer, a Scalar a row there
+        // (si > 500 6.3 ms at 200k rows, pandas 0.10). A NaN is pandas'
+        // numpy compare of the data, false (true under !=) where present:
+        // the propagating path read it as a missing scalar and answered NA
+        // throughout.
+        if let Some((data, validity)) = self.as_masked_i64_slice() {
+            let bools = match scalar {
+                Scalar::Int64(s) => Some(compare_i64_scalar(data, *s, op)),
+                Scalar::Float64(s) if s.is_nan() => Some(vec![op == ComparisonOp::Ne; data.len()]),
+                Scalar::Float64(s) => match IntAgainstFloat::of(*s, op) {
+                    Some(IntAgainstFloat::Compare(op, t)) => Some(compare_i64_scalar(data, t, op)),
+                    Some(IntAgainstFloat::Constant(value)) => Some(vec![value; data.len()]),
+                    None => None,
+                },
+                _ => None,
+            };
+            if let Some(bools) = bools {
+                return Ok(
+                    Self::from_bool_values_with_validity(bools, validity.clone())
+                        .with_dtype(DType::BoolNullable),
+                );
+            }
+        }
         let result = self.compare_scalar_propagating(scalar, op)?;
         if self.dtype.is_nullable() {
             // The nullable `boolean` dtype, <NA> where missing (see
@@ -24384,10 +24507,12 @@ impl Column {
                         out_idx += 1;
                     }
                 }
+                // A masked Int64 source stays masked (br-frankenpandas-aykex).
                 return Ok(Self::from_i64_values_with_validity(
                     gathered,
                     ValidityMask::from_words(words, count),
-                ));
+                )
+                .keeping_nullable_dtype(&self.dtype));
             }
             // Nullable temporal / Bool siblings (mirror the take_positions gathers):
             // Datetime64/Timedelta64 store i64 ns (missing ⇒ Null(NaT)), Bool raw
@@ -24452,7 +24577,8 @@ impl Column {
                 return Ok(Self::from_bool_values_with_validity(
                     gathered,
                     ValidityMask::from_words(words, count),
-                ));
+                )
+                .keeping_nullable_dtype(&self.dtype));
             }
             let values = self
                 .values
@@ -24691,6 +24817,23 @@ impl Column {
             }
             return Ok(Self::from_i64_values_owned(out));
         }
+        // A masked Int64 column's int fill: its data, each missing run the
+        // fill, the column masked and whole - the generic loop's (a Scalar a
+        // row: si.fillna(0) 5.0 ms at 200k rows, pandas 0.54).
+        if self.dtype == DType::Int64Nullable
+            && let Scalar::Int64(fv) = &cast_fill
+            && let Some((data, validity)) = self.as_masked_i64_slice()
+        {
+            if validity.all() {
+                return Ok(self.clone());
+            }
+            let mut out = data.to_vec();
+            validity.for_each_invalid_range(|start, run| out[start..start + run].fill(*fv));
+            return Ok(Self::masked_int64_from(
+                out,
+                ValidityMask::all_valid(data.len()),
+            ));
+        }
 
         // Typed Int64 fast path (br-frankenpandas-3llep): as_i64_slice returns
         // Some only for an all-valid Int64 backing, which has nothing to fill — so
@@ -24722,7 +24865,9 @@ impl Column {
                 .enumerate()
                 .map(|(i, &value)| if validity.get(i) { value } else { *fv })
                 .collect();
-            return Ok(Self::from_bool_values(out));
+            // A masked `boolean` column stays one (a masked compare's result
+            // holds this backing; br-frankenpandas-aykex).
+            return Ok(Self::from_bool_values(out).keeping_nullable_dtype(&self.dtype));
         }
 
         // Typed nullable Utf8 fast path: a `LazyNullableUtf8` column (a string column
@@ -27392,7 +27537,19 @@ impl Column {
                     return Some(reduce(&reductions));
                 }
             }
-            DType::Float64Nullable | DType::Int64Nullable | DType::Bool | DType::BoolNullable => {}
+            // A masked Int64 column's ints and mask in place, the tail's
+            // reading of them (each cell was read as a Scalar: si.mean()
+            // 1.4 ms at 200k rows, pandas 0.49; br-frankenpandas-aykex).
+            DType::Int64Nullable => {
+                if let Some((data, validity)) = self.as_masked_i64_slice() {
+                    let present = validity.packed_words_for_scan();
+                    let values = ReductionValues::Int(data);
+                    let reductions =
+                        PandasReductions::new(values, Some(&present), MissingLayout::Masked);
+                    return Some(reduce(&reductions));
+                }
+            }
+            DType::Float64Nullable | DType::Bool | DType::BoolNullable => {}
             _ => return None,
         }
         // Any other storage: read the cells. Ints and bools are numpy integer
@@ -31135,15 +31292,28 @@ impl Column {
             // and no NaN to scan for (br-frankenpandas-uf0mw).
             return Ok(Self::from_f64_values_owned_tracked(out, false));
         }
+        // A masked Int64 column to float64: its ints as floats, a missing row
+        // NaN under a cleared bit (its datum 0.0, as the gap constructors
+        // hold it) - each was cast as a Scalar (si.astype('float64') 9.1 ms
+        // at 200k rows, pandas 0.31).
+        if target == DType::Float64
+            && let Some((data, validity)) = self.as_masked_i64_slice()
+        {
+            let mut out: Vec<f64> = data.iter().map(|&x| x as f64).collect();
+            if validity.all() {
+                return Ok(Self::from_f64_values_owned_tracked(out, false));
+            }
+            validity.for_each_invalid_range(|start, run| out[start..start + run].fill(0.0));
+            return Ok(Self::from_f64_values_with_validity(out, validity.clone()));
+        }
         if target == DType::Int64
             && let Some(data) = self.as_f64_slice()
         {
             // Four lanes at a time where the CPU has AVX2 and every value is
             // below 2^51: one pass, the same truncations (x.astype('int64')
             // a million rows 1.40 ms, pandas 0.59; br-frankenpandas-uf0mw).
-            #[cfg(target_arch = "x86_64")]
-            if std::arch::is_x86_feature_detected!("avx2")
-                && let Some(out) = fp_dot_kernel::float_as_int_collect(data, -1, 0)
+            if let Some(isa) = fp_dot_kernel::Avx2Fma::detect()
+                && let Some(out) = fp_dot_kernel::float_as_int_collect(isa, data, -1, 0)
             {
                 return Ok(Self::from_i64_values_owned(out));
             }
@@ -32160,7 +32330,9 @@ impl Column {
                             out_valid.set(j, false);
                         }
                     }
-                    return Ok(Self::from_i64_values_with_validity(out, out_valid));
+                    // A masked Int64 source stays masked (br-frankenpandas-aykex).
+                    return Ok(Self::from_i64_values_with_validity(out, out_valid)
+                        .keeping_nullable_dtype(&self.dtype));
                 }
                 ScalarValues::LazyNullableFloat64 {
                     buffer,
@@ -33206,6 +33378,17 @@ impl Column {
                 data.iter().map(|&x| x.wrapping_abs()).collect(),
             ));
         }
+        // A masked Int64 column: every row's wrapping abs, its mask carried
+        // (a Scalar a row: si.abs() 6.2 ms at 200k rows, pandas 0.05;
+        // br-frankenpandas-aykex).
+        if self.width.is_none()
+            && let Some((data, validity)) = self.as_masked_i64_slice()
+        {
+            return Ok(Self::masked_int64_from(
+                data.iter().map(|&x| x.wrapping_abs()).collect(),
+                validity.clone(),
+            ));
+        }
         if let Some(data) = self.as_f64_slice() {
             // `as_f64_slice` is all-valid (no NaN — NaN ⇒ missing ⇒ None), and
             // |x| never introduces NaN and preserves finiteness EXACTLY
@@ -33497,9 +33680,8 @@ impl Column {
         // one buffer), and this arm produces the single-buffer form, which is the
         // shipped default. When the write-once path is selected this arm is
         // skipped so the representation choice stays with the generic code.
-        #[cfg(target_arch = "x86_64")]
         if !elementwise_write_once_enabled()
-            && std::arch::is_x86_feature_detected!("avx2")
+            && let Some(isa) = fp_dot_kernel::Avx2Fma::detect()
             && let Some(data) = self.as_f64_slice()
         {
             // ⚠️ RECORD THE SPLIT, or every `sqrt` row's thread count is a lie.
@@ -33513,7 +33695,8 @@ impl Column {
             // a single serial pass, which is also what sqrt's
             // `par_min_override = usize::MAX` selects on the generic arm.
             record_elementwise_workers(1);
-            let (out, domain_held, computed_all_finite) = fp_dot_kernel::sqrt_f64_collect(data);
+            let (out, domain_held, computed_all_finite) =
+                fp_dot_kernel::sqrt_f64_collect(isa, data);
             if domain_held {
                 let all_finite = self.f64_finite_witness().unwrap_or(computed_all_finite);
                 return Ok(Self::from_f64_all_valid_with_finite_opt(
@@ -33529,15 +33712,14 @@ impl Column {
         // Arc on one thread, where the generic arm below split a zeroed buffer
         // across threads and its fill outweighed the roots (np.sqrt of a column
         // 10% NaN 1.12 ms a million rows, pandas 1.02; br-frankenpandas-cmgnp).
-        #[cfg(target_arch = "x86_64")]
         if self.dtype == DType::Float64
             && self.nan_missing_exact()
             && !elementwise_write_once_enabled()
-            && std::arch::is_x86_feature_detected!("avx2")
+            && let Some(isa) = fp_dot_kernel::Avx2Fma::detect()
             && let Some((data, _)) = self.as_f64_slice_with_validity()
         {
             record_elementwise_workers(1);
-            let out = fp_dot_kernel::sqrt_f64_arc(data);
+            let out = fp_dot_kernel::sqrt_f64_arc(isa, data);
             let validity = ValidityMask::from_f64(&out);
             return Ok(Self::nan_exact_float64(out, validity));
         }
@@ -36794,6 +36976,40 @@ impl Column {
                 }
             }
             return Ok(Self::from_f64_values(out));
+        }
+        // A masked Int64 column's shift with a missing fill: its ints moved,
+        // the vacated rows and its own missing runs (moved with them) the
+        // result's missing runs - a Scalar a row (si.shift(1) 4.4 ms at 200k
+        // rows, pandas 0.09; br-frankenpandas-aykex).
+        if fill.is_missing()
+            && self.width.is_none()
+            && let Some((data, validity)) = self.as_masked_i64_slice()
+        {
+            let mut out = vec![0_i64; len];
+            let mut runs: Vec<(usize, usize)> = Vec::new();
+            if abs >= len {
+                runs.push((0, len));
+            } else if periods > 0 {
+                out[abs..].copy_from_slice(&data[..len - abs]);
+                runs.push((0, abs));
+                validity.for_each_invalid_range(|start, run| {
+                    let end = (start + run).min(len - abs);
+                    if start < end {
+                        runs.push((start + abs, end - start));
+                    }
+                });
+            } else {
+                out[..len - abs].copy_from_slice(&data[abs..]);
+                validity.for_each_invalid_range(|start, run| {
+                    let (from, end) = (start.max(abs), start + run);
+                    if from < end {
+                        runs.push((from - abs, end - from));
+                    }
+                });
+                runs.push((len - abs, abs));
+            }
+            let validity = ValidityMask::from_invalid_ranges(Arc::from(runs), len);
+            return Ok(Self::masked_int64_from(out, validity));
         }
         // Typed all-valid-Int64 fast path for an Int64 fill. This is the
         // dtype-preserving `shift(..., fill_value=0)` shape: the scalar path emits
@@ -45759,6 +45975,57 @@ mod tests {
     }
 
     #[test]
+    fn chunked_float_range_is_a_window_of_its_chunks_aykex() {
+        // br-frankenpandas-aykex: a contiguous range of a concat's chunked
+        // floats is the chunks it overlaps, trimmed - one buffer's window
+        // within a chunk - with the values the materialized whole gives,
+        // across a boundary, from one, at the ends and empty.
+        let first: Arc<[f64]> = Arc::from(vec![9.0, 1.0, 2.0, 8.0]);
+        let second: Arc<[f64]> = Arc::from(vec![3.0, 4.0, 5.0]);
+        let third: Arc<[f64]> = Arc::from(vec![6.0, 7.0]);
+        let column = Column::from_f64_all_valid_chunks(
+            vec![
+                (Arc::clone(&first), 1, 2),
+                (Arc::clone(&second), 0, 3),
+                (Arc::clone(&third), 0, 2),
+            ],
+            7,
+        );
+        let whole = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+        for (start, len) in [
+            (1, 4),
+            (2, 3),
+            (3, 1),
+            (0, 7),
+            (4, 3),
+            (0, 2),
+            (6, 1),
+            (5, 0),
+        ] {
+            let range = column.take_contiguous_range(start, len);
+            assert_eq!(range.len(), len, "{start} + {len}");
+            assert!(range.validity().all());
+            assert_eq!(
+                range.as_f64_slice(),
+                Some(&whole[start..start + len]),
+                "{start} + {len}"
+            );
+        }
+        // Within one chunk: that buffer's window, not a chunk list.
+        let inner = column.take_contiguous_range(2, 3);
+        assert!(matches!(
+            inner.values,
+            ScalarValues::LazyAllValidFloat64Slice { .. }
+        ));
+        // NEGATIVE: a range over two chunks stays chunked.
+        let across = column.take_contiguous_range(1, 3);
+        assert!(matches!(
+            across.values,
+            ScalarValues::LazyAllValidFloat64Chunks { .. }
+        ));
+    }
+
+    #[test]
     fn from_f64_all_valid_chunks_materializes_in_chunk_order() {
         let first: Arc<[f64]> = Arc::from(vec![9.0, 1.0, 2.0, 8.0]);
         let second: Arc<[f64]> = Arc::from(vec![3.0, 4.0, 5.0]);
@@ -47614,6 +47881,156 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(div.dtype(), DType::Float64);
+        }
+
+        /// A masked Int64 column's typed kernels: + - * // % by an int (a zero
+        /// divisor 0) and by an int column, a compare with an int, a float and
+        /// NaN, fillna and astype to float64 give pandas' masked cells, and the
+        /// masked results stay masked through fillna, a filter, a reindex and
+        /// a sort (br-frankenpandas-aykex). NEGATIVE: a plain int64 column with
+        /// a gap keeps numpy's rules and dtype; ** declines the kernel.
+        #[test]
+        fn masked_int_kernels_keep_the_mask_aykex() {
+            let ints = |column: &Column| -> Vec<Option<i64>> {
+                column
+                    .values()
+                    .iter()
+                    .map(|value| match value {
+                        Scalar::Int64(int) => Some(*int),
+                        other => {
+                            assert!(other.is_missing(), "{other:?}");
+                            None
+                        }
+                    })
+                    .collect()
+            };
+            let bools = |column: &Column| -> Vec<Option<bool>> {
+                column
+                    .values()
+                    .iter()
+                    .map(|value| match value {
+                        Scalar::Bool(flag) => Some(*flag),
+                        other => {
+                            assert!(other.is_missing(), "{other:?}");
+                            None
+                        }
+                    })
+                    .collect()
+            };
+            let gapped = ValidityMask::from_words(vec![0b1101], 4);
+            let plain = Column::from_i64_values_with_validity(vec![7, 0, -9, 0], gapped);
+            let masked = plain.astype(DType::Int64Nullable).unwrap();
+            assert!(masked.as_masked_i64_slice().is_some());
+            let by = |op, scalar: i64, left| {
+                let column = masked
+                    .binary_scalar(&Scalar::Int64(scalar), op, left)
+                    .unwrap();
+                assert_eq!(column.dtype(), DType::Int64Nullable);
+                ints(&column)
+            };
+            assert_eq!(
+                by(ArithmeticOp::Add, 1, false),
+                [Some(8), None, Some(-8), Some(1)]
+            );
+            assert_eq!(
+                by(ArithmeticOp::Sub, 10, true),
+                [Some(3), None, Some(19), Some(10)]
+            );
+            assert_eq!(
+                by(ArithmeticOp::Mul, 3, false),
+                [Some(21), None, Some(-27), Some(0)]
+            );
+            assert_eq!(
+                by(ArithmeticOp::FloorDiv, 2, false),
+                [Some(3), None, Some(-5), Some(0)]
+            );
+            assert_eq!(
+                by(ArithmeticOp::Mod, 2, false),
+                [Some(1), None, Some(1), Some(0)]
+            );
+            assert_eq!(
+                by(ArithmeticOp::FloorDiv, 0, false),
+                [Some(0), None, Some(0), Some(0)]
+            );
+            assert_eq!(
+                by(ArithmeticOp::FloorDiv, 5, true),
+                [Some(0), None, Some(-1), Some(0)]
+            );
+            let divisors = Column::from_i64_values(vec![2, 2, 0, 3]);
+            let floor = masked
+                .binary_numeric(&divisors, ArithmeticOp::FloorDiv)
+                .unwrap();
+            assert_eq!(floor.dtype(), DType::Int64Nullable);
+            assert_eq!(ints(&floor), [Some(3), None, Some(0), Some(0)]);
+            let sum = masked.binary_numeric(&divisors, ArithmeticOp::Add).unwrap();
+            assert_eq!(ints(&sum), [Some(9), None, Some(-9), Some(3)]);
+            let compare = |scalar: Scalar, op| {
+                let column = masked.compare_scalar(&scalar, op).unwrap();
+                assert_eq!(column.dtype(), DType::BoolNullable);
+                bools(&column)
+            };
+            let gt = [Some(true), None, Some(false), Some(false)];
+            assert_eq!(compare(Scalar::Int64(0), ComparisonOp::Gt), gt);
+            assert_eq!(
+                compare(Scalar::Float64(-0.5), ComparisonOp::Ge),
+                [Some(true), None, Some(false), Some(true)]
+            );
+            assert_eq!(
+                compare(Scalar::Float64(f64::NAN), ComparisonOp::Ne),
+                [Some(true), None, Some(true), Some(true)]
+            );
+            assert_eq!(
+                compare(Scalar::Float64(2.5), ComparisonOp::Eq),
+                [Some(false), None, Some(false), Some(false)]
+            );
+            let filled = masked.fillna(&Scalar::Int64(5)).unwrap();
+            assert_eq!(filled.dtype(), DType::Int64Nullable);
+            assert_eq!(ints(&filled), [Some(7), Some(5), Some(-9), Some(0)]);
+            let floats = masked.astype(DType::Float64).unwrap();
+            assert_eq!(floats.dtype(), DType::Float64);
+            assert!(floats.values()[1].is_missing());
+            assert_eq!(floats.values()[2], Scalar::Float64(-9.0));
+            // The masked results through the typed gathers.
+            let flags = masked
+                .compare_scalar(&Scalar::Int64(0), ComparisonOp::Gt)
+                .unwrap();
+            let flags_filled = flags.fillna(&Scalar::Bool(false)).unwrap();
+            assert_eq!(flags_filled.dtype(), DType::BoolNullable);
+            let keep = Column::from_bool_values(vec![true, true, false, true]);
+            let kept = flags.filter_by_mask(&keep).unwrap();
+            assert_eq!(kept.dtype(), DType::BoolNullable);
+            assert_eq!(bools(&kept), [Some(true), None, Some(false)]);
+            let added = masked
+                .binary_scalar(&Scalar::Int64(1), ArithmeticOp::Add, false)
+                .unwrap();
+            let kept = added.filter_by_mask(&keep).unwrap();
+            assert_eq!(kept.dtype(), DType::Int64Nullable);
+            assert_eq!(ints(&kept), [Some(8), None, Some(1)]);
+            let moved = added
+                .reindex_by_positions(&[Some(1), None, Some(0)])
+                .unwrap();
+            assert_eq!(moved.dtype(), DType::Int64Nullable);
+            assert_eq!(ints(&moved), [None, None, Some(8)]);
+            let sorted = added.sort_values(true).unwrap();
+            assert_eq!(sorted.dtype(), DType::Int64Nullable);
+            assert_eq!(ints(&sorted), [Some(-8), Some(1), Some(8), None]);
+            // NEGATIVE: a plain int64 column with a gap compares by numpy's
+            // rule (missing false) and keeps int64 through a filter; ** is
+            // not the kernel's.
+            let plain_gt = plain
+                .compare_scalar(&Scalar::Int64(0), ComparisonOp::Gt)
+                .unwrap();
+            assert_eq!(plain_gt.dtype(), DType::Bool);
+            assert_eq!(
+                bools(&plain_gt),
+                [Some(true), Some(false), Some(false), Some(false)]
+            );
+            assert_eq!(plain.filter_by_mask(&keep).unwrap().dtype(), DType::Int64);
+            assert!(
+                masked
+                    .binary_scalar(&Scalar::Int64(2), ArithmeticOp::Pow, false)
+                    .is_none()
+            );
         }
 
         /// A gather from an eager text column reads only the selected rows

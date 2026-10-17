@@ -13,6 +13,29 @@
 //! let filtered = df.query("age > 28").unwrap();
 //! assert_eq!(filtered.index().len(), 1); // Only Alice (30) passes the filter
 //! ```
+//!
+//! # Structured Tracing (`tracing` feature)
+//!
+//! Enabling `frankenpandas = { features = ["tracing"] }` activates a zero-cost-when-off
+//! [`tracing`](https://docs.rs/tracing) decision/event stream and operation spans across
+//! `fp-runtime`, `fp-frame`, and `fp-io`. When the `tracing` feature is disabled (the
+//! default), all emission helpers compile down to `#[inline(always)]` no-ops with zero
+//! heap allocations on the hot path.
+//!
+//! ## Targets & Subscribers
+//!
+//! - `frankenpandas::aace` (`INFO` events): Alignment-Aware Columnar Execution (AACE)
+//!   and runtime policy events (`alignment_planned`, `dtype_coerced`, `policy_decided`,
+//!   `materialized`). Use [`with_aace_ledger`] or [`EvidenceLedgerSubscriber`] to record
+//!   these structured [`AaceEvent`] entries directly into an [`EvidenceLedger`].
+//! - `frankenpandas::span` (`INFO` spans): high-level operation spans on `groupby`,
+//!   `rolling`, `resample`, and `io` (`read_csv_str`, `read_json_str`).
+//!
+//! ## Example `EnvFilter` Configuration
+//!
+//! ```text
+//! RUST_LOG=frankenpandas::span=info,frankenpandas::aace=info
+//! ```
 
 // ── Core types ──────────────────────────────────────────────────────────
 
@@ -499,10 +522,13 @@ pub fn eval(expr: &str, frame: &DataFrame) -> Result<Series, ExprError> {
     frame.eval(expr)
 }
 // outcome_to_action is gated behind the `asupersync` feature in fp-runtime.
+#[cfg(feature = "tracing")]
+pub use fp_runtime::EvidenceLedgerSubscriber;
 #[cfg(feature = "asupersync")]
 pub use fp_runtime::outcome_to_action;
 // ── Runtime policy ──────────────────────────────────────────────────────
 pub use fp_runtime::{
+    AaceEvent,
     CompatibilityIssue,
     // fd90.265: remaining fp-runtime types (advanced — not in prelude).
     ConformalGuard,
@@ -523,6 +549,8 @@ pub use fp_runtime::{
     RuntimePolicy,
     ScrubStatus,
     decision_to_card,
+    is_tracing_enabled,
+    with_aace_ledger,
 };
 pub use fp_types::{
     AsDType, CategoricalDType, CategoricalDtype, DType, IntervalDType, IntervalDtype, NA, NAT, NaT,
@@ -659,7 +687,10 @@ pub mod errors {
 /// let _ = JoinType::Inner;
 /// ```
 pub mod prelude {
+    #[cfg(feature = "tracing")]
+    pub use crate::EvidenceLedgerSubscriber;
     pub use crate::{
+        AaceEvent,
         // fd90.15: AggFunc + GroupByOptions / GroupByExecutionOptions
         // pair with DataFrameGroupBy (in prelude). README documents the
         // groupby aggregation surface extensively (line 1052+).
@@ -945,6 +976,7 @@ pub mod prelude {
         interval_range,
         interval_range_by_periods,
         interval_range_by_step,
+        is_tracing_enabled,
         isna,
         isnull,
         join_series,
@@ -1112,6 +1144,7 @@ pub mod prelude {
         value_counts,
         value_counts_with_options,
         wide_to_long,
+        with_aace_ledger,
         // IO — writers (in-memory + path + sql; covers all 8 documented formats)
         write_csv,
         write_csv_string,
@@ -2087,5 +2120,393 @@ mod tests {
         assert_eq!(ii.len(), 2);
         assert_eq!(ii.closed(), IntervalClosed::Right);
         assert_eq!(ii.get_loc(5.0).unwrap(), 0);
+    }
+
+    #[cfg(not(feature = "tracing"))]
+    #[test]
+    fn tracing_off_zero_cost_negative_contract_rp3un() {
+        assert!(!is_tracing_enabled());
+
+        let s1 = Series::from_values(
+            "a",
+            vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+            vec![Scalar::Int64(10), Scalar::Int64(20)],
+        )
+        .expect("s1");
+        let s2 = Series::from_values(
+            "a",
+            vec![IndexLabel::Int64(1), IndexLabel::Int64(2)],
+            vec![Scalar::Int64(100), Scalar::Int64(200)],
+        )
+        .expect("s2");
+
+        let (sum, ledger) = with_aace_ledger(|| (&s1 + &s2).expect("misaligned add"));
+        assert_eq!(sum.len(), 3);
+        assert_eq!(sum.dtype(), DType::Float64);
+        assert!(sum.values()[0].is_missing());
+        assert_eq!(sum.values()[1], Scalar::Float64(120.0));
+        assert!(sum.values()[2].is_missing());
+        assert!(
+            ledger.aace_events().is_empty(),
+            "expected no AACE events when tracing feature is off, got: {:?}",
+            ledger.aace_events()
+        );
+        assert!(
+            ledger.recorded_spans().is_empty(),
+            "expected no recorded spans when tracing feature is off, got: {:?}",
+            ledger.recorded_spans()
+        );
+    }
+
+    #[cfg(feature = "tracing")]
+    mod tracing_integration {
+        use std::{
+            collections::BTreeMap,
+            sync::{Arc, Mutex, PoisonError},
+        };
+
+        use tracing::{
+            Event, Level, Subscriber,
+            field::{Field, Visit},
+            span::{Attributes, Id, Record},
+        };
+        use tracing_subscriber::{
+            layer::{Context, Layer, SubscriberExt},
+            registry::LookupSpan,
+        };
+
+        use crate::prelude::*;
+
+        #[derive(Debug, Clone, Default)]
+        struct CapturedSpan {
+            name: String,
+            target: String,
+            fields: BTreeMap<String, String>,
+        }
+
+        #[derive(Debug, Clone)]
+        struct CapturedEvent {
+            target: String,
+            level: Level,
+            fields: BTreeMap<String, String>,
+        }
+
+        struct FieldMapVisitor<'a>(&'a mut BTreeMap<String, String>);
+
+        impl Visit for FieldMapVisitor<'_> {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                self.0
+                    .insert(field.name().to_string(), format!("{value:?}"));
+            }
+
+            fn record_str(&mut self, field: &Field, value: &str) {
+                self.0.insert(field.name().to_string(), value.to_string());
+            }
+
+            fn record_bool(&mut self, field: &Field, value: bool) {
+                self.0.insert(field.name().to_string(), value.to_string());
+            }
+
+            fn record_u64(&mut self, field: &Field, value: u64) {
+                self.0.insert(field.name().to_string(), value.to_string());
+            }
+
+            fn record_i64(&mut self, field: &Field, value: i64) {
+                self.0.insert(field.name().to_string(), value.to_string());
+            }
+        }
+
+        #[derive(Clone, Default)]
+        struct CaptureLayer {
+            spans: Arc<Mutex<BTreeMap<u64, CapturedSpan>>>,
+            events: Arc<Mutex<Vec<CapturedEvent>>>,
+        }
+
+        impl<S> Layer<S> for CaptureLayer
+        where
+            S: Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, _ctx: Context<'_, S>) {
+                let mut fields = BTreeMap::new();
+                attrs.record(&mut FieldMapVisitor(&mut fields));
+                let mut spans = self.spans.lock().unwrap_or_else(PoisonError::into_inner);
+                spans.insert(
+                    id.into_u64(),
+                    CapturedSpan {
+                        name: attrs.metadata().name().to_string(),
+                        target: attrs.metadata().target().to_string(),
+                        fields,
+                    },
+                );
+            }
+
+            fn on_record(&self, id: &Id, values: &Record<'_>, _ctx: Context<'_, S>) {
+                let mut spans = self.spans.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some(span) = spans.get_mut(&id.into_u64()) {
+                    values.record(&mut FieldMapVisitor(&mut span.fields));
+                }
+            }
+
+            fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
+                let mut fields = BTreeMap::new();
+                event.record(&mut FieldMapVisitor(&mut fields));
+                let mut events = self.events.lock().unwrap_or_else(PoisonError::into_inner);
+                events.push(CapturedEvent {
+                    target: event.metadata().target().to_string(),
+                    level: *event.metadata().level(),
+                    fields,
+                });
+            }
+        }
+
+        #[test]
+        fn aace_ledger_subscriber_records_misaligned_binop_events_rp3un() {
+            assert!(is_tracing_enabled());
+
+            // 1. Misaligned Int64 + Int64 Series addition: outer union has gaps so Int64
+            //    promotes to Float64 and emits AlignmentPlanned + PolicyDecided +
+            //    DtypeCoerced + Materialized into EvidenceLedger via EvidenceLedgerSubscriber.
+            let s1 = Series::from_values(
+                "a",
+                vec![IndexLabel::Int64(0), IndexLabel::Int64(1)],
+                vec![Scalar::Int64(10), Scalar::Int64(20)],
+            )
+            .expect("s1");
+            let s2 = Series::from_values(
+                "a",
+                vec![IndexLabel::Int64(1), IndexLabel::Int64(2)],
+                vec![Scalar::Int64(100), Scalar::Int64(200)],
+            )
+            .expect("s2");
+
+            let (sum, ledger) = with_aace_ledger(|| (&s1 + &s2).expect("misaligned add"));
+            assert_eq!(sum.len(), 3);
+            assert_eq!(sum.dtype(), DType::Float64);
+            assert!(sum.values()[0].is_missing());
+            assert_eq!(sum.values()[1], Scalar::Float64(120.0));
+            assert!(sum.values()[2].is_missing());
+
+            assert_eq!(
+                ledger.aace_events(),
+                &[
+                    AaceEvent::AlignmentPlanned {
+                        operation: "series.add".to_owned(),
+                        plan_kind: "int64_unit_range_outer".to_owned(),
+                        union_len: 3,
+                        left_hits: 2,
+                        right_hits: 2,
+                    },
+                    AaceEvent::PolicyDecided {
+                        mode: RuntimeMode::Strict,
+                        issue_kind: IssueKind::JoinCardinality,
+                        subject: "join_admission".to_owned(),
+                        action: DecisionAction::Allow,
+                    },
+                    AaceEvent::DtypeCoerced {
+                        operation: "series.add".to_owned(),
+                        left_dtype: "int64".to_owned(),
+                        right_dtype: "int64".to_owned(),
+                        output_dtype: "float64".to_owned(),
+                    },
+                    AaceEvent::Materialized {
+                        operation: "series.add".to_owned(),
+                        rows: 3,
+                        cols: 1,
+                    },
+                ]
+            );
+
+            // 2. Misaligned mixed-dtype (Int64 + Float64) on non-unit-range index (duplicate_aware / sorted_unique_outer)
+            let s_left = Series::from_values(
+                "v",
+                vec![IndexLabel::Utf8("x".into()), IndexLabel::Utf8("y".into())],
+                vec![Scalar::Int64(5), Scalar::Int64(15)],
+            )
+            .expect("s_left");
+            let s_right = Series::from_values(
+                "v",
+                vec![IndexLabel::Utf8("y".into()), IndexLabel::Utf8("z".into())],
+                vec![Scalar::Float64(2.5), Scalar::Float64(7.5)],
+            )
+            .expect("s_right");
+
+            let (mixed_sum, mixed_ledger) =
+                with_aace_ledger(|| (&s_left + &s_right).expect("mixed misaligned add"));
+            assert_eq!(mixed_sum.len(), 3);
+            assert_eq!(mixed_sum.dtype(), DType::Float64);
+            assert!(
+                mixed_ledger
+                    .aace_events()
+                    .contains(&AaceEvent::AlignmentPlanned {
+                        operation: "series.add".to_owned(),
+                        plan_kind: "sorted_unique_outer".to_owned(),
+                        union_len: 3,
+                        left_hits: 2,
+                        right_hits: 2,
+                    })
+            );
+            assert!(
+                mixed_ledger
+                    .aace_events()
+                    .contains(&AaceEvent::DtypeCoerced {
+                        operation: "series.add".to_owned(),
+                        left_dtype: "int64".to_owned(),
+                        right_dtype: "float64".to_owned(),
+                        output_dtype: "float64".to_owned(),
+                    })
+            );
+            assert!(
+                mixed_ledger
+                    .aace_events()
+                    .contains(&AaceEvent::Materialized {
+                        operation: "series.add".to_owned(),
+                        rows: 3,
+                        cols: 1,
+                    })
+            );
+
+            // 3. DataFrame misaligned addition emits dataframe.add AlignmentPlanned and Materialized
+            let df1 = DataFrame::from_series(vec![s1]).expect("df1");
+            let df2 = DataFrame::from_series(vec![s2]).expect("df2");
+            let (df_sum, df_ledger) =
+                with_aace_ledger(|| (&df1 + &df2).expect("df misaligned add"));
+            assert_eq!(df_sum.index().len(), 3);
+            assert!(
+                df_ledger
+                    .aace_events()
+                    .contains(&AaceEvent::AlignmentPlanned {
+                        operation: "dataframe.add".to_owned(),
+                        plan_kind: "sorted_unique_outer".to_owned(),
+                        union_len: 3,
+                        left_hits: 2,
+                        right_hits: 2,
+                    })
+            );
+            assert!(df_ledger.aace_events().contains(&AaceEvent::Materialized {
+                operation: "dataframe.add".to_owned(),
+                rows: 3,
+                cols: 1,
+            }));
+        }
+
+        #[test]
+        fn tracing_spans_captured_across_groupby_rolling_resample_and_io_rp3un() {
+            let (_, span_ledger) = with_aace_ledger(|| {
+                let df = read_csv_str(
+                    "city,val,ts\nNYC,10,2024-01-01 00:00:00\nLA,20,2024-01-01 00:30:00\nNYC,30,2024-01-01 01:00:00",
+                )
+                .expect("read_csv_str");
+
+                let _json_df =
+                    read_json_str(r#"[{"a":1,"b":2},{"a":3,"b":4}]"#).expect("read_json_str");
+
+                let _grouped = df
+                    .groupby(&["city"])
+                    .expect("groupby")
+                    .sum()
+                    .expect("groupby sum");
+
+                let num_df = read_csv_str("x,y\n1.0,2.0\n3.0,4.0\n5.0,6.0").expect("num_df");
+                let _rolled_df = num_df.rolling(2).expect("df rolling").sum().expect("sum");
+                let s = num_df.column("x").expect("col x").clone();
+                let _rolled_s = s.rolling(2).expect("series rolling").mean().expect("mean");
+
+                let ts_index = Index::new(vec![
+                    IndexLabel::Utf8("2024-01-01 00:00:00".into()),
+                    IndexLabel::Utf8("2024-01-01 00:30:00".into()),
+                    IndexLabel::Utf8("2024-01-01 01:00:00".into()),
+                ]);
+                let ts_s = Series::new(
+                    "val",
+                    ts_index,
+                    Column::from_values(vec![
+                        Scalar::Float64(10.0),
+                        Scalar::Float64(20.0),
+                        Scalar::Float64(30.0),
+                    ])
+                    .expect("col"),
+                )
+                .expect("ts_s");
+                let ts_df = DataFrame::from_series(vec![ts_s.clone()]).expect("ts_df");
+                let _res_s = ts_s.resample("1h").expect("s resample").sum().expect("sum");
+                let _res_df = ts_df
+                    .resample("1h")
+                    .expect("df resample")
+                    .sum()
+                    .expect("sum");
+            });
+
+            for expected_span in [
+                "io(read_csv_str)",
+                "io(read_json_str)",
+                "groupby",
+                "rolling",
+                "resample",
+            ] {
+                assert!(
+                    span_ledger
+                        .recorded_spans()
+                        .iter()
+                        .any(|s| s == expected_span),
+                    "expected span `{expected_span}` in EvidenceLedger::recorded_spans(), got: {:?}",
+                    span_ledger.recorded_spans()
+                );
+            }
+
+            let layer = CaptureLayer::default();
+            let subscriber = tracing_subscriber::registry().with(layer.clone());
+            tracing::subscriber::with_default(subscriber, || {
+                let df = read_csv_str("city,val\nNYC,10\nLA,20").expect("read_csv_str");
+                let _json = read_json_str(r#"[{"city":"NYC","val":10}]"#).expect("read_json_str");
+                let _g = df.groupby(&["city"]).expect("groupby").sum().expect("sum");
+                let _r = df.rolling(2).expect("rolling").sum().expect("sum");
+            });
+
+            let spans: Vec<CapturedSpan> = layer
+                .spans
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .values()
+                .cloned()
+                .collect();
+            assert!(
+                spans.iter().any(|s| {
+                    s.target == "frankenpandas::span"
+                        && s.name == "io"
+                        && s.fields.get("op").map(String::as_str) == Some("read_csv_str")
+                }),
+                "expected io(read_csv_str) span, got: {spans:?}"
+            );
+            assert!(
+                spans.iter().any(|s| {
+                    s.target == "frankenpandas::span"
+                        && s.name == "io"
+                        && s.fields.get("op").map(String::as_str) == Some("read_json_str")
+                }),
+                "expected io(read_json_str) span, got: {spans:?}"
+            );
+            assert!(
+                spans
+                    .iter()
+                    .any(|s| s.target == "frankenpandas::span" && s.name == "groupby"),
+                "expected groupby span, got: {spans:?}"
+            );
+            assert!(
+                spans
+                    .iter()
+                    .any(|s| s.target == "frankenpandas::span" && s.name == "rolling"),
+                "expected rolling span, got: {spans:?}"
+            );
+        }
+
+        #[test]
+        fn tracing_noop_subscriber_executes_cleanly() {
+            let noop = tracing::subscriber::NoSubscriber::default();
+            tracing::subscriber::with_default(noop, || {
+                let df = read_csv_str("k,v\na,1\nb,2\na,3").expect("read_csv_str");
+                let grouped = df.groupby(&["k"]).expect("groupby").sum().expect("sum");
+                assert_eq!(grouped.index().len(), 2);
+            });
+        }
     }
 }

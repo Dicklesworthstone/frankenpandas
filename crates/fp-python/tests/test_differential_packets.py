@@ -41966,14 +41966,45 @@ def test_stack_drops_missing_like_pandas_iq5l6(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+def _33b80_unsorted(m: Any) -> Any:
+    return m.DataFrame({"b": [1.0, 2.0, 5.0], "a": [3.0, 4.0, 6.0], "c": [7.0, 8.0, 9.0]}, index=["q", "p", "r"])
+
+
 _33B80_CASES = {
     "levels and codes after a drop": lambda m: _iq5l6_frame(m).stack(),
     "unsorted round trip": lambda m: m.DataFrame({"b": [1.0, 2.0], "a": [3.0, 4.0]}, index=["q", "p"]).stack(),
+    "filtered": lambda m: (lambda s: s[s > 3])(_33b80_unsorted(m).stack()),
+    "reversed rows": lambda m: _33b80_unsorted(m).stack().iloc[::-1],
+    "int columns": lambda m: m.DataFrame({3: [1.0, 2.0], 1: [3.0, 4.0]}, index=[20, 10]).stack(),
+}
+
+
+def _33b80_levels(index: Any) -> Any:
+    return [[repr(v) for v in level] for level in index.levels], [[int(c) for c in codes] for codes in index.codes]
+
+
+_33B80_MORE_CASES = {
+    "swaplevel keeps": lambda m: _33b80_levels(_33b80_unsorted(m).stack().swaplevel().index),
+    "unstack(0)": lambda m: (lambda u: ([repr(v) for v in u.index], [repr(v) for v in u.columns]))(_33b80_unsorted(m).stack().unstack(0)),
+    "frame stack levels": lambda m: _33b80_levels(m.DataFrame({"y": [1, 2], "x": [3, 4]}, index=["b", "a"]).stack().index),
+    # NEGATIVE: sort_index sorts the levels; from_arrays and a groupby's
+    # keys keep sorted levels.
+    "sort_index sorts (NEGATIVE)": lambda m: _33b80_levels(_33b80_unsorted(m).stack().sort_index().index),
+    "sort_index values (NEGATIVE)": lambda m: [repr(v) for v in _33b80_unsorted(m).stack().sort_index().index],
+    "from_arrays sorted (NEGATIVE)": lambda m: _33b80_levels(m.MultiIndex.from_arrays([["q", "p", "q"], ["b", "a", "a"]])),
+    "groupby keys sorted (NEGATIVE)": lambda m: _33b80_levels(m.DataFrame({"k": ["q", "p"], "j": ["b", "a"], "v": [1, 2]}).groupby(["k", "j"])["v"].sum().index),
 }
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.xfail(strict=True, reason="br-frankenpandas-33b80: MultiIndex levels are the sorted labels present")
+@pytest.mark.parametrize("case", list(_33B80_MORE_CASES))
+def test_stack_level_order_through_ops_33b80(case: str) -> None:
+    # A stack's frame-order levels survive filters, swaplevel and unstack as
+    # pandas' do; sort_index sorts them (br-frankenpandas-33b80).
+    _more9_check(_33B80_MORE_CASES, case)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 @pytest.mark.parametrize("case", list(_33B80_CASES))
 def test_stack_levels_are_the_frame_order_33b80(case: str) -> None:
     # pandas' stack factorizes the index and columns unsorted and keeps the
@@ -45408,7 +45439,22 @@ _SRWMV_CASES = {
     "Index ints map dict all": lambda m: m.Index(_SRWMV_K).map({k: f"v{k}" for k in range(50)}),
     "named Index map": lambda m: m.Index(_SRWMV_K, name="n").map({1: 1.5}),
     "RangeIndex map dict": lambda m: m.RangeIndex(0, 40, 2).map({0: "a", 4: "b"}),
-    "rolling skew": lambda m: _srwmv_rounded(m.Series(_SRWMV_V).rolling(20).skew()),
+    "Index ints map dict ints all": lambda m: m.Index(_SRWMV_K).map({k: k - 25 for k in range(50)}),
+    "Index ints map dict ints and floats": lambda m: m.Index(_SRWMV_K).map({k: (k if k % 2 else k / 4) for k in range(50)}),
+    "Index ints map dict floats with miss": lambda m: m.Index(_SRWMV_K, name="f").map({k: k / 4 for k in range(0, 50, 2)}),
+    "Index ints map empty dict": lambda m: m.Index(_SRWMV_K).map({}),
+    "Index ints map dict negative zero": lambda m: m.Index(_SRWMV_K[:30]).map({0: -0.0, 1: 1, 2: float("nan")}),
+    "text Index map ints with miss": lambda m: m.Index(np.array(list("abcab") * 10, dtype=object)).map({"a": 1, "b": 2}),
+    "empty int Index map": lambda m: m.Index(np.array([], dtype=np.int64)).map({1: 2.5}),
+    "empty named float Index map": lambda m: m.Index(np.array([], dtype=np.float64), name="e").map({1.0: "x"}),
+    "empty text Index map callable": lambda m: m.Index(np.array([], dtype=object)).map(str.upper),
+    # NEGATIVE: bools (an int subclass), numpy scalars and an int beside
+    # text are not the exact int / float values gathered as numbers.
+    "Index ints map dict bools (NEGATIVE)": lambda m: m.Index(_SRWMV_K).map({k: k % 2 == 0 for k in range(50)}),
+    "Index ints map dict bools with miss (NEGATIVE)": lambda m: m.Index(_SRWMV_K[:40]).map({k: k % 2 == 0 for k in range(25)}),
+    "Index ints map dict numpy ints (NEGATIVE)": lambda m: m.Index(_SRWMV_K).map({k: np.int64(k * 3) for k in range(50)}),
+    "Index ints map dict int beside text (NEGATIVE)": lambda m: m.Index(_SRWMV_K[:40]).map({0: 1, 1: "a"}),
+    "rolling skew":lambda m: _srwmv_rounded(m.Series(_SRWMV_V).rolling(20).skew()),
     "rolling skew min_periods": lambda m: _srwmv_rounded(m.Series(np.arange(60.0) % 7).rolling(10, min_periods=3).skew()),
     "rolling skew constant": lambda m: _srwmv_rounded(m.Series(np.full(30, 2.0)).rolling(5).skew()),
     "cumsum axis=1 NaN": lambda m: _srwmv_gapped(m).cumsum(axis=1),
@@ -45430,7 +45476,6 @@ _SRWMV_CASES = {
 
 
 _SRWMV_XFAILS = {
-    "gb mixed object first (NEGATIVE)": "br-frankenpandas-4dt7f: the picked object cells are re-inferred (1 comes back 1.0)",
     "rename onto another's text (NEGATIVE)": "br-frankenpandas-e672h: a 0 vs '0' column pair is refused (pandas keeps both)",
 }
 
@@ -45442,3 +45487,211 @@ def test_census_more16_losses_like_pandas_srwmv(case: str) -> None:
     # text column's group first / last gathered as text, an int index's map
     # by its ints, rolling skew's s2^1.5 as s2 * sqrt(s2).
     _more9_check(_SRWMV_CASES, case)
+
+
+def _4dt7f_frame(m: Any, cells: list, groups: list) -> Any:
+    return m.DataFrame({"g": groups, "w": cells})
+
+
+def _4dt7f_shown(out: Any) -> Any:
+    return ([type(v).__name__ for v in out.tolist()], _more7_shown(out))
+
+
+_4DT7F_CASES = {
+    "first int beside float": lambda m: _4dt7f_shown(_4dt7f_frame(m, [1, "x", 2.5], ["a", "a", "b"]).groupby("g")["w"].first()),
+    "last str beside float": lambda m: _4dt7f_shown(_4dt7f_frame(m, [1, "x", 2.5], ["a", "a", "b"]).groupby("g")["w"].last()),
+    "first ints only": lambda m: _4dt7f_shown(_4dt7f_frame(m, [1, 2, "x"], ["a", "b", "b"]).groupby("g")["w"].first()),
+    "first float beside int": lambda m: _4dt7f_shown(_4dt7f_frame(m, [1.5, 2, "x"], ["a", "b", "b"]).groupby("g")["w"].first()),
+    "first None group": lambda m: _4dt7f_shown(_4dt7f_frame(m, [None, 2, "x"], ["a", "b", "b"]).groupby("g")["w"].first()),
+    "nth 0": lambda m: _4dt7f_shown(_4dt7f_frame(m, [1, "x", 2.5], ["a", "a", "b"]).groupby("g")["w"].nth(0)),
+    "frame first": lambda m: _4dt7f_frame(m, [1, "x", 2.5], ["a", "a", "b"]).groupby("g").first(),
+    # NEGATIVE: a text column and a float column keep their dtypes.
+    "text first (NEGATIVE)": lambda m: _4dt7f_shown(_4dt7f_frame(m, ["p", "q", "r"], ["a", "a", "b"]).groupby("g")["w"].first()),
+    "floats first (NEGATIVE)": lambda m: _4dt7f_shown(_4dt7f_frame(m, [1.5, np.nan, 2.0], ["a", "a", "b"]).groupby("g")["w"].first()),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_4DT7F_CASES))
+def test_groupby_first_of_objects_like_pandas_4dt7f(case: str) -> None:
+    # An object column's first / last cells keep their own types (1 beside
+    # 2.5 came back 1.0, re-inferred; br-frankenpandas-4dt7f).
+    _more9_check(_4DT7F_CASES, case)
+
+
+_AYKEX_INTS = (np.arange(240) * 37) % 1001 - 300
+_AYKEX_GAPS = np.where(np.arange(240) % 9 == 4, np.nan, _AYKEX_INTS)
+
+
+def _aykex_masked(m: Any) -> Any:
+    return m.Series(_AYKEX_GAPS).astype("Int64")
+
+
+def _aykex_whole(m: Any) -> Any:
+    return m.Series(_AYKEX_INTS % 7).astype("Int64")
+
+
+_AYKEX_CASES = {
+    "add int": lambda m: _aykex_masked(m) + 1,
+    "radd int": lambda m: 1 + _aykex_masked(m),
+    "sub int": lambda m: _aykex_masked(m) - 7,
+    "rsub int": lambda m: 7 - _aykex_masked(m),
+    "mul int": lambda m: _aykex_masked(m) * 3,
+    "rmul int": lambda m: 3 * _aykex_masked(m),
+    "floordiv int": lambda m: _aykex_masked(m) // 7,
+    "mod int": lambda m: _aykex_masked(m) % 7,
+    "floordiv negative": lambda m: _aykex_masked(m) // -3,
+    "mod negative": lambda m: _aykex_masked(m) % -3,
+    "floordiv zero": lambda m: _aykex_masked(m) // 0,
+    "mod zero": lambda m: _aykex_masked(m) % 0,
+    "rfloordiv over zeros": lambda m: 100 // _aykex_whole(m),
+    "rmod over zeros": lambda m: 100 % _aykex_whole(m),
+    "add wraps": lambda m: m.Series([2**62, None, -(2**62)], dtype="Int64") * 4,
+    "flex add": lambda m: _aykex_masked(m).add(5),
+    "named add": lambda m: _aykex_masked(m).rename("k") + 2,
+    "sub masked column": lambda m: _aykex_masked(m) - _aykex_whole(m),
+    "add int64 column": lambda m: _aykex_masked(m) + m.Series(_AYKEX_INTS),
+    "mul masked masked": lambda m: _aykex_masked(m) * _aykex_masked(m),
+    "floordiv column with zeros": lambda m: _aykex_masked(m) // _aykex_whole(m),
+    "mod column with zeros": lambda m: _aykex_masked(m) % _aykex_whole(m),
+    "gt int": lambda m: _aykex_masked(m) > 500,
+    "ge int": lambda m: _aykex_masked(m) >= 500,
+    "lt int": lambda m: _aykex_masked(m) < 3,
+    "le int": lambda m: _aykex_masked(m) <= 3,
+    "eq int": lambda m: _aykex_masked(m) == 34,
+    "ne int": lambda m: _aykex_masked(m) != 34,
+    "gt float": lambda m: _aykex_masked(m) > 2.5,
+    "eq float fractional": lambda m: _aykex_masked(m) == 2.5,
+    "ne float fractional": lambda m: _aykex_masked(m) != 2.5,
+    "le float integral": lambda m: _aykex_masked(m) <= 34.0,
+    "whole gt int": lambda m: _aykex_whole(m) > 3,
+    "gt NaN": lambda m: _aykex_masked(m) > np.nan,
+    "ne NaN": lambda m: _aykex_masked(m) != np.nan,
+    "fillna int": lambda m: _aykex_masked(m).fillna(0),
+    "fillna negative": lambda m: _aykex_masked(m).fillna(-5),
+    "fillna whole": lambda m: _aykex_whole(m).fillna(0),
+    "astype float64": lambda m: _aykex_masked(m).astype("float64"),
+    "astype float whole": lambda m: _aykex_whole(m).astype(float),
+    "abs": lambda m: _aykex_masked(m).abs(),
+    "abs of int64 min": lambda m: m.Series([-(2**63), None, -5], dtype="Int64").abs(),
+    "shift 1": lambda m: _aykex_masked(m).shift(1),
+    "shift -3": lambda m: _aykex_masked(m).shift(-3),
+    "shift past length": lambda m: _aykex_masked(m).shift(500),
+    "shift of add": lambda m: (_aykex_masked(m) + 1).shift(2),
+    "mean": lambda m: _aykex_masked(m).mean(),
+    "std": lambda m: round(_aykex_masked(m).std(), 9),
+    "min max": lambda m: (_aykex_masked(m).min(), _aykex_masked(m).max()),
+    "sum": lambda m: _aykex_masked(m).sum(),
+    "mean of add": lambda m: (_aykex_masked(m) * 3).mean(),
+    "mean all NA (NEGATIVE)": lambda m: m.Series([None, None], dtype="Int64").mean(),
+    "to_numpy float nan": lambda m: repr(_aykex_masked(m).to_numpy(dtype="float64", na_value=np.nan)),
+    "to_numpy int fill": lambda m: repr(_aykex_masked(m).to_numpy(dtype="int64", na_value=-1)),
+    "to_numpy object None": lambda m: repr(_aykex_masked(m)[:12].to_numpy(dtype=object, na_value=None)),
+    "to_numpy float32 zero": lambda m: repr(_aykex_masked(m).to_numpy(dtype="float32", na_value=0)),
+    "to_numpy of add": lambda m: repr((_aykex_masked(m) + 1).to_numpy(dtype="float64", na_value=np.nan)),
+    # Results feed on: a masked mask filters (NA is False), sums, negates.
+    "filter by masked compare": lambda m: _aykex_masked(m)[_aykex_masked(m) > 500],
+    "sum of masked compare": lambda m: (_aykex_masked(m) > 500).sum(),
+    "invert masked compare": lambda m: ~(_aykex_masked(m) > 500),
+    "fillna of masked compare": lambda m: (_aykex_masked(m) > 500).fillna(False),
+    "sum of add": lambda m: (_aykex_masked(m) + 1).sum(),
+    "isna of add": lambda m: (_aykex_masked(m) * 2).isna(),
+    "fillna of add": lambda m: (_aykex_masked(m) - 1).fillna(-1),
+    "astype of add": lambda m: (_aykex_masked(m) + 1).astype("float64"),
+    # A masked result holding a gap stays masked through the typed gathers.
+    "filter of add": lambda m: (_aykex_masked(m) + 1)[np.arange(240) % 3 == 0],
+    "take of add": lambda m: (_aykex_masked(m) + 1).iloc[[5, 4, 13, 0, 200]],
+    "reindex of add": lambda m: (_aykex_masked(m) + 1).reindex(range(-5, 250, 3)),
+    "sort of add": lambda m: (_aykex_masked(m) + 1).sort_values(),
+    "dropna of add": lambda m: (_aykex_masked(m) + 1).dropna(),
+    "value_counts of add": lambda m: (_aykex_masked(m) % 5).value_counts().sort_index(),
+    "filter of compare": lambda m: (_aykex_masked(m) > 500)[np.arange(240) % 3 == 0],
+    "take of compare": lambda m: (_aykex_masked(m) > 500).iloc[[5, 4, 13, 0, 200]],
+    "reindex of compare": lambda m: (_aykex_masked(m) > 500).reindex(range(-5, 250, 7)),
+    "frame column of add": lambda m: m.DataFrame({"a": _aykex_masked(m) + 1, "b": _aykex_masked(m) > 500}).iloc[::7],
+    # NEGATIVE: a narrower masked width, a bool, a float or a NaN operand,
+    # true division and ints past 2^53 keep their paths.
+    "UInt8 add (NEGATIVE)": lambda m: m.Series([1, None, 250], dtype="UInt8") + 1,
+    "Int32 mul (NEGATIVE)": lambda m: m.Series([1, None, -3], dtype="Int32") * 2,
+    "add bool (NEGATIVE)": lambda m: _aykex_masked(m) + True,
+    "add float (NEGATIVE)": lambda m: _aykex_masked(m) + 0.5,
+    "truediv (NEGATIVE)": lambda m: _aykex_masked(m) / 2,
+    "add NaN (NEGATIVE)": lambda m: _aykex_masked(m) + np.nan,
+    "eq past 2^53 (NEGATIVE)": lambda m: m.Series([2**53 + 1, None, 3], dtype="Int64") == float(2**53),
+    "pow (NEGATIVE)": lambda m: _aykex_whole(m) ** 2,
+    "all NA add (NEGATIVE)": lambda m: m.Series([None, None], dtype="Int64") + 1,
+}
+
+
+_AYKEX_XFAILS = {
+    "rfloordiv over zeros": "br-frankenpandas-znfox: pandas promotes a number // a masked 0 to Float64 inf",
+    "rmod over zeros": "br-frankenpandas-znfox: pandas promotes a number % a masked 0 to Float64 NaN",
+    "add NaN (NEGATIVE)": "br-frankenpandas-6f379: a masked Int64 + NaN is Float64 holding present NaNs in pandas",
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", _more9_params(_AYKEX_CASES, _AYKEX_XFAILS))
+def test_masked_int_ops_like_pandas_aykex(case: str) -> None:
+    # A masked Int64 column's arithmetic and comparison by a number or an
+    # int column, fillna and astype run over its data, its mask carried
+    # (each went a Scalar a row: si + 1 0.01x pandas; br-frankenpandas-aykex).
+    _more9_check(_AYKEX_CASES, case)
+
+
+_AYKEX_G = np.array([f"g{i:02d}" for i in range(30)], dtype=object)[(np.arange(300) * 7) % 30]
+_AYKEX_V = ((np.arange(300) * 7919) % 1009) / 7.0
+
+
+def _aykex_frame(m: Any) -> Any:
+    return m.DataFrame({"g": _AYKEX_G, "v": _AYKEX_V, "k": np.arange(300) % 13})
+
+
+def _aykex_custom(m: Any) -> Any:
+    cats = m.CategoricalDtype(["d", "c", "b", "a"])
+    return m.DataFrame({"g": ["b", "a", "d", "c"], "v": [1.0, 2.0, 3.0, 4.0]}).astype({"g": cats})
+
+
+_AYKEX_CENSUS_CASES = {
+    # A frame's cast to category holds codes, as the Series' cast does.
+    "frame cast eq": lambda m: _aykex_frame(m).astype({"g": "category"})["g"] == "g03",
+    "frame cast value_counts": lambda m: _aykex_frame(m).astype({"g": "category"})["g"].value_counts().sort_index(),
+    "frame cast codes": lambda m: _aykex_frame(m).astype({"g": "category"})["g"].cat.codes,
+    "frame cast isin": lambda m: _aykex_frame(m).astype({"g": "category"})["g"].isin(["g01", "g05"]),
+    "frame cast groupby": lambda m: _aykex_frame(m).astype({"g": "category"}).groupby("g", observed=True)["v"].sum(),
+    "frame cast astype str": lambda m: _aykex_frame(m).astype({"g": "category"})["g"].astype(str),
+    "frame cast all": lambda m: m.DataFrame({"a": ["x", "y", "x"], "b": ["p", "p", "q"]}).astype("category")["b"].cat.categories.tolist(),
+    "frame cast int column": lambda m: _aykex_frame(m).astype({"k": "category"})["k"].cat.categories.tolist(),
+    "frame cast keeps a category": lambda m: _aykex_custom(m).astype({"g": "category"})["g"].cat.categories.tolist(),
+    # A categorical key sorts by its codes.
+    "sort category": lambda m: _aykex_custom(m).sort_values("g"),
+    "sort category descending": lambda m: _aykex_custom(m).sort_values("g", ascending=False),
+    "sort category NaN last": lambda m: m.DataFrame({"g": m.Categorical(["b", None, "a", "c"]), "v": [1, 2, 3, 4]}).sort_values("g"),
+    "sort category NaN first": lambda m: m.DataFrame({"g": m.Categorical(["b", None, "a", "c"]), "v": [1, 2, 3, 4]}).sort_values("g", na_position="first"),
+    "sort category then v": lambda m: _aykex_frame(m).astype({"g": "category"}).sort_values(["g", "v"]),
+    "sort category desc then v": lambda m: _aykex_frame(m).astype({"g": "category"}).sort_values(["g", "v"], ascending=[False, True]),
+    "sort ordered category": lambda m: m.DataFrame({"g": m.Categorical(["lo", "hi", "mid"], categories=["lo", "mid", "hi"], ordered=True), "v": [1, 2, 3]}).sort_values("g"),
+    # A unique unsorted int index places its loc slice bounds by lookup.
+    "loc slice sorted frame": lambda m: _aykex_frame(m).sort_values("v").loc[17:203],
+    "loc slice reversed bounds": lambda m: _aykex_frame(m).sort_values("v").loc[203:17],
+    "loc slice open start": lambda m: _aykex_frame(m).sort_values("v").loc[:203],
+    "loc slice open stop": lambda m: _aykex_frame(m).sort_values("v").loc[17:],
+    "loc slice series": lambda m: _aykex_frame(m).sort_values("v")["v"].loc[17:203],
+    "loc slice missing label (NEGATIVE)": lambda m: _aykex_frame(m).sort_values("v").loc[17:999],
+    "loc slice decreasing (NEGATIVE)": lambda m: _aykex_frame(m).iloc[::-1].loc[250:200],
+    "loc slice float bound (NEGATIVE)": lambda m: _aykex_frame(m).sort_values("v").loc[17.5:203],
+    # A concat's float range is a window of its chunks.
+    "concat float iloc across": lambda m: m.concat([m.Series(_AYKEX_V[:100]), m.Series(_AYKEX_V[100:180]), m.Series(_AYKEX_V[180:])], ignore_index=True).iloc[90:200],
+    "concat float iloc within": lambda m: m.concat([m.Series(_AYKEX_V[:100]), m.Series(_AYKEX_V[100:])], ignore_index=True).iloc[120:150],
+    "concat frame iloc": lambda m: m.concat([_aykex_frame(m).iloc[:150], _aykex_frame(m).iloc[150:]], ignore_index=True).iloc[140:160],
+    "concat float iloc then sum": lambda m: m.concat([m.Series(_AYKEX_V[:100]), m.Series(_AYKEX_V[100:])], ignore_index=True).iloc[50:250].sum(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_AYKEX_CENSUS_CASES))
+def test_census_more17_losses_like_pandas_aykex(case: str) -> None:
+    # census_more17's losses answer as pandas (br-frankenpandas-aykex): a
+    # frame's category cast held as codes, a categorical sort by them, a
+    # label slice of an unsorted unique int index, a concat's float range.
+    _more9_check(_AYKEX_CENSUS_CASES, case)

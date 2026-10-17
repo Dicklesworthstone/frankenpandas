@@ -47,29 +47,33 @@ fn main() {
     let a_slices: Vec<&[f64]> = a_data.iter().map(|c| c.as_slice()).collect();
     let b_cols: Vec<&[f64]> = b_data.iter().map(|c| c.as_slice()).collect();
 
+    let isa = fp_dot_kernel::Avx2Fma::detect()
+        .expect("kernel_instr_probe requires an x86_64 CPU with AVX2+FMA");
+
     // Packed ONCE, outside the loop, so `prepacked` measures the microkernel
     // alone and `block` measures microkernel + packing. The difference between
     // the two modes is the packing cost.
-    let packed = fp_dot_kernel::pack_a_panel(&a_slices, dim);
+    let packed = fp_dot_kernel::pack_a_panel(isa, &a_slices, dim);
 
     let mut checksum = 0.0_f64;
     for _ in 0..reps {
         match mode {
             "block" => {
-                let out = fp_dot_kernel::materialize_float64_dot_block(&a_slices, &b_cols, dim);
+                let out =
+                    fp_dot_kernel::materialize_float64_dot_block(isa, &a_slices, &b_cols, dim);
                 checksum += black_box(&out)[0][0];
             }
             "axpy" => {
                 // The per-column kernel the blocked path replaces: one pass over
                 // the whole A panel per output column.
                 for b_col in &b_cols {
-                    let out = fp_dot_kernel::materialize_float64_dot(&a_slices, b_col, dim);
+                    let out = fp_dot_kernel::materialize_float64_dot(isa, &a_slices, b_col, dim);
                     checksum += black_box(&out)[0];
                 }
             }
             _ => {
                 let out = fp_dot_kernel::materialize_float64_dot_block_prepacked(
-                    &packed, &a_slices, &b_cols, dim,
+                    isa, &packed, &a_slices, &b_cols, dim,
                 );
                 checksum += black_box(&out)[0][0];
             }

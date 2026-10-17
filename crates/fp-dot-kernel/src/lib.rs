@@ -24,10 +24,10 @@
 //!
 //! ⚠️ CALLERS MUST GUARD. Nothing here is safe to enter on a pre-AVX2 CPU: the
 //! compiler is told the features exist, so it emits them unconditionally and the
-//! process takes SIGILL rather than a graceful error. The guard is
-//! `is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")` at the
-//! call site, in a BASELINE crate, with the original kernel as the else arm.
-//! That is discipline, not types — this crate cannot enforce it.
+//! process takes SIGILL rather than a graceful error. Every public entry point
+//! takes an [`Avx2Fma`] capability token, which has a private field and can ONLY
+//! be constructed via [`Avx2Fma::detect`] (which checks both `avx2` and `fma` at
+//! runtime on `x86`/`x86_64` and returns `None` elsewhere).
 
 #![forbid(unsafe_code)]
 
@@ -35,6 +35,60 @@ use std::simd::{
     Mask, Select, Simd,
     cmp::{SimdPartialEq, SimdPartialOrd},
 };
+
+/// Zero-sized capability token proving that the current CPU supports both
+/// `avx2` and `fma` instructions.
+///
+/// Every public function in `fp-dot-kernel` requires an `Avx2Fma` token by
+/// value because this crate is compiled unconditionally with
+/// `-Ctarget-feature=+avx2,+fma`. Passing the token is free at runtime (it is a
+/// zero-sized type and passes in zero registers), while making an unguarded
+/// call a compile error.
+///
+/// # Examples
+///
+/// Guarded call via [`Avx2Fma::detect`]:
+///
+/// ```
+/// if let Some(isa) = fp_dot_kernel::Avx2Fma::detect() {
+///     let out = fp_dot_kernel::mul_i64_by_number(isa, &[2, 3, 4], 5);
+///     assert_eq!(out, vec![10, 15, 20]);
+/// }
+/// ```
+///
+/// Attempting to construct `Avx2Fma` directly without calling `detect()` is
+/// rejected at compile time because its inner field is private:
+///
+/// ```compile_fail
+/// let forged = fp_dot_kernel::Avx2Fma(());
+/// ```
+///
+/// Attempting to call a kernel without the capability token is also rejected at
+/// compile time:
+///
+/// ```compile_fail
+/// let _ = fp_dot_kernel::mul_i64_by_number(&[1, 2, 3], 2);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Avx2Fma(());
+
+impl Avx2Fma {
+    /// Returns `Some(Avx2Fma)` if the host CPU supports both `avx2` and `fma`,
+    /// or `None` on non-x86 targets or CPUs lacking either feature.
+    #[inline]
+    #[must_use]
+    pub fn detect() -> Option<Self> {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            if std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("fma")
+            {
+                return Some(Self(()));
+            }
+        }
+        None
+    }
+}
 
 /// Materialize `out[row] = Σ_j a_slices[j][row] * b_col[j]` for `len` rows.
 ///
@@ -59,7 +113,12 @@ use std::simd::{
 /// disassembly. Do not add generics or relax the inline attribute here.
 #[inline(never)]
 #[must_use]
-pub fn materialize_float64_dot(a_slices: &[&[f64]], b_col: &[f64], len: usize) -> Vec<f64> {
+pub fn materialize_float64_dot(
+    _isa: Avx2Fma,
+    a_slices: &[&[f64]],
+    b_col: &[f64],
+    len: usize,
+) -> Vec<f64> {
     debug_assert_eq!(a_slices.len(), b_col.len());
     let mut out = vec![0.0_f64; len];
     for (column, &scale) in a_slices.iter().zip(b_col.iter()) {
@@ -178,12 +237,13 @@ fn micro_kernel_packed(
 #[inline(never)]
 #[must_use]
 pub fn materialize_float64_dot_block(
+    isa: Avx2Fma,
     a_slices: &[&[f64]],
     b_cols: &[&[f64]],
     len: usize,
 ) -> Vec<Vec<f64>> {
-    let packed = pack_a_panel(a_slices, len);
-    materialize_float64_dot_block_prepacked(&packed, a_slices, b_cols, len)
+    let packed = pack_a_panel(isa, a_slices, len);
+    materialize_float64_dot_block_prepacked(isa, &packed, a_slices, b_cols, len)
 }
 
 /// Pack the whole A panel into row-block-major order, ONCE, for reuse by every
@@ -198,7 +258,7 @@ pub fn materialize_float64_dot_block(
 /// immutable and shared, so it can be built once before the scope and read by
 /// every worker.
 #[must_use]
-pub fn pack_a_panel(a_slices: &[&[f64]], len: usize) -> Vec<f64> {
+pub fn pack_a_panel(_isa: Avx2Fma, a_slices: &[&[f64]], len: usize) -> Vec<f64> {
     let k = a_slices.len();
     let blocks = len / MR;
     let mut packed = vec![0.0_f64; blocks * k * MR];
@@ -224,6 +284,7 @@ pub fn pack_a_panel(a_slices: &[&[f64]], len: usize) -> Vec<f64> {
 #[inline(never)]
 #[must_use]
 pub fn materialize_float64_dot_block_prepacked(
+    isa: Avx2Fma,
     packed: &[f64],
     a_slices: &[&[f64]],
     b_cols: &[&[f64]],
@@ -241,7 +302,7 @@ pub fn materialize_float64_dot_block_prepacked(
     let packed = if packed.len() == blocks * k * MR {
         packed
     } else {
-        owned = pack_a_panel(a_slices, len);
+        owned = pack_a_panel(isa, a_slices, len);
         &owned
     };
 
@@ -305,13 +366,13 @@ pub fn materialize_float64_dot_block_prepacked(
 /// the CALLER's baseline crate and the `+avx2` flag is silently lost, leaving a
 /// green build with correct values and no speedup.
 ///
-/// ⚠️ CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`. This crate is
-/// compiled for AVX2 unconditionally; entering it on a pre-AVX2 CPU is SIGILL.
+/// ⚠️ CALLER MUST GUARD with [`Avx2Fma::detect`]. This crate is
+/// compiled for AVX2+FMA unconditionally; entering it on a pre-AVX2 CPU is SIGILL.
 ///
 /// # Panics
 /// Panics if `a`, `b` and `out` do not all have the same length.
 #[inline(never)]
-pub fn div_f64_into(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
+pub fn div_f64_into(_isa: Avx2Fma, a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
     assert_eq!(a.len(), b.len(), "div_f64_into: a/b length mismatch");
     assert_eq!(a.len(), out.len(), "div_f64_into: out length mismatch");
 
@@ -377,11 +438,10 @@ pub fn div_f64_into(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
 /// pandas 0.30; br-frankenpandas-rc0923-epic-zero-certified-losses-bss5q.3).
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`], so the `+avx2`
-/// codegen is this crate's; the CALLER MUST GUARD with
-/// `is_x86_feature_detected!("avx2")`.
+/// codegen is this crate's; the CALLER MUST GUARD with [`Avx2Fma::detect`].
 #[inline(never)]
 #[must_use]
-pub fn div_by_number_f64(a: &[f64], s: f64, number_first: bool) -> Vec<f64> {
+pub fn div_by_number_f64(_isa: Avx2Fma, a: &[f64], s: f64, number_first: bool) -> Vec<f64> {
     if number_first {
         a.iter().map(|&x| s / x).collect()
     } else {
@@ -407,7 +467,7 @@ fn int_as_float(k: i64) -> f64 {
 /// br-frankenpandas-uf0mw). The values the two-pass path computes.
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 macro_rules! float_int_collect {
     ($name:ident, $op:tt, $doc:literal) => {
         #[doc = $doc]
@@ -416,7 +476,7 @@ macro_rules! float_int_collect {
         /// Panics if `a` and `b` differ in length.
         #[inline(never)]
         #[must_use]
-        pub fn $name(a: &[f64], b: &[i64], int_first: bool) -> (Vec<f64>, bool) {
+        pub fn $name(_isa: Avx2Fma, a: &[f64], b: &[i64], int_first: bool) -> (Vec<f64>, bool) {
             assert_eq!(
                 a.len(),
                 b.len(),
@@ -454,13 +514,13 @@ macro_rules! float_int_collect {
 /// (k / k a million rows 0.99 ms, pandas 0.74; br-frankenpandas-uf0mw).
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 ///
 /// # Panics
 /// Panics if `a` and `b` differ in length.
 #[inline(never)]
 #[must_use]
-pub fn div_i64_i64_collect(a: &[i64], b: &[i64]) -> (Vec<f64>, bool) {
+pub fn div_i64_i64_collect(_isa: Avx2Fma, a: &[i64], b: &[i64]) -> (Vec<f64>, bool) {
     assert_eq!(a.len(), b.len(), "div_i64_i64_collect: a/b length mismatch");
     // A count, not a bool: see `made_nan_f64_arc`.
     let mut nans = 0_u64;
@@ -483,7 +543,7 @@ pub fn div_i64_i64_collect(a: &[i64], b: &[i64]) -> (Vec<f64>, bool) {
 /// scalar ones: NaN compares false, true under !=.
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 macro_rules! compare_float_int_kernel {
     ($name:ident, $op:tt) => {
         #[doc = concat!(
@@ -495,7 +555,7 @@ macro_rules! compare_float_int_kernel {
         /// Panics if `a` and `b` differ in length.
         #[inline(never)]
         #[must_use]
-        pub fn $name(a: &[f64], b: &[i64]) -> Vec<bool> {
+        pub fn $name(_isa: Avx2Fma, a: &[f64], b: &[i64]) -> Vec<bool> {
             assert_eq!(
                 a.len(),
                 b.len(),
@@ -521,13 +581,13 @@ compare_float_int_kernel!(ne_f64_i64_collect, !=);
 /// values are the baseline loop's.
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 ///
 /// # Panics
 /// Panics if `a` and `b` differ in length.
 #[inline(never)]
 #[must_use]
-pub fn mul_i64_collect(a: &[i64], b: &[i64]) -> Vec<i64> {
+pub fn mul_i64_collect(_isa: Avx2Fma, a: &[i64], b: &[i64]) -> Vec<i64> {
     assert_eq!(a.len(), b.len(), "mul_i64_collect: a/b length mismatch");
     a.iter().zip(b).map(|(&x, &y)| x.wrapping_mul(y)).collect()
 }
@@ -539,10 +599,10 @@ pub fn mul_i64_collect(a: &[i64], b: &[i64]) -> Vec<i64> {
 /// multiplication is exact, so the products are the baseline loop's.
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 #[inline(never)]
 #[must_use]
-pub fn mul_i64_by_number(a: &[i64], s: i64) -> Vec<i64> {
+pub fn mul_i64_by_number(_isa: Avx2Fma, a: &[i64], s: i64) -> Vec<i64> {
     a.iter().map(|&x| x.wrapping_mul(s)).collect()
 }
 
@@ -580,10 +640,10 @@ fn small_float_as_int(x: f64) -> i64 {
 /// magnitude.
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")` and `("fma")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 #[inline(never)]
 #[must_use]
-pub fn floor_div_by_number_i64(a: &[i64], s: i64, modulo: bool) -> Option<Vec<i64>> {
+pub fn floor_div_by_number_i64(_isa: Avx2Fma, a: &[i64], s: i64, modulo: bool) -> Option<Vec<i64>> {
     const LIMIT: u64 = 1 << 51;
     if s == 0 || s.unsigned_abs() >= LIMIT || a.first().is_some_and(|k| k.unsigned_abs() >= LIMIT) {
         return None;
@@ -637,11 +697,11 @@ pub fn floor_div_by_number_i64(a: &[i64], s: i64, modulo: bool) -> Option<Vec<i6
 /// `v.wrapping_mul(v)`.
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 #[inline(never)]
 #[must_use]
 #[allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)] // bit patterns
-pub fn square_i64_collect(a: &[i64]) -> Vec<i64> {
+pub fn square_i64_collect(_isa: Avx2Fma, a: &[i64]) -> Vec<i64> {
     a.iter()
         .map(|&v| {
             let bits = v as u64;
@@ -665,10 +725,15 @@ pub fn square_i64_collect(a: &[i64]) -> Vec<i64> {
 /// more in magnitude.
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 #[inline(never)]
 #[must_use]
-pub fn floor_div_wide_by_number_i64(a: &[i64], s: i64, modulo: bool) -> Option<Vec<i64>> {
+pub fn floor_div_wide_by_number_i64(
+    _isa: Avx2Fma,
+    a: &[i64],
+    s: i64,
+    modulo: bool,
+) -> Option<Vec<i64>> {
     const LIMIT: f64 = 2_251_799_813_685_248.0; // 2^51
     if !(1..1 << 53).contains(&s) {
         return None;
@@ -716,10 +781,10 @@ pub fn floor_div_wide_by_number_i64(a: &[i64], s: i64, modulo: bool) -> Option<V
 /// `None` when any value is NaN, infinite, or 2^51 or more in magnitude.
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 #[inline(never)]
 #[must_use]
-pub fn float_as_int_collect(a: &[f64], mask: i64, sign: i64) -> Option<Vec<i64>> {
+pub fn float_as_int_collect(_isa: Avx2Fma, a: &[f64], mask: i64, sign: i64) -> Option<Vec<i64>> {
     const LIMIT: f64 = 2_251_799_813_685_248.0; // 2^51
     // A count, not a bool: see `made_nan_f64_arc`.
     let mut outside = 0_u64;
@@ -742,10 +807,10 @@ pub fn float_as_int_collect(a: &[f64], mask: i64, sign: i64) -> Option<Vec<i64>>
 /// number gained nothing so: memory-bound already.)
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 #[inline(never)]
 #[must_use]
-pub fn div_i64_number_collect(a: &[i64], s: f64, number_first: bool) -> Vec<f64> {
+pub fn div_i64_number_collect(_isa: Avx2Fma, a: &[i64], s: f64, number_first: bool) -> Vec<f64> {
     if number_first {
         a.iter().map(|&k| s / int_as_float(k)).collect()
     } else {
@@ -766,10 +831,15 @@ float_int_collect!(div_f64_i64_collect, /, "A float column over an int one.");
 /// quotients: this crate's codegen divides four lanes at a time.
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 #[inline(never)]
 #[must_use]
-pub fn div_by_number_f64_arc(a: &[f64], s: f64, number_first: bool) -> std::sync::Arc<[f64]> {
+pub fn div_by_number_f64_arc(
+    _isa: Avx2Fma,
+    a: &[f64],
+    s: f64,
+    number_first: bool,
+) -> std::sync::Arc<[f64]> {
     if number_first {
         a.iter().map(|&x| s / x).collect()
     } else {
@@ -787,10 +857,15 @@ pub fn div_by_number_f64_arc(a: &[f64], s: f64, number_first: bool) -> std::sync
 /// br-frankenpandas-jy2f4).
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 #[inline(never)]
 #[must_use]
-pub fn cov_cross_sums_f64(columns: &[&[f64]], means: &[f64], len: usize) -> Vec<f64> {
+pub fn cov_cross_sums_f64(
+    _isa: Avx2Fma,
+    columns: &[&[f64]],
+    means: &[f64],
+    len: usize,
+) -> Vec<f64> {
     let k = columns.len();
     let mut cross = vec![0.0_f64; k * (k + 1) / 2];
     let mut centered = vec![0.0_f64; k];
@@ -820,10 +895,10 @@ pub fn cov_cross_sums_f64(columns: &[&[f64]], means: &[f64], len: usize) -> Vec<
 /// to contract.
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 #[inline(never)]
 #[must_use]
-pub fn pct_change_f64(data: &[f64], periods: usize) -> Vec<f64> {
+pub fn pct_change_f64(_isa: Avx2Fma, data: &[f64], periods: usize) -> Vec<f64> {
     let lead = periods.min(data.len());
     std::iter::repeat_n(0.0, lead)
         .chain(
@@ -877,8 +952,8 @@ pub fn pct_change_f64(data: &[f64], periods: usize) -> Vec<f64> {
 /// green build with correct values and no speedup. That is why this is a macro
 /// over three concrete `pub fn`s rather than one function generic over the op.
 ///
-/// ⚠️ CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`. This crate is
-/// compiled for AVX2 unconditionally; entering it on a pre-AVX2 CPU is SIGILL.
+/// ⚠️ CALLER MUST GUARD with [`Avx2Fma::detect`]. This crate is
+/// compiled for AVX2+FMA unconditionally; entering it on a pre-AVX2 CPU is SIGILL.
 macro_rules! elementwise_f64_kernel {
     ($name:ident, $simd_op:expr, $scalar_op:expr, $doc:literal) => {
         #[doc = $doc]
@@ -890,7 +965,7 @@ macro_rules! elementwise_f64_kernel {
         /// # Panics
         /// Panics if `a`, `b` and `out` do not all have the same length.
         #[inline(never)]
-        pub fn $name(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
+        pub fn $name(_isa: Avx2Fma, a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
             assert_eq!(
                 a.len(),
                 b.len(),
@@ -959,8 +1034,7 @@ elementwise_f64_kernel!(
 /// four rows (0.48 -> 0.70 ms on nx - ny).
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`], so the `+avx2`
-/// codegen is this crate's; the CALLER MUST GUARD with
-/// `is_x86_feature_detected!("avx2")`.
+/// codegen is this crate's; the CALLER MUST GUARD with [`Avx2Fma::detect`].
 macro_rules! made_nan_f64_kernel {
     ($name:ident, $simd_op:expr, $scalar_op:expr, $doc:literal) => {
         #[doc = $doc]
@@ -971,7 +1045,7 @@ macro_rules! made_nan_f64_kernel {
         /// # Panics
         /// Panics if `a`, `b` and `out` do not all have the same length.
         #[inline(never)]
-        pub fn $name(a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
+        pub fn $name(_isa: Avx2Fma, a: &[f64], b: &[f64], out: &mut [f64]) -> bool {
             const LANES: usize = 4;
             assert_eq!(
                 a.len(),
@@ -1010,7 +1084,7 @@ macro_rules! made_nan_f64_kernel {
 /// then written into (br-frankenpandas-cmgnp).
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 macro_rules! made_nan_f64_arc {
     ($name:ident, $op:tt, $doc:literal) => {
         #[doc = $doc]
@@ -1019,7 +1093,7 @@ macro_rules! made_nan_f64_arc {
         /// Panics if `a` and `b` differ in length.
         #[inline(never)]
         #[must_use]
-        pub fn $name(a: &[f64], b: &[f64]) -> (std::sync::Arc<[f64]>, bool) {
+        pub fn $name(_isa: Avx2Fma, a: &[f64], b: &[f64]) -> (std::sync::Arc<[f64]>, bool) {
             assert_eq!(
                 a.len(),
                 b.len(),
@@ -1049,7 +1123,7 @@ macro_rules! made_nan_f64_arc {
 /// (x + y a million rows 0.23 ms, pandas 0.18; br-frankenpandas-uf0mw).
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 macro_rules! nan_witness_f64_collect {
     ($name:ident, $op:tt, $doc:literal) => {
         #[doc = $doc]
@@ -1058,7 +1132,7 @@ macro_rules! nan_witness_f64_collect {
         /// Panics if `a` and `b` differ in length.
         #[inline(never)]
         #[must_use]
-        pub fn $name(a: &[f64], b: &[f64]) -> (Vec<f64>, bool) {
+        pub fn $name(_isa: Avx2Fma, a: &[f64], b: &[f64]) -> (Vec<f64>, bool) {
             assert_eq!(
                 a.len(),
                 b.len(),
@@ -1165,11 +1239,11 @@ made_nan_f64_kernel!(
 /// baseline crate and the `+avx2` flag is silently lost — a green build with
 /// correct values and no speedup.
 ///
-/// ⚠️ CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`; this crate emits
-/// AVX2 unconditionally and entering it on a pre-AVX2 CPU is SIGILL.
+/// ⚠️ CALLER MUST GUARD with [`Avx2Fma::detect`]; this crate emits
+/// AVX2+FMA unconditionally and entering it on a pre-AVX2 CPU is SIGILL.
 #[inline(never)]
 #[must_use]
-pub fn sqrt_f64_collect(a: &[f64]) -> (Vec<f64>, bool, bool) {
+pub fn sqrt_f64_collect(_isa: Avx2Fma, a: &[f64]) -> (Vec<f64>, bool, bool) {
     // Counts, not bools: see `made_nan_f64_arc`.
     let mut out_of_domain = 0_u64;
     let mut non_finite = 0_u64;
@@ -1195,10 +1269,10 @@ pub fn sqrt_f64_collect(a: &[f64]) -> (Vec<f64>, bool, bool) {
 /// [`sqrt_f64_collect`].
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`sqrt_f64_collect`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 #[inline(never)]
 #[must_use]
-pub fn sqrt_f64_arc(a: &[f64]) -> std::sync::Arc<[f64]> {
+pub fn sqrt_f64_arc(_isa: Avx2Fma, a: &[f64]) -> std::sync::Arc<[f64]> {
     a.iter().map(|&x| x.sqrt()).collect()
 }
 
@@ -1231,10 +1305,10 @@ const WORD_LANE_BITS: [Simd<i64, 4>; 16] = {
 /// permuted it first (br-frankenpandas-qpbpa).
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`sqrt_f64_collect`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 #[inline(never)]
 #[must_use]
-pub fn nan_validity_words(a: &[f64]) -> (Vec<u64>, bool) {
+pub fn nan_validity_words(_isa: Avx2Fma, a: &[f64]) -> (Vec<u64>, bool) {
     use std::simd::num::SimdInt;
     const LANES: usize = 4;
     let zero = Simd::<f64, LANES>::splat(0.0);
@@ -1272,10 +1346,10 @@ pub fn nan_validity_words(a: &[f64]) -> (Vec<u64>, bool) {
 /// datetime column's frame build, 0.58x pandas; br-frankenpandas-qpbpa).
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`sqrt_f64_collect`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 #[inline(never)]
 #[must_use]
-pub fn i64_validity_words(a: &[i64], missing: i64) -> Vec<u64> {
+pub fn i64_validity_words(_isa: Avx2Fma, a: &[i64], missing: i64) -> Vec<u64> {
     use std::simd::num::SimdInt;
     const LANES: usize = 4;
     let sentinel = Simd::<i64, LANES>::splat(missing);
@@ -1330,8 +1404,8 @@ const MASK_BYTES: [[bool; 8]; 256] = {
 /// [`materialize_float64_dot`]: an inlinable entry point codegens in the
 /// caller's baseline crate and loses the `+avx2` flag.
 ///
-/// ⚠️ CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`; this crate
-/// emits AVX2 unconditionally and entering it on a pre-AVX2 CPU is SIGILL.
+/// ⚠️ CALLER MUST GUARD with [`Avx2Fma::detect`]; this crate
+/// emits AVX2+FMA unconditionally and entering it on a pre-AVX2 CPU is SIGILL.
 macro_rules! compare_scalar_kernel {
     ($name:ident, $elem:ty, $simd_cmp:ident, $op:tt) => {
         #[doc = concat!(
@@ -1342,7 +1416,7 @@ macro_rules! compare_scalar_kernel {
         /// # Panics
         /// Panics if `a` and `out` do not have the same length.
         #[inline(never)]
-        pub fn $name(a: &[$elem], s: $elem, out: &mut [bool]) {
+        pub fn $name(_isa: Avx2Fma, a: &[$elem], s: $elem, out: &mut [bool]) {
             assert_eq!(
                 a.len(),
                 out.len(),
@@ -1374,11 +1448,11 @@ macro_rules! compare_scalar_kernel {
 /// 0.41 (br-frankenpandas-e186m).
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 #[inline(never)]
 #[must_use]
 #[allow(clippy::cast_precision_loss)] // numpy's cast of each int
-pub fn numpy_cast_sum_i64(values: &[i64]) -> f64 {
+pub fn numpy_cast_sum_i64(_isa: Avx2Fma, values: &[i64]) -> f64 {
     const CAST_BUFFER: usize = 8192;
     let mut buffer = [0.0_f64; CAST_BUFFER];
     let mut total = 0.0;
@@ -1410,12 +1484,12 @@ pub fn numpy_cast_sum_i64(values: &[i64]) -> f64 {
 /// Series.std of a million ints 0.6 ms, pandas 0.43 (br-frankenpandas-e186m).
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")` and pass more values
+/// MUST GUARD with [`Avx2Fma::detect`] and pass more values
 /// than `ddof`.
 #[inline(never)]
 #[must_use]
 #[allow(clippy::cast_precision_loss)] // numpy's casts and counts
-pub fn numpy_var_i64(values: &[i64], ddof: usize) -> f64 {
+pub fn numpy_var_i64(_isa: Avx2Fma, values: &[i64], ddof: usize) -> f64 {
     let small = values.iter().fold(true, |small, &value| {
         small & (value.unsigned_abs() < 1 << 51)
     });
@@ -1505,19 +1579,19 @@ fn pairwise_sum(values: &[f64]) -> f64 {
 /// exact in any order, so the lanes answer as the serial fold does.
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 #[inline(never)]
 #[must_use]
-pub fn min_i64(values: &[i64]) -> Option<i64> {
+pub fn min_i64(_isa: Avx2Fma, values: &[i64]) -> Option<i64> {
     fold_i64_lanes(values, i64::MAX, i64::min)
 }
 
 /// The greatest of `values`; see [`min_i64`].
 ///
-/// ⚠️ The CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// ⚠️ The CALLER MUST GUARD with [`Avx2Fma::detect`].
 #[inline(never)]
 #[must_use]
-pub fn max_i64(values: &[i64]) -> Option<i64> {
+pub fn max_i64(_isa: Avx2Fma, values: &[i64]) -> Option<i64> {
     fold_i64_lanes(values, i64::MIN, i64::max)
 }
 
@@ -1539,7 +1613,7 @@ macro_rules! arg_extreme_kernel {
             "` of `values`; see `arg_extreme_kernel`."
         )]
         ///
-        /// ⚠️ The CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`
+        /// ⚠️ The CALLER MUST GUARD with [`Avx2Fma::detect`]
         /// (and pass a float buffer without NaN).
         #[inline(never)]
         #[must_use]
@@ -1548,7 +1622,7 @@ macro_rules! arg_extreme_kernel {
             clippy::cast_sign_loss,
             clippy::cast_possible_truncation
         )] // block numbers of a slice
-        pub fn $name(values: &[$elem]) -> Option<usize> {
+        pub fn $name(_isa: Avx2Fma, values: &[$elem]) -> Option<usize> {
             if values.is_empty() {
                 return None;
             }
@@ -1604,10 +1678,10 @@ arg_extreme_kernel!(argmax_f64, f64, f64::NEG_INFINITY, simd_gt, >);
 /// 0.09; br-frankenpandas-e186m). Wrapping addition is associative, so any
 /// order gives the serial fold's sum.
 ///
-/// ⚠️ The CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// ⚠️ The CALLER MUST GUARD with [`Avx2Fma::detect`].
 #[inline(never)]
 #[must_use]
-pub fn sum_i64(values: &[i64]) -> i64 {
+pub fn sum_i64(_isa: Avx2Fma, values: &[i64]) -> i64 {
     let (chunks, tail) = values.as_chunks::<16>();
     let mut lanes = [0_i64; 16];
     for chunk in chunks {
@@ -1664,7 +1738,7 @@ compare_scalar_kernel!(ne_i64_scalar_into, i64, simd_ne, !=);
 /// same bools - a comparison is exact; NaN compares false, true under !=.
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as [`div_f64_into`]; the CALLER
-/// MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// MUST GUARD with [`Avx2Fma::detect`].
 macro_rules! compare_scalar_arc_kernel {
     ($name:ident, $op:tt) => {
         #[doc = concat!(
@@ -1673,7 +1747,7 @@ macro_rules! compare_scalar_arc_kernel {
         )]
         #[inline(never)]
         #[must_use]
-        pub fn $name(a: &[f64], s: f64) -> std::sync::Arc<[bool]> {
+        pub fn $name(_isa: Avx2Fma, a: &[f64], s: f64) -> std::sync::Arc<[bool]> {
             a.iter().map(|&v| v $op s).collect()
         }
     };
@@ -1694,7 +1768,7 @@ compare_scalar_arc_kernel!(ne_f64_scalar_arc, !=);
 /// (true under !=); -0.0 == 0.0.
 ///
 /// ⚠️ `#[inline(never)]` and non-generic, as `compare_scalar_kernel`; the
-/// CALLER MUST GUARD with `is_x86_feature_detected!("avx2")`.
+/// CALLER MUST GUARD with [`Avx2Fma::detect`].
 macro_rules! compare_pairs_arc_kernel {
     ($name:ident, $op:tt) => {
         #[doc = concat!(
@@ -1706,7 +1780,7 @@ macro_rules! compare_pairs_arc_kernel {
         /// Panics if `a` and `b` differ in length.
         #[inline(never)]
         #[must_use]
-        pub fn $name(a: &[f64], b: &[f64]) -> std::sync::Arc<[bool]> {
+        pub fn $name(_isa: Avx2Fma, a: &[f64], b: &[f64]) -> std::sync::Arc<[bool]> {
             assert_eq!(
                 a.len(),
                 b.len(),
@@ -1728,9 +1802,13 @@ compare_pairs_arc_kernel!(ne_f64_pairs_arc, !=);
 mod compare_scalar_4h4mp {
     use super::*;
 
-    type Kernel<T> = fn(&[T], T, &mut [bool]);
+    type Kernel<T> = fn(Avx2Fma, &[T], T, &mut [bool]);
     /// A kernel and the scalar comparison it must reproduce.
     type Case<T> = (Kernel<T>, fn(T, T) -> bool);
+
+    fn isa() -> Avx2Fma {
+        Avx2Fma::detect().expect("fp-dot-kernel tests require AVX2+FMA")
+    }
 
     fn check<T: Copy + std::fmt::Debug>(
         kernel: Kernel<T>,
@@ -1738,12 +1816,13 @@ mod compare_scalar_4h4mp {
         values: &[T],
         s: T,
     ) {
+        let isa = isa();
         // Every length (each tail), from both fills, so no slot is left unwritten.
         for len in 0..=values.len() {
             let want: Vec<bool> = values[..len].iter().map(|&v| scalar(v, s)).collect();
             for fill in [false, true] {
                 let mut out = vec![fill; len];
-                kernel(&values[..len], s, &mut out);
+                kernel(isa, &values[..len], s, &mut out);
                 assert_eq!(out, want, "len {len}, s {s:?}");
             }
         }
@@ -1787,7 +1866,7 @@ mod compare_scalar_4h4mp {
         }
         // NEGATIVE: an ordered "not equal" would call NaN != 0.5 false.
         let mut out = [false; 8];
-        ne_f64_scalar_into(&[f64::NAN; 8], 0.5, &mut out);
+        ne_f64_scalar_into(isa(), &[f64::NAN; 8], 0.5, &mut out);
         assert_eq!(out, [true; 8]);
     }
 
@@ -1817,6 +1896,26 @@ mod compare_scalar_4h4mp {
 mod tests {
     use super::*;
 
+    fn isa() -> Avx2Fma {
+        Avx2Fma::detect().expect("fp-dot-kernel tests require AVX2+FMA")
+    }
+
+    #[test]
+    fn avx2_fma_token_is_zero_sized_and_detected_on_supported_host() {
+        assert_eq!(std::mem::size_of::<Avx2Fma>(), 0);
+        assert_eq!(std::mem::align_of::<Avx2Fma>(), 1);
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            let expected = std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("fma");
+            assert_eq!(Avx2Fma::detect().is_some(), expected);
+        }
+        #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+        {
+            assert!(Avx2Fma::detect().is_none());
+        }
+    }
+
     /// The SIMD witness fold must agree with the scalar `is_nan` fold on every
     /// element AND on the returned boolean — including the cases a cheaper fold
     /// would get wrong. `inf` outputs are PRESENT values under pandas semantics,
@@ -1824,6 +1923,7 @@ mod tests {
     /// wrongly mark valid data missing; this pins that.
     #[test]
     fn div_simd_witness_matches_the_scalar_fold_including_inf_and_remainder() {
+        let isa = isa();
         fn scalar(a: &[f64], b: &[f64]) -> (Vec<f64>, bool) {
             let mut out = vec![0.0; a.len()];
             let mut nan = false;
@@ -1872,7 +1972,7 @@ mod tests {
             }
             let (want, want_nan) = scalar(&a, &b);
             let mut got = vec![0.0; len];
-            let got_nan = div_f64_into(&a, &b, &mut got);
+            let got_nan = div_f64_into(isa, &a, &b, &mut got);
             assert_eq!(got_nan, want_nan, "witness disagrees at len {len}");
             for i in 0..len {
                 assert_eq!(
@@ -1888,7 +1988,7 @@ mod tests {
         let b = vec![0.0f64; 8];
         let mut out = vec![0.0; 8];
         assert!(
-            !div_f64_into(&a, &b, &mut out),
+            !div_f64_into(isa, &a, &b, &mut out),
             "x/0 is +inf, a PRESENT value; the witness must not claim NaN"
         );
         assert!(out.iter().all(|v| *v == f64::INFINITY));
@@ -1901,6 +2001,7 @@ mod tests {
     /// is inf, 0.0 / 0.0 NaN). NEGATIVE: the other direction differs.
     #[test]
     fn div_by_number_is_the_scalar_quotient_3tk83() {
+        let isa = isa();
         let special = [1.5, -0.0, 0.0, f64::INFINITY, -2.0, f64::NAN, 5e-324, 1.0];
         for len in [0usize, 1, 3, 4, 5, 7, 8, 9, 17, 1001] {
             let a: Vec<f64> = (0..len)
@@ -1908,7 +2009,7 @@ mod tests {
                 .collect();
             for s in [3.0, -0.25, 0.0, -0.0, f64::INFINITY, f64::NAN, 5e-324] {
                 for number_first in [false, true] {
-                    let got = div_by_number_f64(&a, s, number_first);
+                    let got = div_by_number_f64(isa, &a, s, number_first);
                     let want: Vec<u64> = a
                         .iter()
                         .map(|&x| (if number_first { s / x } else { x / s }).to_bits())
@@ -1922,9 +2023,9 @@ mod tests {
             }
         }
         let a = [2.0, 8.0, 1.0, 0.5, 4.0];
-        let swapped = div_by_number_f64(&a, 4.0, true);
+        let swapped = div_by_number_f64(isa, &a, 4.0, true);
         assert_eq!(swapped, vec![2.0, 0.5, 4.0, 8.0, 1.0]);
-        assert_ne!(swapped, div_by_number_f64(&a, 4.0, false));
+        assert_ne!(swapped, div_by_number_f64(isa, &a, 4.0, false));
     }
 
     /// br-frankenpandas-uf0mw: each float-int kernel is the two-pass path -
@@ -1935,9 +2036,10 @@ mod tests {
     /// is not x - k).
     #[test]
     fn float_int_kernels_are_the_two_pass_path_uf0mw() {
-        type Kernel = fn(&[f64], &[i64], bool) -> (Vec<f64>, bool);
+        let isa = isa();
+        type Kernel = fn(Avx2Fma, &[f64], &[i64], bool) -> (Vec<f64>, bool);
         type Case = (Kernel, fn(f64, f64) -> f64);
-        type Compare = fn(&[f64], &[i64]) -> Vec<bool>;
+        type Compare = fn(Avx2Fma, &[f64], &[i64]) -> Vec<bool>;
         type CompareCase = (Compare, fn(f64, f64) -> bool);
         let cases: [Case; 4] = [
             (add_f64_i64_collect, |x, y| x + y),
@@ -1976,7 +2078,7 @@ mod tests {
                             }
                         })
                         .collect();
-                    let (got, output_nan) = kernel(&a, &b, int_first);
+                    let (got, output_nan) = kernel(isa, &a, &b, int_first);
                     assert_eq!(
                         got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                         want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
@@ -1986,8 +2088,8 @@ mod tests {
                 }
             }
         }
-        let (forward, _) = sub_f64_i64_collect(&[1.5], &[4], false);
-        let (backward, _) = sub_f64_i64_collect(&[1.5], &[4], true);
+        let (forward, _) = sub_f64_i64_collect(isa, &[1.5], &[4], false);
+        let (backward, _) = sub_f64_i64_collect(isa, &[1.5], &[4], true);
         assert_eq!((forward[0], backward[0]), (-2.5, 2.5));
         // Two int columns' true division, a zero divisor included (0 / 0 is
         // NaN and sets the witness, 3 / 0 is inf and does not).
@@ -1999,7 +2101,7 @@ mod tests {
                 .zip(&b)
                 .map(|(&x, &y)| x as f64 / y as f64)
                 .collect();
-            let (got, output_nan) = div_i64_i64_collect(&a, &b);
+            let (got, output_nan) = div_i64_i64_collect(isa, &a, &b);
             assert_eq!(
                 got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
@@ -2007,8 +2109,8 @@ mod tests {
             );
             assert_eq!(output_nan, want.iter().any(|v| v.is_nan()), "div {len}");
         }
-        assert!(div_i64_i64_collect(&[0, 3], &[0, 0]).1);
-        assert!(!div_i64_i64_collect(&[3, -3], &[0, 0]).1);
+        assert!(div_i64_i64_collect(isa, &[0, 3], &[0, 0]).1);
+        assert!(!div_i64_i64_collect(isa, &[3, -3], &[0, 0]).1);
         // The six comparisons of a float column with an int one: the
         // scalar ones (NaN false, true under !=; past 2^53 the int compares
         // as the double it rounds to).
@@ -2030,18 +2132,21 @@ mod tests {
                     .zip(&b)
                     .map(|(&x, &y)| compare(x, y as f64))
                     .collect();
-                assert_eq!(kernel(&a, &b), want, "compare {k} {len}");
+                assert_eq!(kernel(isa, &a, &b), want, "compare {k} {len}");
             }
         }
-        assert_eq!(ne_f64_i64_collect(&[nan, 2.0], &[2, 2]), vec![true, false]);
+        assert_eq!(
+            ne_f64_i64_collect(isa, &[nan, 2.0], &[2, 2]),
+            vec![true, false]
+        );
         // The wrapping int multiply: overflow wraps as the scalar op does.
         for len in [0usize, 1, 3, 4, 5, 9, 101] {
             let a: Vec<i64> = (0..len).map(|i| ints[i % ints.len()]).collect();
             let b: Vec<i64> = (0..len).map(|i| ints[(i * 3 + 1) % ints.len()]).collect();
             let want: Vec<i64> = a.iter().zip(&b).map(|(&x, &y)| x.wrapping_mul(y)).collect();
-            assert_eq!(mul_i64_collect(&a, &b), want, "mul {len}");
+            assert_eq!(mul_i64_collect(isa, &a, &b), want, "mul {len}");
         }
-        assert_eq!(mul_i64_collect(&[i64::MAX], &[2]), vec![-2]);
+        assert_eq!(mul_i64_collect(isa, &[i64::MAX], &[2]), vec![-2]);
         // The square on two 32 x 32 multiplies: v.wrapping_mul(v) for every
         // int, the extremes and 32-bit edges among them.
         let edges = [
@@ -2062,9 +2167,9 @@ mod tests {
                 .map(|i| edges[i % edges.len()] ^ edges[(i * 7) % edges.len()])
                 .collect();
             let want: Vec<i64> = a.iter().map(|&v| v.wrapping_mul(v)).collect();
-            assert_eq!(square_i64_collect(&a), want, "square {len}");
+            assert_eq!(square_i64_collect(isa, &a), want, "square {len}");
         }
-        assert_eq!(square_i64_collect(&[i64::MIN, 3]), vec![0, 9]);
+        assert_eq!(square_i64_collect(isa, &[i64::MIN, 3]), vec![0, 9]);
     }
 
     /// br-frankenpandas-uf0mw: an int column over a number is `k as f64 / s`
@@ -2074,6 +2179,7 @@ mod tests {
     #[test]
     #[allow(clippy::cast_precision_loss)] // `as f64` is the reference
     fn int_number_division_is_the_converted_quotient_uf0mw() {
+        let isa = isa();
         let two53 = 1_i64 << 53;
         let ints = [
             0,
@@ -2103,16 +2209,19 @@ mod tests {
                         })
                         .collect();
                     assert_eq!(
-                        bits(&div_i64_number_collect(&a, s, number_first)),
+                        bits(&div_i64_number_collect(isa, &a, s, number_first)),
                         bits(&want),
                         "{len} {s} {number_first}"
                     );
                 }
             }
         }
-        assert_eq!(div_i64_number_collect(&[4], 2.0, false), vec![2.0]);
-        assert_eq!(div_i64_number_collect(&[4], 2.0, true), vec![0.5]);
-        assert_eq!(div_i64_number_collect(&[0], 2.0, true), vec![f64::INFINITY]);
+        assert_eq!(div_i64_number_collect(isa, &[4], 2.0, false), vec![2.0]);
+        assert_eq!(div_i64_number_collect(isa, &[4], 2.0, true), vec![0.5]);
+        assert_eq!(
+            div_i64_number_collect(isa, &[0], 2.0, true),
+            vec![f64::INFINITY]
+        );
     }
 
     /// br-frankenpandas-uf0mw: the f64 floor division and modulo are the
@@ -2124,6 +2233,7 @@ mod tests {
     /// divisor at 2^51 or beyond, and the divisor 0, answer None.
     #[test]
     fn floor_div_by_number_is_the_integer_floor_division_uf0mw() {
+        let isa = isa();
         fn floor_div(k: i64, s: i64) -> i64 {
             let q = k / s;
             if k % s != 0 && (k < 0) != (s < 0) {
@@ -2181,28 +2291,31 @@ mod tests {
                     .collect();
                 for len in [0, 1, 3, 4, 5, 8, 9, values.len()] {
                     assert_eq!(
-                        floor_div_by_number_i64(&values[..len], s, modulo).as_deref(),
+                        floor_div_by_number_i64(isa, &values[..len], s, modulo).as_deref(),
                         Some(&want[..len]),
                         "{s} {modulo} {len}"
                     );
                 }
             }
         }
-        assert_eq!(floor_div_by_number_i64(&[-7, 7], 2, true), Some(vec![1, 1]));
         assert_eq!(
-            floor_div_by_number_i64(&[-7, 7], -2, false),
+            floor_div_by_number_i64(isa, &[-7, 7], 2, true),
+            Some(vec![1, 1])
+        );
+        assert_eq!(
+            floor_div_by_number_i64(isa, &[-7, 7], -2, false),
             Some(vec![3, -4])
         );
         let bound = 1_i64 << 51;
-        assert_eq!(floor_div_by_number_i64(&[3, bound, 5], 3, false), None);
+        assert_eq!(floor_div_by_number_i64(isa, &[3, bound, 5], 3, false), None);
         assert_eq!(
-            floor_div_by_number_i64(&[3, 4, 5, 6, -bound], 3, true),
+            floor_div_by_number_i64(isa, &[3, 4, 5, 6, -bound], 3, true),
             None
         );
-        assert_eq!(floor_div_by_number_i64(&[i64::MIN], 3, false), None);
-        assert_eq!(floor_div_by_number_i64(&[3], bound, false), None);
-        assert_eq!(floor_div_by_number_i64(&[3], -bound, true), None);
-        assert_eq!(floor_div_by_number_i64(&[3], 0, false), None);
+        assert_eq!(floor_div_by_number_i64(isa, &[i64::MIN], 3, false), None);
+        assert_eq!(floor_div_by_number_i64(isa, &[3], bound, false), None);
+        assert_eq!(floor_div_by_number_i64(isa, &[3], -bound, true), None);
+        assert_eq!(floor_div_by_number_i64(isa, &[3], 0, false), None);
     }
 
     /// br-frankenpandas-uf0mw: the wide floor division is the integer one for
@@ -2213,6 +2326,7 @@ mod tests {
     /// a negative one or 2^53, answer None.
     #[test]
     fn floor_div_wide_is_the_integer_floor_division_uf0mw() {
+        let isa = isa();
         fn floor_div(k: i64, s: i64) -> i64 {
             let q = k / s;
             if k % s != 0 && (k < 0) != (s < 0) {
@@ -2270,18 +2384,27 @@ mod tests {
                     .collect();
                 for len in [0, 1, 3, 4, 5, 8, 9, values.len()] {
                     assert_eq!(
-                        floor_div_wide_by_number_i64(&values[..len], s, modulo).as_deref(),
+                        floor_div_wide_by_number_i64(isa, &values[..len], s, modulo).as_deref(),
                         Some(&want[..len]),
                         "{s} {modulo} {len}"
                     );
                 }
             }
         }
-        assert_eq!(floor_div_wide_by_number_i64(&[1, 1 << 60], 3, false), None);
-        assert_eq!(floor_div_wide_by_number_i64(&[i64::MAX], 7, true), None);
-        assert_eq!(floor_div_wide_by_number_i64(&[5], 0, false), None);
-        assert_eq!(floor_div_wide_by_number_i64(&[5], -3, false), None);
-        assert_eq!(floor_div_wide_by_number_i64(&[5], 1 << 53, false), None);
+        assert_eq!(
+            floor_div_wide_by_number_i64(isa, &[1, 1 << 60], 3, false),
+            None
+        );
+        assert_eq!(
+            floor_div_wide_by_number_i64(isa, &[i64::MAX], 7, true),
+            None
+        );
+        assert_eq!(floor_div_wide_by_number_i64(isa, &[5], 0, false), None);
+        assert_eq!(floor_div_wide_by_number_i64(isa, &[5], -3, false), None);
+        assert_eq!(
+            floor_div_wide_by_number_i64(isa, &[5], 1 << 53, false),
+            None
+        );
     }
 
     /// br-frankenpandas-uf0mw: the 4-lane float -> int conversion is `as
@@ -2292,6 +2415,7 @@ mod tests {
     #[test]
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // the casts under test
     fn float_as_int_is_the_truncating_cast_uf0mw() {
+        let isa = isa();
         type Wrap = (i64, i64, fn(i64) -> i64);
         let edge = 2_251_799_813_685_247.5; // 2^51 - 0.5
         let floats = [
@@ -2312,22 +2436,22 @@ mod tests {
                 let a: Vec<f64> = (0..len).map(|i| floats[i % floats.len()]).collect();
                 let want: Vec<i64> = a.iter().map(|&v| wrap(v as i64)).collect();
                 assert_eq!(
-                    float_as_int_collect(&a, mask, sign),
+                    float_as_int_collect(isa, &a, mask, sign),
                     Some(want),
                     "{mask} {len}"
                 );
             }
         }
         assert_eq!(
-            float_as_int_collect(&[edge, -edge], -1, 0),
+            float_as_int_collect(isa, &[edge, -edge], -1, 0),
             Some(vec![2_251_799_813_685_247, -2_251_799_813_685_247])
         );
         assert_eq!(
-            float_as_int_collect(&[300.7, -5.9], 0xFF, 0x80),
+            float_as_int_collect(isa, &[300.7, -5.9], 0xFF, 0x80),
             Some(vec![44, -5])
         );
         assert_eq!(
-            float_as_int_collect(&[300.7, -5.9], 0xFF, 0),
+            float_as_int_collect(isa, &[300.7, -5.9], 0xFF, 0),
             Some(vec![44, 251])
         );
         let bound = 2_251_799_813_685_248.0;
@@ -2340,7 +2464,7 @@ mod tests {
             1e300,
         ] {
             assert_eq!(
-                float_as_int_collect(&[1.0, 2.0, 3.0, 4.0, bad], -1, 0),
+                float_as_int_collect(isa, &[1.0, 2.0, 3.0, 4.0, bad], -1, 0),
                 None,
                 "{bad}"
             );
@@ -2352,6 +2476,7 @@ mod tests {
     /// 4-lane chunks. NEGATIVE: the orders differ.
     #[test]
     fn div_by_number_arc_is_the_vec_divide_3tk83() {
+        let isa = isa();
         let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         let special = [1.5, -0.0, 0.0, f64::INFINITY, -2.0, f64::NAN, 5e-324, 1.0];
         for len in [0usize, 1, 3, 4, 5, 7, 8, 9, 17, 1001] {
@@ -2361,15 +2486,15 @@ mod tests {
             for s in [3.0, -0.25, 0.0, -0.0, f64::INFINITY, f64::NAN, 5e-324] {
                 for number_first in [false, true] {
                     assert_eq!(
-                        bits(&div_by_number_f64_arc(&a, s, number_first)),
-                        bits(&div_by_number_f64(&a, s, number_first)),
+                        bits(&div_by_number_f64_arc(isa, &a, s, number_first)),
+                        bits(&div_by_number_f64(isa, &a, s, number_first)),
                         "{len} {s} {number_first}"
                     );
                 }
             }
         }
-        let forward = div_by_number_f64_arc(&[2.0, 8.0, 1.0], 4.0, false);
-        let backward = div_by_number_f64_arc(&[2.0, 8.0, 1.0], 4.0, true);
+        let forward = div_by_number_f64_arc(isa, &[2.0, 8.0, 1.0], 4.0, false);
+        let backward = div_by_number_f64_arc(isa, &[2.0, 8.0, 1.0], 4.0, true);
         assert_eq!(&forward[..], &[0.5, 2.0, 0.25]);
         assert_eq!(&backward[..], &[2.0, 0.5, 4.0]);
     }
@@ -2382,9 +2507,10 @@ mod tests {
     /// never sets the witness.
     #[test]
     fn made_nan_kernels_are_the_scalar_loop_cmgnp() {
-        type Kernel = fn(&[f64], &[f64], &mut [f64]) -> bool;
-        type ArcKernel = fn(&[f64], &[f64]) -> (std::sync::Arc<[f64]>, bool);
-        type VecKernel = fn(&[f64], &[f64]) -> (Vec<f64>, bool);
+        let isa = isa();
+        type Kernel = fn(Avx2Fma, &[f64], &[f64], &mut [f64]) -> bool;
+        type ArcKernel = fn(Avx2Fma, &[f64], &[f64]) -> (std::sync::Arc<[f64]>, bool);
+        type VecKernel = fn(Avx2Fma, &[f64], &[f64]) -> (Vec<f64>, bool);
         type Case = (Kernel, fn(f64, f64) -> f64);
         let kernels: [Case; 4] = [
             (add_f64_made_nan_into, |x, y| x + y),
@@ -2418,7 +2544,7 @@ mod tests {
                 // Over a zeroed and a garbage-filled `out`: every slot written.
                 for fill in [0.0, 77.5] {
                     let mut got = vec![fill; len];
-                    let made_nan = kernel(&a, &b, &mut got);
+                    let made_nan = kernel(isa, &a, &b, &mut got);
                     assert_eq!(
                         got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                         want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
@@ -2426,14 +2552,14 @@ mod tests {
                     );
                     assert_eq!(made_nan, made, "{k} {len}");
                 }
-                let (collected, collected_made) = arcs[k](&a, &b);
+                let (collected, collected_made) = arcs[k](isa, &a, &b);
                 assert_eq!(
                     collected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                     want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                     "arc {k} {len}"
                 );
                 assert_eq!(collected_made, made, "arc {k} {len}");
-                let (vec, any_nan) = collects[k](&a, &b);
+                let (vec, any_nan) = collects[k](isa, &a, &b);
                 assert_eq!(
                     vec.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                     want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
@@ -2444,11 +2570,11 @@ mod tests {
         }
         let mut got = vec![0.0; 5];
         let (holes, divisors) = ([nan, 6.0, 1.0, 2.0, 9.0], [1.0, 1.0, 1.0, nan, 1.0]);
-        assert!(!div_f64_made_nan_into(&holes, &divisors, &mut got));
+        assert!(!div_f64_made_nan_into(isa, &holes, &divisors, &mut got));
         assert!(got[0].is_nan() && got[3].is_nan());
         let (zeros, ones) = ([1.0, 0.0, 2.0, 3.0, 4.0], [1.0, 0.0, 1.0, 1.0, 1.0]);
-        assert!(div_f64_made_nan_into(&zeros, &ones, &mut got));
-        assert!(sub_f64_made_nan_into(&[inf; 5], &[inf; 5], &mut got));
+        assert!(div_f64_made_nan_into(isa, &zeros, &ones, &mut got));
+        assert!(sub_f64_made_nan_into(isa, &[inf; 5], &[inf; 5], &mut got));
     }
 
     /// br-frankenpandas-cmgnp: each pair-compare kernel is `a[i] <op> b[i]`
@@ -2457,7 +2583,8 @@ mod tests {
     /// itself is unequal (true under !=, false under == and the orders).
     #[test]
     fn pair_compares_are_the_scalar_compare_cmgnp() {
-        type Kernel = fn(&[f64], &[f64]) -> std::sync::Arc<[bool]>;
+        let isa = isa();
+        type Kernel = fn(Avx2Fma, &[f64], &[f64]) -> std::sync::Arc<[bool]>;
         type Case = (Kernel, fn(f64, f64) -> bool);
         let kernels: [Case; 6] = [
             (gt_f64_pairs_arc, |x, y| x > y),
@@ -2477,11 +2604,17 @@ mod tests {
         for (k, (kernel, compare)) in kernels.into_iter().enumerate() {
             for len in 0..=a.len() {
                 let want: Vec<bool> = (0..len).map(|i| compare(a[i], b[i])).collect();
-                assert_eq!(*kernel(&a[..len], &b[..len]), *want, "{k} {len}");
+                assert_eq!(*kernel(isa, &a[..len], &b[..len]), *want, "{k} {len}");
             }
         }
-        assert_eq!(*ne_f64_pairs_arc(&[nan, 1.0], &[nan, 1.0]), [true, false]);
-        assert_eq!(*eq_f64_pairs_arc(&[nan, 1.0], &[nan, 1.0]), [false, true]);
+        assert_eq!(
+            *ne_f64_pairs_arc(isa, &[nan, 1.0], &[nan, 1.0]),
+            [true, false]
+        );
+        assert_eq!(
+            *eq_f64_pairs_arc(isa, &[nan, 1.0], &[nan, 1.0]),
+            [false, true]
+        );
     }
 
     /// br-frankenpandas-cmgnp: each Arc compare is the scalar comparison `v
@@ -2490,7 +2623,8 @@ mod tests {
     /// under !=) and -0.0 == 0.0.
     #[test]
     fn arc_compares_are_the_scalar_compare_cmgnp() {
-        type FloatKernel = fn(&[f64], f64) -> std::sync::Arc<[bool]>;
+        let isa = isa();
+        type FloatKernel = fn(Avx2Fma, &[f64], f64) -> std::sync::Arc<[bool]>;
         type Compare = fn(f64, f64) -> bool;
         let compares: [Compare; 6] = [
             |x, y| x > y,
@@ -2515,12 +2649,12 @@ mod tests {
             for (j, compare) in compares.into_iter().enumerate() {
                 for len in 0..=a.len() {
                     let want: Vec<bool> = a[..len].iter().map(|&v| compare(v, s)).collect();
-                    assert_eq!(*floats[j](&a[..len], s), *want, "{j} {s} {len}");
+                    assert_eq!(*floats[j](isa, &a[..len], s), *want, "{j} {s} {len}");
                 }
             }
         }
-        assert_eq!(*ne_f64_scalar_arc(&[nan, -0.0], nan), [true, true]);
-        assert_eq!(*eq_f64_scalar_arc(&[nan, -0.0], 0.0), [false, true]);
+        assert_eq!(*ne_f64_scalar_arc(isa, &[nan, -0.0], nan), [true, true]);
+        assert_eq!(*eq_f64_scalar_arc(isa, &[nan, -0.0], 0.0), [false, true]);
     }
 
     /// br-frankenpandas-uza04. Same obligation the `div` test above discharges,
@@ -2538,6 +2672,7 @@ mod tests {
     ///   * a NaN operand                 -> NaN, propagated by all three
     #[test]
     fn add_sub_mul_simd_witnesses_match_the_scalar_fold_including_inf_and_remainder() {
+        let isa = isa();
         fn scalar(a: &[f64], b: &[f64], op: fn(f64, f64) -> f64) -> (Vec<f64>, bool) {
             let mut out = vec![0.0; a.len()];
             let mut nan = false;
@@ -2549,7 +2684,7 @@ mod tests {
             (out, nan)
         }
 
-        type Kernel = fn(&[f64], &[f64], &mut [f64]) -> bool;
+        type Kernel = fn(Avx2Fma, &[f64], &[f64], &mut [f64]) -> bool;
         type ScalarOp = fn(f64, f64) -> f64;
         let cases: [(&str, Kernel, ScalarOp); 3] = [
             ("add", add_f64_into, |x, y| x + y),
@@ -2613,7 +2748,7 @@ mod tests {
                 }
                 let (want, want_nan) = scalar(&a, &b, scalar_op);
                 let mut got = vec![0.0; len];
-                let got_nan = kernel(&a, &b, &mut got);
+                let got_nan = kernel(isa, &a, &b, &mut got);
                 assert_eq!(got_nan, want_nan, "{name}: witness disagrees at len {len}");
                 for i in 0..len {
                     assert_eq!(
@@ -2631,13 +2766,16 @@ mod tests {
         let a = [f64::INFINITY, 0.0];
         let b = [f64::NEG_INFINITY, f64::INFINITY];
         let mut out = [0.0; 2];
-        assert!(add_f64_into(&a, &b, &mut out), "inf + -inf must be NaN");
         assert!(
-            sub_f64_into(&[f64::INFINITY], &[f64::INFINITY], &mut out[..1]),
+            add_f64_into(isa, &a, &b, &mut out),
+            "inf + -inf must be NaN"
+        );
+        assert!(
+            sub_f64_into(isa, &[f64::INFINITY], &[f64::INFINITY], &mut out[..1]),
             "inf - inf must be NaN"
         );
         assert!(
-            mul_f64_into(&[0.0], &[f64::INFINITY], &mut out[..1]),
+            mul_f64_into(isa, &[0.0], &[f64::INFINITY], &mut out[..1]),
             "0 * inf must be NaN"
         );
 
@@ -2647,12 +2785,12 @@ mod tests {
         let b = vec![f64::INFINITY; 8];
         let mut out = vec![0.0; 8];
         assert!(
-            !add_f64_into(&a, &b, &mut out),
+            !add_f64_into(isa, &a, &b, &mut out),
             "inf + inf is +inf, a PRESENT value; the witness must not claim NaN"
         );
         assert!(out.iter().all(|v| *v == f64::INFINITY));
         assert!(
-            !mul_f64_into(&a, &b, &mut out),
+            !mul_f64_into(isa, &a, &b, &mut out),
             "inf * inf is +inf, a PRESENT value; the witness must not claim NaN"
         );
         assert!(out.iter().all(|v| *v == f64::INFINITY));
@@ -2670,6 +2808,7 @@ mod tests {
     /// non-vacuity block below proves each witness actually goes false somewhere.
     #[test]
     fn sqrt_kernel_matches_the_scalar_fold_on_values_and_both_witnesses() {
+        let isa = isa();
         fn scalar(a: &[f64]) -> (Vec<f64>, bool, bool) {
             let mut out = vec![0.0; a.len()];
             let (mut domain, mut finite) = (true, true);
@@ -2715,8 +2854,8 @@ mod tests {
             for len in [0usize, 1, 3, 4, 5, 7, 8, 9, 16, 17, 1000, 1001] {
                 let a: Vec<f64> = (0..len).map(make).collect();
                 let (want, want_domain, want_finite) = scalar(&a);
-                let (got, got_domain, got_finite) = sqrt_f64_collect(&a);
-                let arc = sqrt_f64_arc(&a);
+                let (got, got_domain, got_finite) = sqrt_f64_collect(isa, &a);
+                let arc = sqrt_f64_arc(isa, &a);
                 assert_eq!(arc.len(), len, "{name}: arc length");
                 assert_eq!(
                     got_domain, want_domain,
@@ -2744,25 +2883,25 @@ mod tests {
         // NON-VACUITY: each witness must actually be observed FALSE, or the
         // equality assertions above passed against `true == true` throughout.
         assert!(
-            !sqrt_f64_collect(&[-1.0; 8]).1,
+            !sqrt_f64_collect(isa, &[-1.0; 8]).1,
             "negative must clear domain"
         );
         assert!(
-            !sqrt_f64_collect(&[f64::NAN; 8]).1,
+            !sqrt_f64_collect(isa, &[f64::NAN; 8]).1,
             "NaN must clear domain: `x.is_nan() | (x < 0.0)`, NOT `x < 0.0`"
         );
         assert!(
-            !sqrt_f64_collect(&[f64::INFINITY; 8]).2,
+            !sqrt_f64_collect(isa, &[f64::INFINITY; 8]).2,
             "sqrt(inf) is inf, which is NOT finite"
         );
-        let (out, domain, finite) = sqrt_f64_collect(&[4.0; 8]);
+        let (out, domain, finite) = sqrt_f64_collect(isa, &[4.0; 8]);
         assert_eq!(
             (domain, finite),
             (true, true),
             "a clean positive column must set both"
         );
         assert!(out.iter().all(|v| *v == 2.0));
-        assert!(sqrt_f64_arc(&[-1.0, 4.0])[0].is_nan());
+        assert!(sqrt_f64_arc(isa, &[-1.0, 4.0])[0].is_nan());
     }
 
     #[test]
@@ -2771,7 +2910,7 @@ mod tests {
         let a1 = [10.0_f64, 20.0, 30.0];
         let slices: [&[f64]; 2] = [&a0, &a1];
         let b = [2.0_f64, 0.5];
-        let got = materialize_float64_dot(&slices, &b, 3);
+        let got = materialize_float64_dot(isa(), &slices, &b, 3);
         // out[r] = a0[r]*2.0 + a1[r]*0.5
         assert_eq!(
             got,
@@ -2785,7 +2924,7 @@ mod tests {
 
     #[test]
     fn empty_inputs_yield_zeros() {
-        let got = materialize_float64_dot(&[], &[], 4);
+        let got = materialize_float64_dot(isa(), &[], &[], 4);
         assert_eq!(got, vec![0.0; 4]);
     }
 
@@ -2817,6 +2956,7 @@ mod tests {
     /// partial one, and both together).
     #[test]
     fn blocked_kernel_is_bit_identical_to_the_per_column_kernel() {
+        let isa = isa();
         for &(len, k, n) in &[
             (1_usize, 1_usize, 1_usize),
             (7, 3, 5),
@@ -2835,10 +2975,10 @@ mod tests {
             let a_slices: Vec<&[f64]> = a_store.iter().map(Vec::as_slice).collect();
             let b_slices: Vec<&[f64]> = b_store.iter().map(Vec::as_slice).collect();
 
-            let blocked = materialize_float64_dot_block(&a_slices, &b_slices, len);
+            let blocked = materialize_float64_dot_block(isa, &a_slices, &b_slices, len);
             assert_eq!(blocked.len(), n);
             for (column, b) in blocked.iter().zip(b_slices.iter()) {
-                let reference = materialize_float64_dot(&a_slices, b, len);
+                let reference = materialize_float64_dot(isa, &a_slices, b, len);
                 for (row, (got, want)) in column.iter().zip(reference.iter()).enumerate() {
                     assert_eq!(
                         got.to_bits(),
@@ -2877,11 +3017,12 @@ mod tests {
     /// already handles, rather than panicking on an empty panel.
     #[test]
     fn blocked_kernel_handles_empty_panels() {
-        assert!(materialize_float64_dot_block(&[], &[], 4).is_empty());
+        let isa = isa();
+        assert!(materialize_float64_dot_block(isa, &[], &[], 4).is_empty());
         let b: [f64; 0] = [];
         let b_slices: [&[f64]; 1] = [&b];
         assert_eq!(
-            materialize_float64_dot_block(&[], &b_slices, 3),
+            materialize_float64_dot_block(isa, &[], &b_slices, 3),
             vec![vec![0.0_f64; 3]]
         );
     }
@@ -2903,6 +3044,10 @@ mod div_f64_into_uza04 {
     //! last 1..3 elements of a non-multiple-of-4 length. Every length below is
     //! therefore checked, not just round ones.
 
+    fn isa() -> super::Avx2Fma {
+        super::Avx2Fma::detect().expect("fp-dot-kernel tests require AVX2+FMA")
+    }
+
     /// The baseline fp-columnar loop, reproduced exactly.
     fn reference(a: &[f64], b: &[f64]) -> (Vec<f64>, bool) {
         let mut out = vec![0.0_f64; a.len()];
@@ -2918,7 +3063,7 @@ mod div_f64_into_uza04 {
     fn assert_bit_identical(a: &[f64], b: &[f64]) {
         let (want, want_nan) = reference(a, b);
         let mut got = vec![0.0_f64; a.len()];
-        let got_nan = super::div_f64_into(a, b, &mut got);
+        let got_nan = super::div_f64_into(isa(), a, b, &mut got);
         assert_eq!(got_nan, want_nan, "NaN witness disagreed (len {})", a.len());
         for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
             assert_eq!(
@@ -2983,12 +3128,12 @@ mod div_f64_into_uza04 {
         let clean_a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
         let clean_b = [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0];
         let mut out = vec![0.0_f64; 7];
-        assert!(!super::div_f64_into(&clean_a, &clean_b, &mut out));
+        assert!(!super::div_f64_into(isa(), &clean_a, &clean_b, &mut out));
 
         // 0.0/0.0 = NaN placed at index 6, the tail of a 4-wide body.
         let tail_a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 0.0];
         let tail_b = [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 0.0];
-        assert!(super::div_f64_into(&tail_a, &tail_b, &mut out));
+        assert!(super::div_f64_into(isa(), &tail_a, &tail_b, &mut out));
         assert_bit_identical(&tail_a, &tail_b);
     }
 
@@ -3008,6 +3153,10 @@ mod div_f64_into_uza04 {
 mod int_extremes_e186m {
     use super::*;
 
+    fn isa() -> Avx2Fma {
+        Avx2Fma::detect().expect("fp-dot-kernel tests require AVX2+FMA")
+    }
+
     /// The serial answers the lane kernels must give: the first position
     /// of the least / greatest, ties to the first.
     fn serial(values: &[i64]) -> (Option<i64>, Option<i64>, Option<usize>, Option<usize>) {
@@ -3019,6 +3168,7 @@ mod int_extremes_e186m {
 
     #[test]
     fn lanes_answer_as_the_serial_fold_at_every_length() {
+        let isa = isa();
         // Repeated extremes (the first one wins), both int64 ends, ints past
         // 2^53 a double cannot tell apart, every tail length.
         let mut values: Vec<i64> = (0..70_i64).map(|k| (k * 7919) % 53 - 26).collect();
@@ -3031,10 +3181,10 @@ mod int_extremes_e186m {
             let part = &values[..len];
             assert_eq!(
                 (
-                    min_i64(part),
-                    max_i64(part),
-                    argmin_i64(part),
-                    argmax_i64(part)
+                    min_i64(isa, part),
+                    max_i64(isa, part),
+                    argmin_i64(isa, part),
+                    argmax_i64(isa, part)
                 ),
                 serial(part),
                 "len {len}"
@@ -3042,7 +3192,7 @@ mod int_extremes_e186m {
             // The sum wraps as numpy's int64 sum (2^60 + 1 twice and the
             // least int64 twice overflow).
             let wrapped = part.iter().fold(0_i64, |sum, &v| sum.wrapping_add(v));
-            assert_eq!(sum_i64(part), wrapped, "sum, len {len}");
+            assert_eq!(sum_i64(isa, part), wrapped, "sum, len {len}");
         }
     }
 
@@ -3063,6 +3213,7 @@ mod int_extremes_e186m {
 
     #[test]
     fn float_lanes_answer_as_the_serial_scan_e186m() {
+        let isa = isa();
         // -0.0 before 0.0 (equal: the first wins), both infinities, repeats
         // across blocks, every tail length; an all -inf run (NEGATIVE: a lane
         // that never beats its seed still answers its first position).
@@ -3078,32 +3229,47 @@ mod int_extremes_e186m {
         for len in 0..=values.len() {
             let part = &values[..len];
             assert_eq!(
-                (argmin_f64(part), argmax_f64(part)),
+                (argmin_f64(isa, part), argmax_f64(isa, part)),
                 serial_f64(part),
                 "len {len}"
             );
         }
         let lows = [f64::NEG_INFINITY; 40];
-        assert_eq!((argmin_f64(&lows), argmax_f64(&lows)), (Some(0), Some(0)));
+        assert_eq!(
+            (argmin_f64(isa, &lows), argmax_f64(isa, &lows)),
+            (Some(0), Some(0))
+        );
         let zeros: Vec<f64> = (0..40)
             .map(|k| if k % 3 == 0 { 0.0 } else { -0.0 })
             .collect();
-        assert_eq!((argmin_f64(&zeros), argmax_f64(&zeros)), (Some(0), Some(0)));
+        assert_eq!(
+            (argmin_f64(isa, &zeros), argmax_f64(isa, &zeros)),
+            (Some(0), Some(0))
+        );
     }
 
     #[test]
     fn empty_has_no_extreme_and_a_lone_value_is_both() {
+        let isa = isa();
         assert_eq!(
-            (min_i64(&[]), max_i64(&[]), argmin_i64(&[]), argmax_i64(&[])),
+            (
+                min_i64(isa, &[]),
+                max_i64(isa, &[]),
+                argmin_i64(isa, &[]),
+                argmax_i64(isa, &[])
+            ),
             (None, None, None, None)
         );
         assert_eq!(
-            (min_i64(&[i64::MAX]), argmax_i64(&[i64::MAX])),
+            (min_i64(isa, &[i64::MAX]), argmax_i64(isa, &[i64::MAX])),
             (Some(i64::MAX), Some(0))
         );
         // NEGATIVE: a later equal value is not the position (ties to the first).
         let ties = [5_i64; 40];
-        assert_eq!((argmin_i64(&ties), argmax_i64(&ties)), (Some(0), Some(0)));
+        assert_eq!(
+            (argmin_i64(isa, &ties), argmax_i64(isa, &ties)),
+            (Some(0), Some(0))
+        );
     }
 }
 
@@ -3112,7 +3278,11 @@ mod nan_validity_words_qpbpa {
     //! The 8-lane validity words equal a bit-a-row reference at every length
     //! across the 64-row word and 8-lane boundaries (br-frankenpandas-qpbpa).
 
-    use super::nan_validity_words;
+    use super::{Avx2Fma, nan_validity_words};
+
+    fn isa() -> Avx2Fma {
+        Avx2Fma::detect().expect("fp-dot-kernel tests require AVX2+FMA")
+    }
 
     fn reference(a: &[f64]) -> (Vec<u64>, bool) {
         let mut words = vec![0_u64; a.len().div_ceil(64)];
@@ -3126,6 +3296,7 @@ mod nan_validity_words_qpbpa {
 
     #[test]
     fn words_match_a_bit_a_row_at_every_length() {
+        let isa = isa();
         for len in (0..=140).chain([255, 256, 257, 1000]) {
             let values: Vec<f64> = (0..len)
                 .map(|row| match row % 11 {
@@ -3134,7 +3305,11 @@ mod nan_validity_words_qpbpa {
                     _ => row as f64 * 0.5,
                 })
                 .collect();
-            assert_eq!(nan_validity_words(&values), reference(&values), "len {len}");
+            assert_eq!(
+                nan_validity_words(isa, &values),
+                reference(&values),
+                "len {len}"
+            );
         }
     }
 
@@ -3143,23 +3318,24 @@ mod nan_validity_words_qpbpa {
     /// yet not finite; only all-finite values are finite.
     #[test]
     fn infinities_are_valid_but_not_finite() {
+        let isa = isa();
         let mut values = vec![1.0_f64; 70];
         assert_eq!(
-            nan_validity_words(&values),
+            nan_validity_words(isa, &values),
             (vec![u64::MAX, (1 << 6) - 1], true)
         );
         values[10] = f64::NEG_INFINITY;
         values[66] = f64::INFINITY;
         assert_eq!(
-            nan_validity_words(&values),
+            nan_validity_words(isa, &values),
             (vec![u64::MAX, (1 << 6) - 1], false)
         );
         values[63] = f64::NAN;
         values[69] = f64::NAN;
-        let (words, finite) = nan_validity_words(&values);
+        let (words, finite) = nan_validity_words(isa, &values);
         assert_eq!(words, vec![u64::MAX >> 1, (1 << 5) - 1]);
         assert!(!finite);
-        assert_eq!(nan_validity_words(&values), reference(&values));
+        assert_eq!(nan_validity_words(isa, &values), reference(&values));
     }
 
     /// The sentinel words equal a bit-a-row reference at every length, NaT
@@ -3168,6 +3344,7 @@ mod nan_validity_words_qpbpa {
     #[test]
     fn sentinel_words_match_a_bit_a_row_at_every_length() {
         use super::i64_validity_words;
+        let isa = isa();
         for len in (0..=140).chain([255, 256, 257, 1000]) {
             let values: Vec<i64> = (0..len)
                 .map(|row: i64| match row % 9 {
@@ -3183,7 +3360,11 @@ mod nan_validity_words_qpbpa {
                     want[row / 64] |= 1 << (row % 64);
                 }
             }
-            assert_eq!(i64_validity_words(&values, i64::MIN), want, "len {len}");
+            assert_eq!(
+                i64_validity_words(isa, &values, i64::MIN),
+                want,
+                "len {len}"
+            );
         }
     }
 }

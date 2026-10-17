@@ -301,11 +301,50 @@ pub fn decision_to_card(record: &DecisionRecord) -> GalaxyBrainCard {
     }
 }
 
+/// Structured AACE / runtime event emitted through the optional `tracing` stream
+/// and captured by [`EvidenceLedgerSubscriber`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AaceEvent {
+    /// Emitted when an index alignment plan is constructed for a binary or multi-series op.
+    AlignmentPlanned {
+        operation: String,
+        plan_kind: String,
+        union_len: usize,
+        left_hits: usize,
+        right_hits: usize,
+    },
+    /// Emitted when two dtypes are coerced/promoted to a common output dtype.
+    DtypeCoerced {
+        operation: String,
+        left_dtype: String,
+        right_dtype: String,
+        output_dtype: String,
+    },
+    /// Emitted when a [`RuntimePolicy`] makes an Allow / Reject / Repair decision.
+    PolicyDecided {
+        mode: String,
+        issue_kind: String,
+        subject: String,
+        action: String,
+    },
+    /// Emitted when an eager materialization or IO boundary completes.
+    Materialized {
+        operation: String,
+        rows: usize,
+        cols: usize,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceLedger {
     records: Vec<DecisionRecord>,
     #[serde(default)]
     semantic_witnesses: Vec<SemanticWitnessRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    aace_events: Vec<AaceEvent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    recorded_spans: Vec<String>,
     // Runtime-only switch: when false, callers that build a throwaway ledger
     // (e.g. the public `Series::add` convenience wrappers that discard the
     // ledger) can skip the expensive semantic-witness fingerprinting. Not part
@@ -327,6 +366,8 @@ impl EvidenceLedger {
         Self {
             records: Vec::new(),
             semantic_witnesses: Vec::new(),
+            aace_events: Vec::new(),
+            recorded_spans: Vec::new(),
             record_semantic_witnesses: true,
         }
     }
@@ -355,6 +396,14 @@ impl EvidenceLedger {
         self.semantic_witnesses.push(record);
     }
 
+    pub fn push_aace_event(&mut self, event: AaceEvent) {
+        self.aace_events.push(event);
+    }
+
+    pub fn push_recorded_span(&mut self, span_name: impl Into<String>) {
+        self.recorded_spans.push(span_name.into());
+    }
+
     #[must_use]
     pub fn records(&self) -> &[DecisionRecord] {
         &self.records
@@ -363,6 +412,141 @@ impl EvidenceLedger {
     #[must_use]
     pub fn semantic_witnesses(&self) -> &[SemanticWitnessRecord] {
         &self.semantic_witnesses
+    }
+
+    #[must_use]
+    pub fn aace_events(&self) -> &[AaceEvent] {
+        &self.aace_events
+    }
+
+    #[must_use]
+    pub fn recorded_spans(&self) -> &[String] {
+        &self.recorded_spans
+    }
+}
+
+/// Whether the compile-time `tracing` feature is enabled in `fp-runtime`.
+#[must_use]
+pub const fn is_tracing_enabled() -> bool {
+    cfg!(feature = "tracing")
+}
+
+/// Emit an [`AaceEvent::AlignmentPlanned`] event when `feature = "tracing"` is enabled.
+/// Zero-cost no-op when the feature is disabled.
+#[cfg(feature = "tracing")]
+#[inline]
+pub fn emit_alignment_planned(
+    operation: &str,
+    plan_kind: &str,
+    union_len: usize,
+    left_hits: usize,
+    right_hits: usize,
+) {
+    tracing::info!(
+        target: "frankenpandas::aace",
+        aace_kind = "alignment_planned",
+        operation = operation,
+        plan_kind = plan_kind,
+        union_len = union_len as u64,
+        left_hits = left_hits as u64,
+        right_hits = right_hits as u64,
+    );
+}
+
+/// Zero-cost no-op when `feature = "tracing"` is disabled.
+#[cfg(not(feature = "tracing"))]
+#[inline(always)]
+pub fn emit_alignment_planned(
+    _operation: &str,
+    _plan_kind: &str,
+    _union_len: usize,
+    _left_hits: usize,
+    _right_hits: usize,
+) {
+}
+
+/// Emit an [`AaceEvent::DtypeCoerced`] event when `feature = "tracing"` is enabled.
+/// Zero-cost no-op when the feature is disabled.
+#[cfg(feature = "tracing")]
+#[inline]
+pub fn emit_dtype_coerced(
+    operation: &str,
+    left_dtype: &str,
+    right_dtype: &str,
+    output_dtype: &str,
+) {
+    tracing::info!(
+        target: "frankenpandas::aace",
+        aace_kind = "dtype_coerced",
+        operation = operation,
+        left_dtype = left_dtype,
+        right_dtype = right_dtype,
+        output_dtype = output_dtype,
+    );
+}
+
+/// Zero-cost no-op when `feature = "tracing"` is disabled.
+#[cfg(not(feature = "tracing"))]
+#[inline(always)]
+pub fn emit_dtype_coerced(
+    _operation: &str,
+    _left_dtype: &str,
+    _right_dtype: &str,
+    _output_dtype: &str,
+) {
+}
+
+/// Emit an [`AaceEvent::PolicyDecided`] event when `feature = "tracing"` is enabled.
+/// Zero-cost no-op when the feature is disabled.
+#[cfg(feature = "tracing")]
+#[inline]
+pub fn emit_policy_decided(mode: &str, issue_kind: &str, subject: &str, action: &str) {
+    tracing::info!(
+        target: "frankenpandas::aace",
+        aace_kind = "policy_decided",
+        mode = mode,
+        issue_kind = issue_kind,
+        subject = subject,
+        action = action,
+    );
+}
+
+/// Zero-cost no-op when `feature = "tracing"` is disabled.
+#[cfg(not(feature = "tracing"))]
+#[inline(always)]
+pub fn emit_policy_decided(_mode: &str, _issue_kind: &str, _subject: &str, _action: &str) {}
+
+/// Emit an [`AaceEvent::Materialized`] event when `feature = "tracing"` is enabled.
+/// Zero-cost no-op when the feature is disabled.
+#[cfg(feature = "tracing")]
+#[inline]
+pub fn emit_materialized(operation: &str, rows: usize, cols: usize) {
+    tracing::info!(
+        target: "frankenpandas::aace",
+        aace_kind = "materialized",
+        operation = operation,
+        rows = rows as u64,
+        cols = cols as u64,
+    );
+}
+
+/// Zero-cost no-op when `feature = "tracing"` is disabled.
+#[cfg(not(feature = "tracing"))]
+#[inline(always)]
+pub fn emit_materialized(_operation: &str, _rows: usize, _cols: usize) {}
+
+const fn runtime_mode_str(mode: RuntimeMode) -> &'static str {
+    match mode {
+        RuntimeMode::Strict => "strict",
+        RuntimeMode::Hardened => "hardened",
+    }
+}
+
+const fn decision_action_str(action: DecisionAction) -> &'static str {
+    match action {
+        DecisionAction::Allow => "allow",
+        DecisionAction::Reject => "reject",
+        DecisionAction::Repair => "repair",
     }
 }
 
@@ -398,9 +582,10 @@ impl RuntimePolicy {
         detail: impl Into<String>,
         ledger: &mut EvidenceLedger,
     ) -> DecisionAction {
+        let subject_str = subject.into();
         let issue = CompatibilityIssue {
             kind: IssueKind::UnknownFeature,
-            subject: subject.into(),
+            subject: subject_str.clone(),
             detail: detail.into(),
         };
 
@@ -415,6 +600,12 @@ impl RuntimePolicy {
             record.action = DecisionAction::Reject;
         }
         let action = record.action;
+        emit_policy_decided(
+            runtime_mode_str(self.mode),
+            "unknown_feature",
+            &subject_str,
+            decision_action_str(action),
+        );
         ledger.push(record);
         action
     }
@@ -424,6 +615,15 @@ impl RuntimePolicy {
         estimated_rows: usize,
         ledger: &mut EvidenceLedger,
     ) -> DecisionAction {
+        // Fast path for default throwaway ledgers (e.g. `Series::add`) in strict
+        // mode: avoid heap-allocating a `DecisionRecord` and querying the system
+        // clock when the caller will immediately drop `ledger`, while still
+        // emitting the tracing decision event when `feature = "tracing"` is on.
+        if !ledger.records_semantic_witnesses() && matches!(self.mode, RuntimeMode::Strict) {
+            emit_policy_decided("strict", "join_cardinality", "join_estimator", "allow");
+            return DecisionAction::Allow;
+        }
+
         let issue = CompatibilityIssue {
             kind: IssueKind::JoinCardinality,
             subject: "join_estimator".to_owned(),
@@ -449,6 +649,12 @@ impl RuntimePolicy {
         }
 
         let action = record.action;
+        emit_policy_decided(
+            runtime_mode_str(self.mode),
+            "join_cardinality",
+            "join_estimator",
+            decision_action_str(action),
+        );
         ledger.push(record);
         action
     }
@@ -902,6 +1108,206 @@ pub fn outcome_to_action<T, E>(outcome: &::asupersync::Outcome<T, E>) -> Decisio
             DecisionAction::Reject
         }
     }
+}
+
+/// A `tracing::Subscriber` that captures `frankenpandas::aace` structured events
+/// and `frankenpandas` hot-path spans into an [`EvidenceLedger`].
+#[cfg(feature = "tracing")]
+#[derive(Debug, Clone)]
+pub struct EvidenceLedgerSubscriber {
+    ledger: std::sync::Arc<std::sync::Mutex<EvidenceLedger>>,
+    next_span_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[cfg(feature = "tracing")]
+impl Default for EvidenceLedgerSubscriber {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "tracing")]
+impl EvidenceLedgerSubscriber {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::from_ledger(EvidenceLedger::new())
+    }
+
+    #[must_use]
+    pub fn from_ledger(ledger: EvidenceLedger) -> Self {
+        Self {
+            ledger: std::sync::Arc::new(std::sync::Mutex::new(ledger)),
+            next_span_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        }
+    }
+
+    /// Return a snapshot of the captured [`EvidenceLedger`].
+    #[must_use]
+    pub fn snapshot(&self) -> EvidenceLedger {
+        match self.ledger.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+}
+
+#[cfg(feature = "tracing")]
+#[derive(Default)]
+struct AaceFieldVisitor {
+    aace_kind: Option<String>,
+    operation: Option<String>,
+    plan_kind: Option<String>,
+    union_len: Option<usize>,
+    left_hits: Option<usize>,
+    right_hits: Option<usize>,
+    left_dtype: Option<String>,
+    right_dtype: Option<String>,
+    output_dtype: Option<String>,
+    mode: Option<String>,
+    issue_kind: Option<String>,
+    subject: Option<String>,
+    action: Option<String>,
+    rows: Option<usize>,
+    cols: Option<usize>,
+}
+
+#[cfg(feature = "tracing")]
+impl tracing::field::Visit for AaceFieldVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        match field.name() {
+            "aace_kind" => self.aace_kind = Some(value.to_owned()),
+            "operation" => self.operation = Some(value.to_owned()),
+            "plan_kind" => self.plan_kind = Some(value.to_owned()),
+            "left_dtype" => self.left_dtype = Some(value.to_owned()),
+            "right_dtype" => self.right_dtype = Some(value.to_owned()),
+            "output_dtype" => self.output_dtype = Some(value.to_owned()),
+            "mode" => self.mode = Some(value.to_owned()),
+            "issue_kind" => self.issue_kind = Some(value.to_owned()),
+            "subject" => self.subject = Some(value.to_owned()),
+            "action" => self.action = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        let as_usize = usize::try_from(value).unwrap_or(usize::MAX);
+        match field.name() {
+            "union_len" => self.union_len = Some(as_usize),
+            "left_hits" => self.left_hits = Some(as_usize),
+            "right_hits" => self.right_hits = Some(as_usize),
+            "rows" => self.rows = Some(as_usize),
+            "cols" => self.cols = Some(as_usize),
+            _ => {}
+        }
+    }
+
+    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+        if let Ok(u) = u64::try_from(value) {
+            self.record_u64(field, u);
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        let formatted = format!("{value:?}");
+        let trimmed = formatted.trim_matches('"');
+        self.record_str(field, trimmed);
+    }
+}
+
+#[cfg(feature = "tracing")]
+impl tracing::Subscriber for EvidenceLedgerSubscriber {
+    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+        metadata.target().starts_with("frankenpandas")
+    }
+
+    fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        if span.metadata().target().starts_with("frankenpandas") {
+            let mut guard = match self.ledger.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            guard.push_recorded_span(span.metadata().name());
+        }
+        let id = self
+            .next_span_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::span::Id::from_u64(id)
+    }
+
+    fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+    fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+    fn event(&self, event: &tracing::Event<'_>) {
+        if !event.metadata().target().starts_with("frankenpandas") {
+            return;
+        }
+        let mut visitor = AaceFieldVisitor::default();
+        event.record(&mut visitor);
+        let parsed = match visitor.aace_kind.as_deref() {
+            Some("alignment_planned") => Some(AaceEvent::AlignmentPlanned {
+                operation: visitor.operation.unwrap_or_default(),
+                plan_kind: visitor.plan_kind.unwrap_or_default(),
+                union_len: visitor.union_len.unwrap_or(0),
+                left_hits: visitor.left_hits.unwrap_or(0),
+                right_hits: visitor.right_hits.unwrap_or(0),
+            }),
+            Some("dtype_coerced") => Some(AaceEvent::DtypeCoerced {
+                operation: visitor.operation.unwrap_or_default(),
+                left_dtype: visitor.left_dtype.unwrap_or_default(),
+                right_dtype: visitor.right_dtype.unwrap_or_default(),
+                output_dtype: visitor.output_dtype.unwrap_or_default(),
+            }),
+            Some("policy_decided") => Some(AaceEvent::PolicyDecided {
+                mode: visitor.mode.unwrap_or_default(),
+                issue_kind: visitor.issue_kind.unwrap_or_default(),
+                subject: visitor.subject.unwrap_or_default(),
+                action: visitor.action.unwrap_or_default(),
+            }),
+            Some("materialized") => Some(AaceEvent::Materialized {
+                operation: visitor.operation.unwrap_or_default(),
+                rows: visitor.rows.unwrap_or(0),
+                cols: visitor.cols.unwrap_or(0),
+            }),
+            _ => None,
+        };
+        if let Some(aace_event) = parsed {
+            let mut guard = match self.ledger.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            guard.push_aace_event(aace_event);
+        }
+    }
+
+    fn enter(&self, _span: &tracing::span::Id) {}
+
+    fn exit(&self, _span: &tracing::span::Id) {}
+}
+
+/// Run `f` with an active [`EvidenceLedgerSubscriber`] attached on the current
+/// thread when `feature = "tracing"` is enabled, returning `(f(), ledger)`.
+/// When `feature = "tracing"` is disabled, runs `f()` directly with zero subscriber
+/// overhead and returns an empty [`EvidenceLedger`].
+#[cfg(feature = "tracing")]
+pub fn with_aace_ledger<F, R>(f: F) -> (R, EvidenceLedger)
+where
+    F: FnOnce() -> R,
+{
+    let subscriber = EvidenceLedgerSubscriber::new();
+    let reader = subscriber.clone();
+    let result = tracing::subscriber::with_default(subscriber, f);
+    (result, reader.snapshot())
+}
+
+/// Zero-cost fallback when `feature = "tracing"` is disabled.
+#[cfg(not(feature = "tracing"))]
+#[inline(always)]
+pub fn with_aace_ledger<F, R>(f: F) -> (R, EvidenceLedger)
+where
+    F: FnOnce() -> R,
+{
+    (f(), EvidenceLedger::new())
 }
 
 #[cfg(test)]
@@ -2751,5 +3157,66 @@ mod tests {
         let _: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         assert!(json.contains("quantile_threshold"));
         assert!(json.contains("empirical_coverage"));
+    }
+
+    #[test]
+    fn aace_tracing_event_stream_and_zero_cost_off_contract_rp3un() {
+        use super::{
+            AaceEvent, emit_alignment_planned, emit_dtype_coerced, emit_materialized,
+            is_tracing_enabled, with_aace_ledger,
+        };
+
+        let (result, ledger) = with_aace_ledger(|| {
+            let mut local_ledger = EvidenceLedger::new().without_semantic_witnesses();
+            let policy = RuntimePolicy::strict();
+            let _ = policy.decide_join_admission(4, &mut local_ledger);
+            assert!(
+                local_ledger.records().is_empty(),
+                "throwaway ledger in strict mode must not allocate DecisionRecords"
+            );
+            emit_alignment_planned("series.add", "sorted_unique_outer", 4, 3, 3);
+            emit_dtype_coerced("series.add", "Int64", "Float64", "Float64");
+            emit_materialized("series.add", 4, 1);
+            42_usize
+        });
+        assert_eq!(result, 42);
+
+        if is_tracing_enabled() {
+            assert_eq!(
+                ledger.aace_events(),
+                &[
+                    AaceEvent::PolicyDecided {
+                        mode: "strict".to_owned(),
+                        issue_kind: "join_cardinality".to_owned(),
+                        subject: "join_estimator".to_owned(),
+                        action: "allow".to_owned(),
+                    },
+                    AaceEvent::AlignmentPlanned {
+                        operation: "series.add".to_owned(),
+                        plan_kind: "sorted_unique_outer".to_owned(),
+                        union_len: 4,
+                        left_hits: 3,
+                        right_hits: 3,
+                    },
+                    AaceEvent::DtypeCoerced {
+                        operation: "series.add".to_owned(),
+                        left_dtype: "Int64".to_owned(),
+                        right_dtype: "Float64".to_owned(),
+                        output_dtype: "Float64".to_owned(),
+                    },
+                    AaceEvent::Materialized {
+                        operation: "series.add".to_owned(),
+                        rows: 4,
+                        cols: 1,
+                    },
+                ]
+            );
+        } else {
+            // NEGATIVE: When tracing feature is disabled, zero events are recorded.
+            assert!(
+                ledger.aace_events().is_empty(),
+                "NEGATIVE: tracing-off build must record zero AACE events"
+            );
+        }
     }
 }

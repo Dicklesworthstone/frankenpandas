@@ -13320,6 +13320,37 @@ fn float_index_labels(labels: Vec<IndexLabel>) -> Vec<IndexLabel> {
         .collect()
 }
 
+/// The index of `distinct[code]` for each code when every distinct value is
+/// an exact Python int (fitting i64) or float: int64 when all are ints,
+/// else float64 - pandas' Index of such values (a NaN for a missing map
+/// key among them). None for any other value (a bool, a numpy scalar, text).
+fn mapped_numbers_index(distinct: &[Bound<'_, PyAny>], codes: &[usize]) -> Option<Index> {
+    if distinct.is_empty() {
+        return None;
+    }
+    let mut ints = Vec::with_capacity(distinct.len());
+    let mut floats = Vec::with_capacity(distinct.len());
+    let mut any_float = false;
+    for value in distinct {
+        if value.is_exact_instance_of::<pyo3::types::PyInt>() {
+            let int: i64 = value.extract().ok()?;
+            ints.push(int);
+            floats.push(int as f64);
+        } else if value.is_exact_instance_of::<pyo3::types::PyFloat>() {
+            any_float = true;
+            ints.push(0);
+            floats.push(value.extract::<f64>().ok()?);
+        } else {
+            return None;
+        }
+    }
+    Some(if any_float {
+        Index::from_f64_values(codes.iter().map(|&code| floats[code]).collect())
+    } else {
+        Index::from_i64_values(codes.iter().map(|&code| ints[code]).collect())
+    })
+}
+
 /// `index` with [`float_index_labels`] applied when they change it (a
 /// missing label, or ints beside floats), its name kept. Aware instants
 /// are left as they are (rebuilding them dropped the zone when a NaT was
@@ -18046,6 +18077,13 @@ impl PyIndex {
                 )));
             }
         };
+        // No value to read a dtype off: pandas' map of an empty index keeps
+        // its dtype (an empty int index mapped came back object).
+        if self.inner.is_empty() {
+            return Ok(Self {
+                inner: self.inner.take(&[]),
+            });
+        }
         let table = if mapper.is_instance_of::<PyDict>() {
             Some(mapper.clone())
         } else if mapper.extract::<PyRef<'_, PySeries>>().is_ok() {
@@ -18100,6 +18138,15 @@ impl PyIndex {
                     };
                     codes.push(slot);
                 }
+            }
+            // Python ints and floats (a missing key's NaN among them) are an
+            // int64 / float64 index gathered from the distinct values: they
+            // made an index, taken a label a row and scanned after for kinds
+            // and NaN (Index(ints).map(dict) with missing keys 0.42x pandas).
+            if let Some(numbers) = mapped_numbers_index(&distinct, &codes) {
+                return Ok(Self {
+                    inner: numbers.rename_index(self.inner.name()),
+                });
             }
             let values = PyList::new(py, distinct)?;
             let mapped = Self::new(Some(values.as_any()), self.inner.name().cloned())?;
@@ -30361,6 +30408,21 @@ fn operand_zone(operand: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
 /// numpy scalar, a bool, an int past i64, a float against narrow ints.
 fn plain_number_operand(like: &Series, other: &Bound<'_, PyAny>) -> Option<Scalar> {
     let dtype = like.column().dtype();
+    // A masked Int64 column (no narrower width) by an int or a float: the
+    // column's masked kernels answer it, a missing row NA (the broadcast and
+    // a Scalar a row: si + 1 0.01x pandas; br-frankenpandas-aykex).
+    if dtype == DType::Int64Nullable {
+        if like.column().width().is_some() {
+            return None;
+        }
+        if other.is_exact_instance_of::<pyo3::types::PyInt>() {
+            return other.extract::<i64>().ok().map(Scalar::Int64);
+        }
+        if other.is_exact_instance_of::<pyo3::types::PyFloat>() {
+            return other.extract::<f64>().ok().map(Scalar::Float64);
+        }
+        return None;
+    }
     let float_values = dtype == DType::Float64;
     if !float_values && dtype != DType::Int64 {
         return None;
@@ -38583,6 +38645,7 @@ impl PySeries {
                     .with_row_multiindex(multiindex_take(&multi, &rows)?)
                     .map_err(index_error_to_py)?
             };
+            let index = index_with_sorted_row_levels(index)?;
             let sorted = Series::new(taken.name(), index, taken.column().clone())
                 .map_err(frame_error_to_py)?;
             return Ok(series_inplace(
@@ -39690,6 +39753,13 @@ impl PySeries {
             .transpose()?;
         let values = match (dtype, na_value) {
             (None, None) => pandas_default_ndarray(py, column)?,
+            // A masked Int64 column's ints in `dtype`, every missing row
+            // filled after (an int64 array takes no NaN): each cell was made
+            // an object (si.to_numpy(dtype=float, na_value=nan) 15 ms at 200k
+            // rows, pandas 0.27; br-frankenpandas-aykex).
+            (Some(dtype), Some(_)) => masked_int64_ndarray(py, column)?
+                .map(|array| array.call_method1("astype", (dtype,)))
+                .transpose()?,
             _ => None,
         };
         let values = values.map_or_else(|| column_ndarray(py, column), Ok)?;
@@ -44299,6 +44369,22 @@ fn typed_ndarray<'py>(
         }
         _ => Ok(None),
     }
+}
+
+/// A masked Int64 column's ints as an int64 array, a missing row's datum
+/// arbitrary (the caller fills it); None for any other column.
+fn masked_int64_ndarray<'py>(
+    py: Python<'py>,
+    column: &Column,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let Some((data, _)) = column.as_masked_i64_slice() else {
+        return Ok(None);
+    };
+    let array = py
+        .import("numpy")?
+        .call_method1("empty", (data.len(), "int64"))?;
+    pyo3::buffer::PyBuffer::<i64>::get(&array)?.copy_from_slice(py, data)?;
+    Ok(Some(array))
 }
 
 /// A 1-D numpy array of `column` as pandas' `.values` / `to_numpy()` give
@@ -53573,7 +53659,8 @@ impl PyDataFrame {
         {
             validate_sort_kind(kind)?;
             let rows = multiindex_sort_rows(&multi, level, ascending, sort_remaining, na_position)?;
-            let mut sorted = frame_rows_keeping_multiindex(&self.inner, &rows)?;
+            let mut sorted =
+                frame_with_sorted_row_levels(frame_rows_keeping_multiindex(&self.inner, &rows)?)?;
             if ignore_index {
                 sorted = sorted.reset_index(true).map_err(frame_error_to_py)?;
             }
@@ -54891,7 +54978,10 @@ impl PyDataFrame {
             }
             .and_then(|zoned| match zoned {
                 Some(column) => Ok(Some(column)),
-                None => pandas_astype_int_source(column, spec),
+                None => match frame_categorical_cast(&self.inner, name, column, spec)? {
+                    Some(column) => Ok(Some(column)),
+                    None => pandas_astype_int_source(column, spec),
+                },
             });
             match converted {
                 Ok(Some(column)) => {
@@ -66853,6 +66943,33 @@ fn label_rank_keys(
             }
         })
         .collect()
+}
+
+/// Whether any level of `multi` holds a declared (a stack's frame-order)
+/// catalog.
+fn has_declared_levels(multi: &fp_index::MultiIndex) -> bool {
+    (0..multi.nlevels()).any(|level| multi.declared_level_order(level).is_some())
+}
+
+/// `index` with its row MultiIndex's levels sorted, as pandas' sort_index
+/// leaves a stack's frame-order levels (br-frankenpandas-33b80).
+fn index_with_sorted_row_levels(index: Index) -> PyResult<Index> {
+    match index.row_multiindex().cloned() {
+        Some(multi) if has_declared_levels(&multi) => index
+            .with_row_multiindex(multi.with_sorted_levels())
+            .map_err(index_error_to_py),
+        _ => Ok(index),
+    }
+}
+
+/// [`index_with_sorted_row_levels`] of a frame's rows.
+fn frame_with_sorted_row_levels(frame: DataFrame) -> PyResult<DataFrame> {
+    match frame.row_multiindex().cloned() {
+        Some(multi) if has_declared_levels(&multi) => frame
+            .with_row_multiindex(multi.with_sorted_levels())
+            .map_err(frame_error_to_py),
+        _ => Ok(frame),
+    }
 }
 
 fn frame_rows_keeping_multiindex(frame: &DataFrame, positions: &[usize]) -> PyResult<DataFrame> {
@@ -86203,6 +86320,25 @@ fn category_codes_of(column: &Column, categories: &[Scalar]) -> Vec<i64> {
 /// re-inferred from the values, sorted as text and unordered, so sorts,
 /// comparisons, max and codes followed the wrong order. `None` for any
 /// other dtype.
+/// `frame`'s column `name` cast to a CategoricalDtype naming categories or
+/// ordered, as `Series.astype` casts it ([`categorical_with_dtype`]): the
+/// frame's cast took the sorted distinct values for its categories
+/// (df.astype({'g': CategoricalDtype(['d', 'c', 'b', 'a'])}) came back
+/// ['a', 'b', 'c', 'd']; br-frankenpandas-aykex). None for any other spec.
+fn frame_categorical_cast(
+    frame: &DataFrame,
+    name: &str,
+    column: &Column,
+    spec: &Bound<'_, PyAny>,
+) -> PyResult<Option<Column>> {
+    if spec.extract::<PyRef<'_, PyCategoricalDtype>>().is_err() {
+        return Ok(None);
+    }
+    let series =
+        Series::new(name, frame.index().clone(), column.clone()).map_err(frame_error_to_py)?;
+    Ok(categorical_with_dtype(&series, spec)?.map(|series| series.column().clone()))
+}
+
 fn categorical_with_dtype(series: &Series, dtype: &Bound<'_, PyAny>) -> PyResult<Option<Series>> {
     let Ok(categorical) = dtype.extract::<PyRef<'_, PyCategoricalDtype>>() else {
         return Ok(None);

@@ -40,6 +40,7 @@ serde = { workspace = true }
 serde-pickle = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true, optional = true }
 
 [package.metadata.docs.rs]
 all-features = true
@@ -63,3 +64,4 @@ hdf5 = ["dep:hdf5"]
 sql-sqlite = ["dep:rusqlite"]
 sql-mysql = ["dep:mysql"]
 sql-postgresql = ["dep:postgres-protocol", "dep:fallible-iterator"]
+tracing = ["dep:tracing", "fp-frame/tracing"]

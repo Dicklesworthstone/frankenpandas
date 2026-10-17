@@ -2334,6 +2334,9 @@ fn read_csv_str_uncached(input: &str) -> Result<DataFrame, IoError> {
 }
 
 pub fn read_csv_str(input: &str) -> Result<DataFrame, IoError> {
+    #[cfg(feature = "tracing")]
+    let _span =
+        tracing::info_span!(target: "frankenpandas::span", "io", op = "read_csv_str").entered();
     if let Some(frame) = csv_parse_cache_lookup(CsvParseCacheMode::Default, input) {
         return Ok(frame);
     }
@@ -9233,6 +9236,9 @@ fn try_read_json_records_flat(input: &str) -> Result<Option<DataFrame>, IoError>
 }
 
 pub fn read_json_str(input: &str, orient: JsonOrient) -> Result<DataFrame, IoError> {
+    #[cfg(feature = "tracing")]
+    let _span =
+        tracing::info_span!(target: "frankenpandas::span", "io", op = "read_json_str").entered();
     // Records fast path (must precede the Value-tree parse): scan a FLAT records
     // array directly into per-column Scalar builders, skipping the serde_json::Value
     // tree + per-record map allocation that dominates a large records JSON (a 260 MB
@@ -12739,11 +12745,532 @@ fn parse_excel_rows(
     )?)
 }
 
+struct DeflateBitReader<'a> {
+    data: &'a [u8],
+    pos: usize,
+    bit_buf: u64,
+    bit_cnt: u32,
+}
+
+impl<'a> DeflateBitReader<'a> {
+    const fn new(data: &'a [u8]) -> Self {
+        Self {
+            data,
+            pos: 0,
+            bit_buf: 0,
+            bit_cnt: 0,
+        }
+    }
+
+    fn read_bits(&mut self, n: u32) -> Option<u32> {
+        while self.bit_cnt < n {
+            let byte = *self.data.get(self.pos)?;
+            self.pos += 1;
+            self.bit_buf |= u64::from(byte) << self.bit_cnt;
+            self.bit_cnt += 8;
+        }
+        let mask = if n == 32 { u64::MAX } else { (1u64 << n) - 1 };
+        let val = (self.bit_buf & mask) as u32;
+        self.bit_buf >>= n;
+        self.bit_cnt -= n;
+        Some(val)
+    }
+
+    fn align_byte(&mut self) {
+        let drop_bits = self.bit_cnt & 7;
+        self.bit_buf >>= drop_bits;
+        self.bit_cnt -= drop_bits;
+    }
+
+    fn read_u16_le(&mut self) -> Option<u16> {
+        let lo = u16::try_from(self.read_bits(8)?).ok()?;
+        let hi = u16::try_from(self.read_bits(8)?).ok()?;
+        Some(lo | (hi << 8))
+    }
+}
+
+struct DeflateHuffTree {
+    counts: [u16; 16],
+    symbols: Vec<u16>,
+}
+
+impl DeflateHuffTree {
+    fn from_lengths(lengths: &[u8]) -> Option<Self> {
+        let mut counts = [0u16; 16];
+        for &len in lengths {
+            if usize::from(len) >= counts.len() {
+                return None;
+            }
+            if len > 0 {
+                counts[usize::from(len)] = counts[usize::from(len)].checked_add(1)?;
+            }
+        }
+        let mut offs = [0usize; 16];
+        let mut total = 0usize;
+        for bits in 1..16 {
+            offs[bits] = total;
+            total += usize::from(counts[bits]);
+        }
+        let mut symbols = vec![0u16; total];
+        for (sym, &len) in lengths.iter().enumerate() {
+            if len > 0 {
+                let slot = offs.get_mut(usize::from(len))?;
+                *symbols.get_mut(*slot)? = u16::try_from(sym).ok()?;
+                *slot += 1;
+            }
+        }
+        Some(Self { counts, symbols })
+    }
+
+    fn decode(&self, bits: &mut DeflateBitReader<'_>) -> Option<u16> {
+        let mut code: i32 = 0;
+        let mut first: i32 = 0;
+        let mut index: usize = 0;
+        for len in 1..16 {
+            let bit = i32::try_from(bits.read_bits(1)?).ok()?;
+            code |= bit;
+            let count = i32::from(self.counts[len]);
+            if code - first < count {
+                let offset = usize::try_from(code - first).ok()?;
+                return self.symbols.get(index + offset).copied();
+            }
+            index += usize::from(self.counts[len]);
+            first = (first + count) << 1;
+            code <<= 1;
+        }
+        None
+    }
+}
+
+fn inflate_raw_deflate(input: &[u8], max_out: usize) -> Option<Vec<u8>> {
+    const LEN_BASE: [usize; 29] = [
+        3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
+        131, 163, 195, 227, 258,
+    ];
+    const LEN_EXTRA: [u32; 29] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+    ];
+    const DIST_BASE: [usize; 30] = [
+        1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+        2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
+    ];
+    const DIST_EXTRA: [u32; 30] = [
+        0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
+        13, 13,
+    ];
+    const CL_ORDER: [usize; 19] = [
+        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+    ];
+
+    let mut bits = DeflateBitReader::new(input);
+    let mut out = Vec::new();
+    loop {
+        let bfinal = bits.read_bits(1)?;
+        let btype = bits.read_bits(2)?;
+        match btype {
+            0 => {
+                bits.align_byte();
+                let len = usize::from(bits.read_u16_le()?);
+                let nlen = usize::from(bits.read_u16_le()?);
+                if (len ^ 0xFFFF) != nlen || out.len().saturating_add(len) > max_out {
+                    return None;
+                }
+                for _ in 0..len {
+                    out.push(u8::try_from(bits.read_bits(8)?).ok()?);
+                }
+            }
+            1 | 2 => {
+                let (lit_tree, dist_tree) = if btype == 1 {
+                    let mut lit_lens = [0u8; 288];
+                    lit_lens[..144].fill(8);
+                    lit_lens[144..256].fill(9);
+                    lit_lens[256..280].fill(7);
+                    lit_lens[280..288].fill(8);
+                    let dist_lens = [5u8; 32];
+                    (
+                        DeflateHuffTree::from_lengths(&lit_lens)?,
+                        DeflateHuffTree::from_lengths(&dist_lens)?,
+                    )
+                } else {
+                    let hlit = usize::try_from(bits.read_bits(5)?).ok()? + 257;
+                    let hdist = usize::try_from(bits.read_bits(5)?).ok()? + 1;
+                    let hclen = usize::try_from(bits.read_bits(4)?).ok()? + 4;
+                    let mut cl_lens = [0u8; 19];
+                    for &idx in CL_ORDER.iter().take(hclen) {
+                        cl_lens[idx] = u8::try_from(bits.read_bits(3)?).ok()?;
+                    }
+                    let cl_tree = DeflateHuffTree::from_lengths(&cl_lens)?;
+                    let mut all_lens = Vec::with_capacity(hlit + hdist);
+                    while all_lens.len() < hlit + hdist {
+                        let sym = cl_tree.decode(&mut bits)?;
+                        match sym {
+                            0..=15 => all_lens.push(u8::try_from(sym).ok()?),
+                            16 => {
+                                let prev = *all_lens.last()?;
+                                let rep = usize::try_from(bits.read_bits(2)?).ok()? + 3;
+                                all_lens.extend(std::iter::repeat_n(prev, rep));
+                            }
+                            17 => {
+                                let rep = usize::try_from(bits.read_bits(3)?).ok()? + 3;
+                                all_lens.extend(std::iter::repeat_n(0u8, rep));
+                            }
+                            18 => {
+                                let rep = usize::try_from(bits.read_bits(7)?).ok()? + 11;
+                                all_lens.extend(std::iter::repeat_n(0u8, rep));
+                            }
+                            _ => return None,
+                        }
+                    }
+                    if all_lens.len() != hlit + hdist {
+                        return None;
+                    }
+                    (
+                        DeflateHuffTree::from_lengths(&all_lens[..hlit])?,
+                        DeflateHuffTree::from_lengths(&all_lens[hlit..])?,
+                    )
+                };
+
+                loop {
+                    let sym = usize::from(lit_tree.decode(&mut bits)?);
+                    if sym < 256 {
+                        if out.len() >= max_out {
+                            return None;
+                        }
+                        out.push(u8::try_from(sym).ok()?);
+                    } else if sym == 256 {
+                        break;
+                    } else {
+                        let len_idx = sym.checked_sub(257)?;
+                        let base_len = *LEN_BASE.get(len_idx)?;
+                        let extra_len =
+                            usize::try_from(bits.read_bits(*LEN_EXTRA.get(len_idx)?)?).ok()?;
+                        let length = base_len + extra_len;
+                        let dist_sym = usize::from(dist_tree.decode(&mut bits)?);
+                        let base_dist = *DIST_BASE.get(dist_sym)?;
+                        let extra_dist =
+                            usize::try_from(bits.read_bits(*DIST_EXTRA.get(dist_sym)?)?).ok()?;
+                        let dist = base_dist + extra_dist;
+                        if dist == 0
+                            || dist > out.len()
+                            || out.len().saturating_add(length) > max_out
+                        {
+                            return None;
+                        }
+                        for _ in 0..length {
+                            let b = *out.get(out.len() - dist)?;
+                            out.push(b);
+                        }
+                    }
+                }
+            }
+            _ => return None,
+        }
+        if bfinal == 1 {
+            break;
+        }
+    }
+    Some(out)
+}
+
+fn validate_xlsx_cell_ref(raw: &[u8]) -> Result<(u32, u32), IoError> {
+    let mut i = 0usize;
+    if raw.get(i) == Some(&b'$') {
+        i += 1;
+    }
+    let mut col: u32 = 0;
+    let mut col_letters: usize = 0;
+    while let Some(&b) = raw.get(i) {
+        let upper = match b {
+            b'A'..=b'Z' => b,
+            b'a'..=b'z' => b - b'a' + b'A',
+            _ => break,
+        };
+        col_letters += 1;
+        if col_letters > 3 {
+            return Err(IoError::Excel(format!(
+                "Excel cell reference column exceeds 3 letters (max XFD): {:?}",
+                String::from_utf8_lossy(raw)
+            )));
+        }
+        col = col
+            .saturating_mul(26)
+            .saturating_add(u32::from(upper - b'A') + 1);
+        i += 1;
+    }
+    if col_letters == 0 || col > 16_384 {
+        return Err(IoError::Excel(format!(
+            "Excel cell reference column out of range (1..=16384 / A..=XFD): {:?}",
+            String::from_utf8_lossy(raw)
+        )));
+    }
+    if raw.get(i) == Some(&b'$') {
+        i += 1;
+    }
+    let mut row: u32 = 0;
+    let mut row_digits: usize = 0;
+    while let Some(&b) = raw.get(i) {
+        if !b.is_ascii_digit() {
+            return Err(IoError::Excel(format!(
+                "invalid character in Excel cell reference: {:?}",
+                String::from_utf8_lossy(raw)
+            )));
+        }
+        row_digits += 1;
+        if row_digits > 7 {
+            return Err(IoError::Excel(format!(
+                "Excel cell reference row exceeds max 1048576: {:?}",
+                String::from_utf8_lossy(raw)
+            )));
+        }
+        row = row.saturating_mul(10).saturating_add(u32::from(b - b'0'));
+        i += 1;
+    }
+    if row_digits == 0 || row == 0 || row > 1_048_576 {
+        return Err(IoError::Excel(format!(
+            "Excel cell reference row out of range (1..=1048576): {:?}",
+            String::from_utf8_lossy(raw)
+        )));
+    }
+    Ok((row, col))
+}
+
+fn validate_xlsx_row_index(raw: &[u8]) -> Result<u32, IoError> {
+    if raw.is_empty() || raw.len() > 7 {
+        return Err(IoError::Excel(format!(
+            "Excel row index out of range (1..=1048576): {:?}",
+            String::from_utf8_lossy(raw)
+        )));
+    }
+    let mut row: u32 = 0;
+    for &b in raw {
+        if !b.is_ascii_digit() {
+            return Err(IoError::Excel(format!(
+                "invalid Excel row index attribute: {:?}",
+                String::from_utf8_lossy(raw)
+            )));
+        }
+        row = row.saturating_mul(10).saturating_add(u32::from(b - b'0'));
+    }
+    if row == 0 || row > 1_048_576 {
+        return Err(IoError::Excel(format!(
+            "Excel row index out of range (1..=1048576): {:?}",
+            String::from_utf8_lossy(raw)
+        )));
+    }
+    Ok(row)
+}
+
+fn validate_xlsx_range_or_cell_ref(raw: &[u8]) -> Result<(), IoError> {
+    for segment in raw.split(|&b| b == b' ') {
+        if segment.is_empty() {
+            continue;
+        }
+        if let Some(colon_pos) = segment.iter().position(|&b| b == b':') {
+            let start = &segment[..colon_pos];
+            let end = &segment[colon_pos + 1..];
+            let (r0, c0) = validate_xlsx_cell_ref(start)?;
+            let (r1, c1) = validate_xlsx_cell_ref(end)?;
+            if r1 < r0 || c1 < c0 {
+                return Err(IoError::Excel(format!(
+                    "inverted Excel range reference {:?} (end precedes start)",
+                    String::from_utf8_lossy(raw)
+                )));
+            }
+        } else {
+            let _ = validate_xlsx_cell_ref(segment)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_xlsx_xml_cell_refs(xml: &[u8]) -> Result<(), IoError> {
+    use quick_xml::events::Event;
+
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e) | Event::Empty(ref e)) => {
+                let local = e.local_name();
+                let tag: &[u8] = local.as_ref().as_bytes();
+                if matches!(
+                    tag,
+                    b"c" | b"row" | b"dimension" | b"f" | b"mergeCell" | b"table" | b"location"
+                ) {
+                    for attr in e.attributes().with_checks(false) {
+                        let Ok(attr) = attr else {
+                            continue;
+                        };
+                        let key = attr.key.local_name();
+                        let key_bytes: &[u8] = key.as_ref().as_bytes();
+                        let val: &[u8] = attr.value.as_ref().as_bytes();
+                        if tag == b"c" && key_bytes == b"r" {
+                            let _ = validate_xlsx_cell_ref(val)?;
+                        } else if tag == b"row" && key_bytes == b"r" {
+                            let _ = validate_xlsx_row_index(val)?;
+                        } else if matches!(
+                            tag,
+                            b"dimension" | b"f" | b"mergeCell" | b"table" | b"location"
+                        ) && key_bytes == b"ref"
+                        {
+                            validate_xlsx_range_or_cell_ref(val)?;
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(())
+}
+
+/// Pre-validate `.xlsx` ZIP worksheet XML entries so out-of-range cell coordinates
+/// (such as `AAAAAAA1`, which overflows `calamine-0.36.1`'s `u32` column accumulator
+/// in debug mode) return a clean `Err(IoError::Excel(_))` instead of panicking.
+fn validate_xlsx_bytes(data: &[u8]) -> Result<(), IoError> {
+    const MAX_XML_ENTRY_BYTES: usize = 64 * 1024 * 1024;
+    if !data.starts_with(b"PK\x03\x04") {
+        return Ok(());
+    }
+    let read_u16 = |offset: usize| -> Option<u16> {
+        let slice = data.get(offset..offset.checked_add(2)?)?;
+        Some(u16::from_le_bytes([slice[0], slice[1]]))
+    };
+    let read_u32 = |offset: usize| -> Option<u32> {
+        let slice = data.get(offset..offset.checked_add(4)?)?;
+        Some(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+    };
+
+    let validate_entry = |name: &[u8], method: u16, payload: &[u8]| -> Result<(), IoError> {
+        if !name.ends_with(b".xml") {
+            return Ok(());
+        }
+        match method {
+            0 => validate_xlsx_xml_cell_refs(payload),
+            8 => {
+                if let Some(inflated) = inflate_raw_deflate(payload, MAX_XML_ENTRY_BYTES) {
+                    validate_xlsx_xml_cell_refs(&inflated)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    };
+
+    // Walk ZIP Central Directory if present (handles streaming entries with data descriptors).
+    let min_eocd = 22usize;
+    if data.len() >= min_eocd {
+        let search_start = data.len().saturating_sub(65_557);
+        let mut eocd_pos = None;
+        for pos in (search_start..=data.len() - min_eocd).rev() {
+            if data.get(pos..pos + 4) == Some(b"PK\x05\x06") {
+                eocd_pos = Some(pos);
+                break;
+            }
+        }
+        if let Some(eocd) = eocd_pos
+            && let (Some(total_entries), Some(cd_offset)) =
+                (read_u16(eocd + 10), read_u32(eocd + 16))
+        {
+            let mut cd_pos = usize::try_from(cd_offset).unwrap_or(data.len());
+            for _ in 0..total_entries {
+                if data.get(cd_pos..cd_pos.saturating_add(4)) != Some(b"PK\x01\x02") {
+                    break;
+                }
+                let Some(method) = read_u16(cd_pos + 10) else {
+                    break;
+                };
+                let Some(comp_size) = read_u32(cd_pos + 20).and_then(|v| usize::try_from(v).ok())
+                else {
+                    break;
+                };
+                let Some(name_len) = read_u16(cd_pos + 28).map(usize::from) else {
+                    break;
+                };
+                let Some(extra_len) = read_u16(cd_pos + 30).map(usize::from) else {
+                    break;
+                };
+                let Some(comment_len) = read_u16(cd_pos + 32).map(usize::from) else {
+                    break;
+                };
+                let Some(lfh_offset) = read_u32(cd_pos + 42).and_then(|v| usize::try_from(v).ok())
+                else {
+                    break;
+                };
+                let name_start = cd_pos.saturating_add(46);
+                let name_end = name_start.saturating_add(name_len);
+                if let Some(name) = data.get(name_start..name_end)
+                    && data.get(lfh_offset..lfh_offset.saturating_add(4)) == Some(b"PK\x03\x04")
+                    && let (Some(lfh_name_len), Some(lfh_extra_len)) = (
+                        read_u16(lfh_offset + 26).map(usize::from),
+                        read_u16(lfh_offset + 28).map(usize::from),
+                    )
+                {
+                    let data_start = lfh_offset
+                        .saturating_add(30)
+                        .saturating_add(lfh_name_len)
+                        .saturating_add(lfh_extra_len);
+                    if let Some(payload) =
+                        data.get(data_start..data_start.saturating_add(comp_size))
+                    {
+                        validate_entry(name, method, payload)?;
+                    }
+                }
+                cd_pos = name_end
+                    .saturating_add(extra_len)
+                    .saturating_add(comment_len);
+            }
+            return Ok(());
+        }
+    }
+
+    // Fallback: sequential local file header scan.
+    let mut pos = 0usize;
+    while data.get(pos..pos.saturating_add(4)) == Some(b"PK\x03\x04") {
+        let Some(method) = read_u16(pos + 8) else {
+            break;
+        };
+        let Some(comp_size) = read_u32(pos + 18).and_then(|v| usize::try_from(v).ok()) else {
+            break;
+        };
+        let Some(name_len) = read_u16(pos + 26).map(usize::from) else {
+            break;
+        };
+        let Some(extra_len) = read_u16(pos + 28).map(usize::from) else {
+            break;
+        };
+        let name_start = pos.saturating_add(30);
+        let name_end = name_start.saturating_add(name_len);
+        let data_start = name_end.saturating_add(extra_len);
+        let data_end = data_start.saturating_add(comp_size);
+        let (Some(name), Some(payload)) = (
+            data.get(name_start..name_end),
+            data.get(data_start..data_end),
+        ) else {
+            break;
+        };
+        validate_entry(name, method, payload)?;
+        if data_end <= pos {
+            break;
+        }
+        pos = data_end;
+    }
+    Ok(())
+}
+
 /// Read an Excel (.xlsx/.xls/.xlsb/.ods) file into a DataFrame.
 ///
 /// Matches `pd.read_excel(path)` for basic usage.
 pub fn read_excel(path: &Path, options: &ExcelReadOptions) -> Result<DataFrame, IoError> {
     use calamine::{Reader, open_workbook_auto};
+
+    if let Ok(bytes) = std::fs::read(path) {
+        validate_xlsx_bytes(&bytes)?;
+    }
 
     let mut workbook = open_workbook_auto(path)
         .map_err(|e| IoError::Excel(format!("cannot open workbook: {e}")))?;
@@ -12777,6 +13304,8 @@ pub fn read_excel_with_index_cols(
 /// Read Excel from in-memory bytes.
 pub fn read_excel_bytes(data: &[u8], options: &ExcelReadOptions) -> Result<DataFrame, IoError> {
     use calamine::{Reader, open_workbook_auto_from_rs};
+
+    validate_xlsx_bytes(data)?;
 
     let cursor = std::io::Cursor::new(data);
     let mut workbook = open_workbook_auto_from_rs(cursor)
@@ -12833,6 +13362,10 @@ pub fn read_excel_sheets_ordered(
 ) -> Result<Vec<(String, DataFrame)>, IoError> {
     use calamine::{Reader, open_workbook_auto};
 
+    if let Ok(bytes) = std::fs::read(path) {
+        validate_xlsx_bytes(&bytes)?;
+    }
+
     let mut workbook = open_workbook_auto(path)
         .map_err(|e| IoError::Excel(format!("cannot open workbook: {e}")))?;
     let available: Vec<String> = workbook.sheet_names();
@@ -12874,6 +13407,8 @@ pub fn read_excel_sheets_ordered_bytes(
 ) -> Result<Vec<(String, DataFrame)>, IoError> {
     use calamine::{Reader, open_workbook_auto_from_rs};
 
+    validate_xlsx_bytes(data)?;
+
     let cursor = std::io::Cursor::new(data);
     let mut workbook = open_workbook_auto_from_rs(cursor)
         .map_err(|e| IoError::Excel(format!("cannot open workbook from bytes: {e}")))?;
@@ -12914,6 +13449,10 @@ pub fn read_excel_sheets(
     options: &ExcelReadOptions,
 ) -> Result<BTreeMap<String, DataFrame>, IoError> {
     use calamine::{Reader, open_workbook_auto};
+
+    if let Ok(bytes) = std::fs::read(path) {
+        validate_xlsx_bytes(&bytes)?;
+    }
 
     let mut workbook = open_workbook_auto(path)
         .map_err(|e| IoError::Excel(format!("cannot open workbook: {e}")))?;
@@ -12958,6 +13497,8 @@ pub fn read_excel_sheets_bytes(
     options: &ExcelReadOptions,
 ) -> Result<BTreeMap<String, DataFrame>, IoError> {
     use calamine::{Reader, open_workbook_auto_from_rs};
+
+    validate_xlsx_bytes(data)?;
 
     let cursor = std::io::Cursor::new(data);
     let mut workbook = open_workbook_auto_from_rs(cursor)
@@ -15530,10 +16071,15 @@ pub struct PgSyncClient {
     stream: PgStream,
     read_buf: bytes::BytesMut,
     write_buf: bytes::BytesMut,
+    last_col_types: Vec<u32>,
 }
 
 #[cfg(feature = "sql-postgresql")]
 impl PgSyncClient {
+    pub fn last_col_types(&self) -> &[u32] {
+        &self.last_col_types
+    }
+
     fn read_message(&mut self) -> Result<postgres_protocol::message::backend::Message, IoError> {
         use std::io::Read;
         loop {
@@ -15602,6 +16148,7 @@ impl PgSyncClient {
             stream,
             read_buf: bytes::BytesMut::with_capacity(8192),
             write_buf: bytes::BytesMut::with_capacity(8192),
+            last_col_types: Vec::new(),
         };
 
         let user_str = user.as_str();
@@ -15772,6 +16319,7 @@ impl PgSyncClient {
             if let Some(e) = query_err {
                 return Err(e);
             }
+            self.last_col_types = col_types;
             return Ok(SqlQueryResult { columns, rows });
         }
 
@@ -15859,6 +16407,7 @@ impl PgSyncClient {
         if let Some(e) = query_err {
             return Err(e);
         }
+        self.last_col_types = col_types;
         Ok(SqlQueryResult { columns, rows })
     }
 }
@@ -16047,7 +16596,8 @@ fn postgres_dtype_sql(dtype: DType) -> &'static str {
         DType::Int64 | DType::Int64Nullable | DType::Timedelta64 => "BIGINT",
         DType::Float64 | DType::Float64Nullable => "DOUBLE PRECISION",
         DType::Bool | DType::BoolNullable => "BOOLEAN",
-        DType::Datetime64 { .. } => "TIMESTAMPTZ",
+        DType::Datetime64 { tz: None } => "TIMESTAMP",
+        DType::Datetime64 { tz: Some(_) } => "TIMESTAMPTZ",
         _ => "TEXT",
     }
 }
@@ -16059,11 +16609,26 @@ fn postgres_sql_dtype_from_index(index: &Index) -> &'static str {
             IndexLabel::Int64(_) => return "BIGINT",
             IndexLabel::Utf8(_) => return "TEXT",
             IndexLabel::Timedelta64(v) if *v != Timedelta::NAT => return "BIGINT",
-            IndexLabel::Datetime64(v) if *v != i64::MIN => return "TIMESTAMPTZ",
+            IndexLabel::Datetime64(v) if *v != i64::MIN => return "TIMESTAMP",
             _ => {}
         }
     }
     "TEXT"
+}
+
+#[cfg(feature = "sql-postgresql")]
+fn pg_type_oid_to_dtype(type_oid: u32) -> Option<DType> {
+    match type_oid {
+        16 => Some(DType::Bool),
+        20 | 21 | 23 => Some(DType::Int64),
+        700 | 701 | 1700 => Some(DType::Float64),
+        25 | 1042 | 1043 => Some(DType::Utf8),
+        1114 => Some(DType::Datetime64 { tz: None }),
+        1184 => Some(DType::Datetime64 {
+            tz: Some("UTC".to_owned()),
+        }),
+        _ => None,
+    }
 }
 
 /// Wrapper around a synchronous `PgSyncClient` providing interior mutability
@@ -16105,6 +16670,21 @@ impl PostgresConnection {
 impl SqlConnection for PostgresConnection {
     fn query(&self, query: &str, params: &[Scalar]) -> Result<SqlQueryResult, IoError> {
         self.conn.borrow_mut().query(query, params)
+    }
+
+    fn query_column_dtypes(
+        &self,
+        _query: &str,
+        _params: &[Scalar],
+    ) -> Result<SqlColumnDtypeHints, IoError> {
+        Ok(self
+            .conn
+            .borrow()
+            .last_col_types()
+            .iter()
+            .copied()
+            .map(pg_type_oid_to_dtype)
+            .collect())
     }
 
     fn supports_paged_sql_chunks(&self) -> bool {
@@ -17350,6 +17930,13 @@ fn dataframe_from_sql_columns(
         let has_observed_value = values.iter().any(|value| !matches!(value, Scalar::Null(_)));
         let column = match (has_observed_value, dtype_hint) {
             (false, Some(dtype)) => Column::new(dtype, values)?,
+            (true, Some(dtype @ DType::Datetime64 { tz: Some(_) }))
+                if values
+                    .iter()
+                    .all(|v| matches!(v, Scalar::Datetime64(_) | Scalar::Null(_))) =>
+            {
+                Column::new(dtype, values)?
+            }
             _ => Column::from_values(values)?,
         };
         out_columns.insert(name.clone(), column);
@@ -29558,11 +30145,32 @@ mod tests {
             assert_eq!(postgres_dtype_sql(DType::Bool), "BOOLEAN");
             assert_eq!(postgres_dtype_sql(DType::BoolNullable), "BOOLEAN");
             assert_eq!(postgres_dtype_sql(DType::Timedelta64), "BIGINT");
-            assert_eq!(postgres_dtype_sql(DType::datetime64_naive()), "TIMESTAMPTZ");
+            assert_eq!(postgres_dtype_sql(DType::datetime64_naive()), "TIMESTAMP");
+            assert_eq!(
+                postgres_dtype_sql(DType::datetime64_tz("UTC")),
+                "TIMESTAMPTZ"
+            );
+            assert_eq!(
+                postgres_dtype_sql(DType::datetime64_tz("America/New_York")),
+                "TIMESTAMPTZ"
+            );
             assert_eq!(postgres_dtype_sql(DType::Utf8), "TEXT");
+
+            assert_eq!(
+                crate::pg_type_oid_to_dtype(1114),
+                Some(DType::Datetime64 { tz: None })
+            );
+            assert_eq!(
+                crate::pg_type_oid_to_dtype(1184),
+                Some(DType::Datetime64 {
+                    tz: Some("UTC".to_owned()),
+                })
+            );
 
             let int_idx = Index::new(vec![IndexLabel::Int64(1), IndexLabel::Int64(2)]);
             assert_eq!(postgres_sql_dtype_from_index(&int_idx), "BIGINT");
+            let dt_idx = Index::new(vec![IndexLabel::Datetime64(1_705_314_600_000_000_000)]);
+            assert_eq!(postgres_sql_dtype_from_index(&dt_idx), "TIMESTAMP");
             let str_idx = Index::new(vec![
                 IndexLabel::Utf8("a".into()),
                 IndexLabel::Utf8("b".into()),
@@ -29831,6 +30439,89 @@ mod tests {
                 names[1]
             );
             assert_eq!(names[2], Scalar::Utf8("z".into()));
+        }
+
+        #[test]
+        fn test_postgres_live_timestamptz_vs_timestamp_roundtrip_4qg5w_15() {
+            let Some(conn) = live_pg_conn() else {
+                return;
+            };
+            let table_name = "fp_test_timestamptz_vs_timestamp_4qg5w_15";
+            let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{table_name}\""));
+
+            // 2024-01-15T10:30:00Z in nanoseconds
+            let ts = 1_705_314_600_000_000_000_i64;
+            let mut columns = BTreeMap::new();
+            columns.insert(
+                "naive_ts".to_string(),
+                Column::new(
+                    DType::datetime64_naive(),
+                    vec![
+                        Scalar::Datetime64(ts),
+                        Scalar::Null(fp_types::NullKind::NaT),
+                    ],
+                )
+                .expect("naive column"),
+            );
+            columns.insert(
+                "aware_utc".to_string(),
+                Column::new(
+                    DType::datetime64_tz("UTC"),
+                    vec![
+                        Scalar::Datetime64(ts),
+                        Scalar::Null(fp_types::NullKind::NaT),
+                    ],
+                )
+                .expect("aware utc column"),
+            );
+            let order = vec!["naive_ts".to_owned(), "aware_utc".to_owned()];
+            let df = DataFrame::new_with_column_order(
+                Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]),
+                columns,
+                order,
+            )
+            .expect("test frame");
+
+            write_sql(&df, &conn, table_name, SqlIfExists::Fail).expect("write_sql");
+
+            // Verify PostgreSQL catalog column types: TIMESTAMP WITHOUT TIME ZONE vs TIMESTAMP WITH TIME ZONE
+            let inspector = SqlInspector::new(&conn);
+            let schema = inspector
+                .columns(table_name, None)
+                .expect("table_schema")
+                .expect("schema exists");
+            let naive_decl = schema
+                .columns
+                .iter()
+                .find(|c| c.name == "naive_ts")
+                .and_then(|c| c.declared_type.as_deref());
+            let aware_decl = schema
+                .columns
+                .iter()
+                .find(|c| c.name == "aware_utc")
+                .and_then(|c| c.declared_type.as_deref());
+            assert_eq!(naive_decl, Some("timestamp without time zone"));
+            assert_eq!(aware_decl, Some("timestamp with time zone"));
+
+            let back = read_sql_table(&conn, table_name).expect("read_sql_table");
+            let _ = conn.execute_batch(&format!("DROP TABLE IF EXISTS \"{table_name}\""));
+
+            let naive_col = back.column("naive_ts").expect("naive_ts");
+            let aware_col = back.column("aware_utc").expect("aware_utc");
+            assert_eq!(naive_col.dtype(), DType::Datetime64 { tz: None });
+            assert_eq!(
+                aware_col.dtype(),
+                DType::Datetime64 {
+                    tz: Some("UTC".to_owned()),
+                }
+            );
+            // NEGATIVE: TIMESTAMPTZ must not collapse to tz-naive Datetime64, and
+            // TIMESTAMP WITHOUT TIME ZONE must not gain a synthetic UTC timezone.
+            assert_ne!(naive_col.dtype(), aware_col.dtype());
+            assert_eq!(naive_col.values()[0], Scalar::Datetime64(ts));
+            assert!(naive_col.values()[1].is_missing());
+            assert_eq!(aware_col.values()[0], Scalar::Datetime64(ts));
+            assert!(aware_col.values()[1].is_missing());
         }
     }
 
@@ -42066,5 +42757,565 @@ mod parse_dates_one_zone_wha4m {
             column.values()[1],
             Scalar::Utf8("2024-01-05T10:30:00Z".to_owned())
         );
+    }
+}
+
+#[cfg(test)]
+mod excel_column_overflow {
+    use super::{
+        ExcelReadOptions, IoError, read_excel_bytes, read_excel_sheets_bytes,
+        read_excel_sheets_ordered_bytes,
+    };
+
+    fn crc32_ieee(bytes: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in bytes {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+            }
+        }
+        !crc
+    }
+
+    fn build_minimal_xlsx(sheet_xml: &str, deflate_entries: bool) -> Vec<u8> {
+        let files: [(&str, &[u8]); 5] = [
+            (
+                "[Content_Types].xml",
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#,
+            ),
+            (
+                "_rels/.rels",
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+</workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"#,
+            ),
+            ("xl/worksheets/sheet1.xml", sheet_xml.as_bytes()),
+        ];
+
+        let mut out = Vec::new();
+        let mut cd = Vec::new();
+        for (name, raw) in files {
+            let lfh_offset = u32::try_from(out.len()).expect("zip offset fits u32");
+            let crc = crc32_ieee(raw);
+            let uncomp_len = u32::try_from(raw.len()).expect("uncomp len fits u32");
+            let (method, payload): (u16, Vec<u8>) = if deflate_entries {
+                let len16 = u16::try_from(raw.len()).expect("deflate block fits u16");
+                let nlen16 = !len16;
+                let mut block = Vec::with_capacity(raw.len() + 5);
+                block.push(0x01); // BFINAL=1, BTYPE=00 (RFC 1951 stored deflate block)
+                block.extend_from_slice(&len16.to_le_bytes());
+                block.extend_from_slice(&nlen16.to_le_bytes());
+                block.extend_from_slice(raw);
+                (8u16, block)
+            } else {
+                (0u16, raw.to_vec())
+            };
+            let comp_len = u32::try_from(payload.len()).expect("comp len fits u32");
+            let name_bytes = name.as_bytes();
+            let name_len = u16::try_from(name_bytes.len()).expect("name len fits u16");
+
+            // Local file header
+            out.extend_from_slice(b"PK\x03\x04");
+            out.extend_from_slice(&20u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&method.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&comp_len.to_le_bytes());
+            out.extend_from_slice(&uncomp_len.to_le_bytes());
+            out.extend_from_slice(&name_len.to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(name_bytes);
+            out.extend_from_slice(&payload);
+
+            // Central directory header
+            cd.extend_from_slice(b"PK\x01\x02");
+            cd.extend_from_slice(&20u16.to_le_bytes());
+            cd.extend_from_slice(&20u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&method.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&crc.to_le_bytes());
+            cd.extend_from_slice(&comp_len.to_le_bytes());
+            cd.extend_from_slice(&uncomp_len.to_le_bytes());
+            cd.extend_from_slice(&name_len.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u16.to_le_bytes());
+            cd.extend_from_slice(&0u32.to_le_bytes());
+            cd.extend_from_slice(&lfh_offset.to_le_bytes());
+            cd.extend_from_slice(name_bytes);
+        }
+
+        let cd_offset = u32::try_from(out.len()).expect("cd offset fits u32");
+        let cd_size = u32::try_from(cd.len()).expect("cd size fits u32");
+        let count = u16::try_from(files.len()).expect("file count fits u16");
+        out.extend_from_slice(&cd);
+        out.extend_from_slice(b"PK\x05\x06");
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&cd_size.to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn excel_column_overflow_rejects_7_letter_column_and_overflow_row_kyvo0_8() {
+        let valid_sheet = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:A2"/>
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>col</t></is></c></row>
+    <row r="2"><c r="A2"><v>42</v></c></row>
+  </sheetData>
+</worksheet>"#;
+        for deflate in [false, true] {
+            let ok_bytes = build_minimal_xlsx(valid_sheet, deflate);
+            let df = read_excel_bytes(&ok_bytes, &ExcelReadOptions::default())
+                .expect("valid xlsx should parse");
+            assert_eq!(df.len(), 1);
+            assert_eq!(df.column_names(), vec!["col"]);
+        }
+
+        let overflow_col_sheet = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="AAAAAAA1"><v>1</v></c></row>
+  </sheetData>
+</worksheet>"#;
+        let overflow_row_sheet = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="99999999"><c r="A99999999"><v>1</v></c></row>
+  </sheetData>
+</worksheet>"#;
+        let inverted_dim_sheet = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="C5:A1"/>
+  <sheetData>
+    <row r="1"><c r="A1"><v>1</v></c></row>
+  </sheetData>
+</worksheet>"#;
+
+        for bad_sheet in [overflow_col_sheet, overflow_row_sheet, inverted_dim_sheet] {
+            for deflate in [false, true] {
+                let bytes = build_minimal_xlsx(bad_sheet, deflate);
+                assert!(
+                    matches!(
+                        read_excel_bytes(&bytes, &ExcelReadOptions::default()),
+                        Err(IoError::Excel(_))
+                    ),
+                    "expected IoError::Excel for deflate={deflate}"
+                );
+                assert!(matches!(
+                    read_excel_sheets_bytes(&bytes, None, &ExcelReadOptions::default()),
+                    Err(IoError::Excel(_))
+                ));
+                assert!(matches!(
+                    read_excel_sheets_ordered_bytes(&bytes, None, &ExcelReadOptions::default()),
+                    Err(IoError::Excel(_))
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod sas_real_file_differential_j0lg5_8 {
+    use std::{
+        collections::BTreeMap,
+        path::{Path, PathBuf},
+        process::Command,
+    };
+
+    use fp_columnar::Column;
+    use fp_frame::DataFrame;
+    use fp_index::Index;
+    use fp_types::{DType, NullKind, Scalar};
+    use sas_xport::sas::{
+        SasVariableType,
+        xport::{XportMetadata, XportSchema, XportValue, XportVariable, XportWriter},
+    };
+
+    use super::{IoError, read_sas};
+
+    fn write_test_xpt(df: &DataFrame, path: &Path) {
+        let mut schema_builder = XportSchema::builder();
+        schema_builder.dataset_name("DATA");
+        let char_len = if df.column_names().len() == 3 { 16 } else { 8 };
+        for col_name in df.column_names() {
+            let col = df.column(col_name).expect("col");
+            let mut var = XportVariable::builder();
+            var.short_name(col_name.as_str());
+            if col.dtype() == DType::Utf8 {
+                var.value_type(SasVariableType::Character)
+                    .value_length(char_len);
+            } else {
+                var.value_type(SasVariableType::Numeric).value_length(8);
+            }
+            schema_builder.add_variable(var);
+        }
+        let schema = schema_builder.try_build().expect("build XPORT schema");
+        let writer = XportWriter::from_file(
+            std::fs::File::create(path).expect("create XPORT file"),
+            XportMetadata::builder().build(),
+        )
+        .expect("open XPORT writer");
+        let mut writer = writer.write_schema(schema).expect("write XPORT schema");
+        for row_idx in 0..df.len() {
+            let mut row_vals = Vec::with_capacity(df.column_names().len());
+            for col_name in df.column_names() {
+                let col = df.column(col_name).expect("col");
+                let cell = col.value(row_idx).expect("cell");
+                match cell {
+                    Scalar::Utf8(s) => row_vals.push(XportValue::from(s.as_str())),
+                    Scalar::Float64(v) => row_vals.push(XportValue::from(*v)),
+                    Scalar::Int64(v) => row_vals.push(XportValue::from(*v as f64)),
+                    _ => row_vals.push(XportValue::from(f64::NAN)),
+                }
+            }
+            writer.write_record(&row_vals).expect("write XPORT record");
+        }
+        writer.finish().expect("finish XPORT writer");
+    }
+
+    fn oracle_python() -> Option<PathBuf> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root");
+        let venv_py = root.join(".venv-oracle/bin/python");
+        if venv_py.is_file() {
+            return Some(venv_py);
+        }
+        None
+    }
+
+    fn assert_sas_matches_pandas(py: &Path, sas_path: &Path) {
+        let script = r#"
+import json, math, sys
+import pandas as pd
+path = sys.argv[1]
+df = pd.read_sas(path, encoding="utf-8")
+cols = list(df.columns)
+rows = []
+for _, r in df.iterrows():
+    row = []
+    for c in cols:
+        v = r[c]
+        if pd.isna(v):
+            row.append(None)
+        elif isinstance(v, (int, float)) and not isinstance(v, bool):
+            row.append(float(v))
+        else:
+            row.append(str(v))
+    rows.append(row)
+print(json.dumps({"columns": cols, "rows": rows}))
+"#;
+        let output = Command::new(py)
+            .arg("-c")
+            .arg(script)
+            .arg(sas_path)
+            .output()
+            .expect("invoke pandas oracle");
+        assert!(
+            output.status.success(),
+            "pandas.read_sas failed on {}: {}",
+            sas_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("parse oracle json");
+        let expected_cols: Vec<String> = parsed["columns"]
+            .as_array()
+            .expect("columns array")
+            .iter()
+            .map(|v| v.as_str().expect("col str").to_owned())
+            .collect();
+        let expected_rows = parsed["rows"].as_array().expect("rows array");
+
+        let df = read_sas(sas_path).expect("fp_io::read_sas");
+        let actual_cols: Vec<String> = df.column_names().into_iter().cloned().collect();
+        assert_eq!(actual_cols, expected_cols);
+        assert_eq!(df.len(), expected_rows.len());
+
+        for (r_idx, exp_row) in expected_rows.iter().enumerate() {
+            let exp_cells = exp_row.as_array().expect("row cells");
+            for (c_idx, col_name) in expected_cols.iter().enumerate() {
+                let actual = df
+                    .column(col_name)
+                    .and_then(|c| c.value(r_idx))
+                    .expect("cell exists");
+                let expected = &exp_cells[c_idx];
+                if expected.is_null() {
+                    assert!(
+                        actual.is_missing(),
+                        "file {} row {r_idx} col {col_name}: expected missing, got {actual:?}",
+                        sas_path.display()
+                    );
+                } else if let Some(exp_num) = expected.as_f64() {
+                    let act_num = match actual {
+                        Scalar::Float64(v) => *v,
+                        Scalar::Int64(v) => *v as f64,
+                        other => {
+                            assert_eq!(
+                                other,
+                                &Scalar::Float64(exp_num),
+                                "unexpected non-numeric scalar"
+                            );
+                            0.0
+                        }
+                    };
+                    assert!(
+                        (act_num - exp_num).abs() <= 1e-6,
+                        "file {} row {r_idx} col {col_name}: expected {exp_num}, got {act_num}",
+                        sas_path.display()
+                    );
+                } else if let Some(exp_str) = expected.as_str() {
+                    assert_eq!(
+                        actual,
+                        &Scalar::Utf8(exp_str.to_owned()),
+                        "file {} row {r_idx} col {col_name} string mismatch",
+                        sas_path.display()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_real_sas7bdat_and_xport_differential_against_pandas_j0lg5_8() {
+        let fixture_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/people_nonascii.sas7bdat");
+        let base_bytes = std::fs::read(&fixture_path).expect("read people_nonascii.sas7bdat");
+        assert_eq!(base_bytes.len(), 5120);
+
+        // Also verify fp_io::read_sas directly on the unmodified non-ASCII fixture.
+        let raw_df = read_sas(&fixture_path).expect("read_sas on people_nonascii.sas7bdat");
+        assert_eq!(raw_df.len(), 5);
+        assert_eq!(
+            raw_df.column_names(),
+            vec!["ID", "SBP", "DBP", "GENDER", "AGE", "WT"]
+        );
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fp_io_sas_differential_j0lg5_8_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        // Normalize byte 1249 (row 0 GENDER 'é' 0xE9) to ASCII 'M' so pandas utf-8 decoding
+        // succeeds across all 5 derived real .sas7bdat files.
+        let mut ascii_base = base_bytes.clone();
+        ascii_base[1249] = b'M';
+
+        // 1. Base 5x6 all-ASCII .sas7bdat
+        let sas_1 = temp_dir.join("case1_people_ascii.sas7bdat");
+        std::fs::write(&sas_1, &ascii_base).expect("write sas_1");
+
+        // 2. SAS numeric missing sentinel (0xFFFFFFFFFFFFFFFF LE -> NaN) in row 0 NUMBER (offset 1216..1224)
+        let mut bytes_2 = ascii_base.clone();
+        bytes_2[1216..1224].copy_from_slice(&0xFFFF_FFFF_FFFF_FFFFu64.to_le_bytes());
+        let sas_2 = temp_dir.join("case2_missing_number.sas7bdat");
+        std::fs::write(&sas_2, &bytes_2).expect("write sas_2");
+
+        // 3. Negative float (-42.5) in row 1 NUMBER (offset 1256..1264)
+        let mut bytes_3 = ascii_base.clone();
+        bytes_3[1256..1264].copy_from_slice(&(-42.5f64).to_le_bytes());
+        let sas_3 = temp_dir.join("case3_negative_number.sas7bdat");
+        std::fs::write(&sas_3, &bytes_3).expect("write sas_3");
+
+        // 4. Zero float (0.0) in row 2 WT (offset 1320..1328)
+        let mut bytes_4 = ascii_base.clone();
+        bytes_4[1320..1328].copy_from_slice(&0.0f64.to_le_bytes());
+        let sas_4 = temp_dir.join("case4_zero_wt.sas7bdat");
+        std::fs::write(&sas_4, &bytes_4).expect("write sas_4");
+
+        // 5. Multiple missing values in WT for rows 0 (1240..1248) and 4 (1400..1408)
+        let mut bytes_5 = ascii_base;
+        bytes_5[1240..1248].copy_from_slice(&0xFFFF_FFFF_FFFF_FFFFu64.to_le_bytes());
+        bytes_5[1400..1408].copy_from_slice(&0xFFFF_FFFF_FFFF_FFFFu64.to_le_bytes());
+        let sas_5 = temp_dir.join("case5_multi_missing.sas7bdat");
+        std::fs::write(&sas_5, &bytes_5).expect("write sas_5");
+
+        // 6..10: Five distinct SAS XPORT v5 (.xpt) datasets written to disk
+        let make_xpt = |file_name: &str, cols: Vec<(&str, Column)>, n: usize| -> PathBuf {
+            let mut map = BTreeMap::new();
+            let mut order = Vec::new();
+            for (name, col) in cols {
+                map.insert(name.to_owned(), col);
+                order.push(name.to_owned());
+            }
+            let df = DataFrame::new_with_column_order(Index::default_range(n), map, order)
+                .expect("build xpt frame");
+            let path = temp_dir.join(file_name);
+            write_test_xpt(&df, &path);
+            path
+        };
+
+        let xpt_1 = make_xpt(
+            "case6_basic.xpt",
+            vec![
+                (
+                    "CODE",
+                    Column::from_values(vec![
+                        Scalar::Utf8("A1".into()),
+                        Scalar::Utf8("B2".into()),
+                        Scalar::Utf8("C3".into()),
+                    ])
+                    .expect("code col"),
+                ),
+                ("ID", Column::from_f64_values(vec![1.0, 2.0, 3.0])),
+                ("SCORE", Column::from_f64_values(vec![10.5, 20.25, 30.75])),
+            ],
+            3,
+        );
+        let xpt_2 = make_xpt(
+            "case7_nulls.xpt",
+            vec![
+                (
+                    "TAG",
+                    Column::from_values(vec![
+                        Scalar::Utf8("first".into()),
+                        Scalar::Utf8("second".into()),
+                        Scalar::Utf8("third".into()),
+                    ])
+                    .expect("tag col"),
+                ),
+                (
+                    "VAL",
+                    Column::from_values(vec![
+                        Scalar::Float64(100.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(-50.5),
+                    ])
+                    .expect("val col"),
+                ),
+            ],
+            3,
+        );
+        let xpt_3 = make_xpt(
+            "case8_fractions.xpt",
+            vec![
+                (
+                    "X",
+                    Column::from_f64_values(vec![-128.5, 1.5, 0.25, 1024.75]),
+                ),
+                (
+                    "Y",
+                    Column::from_f64_values(vec![4.0, -8.125, 16.5, -32.25]),
+                ),
+            ],
+            4,
+        );
+        let xpt_4 = make_xpt(
+            "case9_wide.xpt",
+            vec![
+                (
+                    "LABEL",
+                    Column::from_values(vec![
+                        Scalar::Utf8("row0".into()),
+                        Scalar::Utf8("row1".into()),
+                        Scalar::Utf8("row2".into()),
+                    ])
+                    .expect("label col"),
+                ),
+                ("A", Column::from_f64_values(vec![1.0, 2.0, 3.0])),
+                ("B", Column::from_f64_values(vec![3.0, 4.0, 5.0])),
+                ("C", Column::from_f64_values(vec![5.0, 6.0, 7.0])),
+            ],
+            3,
+        );
+        let xpt_5 = make_xpt(
+            "case10_single.xpt",
+            vec![
+                (
+                    "STATUS",
+                    Column::from_values(vec![
+                        Scalar::Utf8("OK".into()),
+                        Scalar::Utf8("PASS".into()),
+                    ])
+                    .expect("status col"),
+                ),
+                ("METRIC", Column::from_f64_values(vec![99.5, 42.25])),
+            ],
+            2,
+        );
+
+        let all_files = [
+            sas_1, sas_2, sas_3, sas_4, sas_5, xpt_1, xpt_2, xpt_3, xpt_4, xpt_5,
+        ];
+        assert_eq!(all_files.len(), 10);
+
+        if let Some(py) = oracle_python() {
+            for path in &all_files {
+                assert_sas_matches_pandas(&py, path);
+            }
+        } else {
+            for path in &all_files {
+                let df = read_sas(path).expect("read_sas fallback");
+                assert!(df.len() >= 1);
+            }
+        }
+    }
+
+    #[test]
+    fn test_truncated_sas7bdat_and_xport_return_typed_io_error_j0lg5_8() {
+        let fixture_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/people_nonascii.sas7bdat");
+        let base_bytes = std::fs::read(&fixture_path).expect("read people_nonascii.sas7bdat");
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "fp_io_sas_truncated_j0lg5_8_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        for cut in [32usize, 128, 1200] {
+            let path = temp_dir.join(format!("truncated_{cut}.sas7bdat"));
+            std::fs::write(&path, &base_bytes[..cut]).expect("write truncated sas7bdat");
+            let res = read_sas(&path);
+            assert!(
+                matches!(res, Err(IoError::Sas(_))),
+                "expected Err(IoError::Sas(_)) for truncated {cut}-byte .sas7bdat, got {res:?}"
+            );
+        }
+
+        let bad_xpt_path = temp_dir.join("truncated.xpt");
+        std::fs::write(
+            &bad_xpt_path,
+            b"HEADER RECORD*******LIBRARY HEADER RECORD!!!!!!!000000000000000000000000000000  ",
+        )
+        .expect("write truncated xpt");
+        assert!(matches!(read_sas(&bad_xpt_path), Err(IoError::Sas(_))));
     }
 }
