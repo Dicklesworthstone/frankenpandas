@@ -45,12 +45,54 @@ CLASSES_TO_ENUMERATE = [
 ]
 
 # Accessor namespaces (pd.Series.str.*, pd.Series.dt.*, pd.Series.cat.*,
-# pd.DataFrame.plot.*, ...).  Addressed via attribute chain.
+# pd.Series.sparse.*, pd.Series.list.*, pd.Series.struct.*).
 ACCESSOR_NAMESPACES = [
-    ("Series.str", "pandas.core.strings.accessor.StringMethods"),
-    ("Series.dt", "pandas.core.indexes.accessors.DatetimeProperties"),
-    ("Series.cat", "pandas.core.arrays.categorical.CategoricalAccessor"),
+    ("pandas.core.strings.accessor.StringMethods", "Series.str"),
+    ("pandas.core.indexes.accessors.DatetimeProperties", "Series.dt"),
+    ("pandas.core.arrays.categorical.CategoricalAccessor", "Series.cat"),
+    ("pandas.core.arrays.sparse.accessor.SparseAccessor", "Series.sparse"),
+    ("pandas.core.arrays.arrow.accessors.ListAccessor", "Series.list"),
+    ("pandas.core.arrays.arrow.accessors.StructAccessor", "Series.struct"),
 ]
+
+SCALAR_AND_OFFSET_TYPES = [
+    ("pandas.Timestamp", "Timestamp"),
+    ("pandas.Timedelta", "Timedelta"),
+    ("pandas.Period", "Period"),
+    ("pandas.Interval", "Interval"),
+    ("pandas.DateOffset", "DateOffset"),
+]
+
+FAMILY_BY_ALIAS = {
+    "DataFrame": "core",
+    "Series": "core",
+    "Index": "index",
+    "MultiIndex": "index",
+    "DatetimeIndex": "index",
+    "CategoricalIndex": "index",
+    "IntervalIndex": "index",
+    "TimedeltaIndex": "index",
+    "PeriodIndex": "index",
+    "RangeIndex": "index",
+    "DataFrameGroupBy": "groupby_window",
+    "SeriesGroupBy": "groupby_window",
+    "Rolling": "groupby_window",
+    "Expanding": "groupby_window",
+    "ExponentialMovingWindow": "groupby_window",
+    "Resampler": "groupby_window",
+    "Series.str": "accessor",
+    "Series.dt": "accessor",
+    "Series.cat": "accessor",
+    "Series.sparse": "accessor",
+    "Series.list": "accessor",
+    "Series.struct": "accessor",
+    "Timestamp": "scalar_offset",
+    "Timedelta": "scalar_offset",
+    "Period": "scalar_offset",
+    "Interval": "scalar_offset",
+    "DateOffset": "scalar_offset",
+    "pandas_top_level": "top_level",
+}
 
 
 def resolve_class(dotted: str) -> Any:
@@ -113,13 +155,48 @@ def enumerate_class(cls: Any) -> list[dict[str, Any]]:
     return members
 
 
-def build_listing(pandas_version: str) -> dict[str, Any]:
+def enumerate_top_level_functions(pd_mod: Any) -> list[dict[str, Any]]:
+    members = []
+    for name in sorted(dir(pd_mod)):
+        if not _is_public(name):
+            continue
+        try:
+            attr = getattr(pd_mod, name)
+        except AttributeError:
+            continue
+        if inspect.isclass(attr) or inspect.ismodule(attr):
+            continue
+        if not callable(attr):
+            continue
+        doc = _first_line(getattr(attr, "__doc__", None))
+        try:
+            signature = f"{name}{inspect.signature(attr)}"
+        except (TypeError, ValueError):
+            signature = f"{name}(...)"
+        members.append(
+            {
+                "name": name,
+                "kind": "function",
+                "signature": signature,
+                "docstring_first_line": doc,
+            }
+        )
+    return members
+
+
+def build_listing(pd_mod: Any) -> dict[str, Any]:
+    pandas_version = str(getattr(pd_mod, "__version__", "unknown"))
     listing: dict[str, Any] = {
         "pandas_version": pandas_version,
         "generated_by": "scripts/gen_pandas_api_listing.py",
         "classes": {},
     }
-    for dotted, alias in CLASSES_TO_ENUMERATE:
+    all_targets = (
+        list(CLASSES_TO_ENUMERATE)
+        + list(ACCESSOR_NAMESPACES)
+        + list(SCALAR_AND_OFFSET_TYPES)
+    )
+    for dotted, alias in all_targets:
         try:
             cls = resolve_class(dotted)
         except ImportError:
@@ -127,8 +204,14 @@ def build_listing(pandas_version: str) -> dict[str, Any]:
             continue
         listing["classes"][alias] = {
             "dotted_path": dotted,
+            "family": FAMILY_BY_ALIAS.get(alias, "other"),
             "members": enumerate_class(cls),
         }
+    listing["classes"]["pandas_top_level"] = {
+        "dotted_path": "pandas",
+        "family": FAMILY_BY_ALIAS["pandas_top_level"],
+        "members": enumerate_top_level_functions(pd_mod),
+    }
     return listing
 
 
@@ -143,19 +226,25 @@ def main() -> int:
 
     import pandas as pd
 
-    listing = build_listing(pd.__version__)
+    listing = build_listing(pd)
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(listing, indent=2, sort_keys=True))
+    out_path.write_text(json.dumps(listing, indent=2, sort_keys=True) + "\n")
 
     total = sum(
         len(entry.get("members", []))
         for entry in listing["classes"].values()
         if isinstance(entry, dict)
     )
+    by_family: dict[str, int] = {}
+    for entry in listing["classes"].values():
+        if isinstance(entry, dict) and "members" in entry:
+            fam = str(entry.get("family", "other"))
+            by_family[fam] = by_family.get(fam, 0) + len(entry["members"])
+    fam_summary = ", ".join(f"{k}={v}" for k, v in sorted(by_family.items()))
     print(
         f"pandas_api_listing: pandas={pd.__version__} "
-        f"classes={len(listing['classes'])} members={total} → {out_path}"
+        f"surfaces={len(listing['classes'])} members={total} ({fam_summary}) → {out_path}"
     )
     return 0
 
