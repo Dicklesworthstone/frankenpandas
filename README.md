@@ -5,14 +5,14 @@
 
   **Clean-room Rust reimplementation of the full pandas API surface.**
 
-  pandas API in safe Rust. A PyO3 binding crate (`fp-python`) exposes pandas' top-level names and the DataFrame/Series/Index method surface with `frankenpandas.pyi` type stubs and maturin wheel builds; it is not yet a drop-in replacement (the member coverage is counted by name, and behavioral parity is measured case by case in a differential pytest suite against pandas 2.2.3). Zero `unsafe`. Measured head-to-head against live pandas 2.2.3 on 143 certified benchmark lanes. Differential conformance against a pinned live pandas oracle in CI's daily batch and on any checkout that has `.venv-oracle`.
+  pandas API in safe Rust. A PyO3 binding crate (`fp-python`) exposes pandas' top-level names and the DataFrame/Series/Index method surface with `frankenpandas.pyi` type stubs and maturin wheel builds; it is not yet a drop-in replacement (the member coverage is counted by name, and behavioral parity is measured case by case in a differential pytest suite against pandas 2.2.3). Zero `unsafe`. Measured head-to-head against live pandas 2.2.3 on 146 certified benchmark lanes. Differential conformance against a pinned live pandas oracle in CI's daily batch and on any checkout that has `.venv-oracle`.
 
   ![Rust](https://img.shields.io/badge/Rust-2024_edition-orange)
   ![License](https://img.shields.io/badge/license-MIT-blue)
   ![Tests](https://img.shields.io/badge/tests-8700%2B-brightgreen)
   ![Conformance](https://img.shields.io/badge/conformance_packets-1387-blueviolet)
   ![IO Formats](https://img.shields.io/badge/IO_formats-14%2B-purple)
-  ![Lines of Rust](https://img.shields.io/badge/Rust_LOC-507K-orange)
+  ![Lines of Rust](https://img.shields.io/badge/Rust_LOC-750K%2B-orange)
 </div>
 
 ---
@@ -146,7 +146,7 @@ The capability surface (more than 600,000 lines of Rust under `src/` across 15 c
                                       └───────────────┘
 
 Plus two auxiliary crates: fp-conformance (1,387 packets / 1,400 fixture files)
-and fp-frankentui (terminal UI dashboard, experimental).
+and fp-frankentui (dashboard snapshot value types; no TUI in-tree).
 ```
 
 The diagram above shows the runtime/data-flow crates. The total workspace is **15 crates, more than 750,000 lines of Rust under `crates/`** (more than 600,000 of those lines live under `src/` directories, including the inline `#[cfg(test)]` modules; the rest is out-of-`src/` test, example, fixture, and bench scaffolding). The per-crate figures below are floors on each crate's `src/` lines; a test checks every one against the tree.
@@ -156,7 +156,7 @@ The diagram above shows the runtime/data-flow crates. The total workspace is **1
 ```
 frankenpandas/
 ├── crates/
-│   ├── frankenpandas/    # Unified facade crate with prelude (more than 1,800 lines)
+│   ├── frankenpandas/    # Unified facade crate with prelude (more than 2,000 lines)
 │   ├── fp-types/         # Scalar, DType (incl. nullable Int64/Float64/boolean), Timestamp, Timedelta, Period, Interval, NanOps (more than 20,000 lines)
 │   ├── fp-columnar/      # Column with typed Arc<[f64]>/Arc<[i64]> backings, ValidityMask, vectorized kernels (more than 60,000 lines)
 │   ├── fp-dot-kernel/    # The one crate compiled with +avx2,+fma: f64 dot product and elementwise kernels, runtime-dispatched (more than 2,500 lines)
@@ -230,7 +230,7 @@ The `frankenpandas` umbrella forwards inner-crate feature flags so callers can o
 | `sql-postgresql` | off | `fp-io/sql-postgresql` | Pure synchronous Tokio-free PostgreSQL `PostgresConnection` adapter |
 | `sql-mysql` | off | `fp-io/sql-mysql` | MySQL-backed `SqlConnection` impl |
 | `hdf5` | off | `fp-io/hdf5` | Pulls in the hdf5-metno backend for `read_hdf` / `to_hdf` |
-| `tracing` | off | `fp-frame/tracing` | Reserved: pulls in the `tracing` crate, but no spans are emitted yet |
+| `tracing` | off | `fp-frame/tracing`, `fp-runtime/tracing`, `fp-io/tracing` | Emits zero-cost-when-off `tracing` spans (`frankenpandas::span` on `groupby`, `rolling`, `resample`, `read_csv_str`, `read_json_str`) and structured AACE/policy events (`frankenpandas::aace` at `INFO`, subscribed to via `EvidenceLedgerSubscriber` / `with_aace_ledger`) |
 | `asupersync` | off | `fp-runtime/asupersync` | Pulls in the optional `asupersync` runtime integration submodule |
 
 ```toml
@@ -241,8 +241,14 @@ frankenpandas = { path = "crates/frankenpandas" }
 # No SQL deps — drop rusqlite + the sql-sqlite SqlConnection impl
 frankenpandas = { path = "crates/frankenpandas", default-features = false }
 
-# SQLite (default) + HDF5
-frankenpandas = { path = "crates/frankenpandas", features = ["hdf5"] }
+# SQLite (default) + HDF5 + structured tracing
+frankenpandas = { path = "crates/frankenpandas", features = ["hdf5", "tracing"] }
+```
+
+When `tracing` is enabled, filter spans and events by target with `tracing_subscriber::EnvFilter`:
+
+```text
+RUST_LOG=frankenpandas::span=info,frankenpandas::aace=info
 ```
 
 When `sql-sqlite` is disabled, `read_sql` / `write_sql` and the `SqlConnection` trait remain available; just implement the trait for your own connection type to route the same APIs through it.
@@ -1844,7 +1850,7 @@ A: A base `Index` holds heterogeneous `IndexLabel`s (Int64 / Utf8 / Datetime64 /
 A: The core DataFrame, IO, and GroupBy/Join operations are solid and well-tested (**more than 8,000 `#[test]` markers** including adversarial inputs, property-based fuzzing, and a live pandas oracle in CI). This is pre-1.0 software, so API stability is not yet guaranteed, but the correctness bar is high. The known divergences are documented in `DISCREPANCIES.md`.
 
 **Q: How big is the open backlog?**
-A: As of 2026-09-24 the tracker holds about 4,100 beads, of which 79 are open. Most of the open work comes from the 2026-09-23 reality check (label `reality-check-2026-09-23`): the Python binding's path to an honest drop-in, full-surface conformance campaigns, datetime/timezone parity, and reproducible performance measurement; `br ready` shows what is actionable. The April 2026 review-mode audit that once drove the backlog to two items is history, not the current state.
+A: As of 2026-10-13 the tracker holds more than 4,800 beads, of which about 210 are open or in progress. Most of the open work comes from the 2026-09-23 reality check (label `reality-check-2026-09-23`) and subsequent differential/performance census waves: the Python binding's path to an honest drop-in, full-surface conformance campaigns, narrow/nullable dtype backings, and reproducible performance measurement; `br ready` shows what is actionable. The April 2026 review-mode audit that once drove the backlog to two items is history, not the current state.
 
 ## Roadmap
 
@@ -1879,6 +1885,7 @@ A: As of 2026-09-24 the tracker holds about 4,100 beads, of which 79 are open. M
 | `docs/planning/PANIC_CONTRACT_COVERAGE.md` | Per-API `# Panics` contract enforcement |
 | `docs/planning/ERROR_CONFORMANCE.md` | Pandas error catalog and FrankenPandas error parity status |
 | `docs/planning/DIFFERENTIAL_FUZZ_DESIGN.md` | Differential fuzz design notes |
+| `docs/security/THREAT_MODEL.md` | Per-subsystem threat model notes (attack surfaces, trust boundaries, mitigations, hostile-input probes, gap beads) |
 | `crates/fp-conformance/DISCREPANCIES.md` | 33 numbered divergence entries from pandas (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED) |
 | `artifacts/perf/` | Optimization round baselines, opportunity matrices, proofs |
 | `artifacts/phase2c/` | Conformance packet artifacts, drift history, compat-closure attestation packs |
@@ -2092,7 +2099,7 @@ Each file's top-level keys are `packet_id`, `case_id`, `mode` (`"strict"` / `"ha
 
 The 1,387 packet JSON files under `fixtures/packets/` cover: alignment, join, concat, filter, CSV/JSON/Parquet/Excel/Feather/Arrow IPC round-trips, dtype invariants, null semantics, resample, rolling/expanding/ewm, groupby aggregates, datetime/string/timedelta accessors, MultiIndex round-trips, and IO error parity.
 
-## A Tour Through `fp-frame` (a crate of more than 200,000 lines)
+## A Tour Through `fp-frame` (a crate of more than 250,000 lines)
 
 `fp-frame` is the load-bearing crate. The file is too large to skim linearly. Use `rg` to navigate; the rough offsets below date from the 2026-05-16 layout, when `lib.rs` was about a third of its current size, so they give the order of the sections, not their line numbers:
 
@@ -2122,7 +2129,7 @@ The offsets shift every time a major section lands; use them as starting points,
 
 ## Migration Guide: pandas (Python) → FrankenPandas (Rust)
 
-Until PyO3 bindings ship, FrankenPandas is a Rust library. The cookbook below maps the most common pandas patterns to their FrankenPandas equivalents. Note that error handling moves into the type system: everything that pandas raises becomes a `Result<_, _>`.
+When calling FrankenPandas directly from Rust (rather than via the `crates/fp-python` PyO3 package), the cookbook below maps the most common pandas patterns to their Rust API equivalents. Note that error handling moves into the type system: everything that pandas raises becomes a `Result<_, _>`.
 
 ### Construction
 
@@ -2696,8 +2703,8 @@ To keep the scope honest:
 - **Distributed execution**. Single-process. For multi-machine workloads, use Spark / Ray.
 - **GPU acceleration**. No CUDA / Vulkan backend. RAPIDS cuDF and Polars-GPU are the right tools.
 - **Type-erased dynamic typing**. Every column has a known `DType` at runtime; pandas' "object" dtype maps to `Utf8` plus heterogeneous-payload preservation, not unrestricted `dyn Any`.
-- **Pre-built Python bindings** (today). PyO3 bindings are tracked as `br-frankenpandas-4clx`; until they ship, FrankenPandas is Rust-only.
-- **A REPL**. No interactive shell. Use a Rust playground or a Jupyter notebook (eventually, via PyO3).
+- **Pre-built Python wheels on PyPI** (today). The PyO3 package (`crates/fp-python`) ships in-tree and builds from source via `maturin develop --release`; publishing pre-built platform wheels to PyPI is tracked under `br-frankenpandas-rc0923-epic-buildable-everywhere-0zz8y.5` (and full behavioral drop-in parity under `br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao`).
+- **A REPL**. No dedicated interactive shell binary. Use a Rust playground, or Python / Jupyter with a local `maturin` build of `crates/fp-python`.
 - **A query language other than pandas-style `eval()` / `query()`**. No SQL frontend, no Pythonic chained-method DSL beyond what pandas provides.
 
 ## Recommended Workflows by Use Case

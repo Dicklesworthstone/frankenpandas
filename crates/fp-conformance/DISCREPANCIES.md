@@ -46,29 +46,29 @@
 - **Tests affected:** `csv_none_is_default_na`
 - **Review date:** 2026-04-15
 
-### DISC-007: SQL IO is SQLite-only; pandas supports multiple backends
-- **Reference:** pandas `read_sql` / `to_sql` accept any SQLAlchemy-compatible backend (SQLite, PostgreSQL, MySQL, Oracle, MSSQL, etc.).
-- **Our impl:** fp-io's `read_sql` / `write_sql` only accept a `rusqlite::Connection`. PostgreSQL / MySQL / Oracle connectors not shipped.
-- **Impact:** Users whose pipelines depend on non-SQLite backends cannot drop-in replace pandas IO calls.
-- **Resolution:** INVESTIGATING - tracked by br-frankenpandas-fd90 (SQL backend epic, 7 slices). SQLite remains the supported scope until slices 2+ land.
-- **Tests affected:** `live_oracle_sql_*` suite (SQLite only).
-- **Review date:** 2026-04-23
+### DISC-007: SQL IO covers SQLite, MySQL, and PostgreSQL (including TIMESTAMPTZ UTC parity); arbitrary third-party SQLAlchemy dialects are not bundled
+- **Reference:** pandas `read_sql` / `to_sql` accept any SQLAlchemy-compatible backend (SQLite, PostgreSQL, MySQL, Oracle, MSSQL, etc.) and return `datetime64[ns, UTC]` for PostgreSQL `TIMESTAMPTZ` columns vs `datetime64[ns]` for `TIMESTAMP`.
+- **Our impl:** `fp-io` provides a generic `SqlConnection` trait with three in-tree synchronous backends: `rusqlite::Connection` (`sql-sqlite`, default), `MysqlConnection` (`sql-mysql`), and Tokio-free `PostgresConnection` (`sql-postgresql`), plus `SqlInspector` for schema reflection. `PostgresConnection` maps `DType::Datetime64 { tz: Some(_) }` to `TIMESTAMPTZ` and `DType::Datetime64 { tz: None }` to `TIMESTAMP` on write, and inspects PostgreSQL `RowDescription` type OIDs (`1184` `TIMESTAMPTZ` -> `Datetime64 { tz: Some("UTC") }`, `1114` `TIMESTAMP` -> `Datetime64 { tz: None }`) on read (`br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.15`). Third-party SQLAlchemy dialects outside SQLite/MySQL/PostgreSQL (such as Oracle or MSSQL) require implementing the `SqlConnection` trait externally.
+- **Impact:** SQLite, MySQL, and PostgreSQL work in-tree via `SqlConnection` with `TIMESTAMPTZ` UTC timezone preservation; callers using other database engines must implement `SqlConnection`.
+- **Resolution:** ACCEPTED for Rust core (`SqlConnection` trait + SQLite/MySQL/PostgreSQL adapters landed in `br-frankenpandas-rc-postgres-adapter-k1axt`, `br-frankenpandas-rc0923-epic-first-green-ci-kyvo0.2`, and `br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.15`); Python `read_sql` / `to_sql` URI/connection dispatch is tracked under `br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.6`.
+- **Tests affected:** `live_oracle_sql_*` suite, `test_postgres_dtype_sql_mappings`, `test_postgres_live_roundtrip_dtypes_and_nulls`, `test_postgres_live_timestamptz_vs_timestamp_roundtrip_4qg5w_15`.
+- **Review date:** 2026-10-14 (was 2026-04-23)
 
-### DISC-008: No Python bindings shipped; pandas' Python-level drop-in positioning differs
-- **Reference:** pandas IS a Python library. Users `import pandas`.
-- **Our impl:** frankenpandas is a Rust library. Users `use frankenpandas::*` from Rust code. Python bindings (e.g. via PyO3) are not shipped.
-- **Impact:** README's "drop-in pandas replacement" positioning applies at the API-shape level, not at the import-statement level. A Python pandas user cannot adopt frankenpandas without first porting to Rust.
-- **Resolution:** ACCEPTED - README was updated to qualify the claim (br-frankenpandas-diic closed by wording rather than bindings). PyO3 bindings remain a future-epic candidate, not in scope for 0.1.0.
-- **Tests affected:** N/A - positioning / documentation divergence, not behavioral.
-- **Review date:** 2026-04-23
+### DISC-008: Python bindings (`fp-python`) ship in-tree; behavioral drop-in parity and PyPI wheels remain in progress
+- **Reference:** pandas is a Python library (`pip install pandas`; `import pandas as pd`).
+- **Our impl:** `crates/fp-python` ships an in-tree PyO3 package (`frankenpandas`) with `pyproject.toml`, `frankenpandas.pyi` type stubs, and multi-platform wheel CI (`.github/workflows/wheels.yml`), and zero runtime delegation to `pandas`. However, pre-built wheels are not yet published to PyPI, ~82.5% of `.pyi` signatures still use `*args, **kwargs`, and several methods/parameters remain partial or raise `NotImplementedError`.
+- **Impact:** Python callers can build `crates/fp-python` via `maturin develop --release`, but `pip install frankenpandas` from PyPI and 100% behavioral drop-in parity across all parameters and edge cases are not yet complete.
+- **Resolution:** NARROWED / WILL-FIX — in-tree PyO3 bindings landed; behavioral parity across the full 16-class surface is tracked by `br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao` (and child beads `fvsao.4`..`fvsao.40`, `br-frankenpandas-n57tz`, `br-frankenpandas-u6p7i`), and TestPyPI/PyPI wheel publication is tracked by `br-frankenpandas-rc0923-epic-buildable-everywhere-0zz8y.5`.
+- **Tests affected:** `crates/fp-python/tests/test_differential_packets.py` (996 pytest functions against live pandas 2.2.3).
+- **Review date:** 2026-10-13 (was 2026-04-23)
 
 ### DISC-009: Sparse dtype descriptor exists before compressed sparse storage
 - **Reference:** pandas `SparseDtype` pairs an underlying value dtype with a fill value and stores only non-fill positions in `SparseArray`.
-- **Our impl:** `fp-types::SparseDType` records the dtype/fill-value contract and `DType::Sparse` marks the logical dtype. fp-columnar still stores columns densely and IO falls back to textual sparse markers until a compressed sparse column representation lands.
-- **Impact:** Code can now describe sparse dtype intent, but memory usage and `Series.sparse` accessor parity still differ from pandas.
-- **Resolution:** WILL-FIX - remaining storage/accessor work tracked by br-frankenpandas-0xcm follow-up slices.
+- **Our impl:** `fp-types::SparseDType` records the dtype/fill-value contract and `DType::Sparse` marks the logical dtype (`SparseDType::pandas_name()` renders `Sparse[<subtype>, <fill>]`, see resolved `DISC-026`). `fp-columnar` still stores columns densely, and in `fp-python` constructing `Series(..., dtype='Sparse[int]')` or `pd.arrays.SparseArray` is not yet supported.
+- **Impact:** Rust code can describe sparse dtype metadata and query `Series.sparse` metrics over dense storage, but memory usage is dense and Python `SparseArray` construction fails.
+- **Resolution:** WILL-FIX - compressed physical sparse column storage is tracked by `br-frankenpandas-rc0923-sparse-storage-iphl5`, and Python `Sparse` construction / `SparseArray` parity is tracked by `br-frankenpandas-o1qso` and `br-frankenpandas-at95d`.
 - **Tests affected:** Sparse storage/accessor conformance tests not yet enabled.
-- **Review date:** 2026-04-24
+- **Review date:** 2026-10-13 (was 2026-04-24)
 
 ### DISC-010: Rust GroupBy.apply uses explicit output-shape APIs
 - **Reference:** pandas `DataFrameGroupBy.apply` dynamically dispatches scalar, Series, and DataFrame return values from one Python callable.
