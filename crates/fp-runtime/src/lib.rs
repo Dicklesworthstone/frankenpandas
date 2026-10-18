@@ -1156,6 +1156,7 @@ impl EvidenceLedgerSubscriber {
 struct AaceFieldVisitor {
     aace_kind: Option<String>,
     operation: Option<String>,
+    op: Option<String>,
     plan_kind: Option<String>,
     union_len: Option<usize>,
     left_hits: Option<usize>,
@@ -1177,6 +1178,7 @@ impl tracing::field::Visit for AaceFieldVisitor {
         match field.name() {
             "aace_kind" => self.aace_kind = Some(value.to_owned()),
             "operation" => self.operation = Some(value.to_owned()),
+            "op" => self.op = Some(value.to_owned()),
             "plan_kind" => self.plan_kind = Some(value.to_owned()),
             "left_dtype" => self.left_dtype = Some(value.to_owned()),
             "right_dtype" => self.right_dtype = Some(value.to_owned()),
@@ -1222,11 +1224,17 @@ impl tracing::Subscriber for EvidenceLedgerSubscriber {
 
     fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
         if span.metadata().target().starts_with("frankenpandas") {
+            let mut visitor = AaceFieldVisitor::default();
+            span.record(&mut visitor);
+            let span_label = match visitor.op.as_deref() {
+                Some(op) => format!("{}({op})", span.metadata().name()),
+                None => span.metadata().name().to_owned(),
+            };
             let mut guard = match self.ledger.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            guard.push_recorded_span(span.metadata().name());
+            guard.push_recorded_span(span_label);
         }
         let id = self
             .next_span_id
