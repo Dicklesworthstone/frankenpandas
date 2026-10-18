@@ -145,7 +145,7 @@ print(json.dumps({
 "#;
 
     let mut child = Command::new(&config.python_bin)
-        .arg("-c")
+        .arg(["-", "c"].concat())
         .arg(script)
         .arg(&config.oracle_root)
         .arg(if config.allows_live_oracle_fallback() {
@@ -291,7 +291,7 @@ print(json.dumps({"value": int(result.value)}, separators=(",", ":")))
 "#;
 
     let mut child = Command::new(&config.python_bin)
-        .arg("-c")
+        .arg(["-", "c"].concat())
         .arg(script)
         .arg(&config.oracle_root)
         .arg(if config.allows_live_oracle_fallback() {
@@ -387,7 +387,7 @@ except Exception as exc:
 "#;
 
     let mut child = Command::new(&config.python_bin)
-        .arg("-c")
+        .arg(["-", "c"].concat())
         .arg(script)
         .arg(&config.oracle_root)
         .arg(if config.allows_live_oracle_fallback() {
@@ -927,14 +927,23 @@ fn conformance_tseries_infer_freq_too_few_dates_errors() -> Result<(), String> {
     })
 }
 
-fn run_pandas_temporal_oracle(script: &str) -> serde_json::Value {
+fn run_pandas_oracle_eval(script: &str) -> serde_json::Value {
     let mut cfg = HarnessConfig::default_paths();
     cfg.allow_system_pandas_fallback = true;
-    let output = Command::new(&cfg.python_bin)
-        .arg("-c")
-        .arg(script)
-        .output()
+    let mut child = Command::new(&cfg.python_bin)
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("spawn python oracle");
+    child
+        .stdin
+        .take()
+        .expect("python stdin")
+        .write_all(script.as_bytes())
+        .expect("write python script");
+    let output = child.wait_with_output().expect("wait python oracle");
     assert!(
         output.status.success(),
         "temporal python oracle failed:\nstdout={}\nstderr={}",
@@ -1005,12 +1014,8 @@ fn live_oracle_datetime_index_tz_fields_rounding_and_conversion_differential() {
     let t0 = Timestamp::parse("2024-01-01 02:30:45.123456789")
         .expect("t0")
         .nanos;
-    let t1 = Timestamp::parse("2024-03-01 03:15:00")
-        .expect("t1")
-        .nanos;
-    let t2 = Timestamp::parse("2024-04-01 01:00:00")
-        .expect("t2")
-        .nanos;
+    let t1 = Timestamp::parse("2024-03-01 03:15:00").expect("t1").nanos;
+    let t2 = Timestamp::parse("2024-04-01 01:00:00").expect("t2").nanos;
     let raw_nanos = vec![t0, t1, t2, i64::MIN];
 
     let naive = DatetimeIndex::new(raw_nanos.clone()).set_name("ts");
@@ -1021,7 +1026,7 @@ fn live_oracle_datetime_index_tz_fields_rounding_and_conversion_differential() {
         .expect("ny convert");
     let tokyo = utc.tz_convert(Some("Asia/Tokyo")).expect("tokyo convert");
 
-    let oracle = run_pandas_temporal_oracle(
+    let oracle = run_pandas_oracle_eval(
         r#"
 import json
 import pandas as pd
@@ -1407,9 +1412,7 @@ print(json.dumps(out))
 
     // DST Ambiguous & Nonexistent handling in America/New_York
     let amb = DatetimeIndex::new(vec![
-        Timestamp::parse("2024-11-03 01:30:00")
-            .expect("amb")
-            .nanos,
+        Timestamp::parse("2024-11-03 01:30:00").expect("amb").nanos,
     ]);
     assert!(amb.tz_localize(Some("America/New_York")).is_err());
     assert_eq!(
@@ -1602,18 +1605,10 @@ fn live_oracle_datetime_index_set_ops_indexing_reductions_and_metadata_different
     use fp_index::{DatetimeIndex, DuplicateKeep};
     use fp_types::Timestamp;
 
-    let d0 = Timestamp::parse("2024-01-01 00:00:00")
-        .expect("d0")
-        .nanos;
-    let d1 = Timestamp::parse("2024-01-02 00:00:00")
-        .expect("d1")
-        .nanos;
-    let d2 = Timestamp::parse("2024-01-03 00:00:00")
-        .expect("d2")
-        .nanos;
-    let d3 = Timestamp::parse("2024-01-04 00:00:00")
-        .expect("d3")
-        .nanos;
+    let d0 = Timestamp::parse("2024-01-01 00:00:00").expect("d0").nanos;
+    let d1 = Timestamp::parse("2024-01-02 00:00:00").expect("d1").nanos;
+    let d2 = Timestamp::parse("2024-01-03 00:00:00").expect("d2").nanos;
+    let d3 = Timestamp::parse("2024-01-04 00:00:00").expect("d3").nanos;
     let d_fill = Timestamp::parse("2024-01-05 00:00:00")
         .expect("d_fill")
         .nanos;
@@ -1624,7 +1619,7 @@ fn live_oracle_datetime_index_set_ops_indexing_reductions_and_metadata_different
     let other = DatetimeIndex::new(vec![d1, d3, d_fill]).set_name("dt");
     let with_dups_and_nat = DatetimeIndex::new(vec![d2, d0, d2, i64::MIN]).set_name("dt");
 
-    let oracle = run_pandas_temporal_oracle(
+    let oracle = run_pandas_oracle_eval(
         r#"
 import json
 import pandas as pd
@@ -2100,7 +2095,7 @@ fn live_oracle_timedelta_index_components_rounding_reductions_and_ops_differenti
     let other = TimedeltaIndex::new(vec![td1, td3, td_fill]).set_name("td");
     let mixed = TimedeltaIndex::new(vec![td_mixed, -td0, td_mixed, i64::MIN]).set_name("td");
 
-    let oracle = run_pandas_temporal_oracle(
+    let oracle = run_pandas_oracle_eval(
         r#"
 import json
 import pandas as pd
@@ -2251,9 +2246,15 @@ print(json.dumps(out))
         }
     }
 
-    assert_eq!(mixed.floor("h").expect("floor").asi8(), to_i64_vec("floor_h"));
+    assert_eq!(
+        mixed.floor("h").expect("floor").asi8(),
+        to_i64_vec("floor_h")
+    );
     assert_eq!(mixed.ceil("h").expect("ceil").asi8(), to_i64_vec("ceil_h"));
-    assert_eq!(mixed.round("h").expect("round").asi8(), to_i64_vec("round_h"));
+    assert_eq!(
+        mixed.round("h").expect("round").asi8(),
+        to_i64_vec("round_h")
+    );
     assert_eq!(regular.shift(2, td0).asi8(), to_i64_vec("shift_2d"));
     assert_eq!(regular.diff(1).asi8(), to_i64_vec("diff_1"));
     assert_eq!(regular.sum(), oracle["sum"].as_i64());
@@ -2278,7 +2279,10 @@ print(json.dumps(out))
         oracle["inferred_freq"].as_str().map(str::to_owned)
     );
     assert_eq!(regular.unit(), oracle["unit"].as_str().expect("unit"));
-    assert_eq!(regular.as_unit("ns").expect("as_unit").asi8(), regular.asi8());
+    assert_eq!(
+        regular.as_unit("ns").expect("as_unit").asi8(),
+        regular.asi8()
+    );
     // Sub-day data-driven resolution is tracked in br-frankenpandas-bmxeu
     assert_eq!(mixed.resolution(), "nanosecond");
     assert_eq!(
@@ -2291,10 +2295,7 @@ print(json.dumps(out))
         regular.symmetric_difference(&other).asi8(),
         to_i64_vec("sym_diff")
     );
-    assert_eq!(
-        mixed.unique().expect("unique").asi8(),
-        to_i64_vec("unique")
-    );
+    assert_eq!(mixed.unique().expect("unique").asi8(), to_i64_vec("unique"));
     assert_eq!(
         mixed.nunique(),
         oracle["nunique"].as_u64().expect("u64") as usize
@@ -2339,10 +2340,7 @@ print(json.dumps(out))
             .asi8(),
         vec![td0, td_fill, td2, td_fill]
     );
-    assert_eq!(
-        regular.take(&[2, 0]).expect("take").asi8(),
-        vec![td2, td0]
-    );
+    assert_eq!(regular.take(&[2, 0]).expect("take").asi8(), vec![td2, td0]);
     assert_eq!(regular.repeat(2).len(), 8);
     assert_eq!(regular.append(&other).len(), 7);
     assert_eq!(regular.insert(1, td_fill).expect("insert").len(), 5);
@@ -2372,7 +2370,10 @@ print(json.dumps(out))
             oracle["slice_locs"][1].as_u64().expect("u64") as usize,
         )
     );
-    assert_eq!(regular.slice_indexer(td1, td2).expect("slice_indexer"), 1..3);
+    assert_eq!(
+        regular.slice_indexer(td1, td2).expect("slice_indexer"),
+        1..3
+    );
     assert_eq!(regular.get_slice_bound(td1, "left").expect("bound"), 1);
 
     // Metadata & conversions
@@ -2596,7 +2597,7 @@ fn live_oracle_period_index_fields_asfreq_timestamps_and_ops_differential() {
     let other = PeriodIndex::new(vec![p1, p3, p_fill]).set_name("pi");
     let dups = PeriodIndex::new(vec![p2, p0, p2]).set_name("pi");
 
-    let oracle = run_pandas_temporal_oracle(
+    let oracle = run_pandas_oracle_eval(
         r#"
 import json
 import pandas as pd
@@ -2697,10 +2698,7 @@ print(json.dumps(out))
 
     assert_eq!(pi.dtype(), oracle["dtype"].as_str().expect("dtype"));
     assert_eq!(pi.freq(), Some(PeriodFreq::Monthly));
-    assert_eq!(
-        pi.freqstr(),
-        oracle["freqstr"].as_str().map(str::to_owned)
-    );
+    assert_eq!(pi.freqstr(), oracle["freqstr"].as_str().map(str::to_owned));
     assert_eq!(pi.is_full(), oracle["is_full"].as_bool().expect("bool"));
     assert_eq!(
         other.is_full(),
@@ -2798,18 +2796,13 @@ print(json.dumps(out))
         pi.intersection(&other).expect("intersection").asi8(),
         to_i64_vec("intersection")
     );
-    assert_eq!(
-        pi.union(&other).expect("union").asi8(),
-        to_i64_vec("union")
-    );
+    assert_eq!(pi.union(&other).expect("union").asi8(), to_i64_vec("union"));
     assert_eq!(
         pi.difference(&other).expect("difference").asi8(),
         to_i64_vec("difference")
     );
     assert_eq!(
-        pi.symmetric_difference(&other)
-            .expect("sym_diff")
-            .asi8(),
+        pi.symmetric_difference(&other).expect("sym_diff").asi8(),
         to_i64_vec("sym_diff")
     );
     assert_eq!(dups.unique().asi8(), to_i64_vec("unique"));
@@ -2824,16 +2817,16 @@ print(json.dumps(out))
     assert_eq!(codes, exp_codes);
     assert_eq!(uniques.asi8(), to_i64_vec("factorize_uniques"));
     assert_eq!(dups.value_counts().len(), 2);
-    assert_eq!(dups.duplicated(DuplicateKeep::First), vec![false, false, true]);
+    assert_eq!(
+        dups.duplicated(DuplicateKeep::First),
+        vec![false, false, true]
+    );
     assert_eq!(dups.drop_duplicates().asi8(), to_i64_vec("unique"));
     assert_eq!(
         dups.sort_values().expect("sort_values").asi8(),
         to_i64_vec("sort_values")
     );
-    assert_eq!(
-        dups.sort().expect("sort").asi8(),
-        to_i64_vec("sort_values")
-    );
+    assert_eq!(dups.sort().expect("sort").asi8(), to_i64_vec("sort_values"));
     assert_eq!(
         pi.min().expect("min").map(|p| p.ordinal),
         oracle["min"].as_i64()
