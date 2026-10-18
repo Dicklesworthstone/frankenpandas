@@ -5197,200 +5197,266 @@
     },
     "Index": {
       "T": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "all": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "any": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "append": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "argmax": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "argmin": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "argsort": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "array": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "asof": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "asof_locs": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "astype": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "copy": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "delete": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "diff": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "difference": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "drop": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "drop_duplicates": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "droplevel": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "dropna": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "dtype": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "duplicated": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "empty": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "equals": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "factorize": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "fillna": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "format": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_indexer": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_indexer_for": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_indexer_non_unique": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_level_values": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_loc": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_slice_bound": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "groupby": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
@@ -5399,6 +5465,7 @@
         "live_tests": [
           "crates/fp-conformance/src/tests/conformance_index.rs::conformance_index_has_duplicates_empty",
           "crates/fp-conformance/src/tests/conformance_index.rs::conformance_index_has_duplicates_na_like_strings",
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_index_has_duplicates_with_dups"
         ],
         "packets": [
@@ -5408,89 +5475,115 @@
         "skipped_tests": []
       },
       "hasnans": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "holds_integer": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "identical": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "infer_objects": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "inferred_type": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "insert": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "intersection": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_index_is_monotonic_increasing_yes"
         ],
         "packets": [],
         "skipped_tests": []
       },
       "is_boolean": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_categorical": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_floating": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_integer": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_interval": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_monotonic_decreasing": {
         "last_result": "covered_live",
         "live_tests": [
-          "crates/fp-conformance/src/tests/conformance_index.rs::conformance_index_monotonic_decreasing_extreme_ints"
+          "crates/fp-conformance/src/tests/conformance_index.rs::conformance_index_monotonic_decreasing_extreme_ints",
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
         ],
         "packets": [
           "fp_p2d_058_index_monotonic_decreasing_false",
@@ -5502,6 +5595,7 @@
         "last_result": "covered_live",
         "live_tests": [
           "crates/fp-conformance/src/tests/conformance_index.rs::conformance_index_monotonic_increasing_duplicate_plateau",
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_index_is_monotonic_increasing_yes"
         ],
         "packets": [
@@ -5511,314 +5605,418 @@
         "skipped_tests": []
       },
       "is_numeric": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_object": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_unique": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "isin": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "isna": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "isnull": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "item": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "join": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "map": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "max": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "memory_usage": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "min": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "name": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "names": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "nbytes": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ndim": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "nlevels": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "notna": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "notnull": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "nunique": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "putmask": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ravel": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "reindex": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "rename": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "repeat": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "round": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "searchsorted": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "set_names": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "shape": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "shift": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "size": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "slice_indexer": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "slice_locs": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "sort": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "sort_values": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "sortlevel": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "str": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "symmetric_difference": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "take": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_flat_index": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_frame": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_list": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_numpy": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_series": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "tolist": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "transpose": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "union": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "unique": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "value_counts": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "values": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "view": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "where": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_index.rs::live_oracle_base_index_metadata_dtypes_missing_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       }
@@ -6617,710 +6815,946 @@
     },
     "MultiIndex": {
       "T": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "all": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "any": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "append": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "argmax": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "argmin": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "argsort": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "array": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "asof": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "asof_locs": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "astype": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "codes": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "copy": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "delete": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "diff": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "difference": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "drop": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "drop_duplicates": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "droplevel": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "dropna": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "dtype": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "dtypes": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "duplicated": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "empty": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "equal_levels": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "equals": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "factorize": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "fillna": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "format": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "from_arrays": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "from_frame": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "from_product": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "from_tuples": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_indexer": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_indexer_for": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_indexer_non_unique": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_level_values": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_loc": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_loc_level": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_locs": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_slice_bound": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "groupby": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "has_duplicates": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "hasnans": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "holds_integer": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "identical": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "infer_objects": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "inferred_type": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "insert": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "intersection": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_boolean": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_categorical": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_floating": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_integer": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_interval": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_monotonic_decreasing": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_monotonic_increasing": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_numeric": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_object": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_unique": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "isin": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "isna": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "isnull": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "item": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "join": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "levels": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "levshape": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "map": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "max": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "memory_usage": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "min": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "name": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "names": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "nbytes": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ndim": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "nlevels": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "notna": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "notnull": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "nunique": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "putmask": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ravel": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "reindex": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "remove_unused_levels": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "rename": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "reorder_levels": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "repeat": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "round": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "searchsorted": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "set_codes": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "set_levels": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "set_names": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "shape": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "shift": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "size": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "slice_indexer": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "slice_locs": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "sort": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "sort_values": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "sortlevel": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "str": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "swaplevel": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "symmetric_difference": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "take": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_flat_index": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_frame": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_list": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_numpy": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_series": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "tolist": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "transpose": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "truncate": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "union": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_indexing_set_ops_sorting_and_mutations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "unique": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "value_counts": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "values": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "view": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "where": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_multiindex.rs::live_oracle_multiindex_constructors_metadata_levels_and_duplicates_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       }
@@ -15616,11 +16050,11 @@
         "uncovered": 65
       },
       "index": {
-        "covered_live": 411,
+        "covered_live": 626,
         "packet_only": 0,
         "skipped_only": 0,
         "total": 963,
-        "uncovered": 552
+        "uncovered": 337
       },
       "scalar_offset": {
         "covered_live": 0,
@@ -15702,13 +16136,13 @@
         "zero": 10
       },
       "Index": {
-        "covered_live": 4,
+        "covered_live": 101,
         "family": "index",
-        "full": 4,
+        "full": 101,
         "packet_only": 0,
         "skipped_only": 0,
         "total": 101,
-        "zero": 97
+        "zero": 0
       },
       "Interval": {
         "covered_live": 0,
@@ -15729,13 +16163,13 @@
         "zero": 119
       },
       "MultiIndex": {
-        "covered_live": 0,
+        "covered_live": 118,
         "family": "index",
-        "full": 0,
+        "full": 118,
         "packet_only": 0,
         "skipped_only": 0,
         "total": 118,
-        "zero": 118
+        "zero": 0
       },
       "Period": {
         "covered_live": 0,
@@ -15891,13 +16325,13 @@
         "zero": 59
       }
     },
-    "covered_live": 814,
-    "live_coverage_percent": 41.96,
+    "covered_live": 1029,
+    "live_coverage_percent": 53.04,
     "packet_only": 61,
-    "packet_or_live_coverage_percent": 45.1,
+    "packet_or_live_coverage_percent": 56.19,
     "skipped_only": 0,
     "surface_count": 28,
     "total_members": 1940,
-    "uncovered": 1065
+    "uncovered": 850
   }
 }
