@@ -32,6 +32,22 @@ OPERATION_RE = re.compile(r'"operation"\s*:\s*"([^"]+)"')
 DF_BINARY_METHOD_RE = re.compile(r'"dataframe_binary_method"\s*:\s*"([^"]+)"')
 INCLUDE_PACKET_RE = re.compile(r'fixtures/packets/([A-Za-z0-9_]+)\.json')
 TEST_FN_RE = re.compile(r"^\s*fn\s+([A-Za-z0-9_]+)\s*\(")
+COVERS_RE = re.compile(r"//\s*@covers:\s*([^\n]+)")
+
+
+def canonical_op_for_cover_token(token: str) -> str:
+    if "." in token:
+        if token.startswith(
+            ("Series.str.", "Series.dt.", "Series.cat.", "Series.plot.", "DataFrame.plot.")
+        ):
+            parts = token.split(".", 2)
+            cls_alias = f"{parts[0]}.{parts[1]}"
+            mname = parts[2]
+        else:
+            cls_alias, mname = token.split(".", 1)
+        cls_snake = _camel_to_snake(cls_alias.replace(".", "_"))
+        return f"{cls_snake}_{mname}"
+    return token
 
 
 def load_fixture_packets(repo_root: Path) -> tuple[set[str], dict[str, list[str]]]:
@@ -140,6 +156,11 @@ def load_conformance_tests(
                         referenced_ops.add(f"data_frame_{m}")
                     for stem in INCLUDE_PACKET_RE.findall(body):
                         referenced_ops.update(packet_ops_by_stem.get(stem, set()))
+                    for covers_line in COVERS_RE.findall(body):
+                        for raw_token in covers_line.split(","):
+                            token = raw_token.strip()
+                            if token:
+                                referenced_ops.add(canonical_op_for_cover_token(token))
 
                     target_map = skipped_by_op if is_skipped else live_by_op
                     for op in referenced_ops:
@@ -400,6 +421,8 @@ def verify_negative_skipped_test_not_counted_as_covered() -> None:
     assert counts["Series"]["skipped_only"] == 1
     assert fam["core"]["covered_live"] == 1
     assert fam["core"]["skipped_only"] == 1
+    assert canonical_op_for_cover_token("DataFrameGroupBy.mean") == "data_frame_group_by_mean"
+    assert canonical_op_for_cover_token("Series.str.contains") == "series_str_contains"
 
 
 def render(breakdown, counts, family_counts, pandas_version: str) -> str:

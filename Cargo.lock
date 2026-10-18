@@ -1450,6 +1450,7 @@ dependencies = [
  "serde-pickle",
  "serde_json",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -1491,6 +1492,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -3863,6 +3865,9 @@ name = "tracing-core"
 version = "0.1.36"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
+dependencies = [
+ "once_cell",
+]
 
 [[package]]
 name = "twox-hash"
