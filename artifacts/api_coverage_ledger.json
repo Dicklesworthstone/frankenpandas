@@ -1445,6 +1445,9 @@
       "groupby": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential",
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential",
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_misc.rs::live_oracle_dataframe_groupby_all_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_misc.rs::live_oracle_dataframe_groupby_any_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_misc.rs::live_oracle_dataframe_groupby_bfill_matches_pandas",
@@ -2966,6 +2969,7 @@
       "agg": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_row_multiindex.rs::live_oracle_dataframe_groupby_agg_multi_multikey_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_groupby_agg_multi_basic"
         ],
@@ -2977,6 +2981,7 @@
       "aggregate": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_row_multiindex.rs::live_oracle_dataframe_groupby_agg_multi_multikey_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_groupby_agg_multi_basic"
         ],
@@ -2988,6 +2993,7 @@
       "all": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_misc.rs::live_oracle_dataframe_groupby_all_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_groupby_all_basic"
         ],
@@ -3001,6 +3007,7 @@
       "any": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_misc.rs::live_oracle_dataframe_groupby_any_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_groupby_any_basic"
         ],
@@ -3012,14 +3019,17 @@
         "skipped_tests": []
       },
       "apply": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "bfill": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_misc.rs::live_oracle_dataframe_groupby_bfill_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_groupby_bfill_basic"
         ],
@@ -3031,38 +3041,49 @@
         "skipped_tests": []
       },
       "boxplot": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "corr": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "corrwith": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "count": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "cov": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "cumcount": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_misc.rs::live_oracle_dataframe_groupby_cumcount_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_groupby_cumcount_basic"
         ],
@@ -3075,62 +3096,81 @@
         "skipped_tests": []
       },
       "cummax": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "cummin": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "cumprod": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "cumsum": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "describe": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "diff": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "dtypes": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ewm": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "expanding": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ffill": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_misc.rs::live_oracle_dataframe_groupby_ffill_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_groupby_ffill_basic"
         ],
@@ -3142,26 +3182,33 @@
         "skipped_tests": []
       },
       "fillna": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "filter": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "first": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_group": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_misc.rs::live_oracle_dataframe_groupby_get_group_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_groupby_get_group_basic"
         ],
@@ -3173,32 +3220,41 @@
         "skipped_tests": []
       },
       "grouper": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "groups": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "head": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "hist": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "idxmax": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_misc.rs::live_oracle_dataframe_groupby_idxmax_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_groupby_idxmax_basic"
         ],
@@ -3212,6 +3268,7 @@
       "idxmin": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_misc.rs::live_oracle_dataframe_groupby_idxmin_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_groupby_idxmin_basic"
         ],
@@ -3223,62 +3280,81 @@
         "skipped_tests": []
       },
       "indices": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "keys": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "last": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "level": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "max": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "mean": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "median": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "min": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ndim": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ngroup": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_misc.rs::live_oracle_dataframe_groupby_ngroup_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_groupby_ngroup_basic"
         ],
@@ -3291,26 +3367,33 @@
         "skipped_tests": []
       },
       "ngroups": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "nth": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "nunique": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ohlc": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_misc.rs::live_oracle_dataframe_groupby_ohlc_multi_value_columns_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_misc.rs::live_oracle_dataframe_groupby_ohlc_single_value_column_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_groupby_ohlc_basic"
@@ -3323,44 +3406,57 @@
         "skipped_tests": []
       },
       "pct_change": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "pipe": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "plot": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "prod": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "quantile": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "rank": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "resample": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_resample.rs::live_oracle_dataframe_groupby_resample_count_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_resample.rs::live_oracle_dataframe_groupby_resample_first_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_resample.rs::live_oracle_dataframe_groupby_resample_last_matches_pandas",
@@ -3373,6 +3469,7 @@
       "rolling": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_rolling.rs::live_oracle_dataframe_groupby_rolling_count_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_rolling.rs::live_oracle_dataframe_groupby_rolling_max_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_rolling.rs::live_oracle_dataframe_groupby_rolling_mean_matches_pandas",
@@ -3400,14 +3497,17 @@
         "skipped_tests": []
       },
       "sample": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "sem": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_misc.rs::live_oracle_dataframe_groupby_sem_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_groupby_sem_basic"
         ],
@@ -3419,20 +3519,25 @@
         "skipped_tests": []
       },
       "shift": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "size": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "skew": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_groupby_misc.rs::live_oracle_dataframe_groupby_skew_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_groupby_skew_basic"
         ],
@@ -3444,14 +3549,17 @@
         "skipped_tests": []
       },
       "std": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "sum": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_row_multiindex.rs::live_oracle_dataframe_groupby_sum_multikey_matches_pandas",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_groupby_sum_basic"
         ],
@@ -3461,32 +3569,42 @@
         "skipped_tests": []
       },
       "tail": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "take": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "transform": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "value_counts": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "var": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_dataframe_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       }
@@ -9768,8 +9886,12 @@
         "skipped_tests": []
       },
       "groupby": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential",
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential",
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
@@ -12334,46 +12456,60 @@
     },
     "SeriesGroupBy": {
       "agg": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "aggregate": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "all": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "any": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "apply": {
-        "last_result": "skipped_only",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": [
           "crates/fp-conformance/src/tests/conformance_groupby_apply.rs::conformance_groupby_apply_live_shape_contracts"
         ]
       },
       "bfill": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "corr": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
@@ -12381,6 +12517,7 @@
         "last_result": "covered_live",
         "live_tests": [
           "crates/fp-conformance/src/tests/conformance_groupby.rs::conformance_groupby_count_null_heavy_values",
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_count_int_keys",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_count_with_string_keys"
         ],
@@ -12393,86 +12530,114 @@
         "skipped_tests": []
       },
       "cov": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "cumcount": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "cummax": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "cummin": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "cumprod": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "cumsum": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "describe": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "diff": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "dtype": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ewm": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "expanding": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ffill": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "fillna": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "filter": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
@@ -12480,6 +12645,7 @@
         "last_result": "covered_live",
         "live_tests": [
           "crates/fp-conformance/src/tests/conformance_groupby.rs::conformance_groupby_first_and_last_skip_missing_values",
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_first_int_keys",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_first_with_float_values",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_first_with_string_keys"
@@ -12492,68 +12658,90 @@
         "skipped_tests": []
       },
       "get_group": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "grouper": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "groups": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "head": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "hist": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "idxmax": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "idxmin": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "indices": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_monotonic_decreasing": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_monotonic_increasing": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "keys": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
@@ -12561,6 +12749,7 @@
         "last_result": "covered_live",
         "live_tests": [
           "crates/fp-conformance/src/tests/conformance_groupby.rs::conformance_groupby_first_and_last_skip_missing_values",
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_last_int_keys",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_last_with_float_values",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_last_with_string_keys"
@@ -12573,8 +12762,10 @@
         "skipped_tests": []
       },
       "level": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
@@ -12582,6 +12773,7 @@
         "last_result": "covered_live",
         "live_tests": [
           "crates/fp-conformance/src/tests/conformance_groupby.rs::conformance_groupby_max_duplicate_keys",
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_max_int_keys",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_max_with_string_keys"
         ],
@@ -12596,6 +12788,7 @@
         "last_result": "covered_live",
         "live_tests": [
           "crates/fp-conformance/src/tests/conformance_groupby.rs::conformance_groupby_mean_duplicate_keys_float_values",
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_mean_int_keys",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_mean_with_float_values"
         ],
@@ -12610,6 +12803,7 @@
       "median": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_median_int_keys",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_median_with_string_keys"
         ],
@@ -12624,6 +12818,7 @@
         "last_result": "covered_live",
         "live_tests": [
           "crates/fp-conformance/src/tests/conformance_groupby.rs::conformance_groupby_min_negative_values",
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_min_int_keys",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_min_with_string_keys"
         ],
@@ -12635,134 +12830,177 @@
         "skipped_tests": []
       },
       "ndim": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ngroup": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ngroups": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "nlargest": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "nsmallest": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "nth": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "nunique": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ohlc": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "pct_change": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "pipe": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "plot": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "prod": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "quantile": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "rank": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "resample": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "rolling": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "sample": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "sem": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "shift": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "size": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "skew": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "std": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_std_int_keys",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_std_with_string_keys"
         ],
@@ -12780,6 +13018,7 @@
           "crates/fp-conformance/src/tests/conformance_groupby.rs::conformance_groupby_sum_multi_key_mixed_dtypes",
           "crates/fp-conformance/src/tests/conformance_groupby.rs::conformance_groupby_sum_nan_heavy_values",
           "crates/fp-conformance/src/tests/conformance_groupby.rs::conformance_groupby_sum_single_group",
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_sum_int_keys",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_sum_with_float_values"
         ],
@@ -12793,38 +13032,49 @@
         "skipped_tests": []
       },
       "tail": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "take": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_cumulative_and_window_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "transform": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_transform_filter_apply_pipe_stats_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "unique": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "value_counts": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "var": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_groupby.rs::live_oracle_series_groupby_aggregations_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_var_int_keys",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_groupby_var_with_string_keys"
         ],
@@ -14542,18 +14792,18 @@
         "uncovered": 38
       },
       "core": {
-        "covered_live": 194,
+        "covered_live": 195,
         "packet_only": 27,
         "skipped_only": 0,
         "total": 419,
-        "uncovered": 198
+        "uncovered": 197
       },
       "groupby_window": {
-        "covered_live": 46,
+        "covered_live": 154,
         "packet_only": 3,
-        "skipped_only": 1,
+        "skipped_only": 0,
         "total": 222,
-        "uncovered": 172
+        "uncovered": 65
       },
       "index": {
         "covered_live": 6,
@@ -14597,13 +14847,13 @@
         "zero": 79
       },
       "DataFrameGroupBy": {
-        "covered_live": 17,
+        "covered_live": 66,
         "family": "groupby_window",
-        "full": 17,
+        "full": 66,
         "packet_only": 0,
         "skipped_only": 0,
         "total": 66,
-        "zero": 49
+        "zero": 0
       },
       "DateOffset": {
         "covered_live": 0,
@@ -14723,13 +14973,13 @@
         "zero": 13
       },
       "Series": {
-        "covered_live": 90,
+        "covered_live": 91,
         "family": "core",
-        "full": 91,
+        "full": 92,
         "packet_only": 1,
         "skipped_only": 0,
         "total": 210,
-        "zero": 119
+        "zero": 118
       },
       "Series.cat": {
         "covered_live": 1,
@@ -14786,13 +15036,13 @@
         "zero": 3
       },
       "SeriesGroupBy": {
-        "covered_live": 10,
+        "covered_live": 69,
         "family": "groupby_window",
-        "full": 10,
+        "full": 69,
         "packet_only": 0,
-        "skipped_only": 1,
+        "skipped_only": 0,
         "total": 69,
-        "zero": 59
+        "zero": 0
       },
       "Timedelta": {
         "covered_live": 0,
@@ -14831,13 +15081,13 @@
         "zero": 59
       }
     },
-    "covered_live": 300,
-    "live_coverage_percent": 15.46,
+    "covered_live": 409,
+    "live_coverage_percent": 21.08,
     "packet_only": 61,
-    "packet_or_live_coverage_percent": 18.61,
-    "skipped_only": 1,
+    "packet_or_live_coverage_percent": 24.23,
+    "skipped_only": 0,
     "surface_count": 28,
     "total_members": 1940,
-    "uncovered": 1578
+    "uncovered": 1470
   }
 }

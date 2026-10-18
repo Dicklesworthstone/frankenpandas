@@ -25,7 +25,6 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-
 FIXTURE_GLOB = "crates/fp-conformance/fixtures/packets/*.json"
 TEST_GLOB = "crates/fp-conformance/src/tests/*.rs"
 OPERATION_RE = re.compile(r'"operation"\s*:\s*"([^"]+)"')
@@ -35,19 +34,19 @@ TEST_FN_RE = re.compile(r"^\s*fn\s+([A-Za-z0-9_]+)\s*\(")
 COVERS_RE = re.compile(r"//\s*@covers:\s*([^\n]+)")
 
 
-def canonical_op_for_cover_token(token: str) -> str:
-    if "." in token:
-        if token.startswith(
+def canonical_op_for_cover_item(item: str) -> str:
+    if "." in item:
+        if item.startswith(
             ("Series.str.", "Series.dt.", "Series.cat.", "Series.plot.", "DataFrame.plot.")
         ):
-            parts = token.split(".", 2)
+            parts = item.split(".", 2)
             cls_alias = f"{parts[0]}.{parts[1]}"
             mname = parts[2]
         else:
-            cls_alias, mname = token.split(".", 1)
+            cls_alias, mname = item.split(".", 1)
         cls_snake = _camel_to_snake(cls_alias.replace(".", "_"))
         return f"{cls_snake}_{mname}"
-    return token
+    return item
 
 
 def load_fixture_packets(repo_root: Path) -> tuple[set[str], dict[str, list[str]]]:
@@ -157,10 +156,10 @@ def load_conformance_tests(
                     for stem in INCLUDE_PACKET_RE.findall(body):
                         referenced_ops.update(packet_ops_by_stem.get(stem, set()))
                     for covers_line in COVERS_RE.findall(body):
-                        for raw_token in covers_line.split(","):
-                            token = raw_token.strip()
-                            if token:
-                                referenced_ops.add(canonical_op_for_cover_token(token))
+                        for raw_item in covers_line.split(","):
+                            item = raw_item.strip()
+                            if item:
+                                referenced_ops.add(canonical_op_for_cover_item(item))
 
                     target_map = skipped_by_op if is_skipped else live_by_op
                     for op in referenced_ops:
@@ -317,10 +316,7 @@ def classify(
             # Also match conformance/live_oracle test function names directly
             for test_id, fn_name, is_skipped in all_test_fns:
                 for cand in cands:
-                    if (
-                        fn_name.startswith(f"live_oracle_{cand}")
-                        or fn_name.startswith(f"conformance_{cand}")
-                    ):
+                    if fn_name.startswith((f"live_oracle_{cand}", f"conformance_{cand}")):
                         if is_skipped:
                             skipped_tests.add(test_id)
                         else:
@@ -414,15 +410,18 @@ def verify_negative_skipped_test_not_counted_as_covered() -> None:
         ],
     )
     skipped_entry = ledger["Series"]["only_skipped_member"]
-    assert skipped_entry["last_result"] == "skipped_only", skipped_entry
-    assert "only_skipped_member" not in breakdown["Series"]["full"]
-    assert "only_skipped_member" in breakdown["Series"]["zero"]
-    assert counts["Series"]["covered_live"] == 1
-    assert counts["Series"]["skipped_only"] == 1
-    assert fam["core"]["covered_live"] == 1
-    assert fam["core"]["skipped_only"] == 1
-    assert canonical_op_for_cover_token("DataFrameGroupBy.mean") == "data_frame_group_by_mean"
-    assert canonical_op_for_cover_token("Series.str.contains") == "series_str_contains"
+    if (
+        skipped_entry["last_result"] != "skipped_only"
+        or "only_skipped_member" in breakdown["Series"]["full"]
+        or "only_skipped_member" not in breakdown["Series"]["zero"]
+        or counts["Series"]["covered_live"] != 1
+        or counts["Series"]["skipped_only"] != 1
+        or fam["core"]["covered_live"] != 1
+        or fam["core"]["skipped_only"] != 1
+        or canonical_op_for_cover_item("DataFrameGroupBy.mean") != "data_frame_group_by_mean"
+        or canonical_op_for_cover_item("Series.str.contains") != "series_str_contains"
+    ):
+        raise RuntimeError(f"negative skipped test check failed: {skipped_entry}")
 
 
 def render(breakdown, counts, family_counts, pandas_version: str) -> str:

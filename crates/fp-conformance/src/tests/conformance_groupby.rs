@@ -514,7 +514,10 @@ fn run_pandas_oracle_eval(code: &str) -> Option<serde_json::Value> {
         if stderr.contains("No module named 'pandas'") {
             return None;
         }
-        panic!("pandas oracle script failed:\n{stderr}");
+        assert!(
+            output.status.success(),
+            "pandas oracle script failed:\n{stderr}"
+        );
     }
     Some(serde_json::from_slice(&output.stdout).expect("valid oracle json"))
 }
@@ -534,11 +537,23 @@ fn series_f64_vec(series: &fp_frame::Series) -> Vec<Option<f64>> {
 }
 
 fn df_col_f64_vec(df: &fp_frame::DataFrame, col: &str) -> Vec<Option<f64>> {
-    series_f64_vec(df.column(col).expect(col))
+    df.column(col)
+        .expect(col)
+        .values()
+        .iter()
+        .map(|s| {
+            if s.is_missing() {
+                None
+            } else {
+                s.to_f64().ok().filter(|v| !v.is_nan())
+            }
+        })
+        .collect()
 }
 
 fn assert_opt_f64_slice_close(actual: &[Option<f64>], expected: &serde_json::Value, ctx: &str) {
-    let arr = expected.as_array().unwrap_or_else(|| panic!("{ctx}: expected json array"));
+    assert!(expected.is_array(), "{ctx}: expected json array");
+    let arr = expected.as_array().expect("checked array");
     assert_eq!(actual.len(), arr.len(), "{ctx}: length mismatch");
     for (idx, (a, e)) in actual.iter().zip(arr.iter()).enumerate() {
         match (a, e.as_f64()) {
@@ -550,7 +565,11 @@ fn assert_opt_f64_slice_close(actual: &[Option<f64>], expected: &serde_json::Val
                 );
             }
             (other_a, other_e) => {
-                panic!("{ctx}[{idx}]: nullability mismatch actual={other_a:?} expected={other_e:?}");
+                assert_eq!(
+                    other_a.is_some(),
+                    other_e.is_some(),
+                    "{ctx}[{idx}]: nullability mismatch actual={other_a:?} expected={other_e:?}"
+                );
             }
         }
     }
@@ -565,11 +584,12 @@ fn live_oracle_dataframe_groupby_aggregations_differential() {
     // @covers: DataFrameGroupBy.nunique, DataFrameGroupBy.idxmin, DataFrameGroupBy.idxmax
     // @covers: DataFrameGroupBy.all, DataFrameGroupBy.any, DataFrameGroupBy.agg, DataFrameGroupBy.aggregate
     // @covers: DataFrameGroupBy.ohlc, DataFrameGroupBy.describe, DataFrameGroupBy.value_counts
+    use std::collections::{BTreeMap, HashMap};
+
     use fp_columnar::Column;
     use fp_frame::DataFrame;
     use fp_index::Index;
     use fp_types::{NullKind, Scalar};
-    use std::collections::{BTreeMap, HashMap};
 
     let python_code = r#"
 import json, math, pandas as pd
@@ -690,23 +710,91 @@ print(json.dumps(res))
     .unwrap();
     let gb = df.groupby(&["k"]).unwrap();
 
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.sum().unwrap(), "v"), &oracle["sum_v"], "df_gb.sum");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.mean().unwrap(), "v"), &oracle["mean_v"], "df_gb.mean");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.min().unwrap(), "v"), &oracle["min_v"], "df_gb.min");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.max().unwrap(), "v"), &oracle["max_v"], "df_gb.max");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.count().unwrap(), "v"), &oracle["count_v"], "df_gb.count");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.size().unwrap()), &oracle["size"], "df_gb.size");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.std().unwrap(), "v"), &oracle["std_v"], "df_gb.std");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.var().unwrap(), "v"), &oracle["var_v"], "df_gb.var");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.sem().unwrap(), "v"), &oracle["sem_v"], "df_gb.sem");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.skew().unwrap(), "w"), &oracle["skew_w"], "df_gb.skew");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.prod().unwrap(), "v"), &oracle["prod_v"], "df_gb.prod");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.median().unwrap(), "v"), &oracle["median_v"], "df_gb.median");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.quantile(0.5).unwrap(), "v"), &oracle["quantile_v"], "df_gb.quantile");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.first().unwrap(), "v"), &oracle["first_v"], "df_gb.first");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.last().unwrap(), "v"), &oracle["last_v"], "df_gb.last");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.nth(1).unwrap(), "w"), &oracle["nth_1_w"], "df_gb.nth");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.nunique().unwrap(), "w"), &oracle["nunique_w"], "df_gb.nunique");
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.sum().unwrap(), "v"),
+        &oracle["sum_v"],
+        "df_gb.sum",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.mean().unwrap(), "v"),
+        &oracle["mean_v"],
+        "df_gb.mean",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.min().unwrap(), "v"),
+        &oracle["min_v"],
+        "df_gb.min",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.max().unwrap(), "v"),
+        &oracle["max_v"],
+        "df_gb.max",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.count().unwrap(), "v"),
+        &oracle["count_v"],
+        "df_gb.count",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.size().unwrap()),
+        &oracle["size"],
+        "df_gb.size",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.std().unwrap(), "v"),
+        &oracle["std_v"],
+        "df_gb.std",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.var().unwrap(), "v"),
+        &oracle["var_v"],
+        "df_gb.var",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.sem().unwrap(), "v"),
+        &oracle["sem_v"],
+        "df_gb.sem",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.skew().unwrap(), "w"),
+        &oracle["skew_w"],
+        "df_gb.skew",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.prod().unwrap(), "v"),
+        &oracle["prod_v"],
+        "df_gb.prod",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.median().unwrap(), "v"),
+        &oracle["median_v"],
+        "df_gb.median",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.quantile(0.5).unwrap(), "v"),
+        &oracle["quantile_v"],
+        "df_gb.quantile",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.first().unwrap(), "v"),
+        &oracle["first_v"],
+        "df_gb.first",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.last().unwrap(), "v"),
+        &oracle["last_v"],
+        "df_gb.last",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.nth(1).unwrap(), "w"),
+        &oracle["nth_1_w"],
+        "df_gb.nth",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.nunique().unwrap(), "w"),
+        &oracle["nunique_w"],
+        "df_gb.nunique",
+    );
 
     let idxmin_df = gb.idxmin().unwrap();
     let idxmin_vals: Vec<i64> = idxmin_df
@@ -813,13 +901,33 @@ print(json.dumps(res))
     let agg_df = gb.agg(&func_map).unwrap();
     let aggregate_df = gb.aggregate(&func_map).unwrap();
     assert_opt_f64_slice_close(&df_col_f64_vec(&agg_df, "v"), &oracle["agg_v"], "df_gb.agg");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&aggregate_df, "w"), &oracle["aggregate_w"], "df_gb.aggregate");
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&aggregate_df, "w"),
+        &oracle["aggregate_w"],
+        "df_gb.aggregate",
+    );
 
     let ohlc_df = gb.ohlc().unwrap();
-    assert_opt_f64_slice_close(&df_col_f64_vec(&ohlc_df, "v_open"), &oracle["ohlc_v_open"], "ohlc_open");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&ohlc_df, "v_high"), &oracle["ohlc_v_high"], "ohlc_high");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&ohlc_df, "v_low"), &oracle["ohlc_v_low"], "ohlc_low");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&ohlc_df, "v_close"), &oracle["ohlc_v_close"], "ohlc_close");
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&ohlc_df, "v_open"),
+        &oracle["ohlc_v_open"],
+        "ohlc_open",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&ohlc_df, "v_high"),
+        &oracle["ohlc_v_high"],
+        "ohlc_high",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&ohlc_df, "v_low"),
+        &oracle["ohlc_v_low"],
+        "ohlc_low",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&ohlc_df, "v_close"),
+        &oracle["ohlc_v_close"],
+        "ohlc_close",
+    );
 
     let desc_df = gb.describe().unwrap();
     let desc_v = df_col_f64_vec(&desc_df, "v");
@@ -884,11 +992,12 @@ fn live_oracle_dataframe_groupby_cumulative_and_window_differential() {
     // @covers: DataFrameGroupBy.ffill, DataFrameGroupBy.bfill, DataFrameGroupBy.fillna
     // @covers: DataFrameGroupBy.head, DataFrameGroupBy.tail, DataFrameGroupBy.take, DataFrameGroupBy.sample
     // @covers: DataFrameGroupBy.rolling, DataFrameGroupBy.expanding, DataFrameGroupBy.ewm, DataFrameGroupBy.resample
+    use std::collections::BTreeMap;
+
     use fp_columnar::Column;
     use fp_frame::DataFrame;
     use fp_index::{Index, IndexLabel};
     use fp_types::{NullKind, Scalar};
-    use std::collections::BTreeMap;
 
     let python_code = r#"
 import json, math, pandas as pd
@@ -999,35 +1108,101 @@ print(json.dumps(res))
     .unwrap();
     let gb = df.groupby(&["k"]).unwrap();
 
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.cumsum().unwrap(), "v"), &oracle["cumsum_v"], "cumsum");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.cumprod().unwrap(), "v"), &oracle["cumprod_v"], "cumprod");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.cummin().unwrap(), "v"), &oracle["cummin_v"], "cummin");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.cummax().unwrap(), "v"), &oracle["cummax_v"], "cummax");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.cumcount().unwrap()), &oracle["cumcount"], "cumcount");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.ngroup().unwrap()), &oracle["ngroup"], "ngroup");
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.cumsum().unwrap(), "v"),
+        &oracle["cumsum_v"],
+        "cumsum",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.cumprod().unwrap(), "v"),
+        &oracle["cumprod_v"],
+        "cumprod",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.cummin().unwrap(), "v"),
+        &oracle["cummin_v"],
+        "cummin",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.cummax().unwrap(), "v"),
+        &oracle["cummax_v"],
+        "cummax",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.cumcount().unwrap()),
+        &oracle["cumcount"],
+        "cumcount",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.ngroup().unwrap()),
+        &oracle["ngroup"],
+        "ngroup",
+    );
     assert_opt_f64_slice_close(
         &df_col_f64_vec(&gb.rank("average", true, "keep").unwrap(), "v"),
         &oracle["rank_v"],
         "rank",
     );
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.shift(1).unwrap(), "v"), &oracle["shift_v"], "shift");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.diff(1).unwrap(), "v"), &oracle["diff_v"], "diff");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.pct_change(1).unwrap(), "v"), &oracle["pct_change_v"], "pct_change");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.ffill(None).unwrap(), "na_col"), &oracle["ffill_na"], "ffill");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.bfill(None).unwrap(), "na_col"), &oracle["bfill_na"], "bfill");
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.shift(1).unwrap(), "v"),
+        &oracle["shift_v"],
+        "shift",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.diff(1).unwrap(), "v"),
+        &oracle["diff_v"],
+        "diff",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.pct_change(1).unwrap(), "v"),
+        &oracle["pct_change_v"],
+        "pct_change",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.ffill(None).unwrap(), "na_col"),
+        &oracle["ffill_na"],
+        "ffill",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.bfill(None).unwrap(), "na_col"),
+        &oracle["bfill_na"],
+        "bfill",
+    );
 
     let filled = gb.fillna(&Scalar::Float64(99.0)).unwrap();
     assert_eq!(
         df_col_f64_vec(&filled, "na_col"),
-        vec![Some(1.0), Some(99.0), Some(3.0), Some(99.0), Some(5.0), Some(99.0)]
+        vec![
+            Some(1.0),
+            Some(99.0),
+            Some(3.0),
+            Some(99.0),
+            Some(5.0),
+            Some(99.0)
+        ]
     );
 
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.head(1).unwrap(), "v"), &oracle["head_1_v"], "head");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.tail(1).unwrap(), "v"), &oracle["tail_1_v"], "tail");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&gb.take(&[0, 2]).unwrap(), "v"), &oracle["take_0_2_v"], "take");
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.head(1).unwrap(), "v"),
+        &oracle["head_1_v"],
+        "head",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.tail(1).unwrap(), "v"),
+        &oracle["tail_1_v"],
+        "tail",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&gb.take(&[0, 2]).unwrap(), "v"),
+        &oracle["take_0_2_v"],
+        "take",
+    );
 
     let sampled = gb.sample(Some(1), None, false, Some(42)).unwrap();
-    assert_eq!(sampled.len(), oracle["sample_1_len"].as_u64().unwrap() as usize);
+    assert_eq!(
+        sampled.len(),
+        oracle["sample_1_len"].as_u64().unwrap() as usize
+    );
 
     assert_opt_f64_slice_close(
         &df_col_f64_vec(&gb.rolling(2).sum().unwrap(), "v"),
@@ -1078,7 +1253,11 @@ print(json.dumps(res))
     )
     .unwrap();
     let resampled = ts_df.groupby(&["k"]).unwrap().resample("1D").sum().unwrap();
-    assert_opt_f64_slice_close(&df_col_f64_vec(&resampled, "v"), &oracle["resample_1d_sum_v"], "resample_sum");
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&resampled, "v"),
+        &oracle["resample_1d_sum_v"],
+        "resample_sum",
+    );
 }
 
 #[test]
@@ -1088,11 +1267,12 @@ fn live_oracle_dataframe_groupby_transform_filter_apply_pipe_stats_differential(
     // @covers: DataFrameGroupBy.groups, DataFrameGroupBy.indices, DataFrameGroupBy.ngroups, DataFrameGroupBy.ndim
     // @covers: DataFrameGroupBy.dtypes, DataFrameGroupBy.keys, DataFrameGroupBy.level, DataFrameGroupBy.grouper
     // @covers: DataFrameGroupBy.plot, DataFrameGroupBy.hist, DataFrameGroupBy.boxplot
+    use std::collections::{BTreeMap, HashMap};
+
     use fp_columnar::Column;
     use fp_frame::DataFrame;
     use fp_index::{Index, IndexLabel};
     use fp_types::{NullKind, Scalar};
-    use std::collections::{BTreeMap, HashMap};
 
     let python_code = r#"
 import json, math, pandas as pd
@@ -1214,7 +1394,11 @@ print(json.dumps(res))
             Ok(s > 5.0)
         })
         .unwrap();
-    assert_opt_f64_slice_close(&df_col_f64_vec(&filtered, "x"), &oracle["filter_x"], "filter");
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&filtered, "x"),
+        &oracle["filter_x"],
+        "filter",
+    );
 
     let applied = gb
         .apply_with_include_groups(false, |g| Ok(g.clone()))
@@ -1225,7 +1409,11 @@ print(json.dumps(res))
     assert_opt_f64_slice_close(&df_col_f64_vec(&piped, "x"), &oracle["pipe_sum_x"], "pipe");
 
     let group_a = gb.get_group("a").unwrap();
-    assert_opt_f64_slice_close(&df_col_f64_vec(&group_a, "x"), &oracle["get_group_a_x"], "get_group");
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&group_a, "x"),
+        &oracle["get_group_a_x"],
+        "get_group",
+    );
 
     let corr_df = gb.corr().unwrap();
     let corr_y = df_col_f64_vec(&corr_df, "y");
@@ -1246,15 +1434,25 @@ print(json.dumps(res))
         ])
         .unwrap(),
     );
-    let other_df =
-        DataFrame::new_with_column_order(Index::from_i64(vec![0, 1, 2, 3]), ocols, vec!["x".into()])
-            .unwrap();
+    let other_df = DataFrame::new_with_column_order(
+        Index::from_i64(vec![0, 1, 2, 3]),
+        ocols,
+        vec!["x".into()],
+    )
+    .unwrap();
     let corrwith_df = gb.corrwith(&other_df).unwrap();
-    assert_opt_f64_slice_close(&df_col_f64_vec(&corrwith_df, "x"), &oracle["corrwith_x"], "corrwith");
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&corrwith_df, "x"),
+        &oracle["corrwith_x"],
+        "corrwith",
+    );
 
     assert_eq!(gb.ngroups(), oracle["ngroups"].as_u64().unwrap() as usize);
     assert_eq!(gb.ndim(), oracle["ndim"].as_u64().unwrap() as usize);
-    assert_eq!(gb.keys(), vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]);
+    assert_eq!(
+        gb.keys(),
+        vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]
+    );
     assert_eq!(gb.grouper(), vec!["k".to_string()]);
     assert_eq!(gb.level(), vec!["k".to_string()]);
     assert_eq!(gb.dtypes().unwrap().len(), 2);
@@ -1297,7 +1495,12 @@ print(json.dumps(res))
         .iter()
         .map(|v| v.as_str().unwrap().to_string())
         .collect();
-    assert_eq!(as_index_false_df.column_names(), oracle_cols);
+    let actual_cols: Vec<String> = as_index_false_df
+        .column_names()
+        .into_iter()
+        .cloned()
+        .collect();
+    assert_eq!(actual_cols, oracle_cols);
 
     let mut nacols = BTreeMap::new();
     nacols.insert(
@@ -1326,7 +1529,9 @@ print(json.dumps(res))
         vec!["k".into(), "x".into()],
     )
     .unwrap();
-    let gb_dropna_false = df_na_key.groupby_full_options(&["k"], true, true, false).unwrap();
+    let gb_dropna_false = df_na_key
+        .groupby_full_options(&["k"], true, true, false)
+        .unwrap();
     assert_opt_f64_slice_close(
         &df_col_f64_vec(&gb_dropna_false.sum().unwrap(), "x"),
         &oracle["dropna_false_sum_x"],
@@ -1473,24 +1678,96 @@ print(json.dumps(res))
     let gb = s.groupby(&k).unwrap();
     let gb_w = w.groupby(&k).unwrap();
 
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.sum().unwrap()), &oracle["sum"], "s_gb.sum");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.mean().unwrap()), &oracle["mean"], "s_gb.mean");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.min().unwrap()), &oracle["min"], "s_gb.min");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.max().unwrap()), &oracle["max"], "s_gb.max");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.count().unwrap()), &oracle["count"], "s_gb.count");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.size().unwrap()), &oracle["size"], "s_gb.size");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.std().unwrap()), &oracle["std"], "s_gb.std");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.var().unwrap()), &oracle["var"], "s_gb.var");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.sem().unwrap()), &oracle["sem"], "s_gb.sem");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb_w.skew().unwrap()), &oracle["skew_w"], "s_gb.skew");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.prod().unwrap()), &oracle["prod"], "s_gb.prod");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.median().unwrap()), &oracle["median"], "s_gb.median");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.quantile(0.5).unwrap()), &oracle["quantile"], "s_gb.quantile");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.first().unwrap()), &oracle["first"], "s_gb.first");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.last().unwrap()), &oracle["last"], "s_gb.last");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb_w.nth(1).unwrap()), &oracle["nth_1_w"], "s_gb.nth");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb_w.nunique().unwrap()), &oracle["nunique_w"], "s_gb.nunique");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb_w.unique().unwrap()), &oracle["unique_w"], "s_gb.unique");
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.sum().unwrap()),
+        &oracle["sum"],
+        "s_gb.sum",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.mean().unwrap()),
+        &oracle["mean"],
+        "s_gb.mean",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.min().unwrap()),
+        &oracle["min"],
+        "s_gb.min",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.max().unwrap()),
+        &oracle["max"],
+        "s_gb.max",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.count().unwrap()),
+        &oracle["count"],
+        "s_gb.count",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.size().unwrap()),
+        &oracle["size"],
+        "s_gb.size",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.std().unwrap()),
+        &oracle["std"],
+        "s_gb.std",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.var().unwrap()),
+        &oracle["var"],
+        "s_gb.var",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.sem().unwrap()),
+        &oracle["sem"],
+        "s_gb.sem",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb_w.skew().unwrap()),
+        &oracle["skew_w"],
+        "s_gb.skew",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.prod().unwrap()),
+        &oracle["prod"],
+        "s_gb.prod",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.median().unwrap()),
+        &oracle["median"],
+        "s_gb.median",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.quantile(0.5).unwrap()),
+        &oracle["quantile"],
+        "s_gb.quantile",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.first().unwrap()),
+        &oracle["first"],
+        "s_gb.first",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.last().unwrap()),
+        &oracle["last"],
+        "s_gb.last",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb_w.nth(1).unwrap()),
+        &oracle["nth_1_w"],
+        "s_gb.nth",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb_w.nunique().unwrap()),
+        &oracle["nunique_w"],
+        "s_gb.nunique",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb_w.unique().unwrap()),
+        &oracle["unique_w"],
+        "s_gb.unique",
+    );
 
     let idxmin_vals: Vec<i64> = gb
         .idxmin()
@@ -1584,18 +1861,50 @@ print(json.dumps(res))
 
     let agg_df = gb.agg(&["sum", "mean"]).unwrap();
     let aggregate_df = gb.aggregate(&["sum", "mean"]).unwrap();
-    assert_opt_f64_slice_close(&df_col_f64_vec(&agg_df, "sum"), &oracle["agg_sum"], "s_gb.agg");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&aggregate_df, "mean"), &oracle["aggregate_mean"], "s_gb.aggregate");
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&agg_df, "sum"),
+        &oracle["agg_sum"],
+        "s_gb.agg",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&aggregate_df, "mean"),
+        &oracle["aggregate_mean"],
+        "s_gb.aggregate",
+    );
 
     let ohlc_df = gb.ohlc().unwrap();
-    assert_opt_f64_slice_close(&df_col_f64_vec(&ohlc_df, "open"), &oracle["ohlc_open"], "s_gb.ohlc_open");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&ohlc_df, "high"), &oracle["ohlc_high"], "s_gb.ohlc_high");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&ohlc_df, "low"), &oracle["ohlc_low"], "s_gb.ohlc_low");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&ohlc_df, "close"), &oracle["ohlc_close"], "s_gb.ohlc_close");
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&ohlc_df, "open"),
+        &oracle["ohlc_open"],
+        "s_gb.ohlc_open",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&ohlc_df, "high"),
+        &oracle["ohlc_high"],
+        "s_gb.ohlc_high",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&ohlc_df, "low"),
+        &oracle["ohlc_low"],
+        "s_gb.ohlc_low",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&ohlc_df, "close"),
+        &oracle["ohlc_close"],
+        "s_gb.ohlc_close",
+    );
 
     let desc_df = gb.describe().unwrap();
-    assert_opt_f64_slice_close(&df_col_f64_vec(&desc_df, "mean"), &oracle["describe_mean"], "s_gb.describe_mean");
-    assert_opt_f64_slice_close(&df_col_f64_vec(&desc_df, "max"), &oracle["describe_max"], "s_gb.describe_max");
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&desc_df, "mean"),
+        &oracle["describe_mean"],
+        "s_gb.describe_mean",
+    );
+    assert_opt_f64_slice_close(
+        &df_col_f64_vec(&desc_df, "max"),
+        &oracle["describe_max"],
+        "s_gb.describe_max",
+    );
 
     let vc_vals: Vec<i64> = gb_w
         .value_counts()
@@ -1741,35 +2050,101 @@ print(json.dumps(res))
     let gb = s.groupby(&k).unwrap();
     let gb_na = na_s.groupby(&k).unwrap();
 
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.cumsum().unwrap()), &oracle["cumsum"], "s_gb.cumsum");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.cumprod().unwrap()), &oracle["cumprod"], "s_gb.cumprod");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.cummin().unwrap()), &oracle["cummin"], "s_gb.cummin");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.cummax().unwrap()), &oracle["cummax"], "s_gb.cummax");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.cumcount().unwrap()), &oracle["cumcount"], "s_gb.cumcount");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.ngroup().unwrap()), &oracle["ngroup"], "s_gb.ngroup");
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.cumsum().unwrap()),
+        &oracle["cumsum"],
+        "s_gb.cumsum",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.cumprod().unwrap()),
+        &oracle["cumprod"],
+        "s_gb.cumprod",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.cummin().unwrap()),
+        &oracle["cummin"],
+        "s_gb.cummin",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.cummax().unwrap()),
+        &oracle["cummax"],
+        "s_gb.cummax",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.cumcount().unwrap()),
+        &oracle["cumcount"],
+        "s_gb.cumcount",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.ngroup().unwrap()),
+        &oracle["ngroup"],
+        "s_gb.ngroup",
+    );
     assert_opt_f64_slice_close(
         &series_f64_vec(&gb.rank("average", true, "keep").unwrap()),
         &oracle["rank"],
         "s_gb.rank",
     );
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.shift(1).unwrap()), &oracle["shift"], "s_gb.shift");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.diff(1).unwrap()), &oracle["diff"], "s_gb.diff");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.pct_change(1).unwrap()), &oracle["pct_change"], "s_gb.pct_change");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb_na.ffill(None).unwrap()), &oracle["ffill"], "s_gb.ffill");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb_na.bfill(None).unwrap()), &oracle["bfill"], "s_gb.bfill");
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.shift(1).unwrap()),
+        &oracle["shift"],
+        "s_gb.shift",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.diff(1).unwrap()),
+        &oracle["diff"],
+        "s_gb.diff",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.pct_change(1).unwrap()),
+        &oracle["pct_change"],
+        "s_gb.pct_change",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb_na.ffill(None).unwrap()),
+        &oracle["ffill"],
+        "s_gb.ffill",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb_na.bfill(None).unwrap()),
+        &oracle["bfill"],
+        "s_gb.bfill",
+    );
 
     let filled = gb_na.fillna(&Scalar::Float64(99.0)).unwrap();
     assert_eq!(
         series_f64_vec(&filled),
-        vec![Some(1.0), Some(99.0), Some(3.0), Some(99.0), Some(5.0), Some(99.0)]
+        vec![
+            Some(1.0),
+            Some(99.0),
+            Some(3.0),
+            Some(99.0),
+            Some(5.0),
+            Some(99.0)
+        ]
     );
 
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.head(1).unwrap()), &oracle["head_1"], "s_gb.head");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.tail(1).unwrap()), &oracle["tail_1"], "s_gb.tail");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.take(&[0, 2]).unwrap()), &oracle["take_0_2"], "s_gb.take");
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.head(1).unwrap()),
+        &oracle["head_1"],
+        "s_gb.head",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.tail(1).unwrap()),
+        &oracle["tail_1"],
+        "s_gb.tail",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.take(&[0, 2]).unwrap()),
+        &oracle["take_0_2"],
+        "s_gb.take",
+    );
 
     let sampled = gb.sample(Some(1), None, false, Some(42)).unwrap();
-    assert_eq!(sampled.len(), oracle["sample_1_len"].as_u64().unwrap() as usize);
+    assert_eq!(
+        sampled.len(),
+        oracle["sample_1_len"].as_u64().unwrap() as usize
+    );
 
     assert_opt_f64_slice_close(
         &series_f64_vec(&gb.rolling(2).sum().unwrap()),
@@ -1966,10 +2341,22 @@ print(json.dumps(res))
     assert_opt_f64_slice_close(&series_f64_vec(&piped), &oracle["pipe_sum"], "s_gb.pipe");
 
     let grp_a = gb.get_group("a").unwrap();
-    assert_opt_f64_slice_close(&series_f64_vec(&grp_a), &oracle["get_group_a"], "s_gb.get_group");
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&grp_a),
+        &oracle["get_group_a"],
+        "s_gb.get_group",
+    );
 
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.corr(&y).unwrap()), &oracle["corr"], "s_gb.corr");
-    assert_opt_f64_slice_close(&series_f64_vec(&gb.cov(&y).unwrap()), &oracle["cov"], "s_gb.cov");
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.corr(&y).unwrap()),
+        &oracle["corr"],
+        "s_gb.corr",
+    );
+    assert_opt_f64_slice_close(
+        &series_f64_vec(&gb.cov(&y).unwrap()),
+        &oracle["cov"],
+        "s_gb.cov",
+    );
 
     let mono_inc: Vec<bool> = gb
         .is_monotonic_increasing()
@@ -2009,7 +2396,10 @@ print(json.dumps(res))
     assert_eq!(gb.ngroups(), oracle["ngroups"].as_u64().unwrap() as usize);
     assert_eq!(gb.ndim(), oracle["ndim"].as_u64().unwrap() as usize);
     assert_eq!(gb.dtype(), DType::Float64);
-    assert_eq!(gb.keys(), vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]);
+    assert_eq!(
+        gb.keys(),
+        vec![IndexLabel::Utf8("a".into()), IndexLabel::Utf8("b".into())]
+    );
     assert_eq!(gb.grouper(), "k");
     assert_eq!(gb.level(), None);
 
@@ -2036,14 +2426,9 @@ print(json.dumps(res))
     assert!(gb.boxplot().unwrap().to_svg().unwrap().contains("<svg"));
 
     // Categorical observed=False variant
-    let cat_k = Series::from_categorical(
+    let cat_k = Series::from_categorical_codes(
         "k",
-        Index::from_i64(vec![0, 1, 2]),
-        vec![
-            Scalar::Utf8("a".into()),
-            Scalar::Utf8("a".into()),
-            Scalar::Utf8("b".into()),
-        ],
+        vec![0, 0, 1],
         vec![
             Scalar::Utf8("a".into()),
             Scalar::Utf8("b".into()),
@@ -2068,7 +2453,11 @@ print(json.dumps(res))
         .unwrap()
         .value_counts_over_categories(false, true, false, true, ValueCountsOrder::GroupsSorted)
         .unwrap();
-    let vc_obs_vals: Vec<i64> = vc_obs.values().iter().map(|v| v.to_i64().unwrap()).collect();
+    let vc_obs_vals: Vec<i64> = vc_obs
+        .values()
+        .iter()
+        .map(|v| v.to_i64().unwrap())
+        .collect();
     let oracle_vc_obs: Vec<i64> = oracle["vc_obs_false"]
         .as_array()
         .unwrap()
@@ -2084,4 +2473,3 @@ print(json.dumps(res))
     assert!(oracle["neg_agg_err"].as_bool().unwrap());
     assert!(gb.agg(&["not_a_valid_pandas_agg"]).is_err());
 }
-
