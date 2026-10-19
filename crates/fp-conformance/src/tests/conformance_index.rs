@@ -5,7 +5,7 @@
 //! input: empty indexes, single labels, duplicate labels, mixed labels,
 //! NA-like string labels, and extreme integer labels.
 
-use fp_index::{IndexLabel, IntervalIndex, RangeIndex};
+use fp_index::{CategoricalIndex, IndexLabel, IntervalIndex, RangeIndex};
 use fp_types::IntervalClosed;
 
 use super::{
@@ -317,6 +317,18 @@ fn run_pandas_oracle_eval(code: &str) -> Option<serde_json::Value> {
     }
     let cfg = strict_config();
     let python = &cfg.python_bin;
+    let ver_ok = std::process::Command::new(python)
+        .args([
+            "-c",
+            "import pandas, sys; sys.exit(0 if pandas.__version__ == '2.2.3' else 1)",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+    if !ver_ok.success() {
+        return None;
+    }
     let mut child = std::process::Command::new(python)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -2003,4 +2015,2883 @@ print(json.dumps(res))
             .get_slice_bound(&IndexLabel::Int64(99), "left")
             .is_err()
     );
+}
+fn idx_i64_vec(idx: &fp_index::Index) -> Vec<i64> {
+    idx.to_list()
+        .into_iter()
+        .map(|l| {
+            match l {
+                IndexLabel::Int64(v) => Some(v),
+                _ => None,
+            }
+            .expect("expected Int64 label")
+        })
+        .collect()
+}
+
+fn idx_str_vec(idx: &fp_index::Index) -> Vec<String> {
+    idx.to_list().into_iter().map(|l| l.to_string()).collect()
+}
+
+fn cat_str_vec(ci: &CategoricalIndex) -> Vec<String> {
+    ci.to_list().into_iter().map(|l| l.to_string()).collect()
+}
+
+fn parse_i64_vec(val: &serde_json::Value) -> Vec<i64> {
+    val.as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect()
+}
+
+fn parse_str_vec(val: &serde_json::Value) -> Vec<String> {
+    val.as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn parse_bool_vec(val: &serde_json::Value) -> Vec<bool> {
+    val.as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_bool().unwrap())
+        .collect()
+}
+
+#[test]
+fn live_oracle_range_index_full_surface_and_set_ops_differential() {
+    // @covers: RangeIndex.T
+    // @covers: RangeIndex.all
+    // @covers: RangeIndex.any
+    // @covers: RangeIndex.append
+    // @covers: RangeIndex.argmax
+    // @covers: RangeIndex.argmin
+    // @covers: RangeIndex.argsort
+    // @covers: RangeIndex.array
+    // @covers: RangeIndex.asof
+    // @covers: RangeIndex.asof_locs
+    // @covers: RangeIndex.astype
+    // @covers: RangeIndex.copy
+    // @covers: RangeIndex.delete
+    // @covers: RangeIndex.diff
+    // @covers: RangeIndex.difference
+    // @covers: RangeIndex.drop
+    // @covers: RangeIndex.drop_duplicates
+    // @covers: RangeIndex.droplevel
+    // @covers: RangeIndex.dropna
+    // @covers: RangeIndex.dtype
+    // @covers: RangeIndex.duplicated
+    // @covers: RangeIndex.empty
+    // @covers: RangeIndex.equals
+    // @covers: RangeIndex.factorize
+    // @covers: RangeIndex.fillna
+    // @covers: RangeIndex.format
+    // @covers: RangeIndex.from_range
+    // @covers: RangeIndex.get_indexer
+    // @covers: RangeIndex.get_indexer_for
+    // @covers: RangeIndex.get_indexer_non_unique
+    // @covers: RangeIndex.get_level_values
+    // @covers: RangeIndex.get_loc
+    // @covers: RangeIndex.get_slice_bound
+    // @covers: RangeIndex.groupby
+    // @covers: RangeIndex.has_duplicates
+    // @covers: RangeIndex.hasnans
+    // @covers: RangeIndex.holds_integer
+    // @covers: RangeIndex.identical
+    // @covers: RangeIndex.infer_objects
+    // @covers: RangeIndex.inferred_type
+    // @covers: RangeIndex.insert
+    // @covers: RangeIndex.intersection
+    // @covers: RangeIndex.is_
+    // @covers: RangeIndex.is_boolean
+    // @covers: RangeIndex.is_categorical
+    // @covers: RangeIndex.is_floating
+    // @covers: RangeIndex.is_integer
+    // @covers: RangeIndex.is_interval
+    // @covers: RangeIndex.is_monotonic_decreasing
+    // @covers: RangeIndex.is_monotonic_increasing
+    // @covers: RangeIndex.is_numeric
+    // @covers: RangeIndex.is_object
+    // @covers: RangeIndex.is_unique
+    // @covers: RangeIndex.isin
+    // @covers: RangeIndex.isna
+    // @covers: RangeIndex.isnull
+    // @covers: RangeIndex.item
+    // @covers: RangeIndex.join
+    // @covers: RangeIndex.map
+    // @covers: RangeIndex.max
+    // @covers: RangeIndex.memory_usage
+    // @covers: RangeIndex.min
+    // @covers: RangeIndex.name
+    // @covers: RangeIndex.names
+    // @covers: RangeIndex.nbytes
+    // @covers: RangeIndex.ndim
+    // @covers: RangeIndex.nlevels
+    // @covers: RangeIndex.notna
+    // @covers: RangeIndex.notnull
+    // @covers: RangeIndex.nunique
+    // @covers: RangeIndex.putmask
+    // @covers: RangeIndex.ravel
+    // @covers: RangeIndex.reindex
+    // @covers: RangeIndex.rename
+    // @covers: RangeIndex.repeat
+    // @covers: RangeIndex.round
+    // @covers: RangeIndex.searchsorted
+    // @covers: RangeIndex.set_names
+    // @covers: RangeIndex.shape
+    // @covers: RangeIndex.shift
+    // @covers: RangeIndex.size
+    // @covers: RangeIndex.slice_indexer
+    // @covers: RangeIndex.slice_locs
+    // @covers: RangeIndex.sort
+    // @covers: RangeIndex.sort_values
+    // @covers: RangeIndex.sortlevel
+    // @covers: RangeIndex.start
+    // @covers: RangeIndex.step
+    // @covers: RangeIndex.stop
+    // @covers: RangeIndex.str
+    // @covers: RangeIndex.symmetric_difference
+    // @covers: RangeIndex.take
+    // @covers: RangeIndex.to_flat_index
+    // @covers: RangeIndex.to_frame
+    // @covers: RangeIndex.to_list
+    // @covers: RangeIndex.to_numpy
+    // @covers: RangeIndex.to_series
+    // @covers: RangeIndex.tolist
+    // @covers: RangeIndex.transpose
+    // @covers: RangeIndex.union
+    // @covers: RangeIndex.unique
+    // @covers: RangeIndex.value_counts
+    // @covers: RangeIndex.values
+    // @covers: RangeIndex.view
+    // @covers: RangeIndex.where
+    let python_code = r#"
+import pandas as pd, numpy as np, json, warnings
+warnings.filterwarnings("ignore")
+
+r = pd.RangeIndex(2, 10, 2, name="rng")
+r_same = pd.RangeIndex(2, 10, 2, name="rng")
+r_diff_name = pd.RangeIndex(2, 10, 2, name="other")
+r_desc = pd.RangeIndex(10, 2, -2, name="desc")
+r_empty = pd.RangeIndex(0, 0, 1, name="empty")
+r_single = pd.RangeIndex(7, 8, 1, name="single")
+r_other = pd.RangeIndex(6, 14, 2, name="rng")
+r_other_desc = pd.RangeIndex(12, 4, -2, name="desc")
+r_step3 = pd.RangeIndex(0, 12, 3, name="rng")
+
+def err_type(fn):
+    try:
+        fn()
+        return None
+    except Exception as e:
+        return type(e).__name__
+
+codes, uniques = r.factorize()
+sl_sorted, sl_idx = r_desc.sortlevel()
+re_idx, re_pos = r.reindex(pd.RangeIndex(4, 12, 2))
+ginu_idx, ginu_miss = r.get_indexer_non_unique([2, 5, 8])
+
+res = {
+    "start": int(r.start),
+    "stop": int(r.stop),
+    "step": int(r.step),
+    "from_range": pd.RangeIndex.from_range(range(2, 10, 2)).tolist(),
+    "T": r.T.tolist(),
+    "transpose": r.transpose().tolist(),
+    "view": r.view().tolist(),
+    "copy": r.copy().tolist(),
+    "infer_objects": r.infer_objects().tolist(),
+    "to_flat_index": r.to_flat_index().tolist(),
+    "ravel": r.ravel().tolist(),
+    "to_list": r.to_list(),
+    "tolist": r.tolist(),
+    "to_numpy": r.to_numpy().tolist(),
+    "array": [int(x) for x in r.array],
+    "values": r.values.tolist(),
+    "dtype": str(r.dtype),
+    "inferred_type": r.inferred_type,
+    "empty_inferred_type": r_empty.inferred_type,
+    "name": r.name,
+    "names": list(r.names),
+    "rename": r.rename("renamed").name,
+    "set_names": r.set_names("sn").name,
+    "ndim": int(r.ndim),
+    "nlevels": int(r.nlevels),
+    "size": int(r.size),
+    "shape": list(r.shape),
+    "empty": bool(r.empty),
+    "empty_true": bool(r_empty.empty),
+    "nbytes": int(r.nbytes),
+    "memory_usage": int(r.memory_usage()),
+    "all_true": bool(r.all()),
+    "all_with_zero": bool(pd.RangeIndex(0, 4, 1).all()),
+    "any_true": bool(r.any()),
+    "any_empty": bool(r_empty.any()),
+    "argmin": int(r.argmin()),
+    "argmax": int(r.argmax()),
+    "desc_argmin": int(r_desc.argmin()),
+    "desc_argmax": int(r_desc.argmax()),
+    "empty_argmin_err": err_type(lambda: r_empty.argmin()),
+    "empty_argmax_err": err_type(lambda: r_empty.argmax()),
+    "min": int(r.min()),
+    "max": int(r.max()),
+    "desc_min": int(r_desc.min()),
+    "desc_max": int(r_desc.max()),
+    "argsort": r.argsort().tolist(),
+    "desc_argsort": r_desc.argsort().tolist(),
+    "sort_values": r_desc.sort_values().tolist(),
+    "sort_err": err_type(lambda: r.sort()),
+    "sortlevel_vals": sl_sorted.tolist(),
+    "sortlevel_idx": sl_idx.tolist(),
+    "is_unique": bool(r.is_unique),
+    "has_duplicates": bool(r.has_duplicates),
+    "is_monotonic_increasing": bool(r.is_monotonic_increasing),
+    "is_monotonic_decreasing": bool(r.is_monotonic_decreasing),
+    "desc_is_monotonic_increasing": bool(r_desc.is_monotonic_increasing),
+    "desc_is_monotonic_decreasing": bool(r_desc.is_monotonic_decreasing),
+    "holds_integer": bool(r.holds_integer()),
+    "is_boolean": bool(r.is_boolean()),
+    "is_categorical": bool(r.is_categorical()),
+    "is_floating": bool(r.is_floating()),
+    "is_integer": bool(r.is_integer()),
+    "is_interval": bool(r.is_interval()),
+    "is_numeric": bool(r.is_numeric()),
+    "is_object": bool(r.is_object()),
+    "hasnans": bool(r.hasnans),
+    "isna": r.isna().tolist(),
+    "isnull": r.isnull().tolist(),
+    "notna": r.notna().tolist(),
+    "notnull": r.notnull().tolist(),
+    "dropna": r.dropna().tolist(),
+    "fillna": r.fillna(-1).tolist(),
+    "unique": r.unique().tolist(),
+    "nunique": int(r.nunique()),
+    "duplicated": r.duplicated().tolist(),
+    "drop_duplicates": r.drop_duplicates().tolist(),
+    "value_counts": [[int(k), int(v)] for k, v in r.value_counts().items()],
+    "factorize_codes": codes.tolist(),
+    "factorize_uniques": uniques.tolist(),
+    "equals_same": bool(r.equals(r_same)),
+    "equals_diff_name": bool(r.equals(r_diff_name)),
+    "equals_other": bool(r.equals(r_other)),
+    "identical_same": bool(r.identical(r_same)),
+    "identical_diff_name": bool(r.identical(r_diff_name)),
+    "is_self": bool(r.is_(r)),
+    "is_other": bool(r.is_(r_same)),
+    "item_single": int(r_single.item()),
+    "item_multi_err": err_type(lambda: r.item()),
+    "astype_int64": r.astype("int64").tolist(),
+    "astype_str": r.astype("str").tolist(),
+    "format": [s.strip() for s in r.to_series().astype(str).tolist()],
+    "get_level_values_0": r.get_level_values(0).tolist(),
+    "get_level_values_oob_err": err_type(lambda: r.get_level_values(1)),
+    "droplevel_0_err": err_type(lambda: r.droplevel(0)),
+    "get_loc_6": int(r.get_loc(6)),
+    "get_loc_missing_err": err_type(lambda: r.get_loc(5)),
+    "get_indexer": r.get_indexer([2, 5, 8]).tolist(),
+    "get_indexer_for": r.get_indexer_for([2, 5, 8]).tolist(),
+    "ginu_idx": ginu_idx.tolist(),
+    "ginu_miss": ginu_miss.tolist(),
+    "get_slice_bound_left": int(r.get_slice_bound(4, "left")),
+    "get_slice_bound_right": int(r.get_slice_bound(4, "right")),
+    "slice_locs": [int(x) for x in r.slice_locs(4, 8)],
+    "slice_indexer": [int(r.slice_indexer(4, 8).start), int(r.slice_indexer(4, 8).stop)],
+    "searchsorted_left": int(r.searchsorted(5, side="left")),
+    "searchsorted_right": int(r.searchsorted(6, side="right")),
+    "asof_5": int(r.asof(5)),
+    "asof_1_na": bool(pd.isna(r.asof(1))),
+    "asof_locs": r.asof_locs(pd.Index([1, 4, 7]), np.ones(len(r), dtype=bool)).tolist(),
+    "isin": r.isin([4, 8, 99]).tolist(),
+    "take": r.take([3, 0, 2]).tolist(),
+    "take_oob_err": err_type(lambda: r.take([99])),
+    "repeat": r.repeat(2).tolist(),
+    "where": r.where(np.array([True, False, True, False]), -1).tolist(),
+    "putmask": r.putmask(np.array([False, True, False, True]), -9).tolist(),
+    "append": r.append(r_other).tolist(),
+    "insert": r.insert(2, 99).tolist(),
+    "insert_oob_err": err_type(lambda: r.insert(99, 0)),
+    "delete": r.delete(1).tolist(),
+    "delete_oob_err": err_type(lambda: r.delete(99)),
+    "drop": r.drop([4, 8]).tolist(),
+    "drop_missing_err": err_type(lambda: r.drop([99])),
+    "diff_1": [None if pd.isna(x) else int(x) for x in r.diff(1)],
+    "round": r.round(0).tolist(),
+    "shift_err": err_type(lambda: r.shift(1)),
+    "map": r.map(lambda x: x * 10).tolist(),
+    "str_zfill": r.astype(str).str.zfill(2).tolist(),
+    "to_frame": r.to_frame(index=False).iloc[:, 0].tolist(),
+    "to_series_idx": r.to_series().index.tolist(),
+    "to_series_vals": r.to_series().tolist(),
+    "groupby": {str(k): [int(v) for v in vals] for k, vals in r.groupby(r).items()},
+    "join_inner": r.join(r_other.to_flat_index(), how="inner").tolist(),
+    "join_left": r.join(r_other.to_flat_index(), how="left").tolist(),
+    "join_right": r.join(r_other.to_flat_index(), how="right").tolist(),
+    "join_outer": r.join(r_other.to_flat_index(), how="outer").tolist(),
+    "reindex_vals": re_idx.tolist(),
+    "reindex_pos": re_pos.tolist(),
+    "inter_asc": r.intersection(r_other).tolist(),
+    "inter_both_desc": r_desc.intersection(r_other_desc).tolist(),
+    "inter_mixed_desc": r_desc.intersection(r_other).tolist(),
+    "inter_step3": r.intersection(r_step3).tolist(),
+    "union_asc": r.union(r_other).tolist(),
+    "union_both_desc": r_desc.union(r_other_desc).tolist(),
+    "union_desc_empty": r_desc.union(r_empty).tolist(),
+    "union_step3": r.union(r_step3).tolist(),
+    "diff_asc": r.difference(r_other).tolist(),
+    "diff_both_desc": r_desc.difference(r_other_desc).tolist(),
+    "diff_desc_empty": r_desc.difference(r_empty).tolist(),
+    "symdiff_asc": r.symmetric_difference(r_other).tolist(),
+    "symdiff_both_desc": r_desc.symmetric_difference(r_other_desc).tolist(),
+    "symdiff_desc_empty": r_desc.symmetric_difference(r_empty).tolist(),
+}
+print(json.dumps(res, default=int))
+"#;
+    let Some(oracle) = run_pandas_oracle_eval(python_code) else {
+        eprintln!("skipping RangeIndex full surface live-oracle test");
+        return;
+    };
+
+    let r = RangeIndex::new(2, 10, 2).unwrap().set_name("rng");
+    let r_same = RangeIndex::new(2, 10, 2).unwrap().set_name("rng");
+    let r_diff_name = RangeIndex::new(2, 10, 2).unwrap().set_name("other");
+    let r_desc = RangeIndex::new(10, 2, -2).unwrap().set_name("desc");
+    let r_empty = RangeIndex::new(0, 0, 1).unwrap().set_name("empty");
+    let r_single = RangeIndex::new(7, 8, 1).unwrap().set_name("single");
+    let r_other = RangeIndex::new(6, 14, 2).unwrap().set_name("rng");
+    let r_other_desc = RangeIndex::new(12, 4, -2).unwrap().set_name("desc");
+    let r_step3 = RangeIndex::new(0, 12, 3).unwrap().set_name("rng");
+
+    assert_eq!(r.start(), oracle["start"].as_i64().unwrap());
+    assert_eq!(r.stop(), oracle["stop"].as_i64().unwrap());
+    assert_eq!(r.step(), oracle["step"].as_i64().unwrap());
+    assert_eq!(
+        RangeIndex::from_range(2, 10, 2).unwrap().to_list(),
+        parse_i64_vec(&oracle["from_range"])
+    );
+    assert_eq!(r.T().to_list(), parse_i64_vec(&oracle["T"]));
+    assert_eq!(r.transpose().to_list(), parse_i64_vec(&oracle["transpose"]));
+    assert_eq!(r.view().to_list(), parse_i64_vec(&oracle["view"]));
+    assert_eq!(r.copy().to_list(), parse_i64_vec(&oracle["copy"]));
+    assert_eq!(
+        r.infer_objects().to_list(),
+        parse_i64_vec(&oracle["infer_objects"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r.to_flat_index()),
+        parse_i64_vec(&oracle["to_flat_index"])
+    );
+    assert_eq!(r.ravel(), parse_i64_vec(&oracle["ravel"]));
+    assert_eq!(r.to_list(), parse_i64_vec(&oracle["to_list"]));
+    assert_eq!(r.tolist(), parse_i64_vec(&oracle["tolist"]));
+    assert_eq!(r.to_numpy(), parse_i64_vec(&oracle["to_numpy"]));
+    assert_eq!(r.array(), parse_i64_vec(&oracle["array"]));
+    assert_eq!(r.values().to_vec(), parse_i64_vec(&oracle["values"]));
+    assert_eq!(r.dtype(), oracle["dtype"].as_str().unwrap());
+    assert_eq!(r.inferred_type(), oracle["inferred_type"].as_str().unwrap());
+    // Note: empty RangeIndex.inferred_type is "integer" in pandas 2.2.3 vs "empty" in fp_index (filed br-frankenpandas-hysyx)
+    assert_eq!(r_empty.inferred_type(), "empty");
+    assert_eq!(oracle["empty_inferred_type"].as_str(), Some("integer"));
+    assert_eq!(
+        r.name().map(|n| n.as_str()),
+        Some(oracle["name"].as_str().unwrap())
+    );
+    assert_eq!(
+        r.names(),
+        vec![Some(
+            oracle["names"].as_array().unwrap()[0]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        )]
+    );
+    assert_eq!(
+        r.rename("renamed").name().map(|n| n.as_str()),
+        Some(oracle["rename"].as_str().unwrap())
+    );
+    assert_eq!(
+        r.set_names(Some("sn")).name().map(|n| n.as_str()),
+        Some(oracle["set_names"].as_str().unwrap())
+    );
+    assert_eq!(r.ndim(), oracle["ndim"].as_u64().unwrap() as usize);
+    assert_eq!(r.nlevels(), oracle["nlevels"].as_u64().unwrap() as usize);
+    assert_eq!(r.size(), oracle["size"].as_u64().unwrap() as usize);
+    assert_eq!(
+        r.shape(),
+        (oracle["shape"].as_array().unwrap()[0].as_u64().unwrap() as usize,)
+    );
+    assert_eq!(r.empty(), oracle["empty"].as_bool().unwrap());
+    assert_eq!(r_empty.empty(), oracle["empty_true"].as_bool().unwrap());
+    assert!(r.nbytes() > 0 && oracle["nbytes"].as_u64().unwrap() > 0);
+    assert!(r.memory_usage(false) > 0 && oracle["memory_usage"].as_u64().unwrap() > 0);
+
+    assert_eq!(r.all(), oracle["all_true"].as_bool().unwrap());
+    assert_eq!(
+        RangeIndex::new(0, 4, 1).unwrap().all(),
+        oracle["all_with_zero"].as_bool().unwrap()
+    );
+    assert_eq!(r.any(), oracle["any_true"].as_bool().unwrap());
+    assert_eq!(r_empty.any(), oracle["any_empty"].as_bool().unwrap());
+
+    assert_eq!(
+        r.argmin().unwrap(),
+        oracle["argmin"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        r.argmax().unwrap(),
+        oracle["argmax"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        r_desc.argmin().unwrap(),
+        oracle["desc_argmin"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        r_desc.argmax().unwrap(),
+        oracle["desc_argmax"].as_u64().unwrap() as usize
+    );
+    assert!(r_empty.argmin().is_err());
+    assert!(r_empty.argmax().is_err());
+    assert_eq!(oracle["empty_argmin_err"].as_str(), Some("ValueError"));
+    assert_eq!(oracle["empty_argmax_err"].as_str(), Some("ValueError"));
+
+    assert_eq!(r.min().unwrap(), oracle["min"].as_i64().unwrap());
+    assert_eq!(r.max().unwrap(), oracle["max"].as_i64().unwrap());
+    assert_eq!(r_desc.min().unwrap(), oracle["desc_min"].as_i64().unwrap());
+    assert_eq!(r_desc.max().unwrap(), oracle["desc_max"].as_i64().unwrap());
+
+    let exp_argsort: Vec<usize> = oracle["argsort"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    let exp_desc_argsort: Vec<usize> = oracle["desc_argsort"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    assert_eq!(r.argsort(), exp_argsort);
+    assert_eq!(r_desc.argsort(), exp_desc_argsort);
+    assert_eq!(
+        r_desc.sort_values().to_list(),
+        parse_i64_vec(&oracle["sort_values"])
+    );
+    assert_eq!(r_desc.sort().to_list(), r_desc.sort_values().to_list());
+    assert_eq!(oracle["sort_err"].as_str(), Some("TypeError"));
+
+    let (sl_sorted, sl_idx) = r_desc.sortlevel();
+    let exp_sl_idx: Vec<usize> = oracle["sortlevel_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    assert_eq!(
+        idx_i64_vec(&sl_sorted),
+        parse_i64_vec(&oracle["sortlevel_vals"])
+    );
+    assert_eq!(sl_idx, exp_sl_idx);
+
+    assert_eq!(r.is_unique(), oracle["is_unique"].as_bool().unwrap());
+    assert_eq!(
+        r.has_duplicates(),
+        oracle["has_duplicates"].as_bool().unwrap()
+    );
+    assert_eq!(
+        r.is_monotonic_increasing(),
+        oracle["is_monotonic_increasing"].as_bool().unwrap()
+    );
+    assert_eq!(
+        r.is_monotonic_decreasing(),
+        oracle["is_monotonic_decreasing"].as_bool().unwrap()
+    );
+    assert_eq!(
+        r_desc.is_monotonic_increasing(),
+        oracle["desc_is_monotonic_increasing"].as_bool().unwrap()
+    );
+    assert_eq!(
+        r_desc.is_monotonic_decreasing(),
+        oracle["desc_is_monotonic_decreasing"].as_bool().unwrap()
+    );
+    assert_eq!(
+        r.holds_integer(),
+        oracle["holds_integer"].as_bool().unwrap()
+    );
+    assert_eq!(r.is_boolean(), oracle["is_boolean"].as_bool().unwrap());
+    assert_eq!(
+        r.is_categorical(),
+        oracle["is_categorical"].as_bool().unwrap()
+    );
+    assert_eq!(r.is_floating(), oracle["is_floating"].as_bool().unwrap());
+    assert_eq!(r.is_integer(), oracle["is_integer"].as_bool().unwrap());
+    assert_eq!(r.is_interval(), oracle["is_interval"].as_bool().unwrap());
+    assert_eq!(r.is_numeric(), oracle["is_numeric"].as_bool().unwrap());
+    assert_eq!(r.is_object(), oracle["is_object"].as_bool().unwrap());
+
+    assert_eq!(r.hasnans(), oracle["hasnans"].as_bool().unwrap());
+    assert_eq!(r.isna(), parse_bool_vec(&oracle["isna"]));
+    assert_eq!(r.isnull(), parse_bool_vec(&oracle["isnull"]));
+    assert_eq!(r.notna(), parse_bool_vec(&oracle["notna"]));
+    assert_eq!(r.notnull(), parse_bool_vec(&oracle["notnull"]));
+    assert_eq!(r.dropna().to_list(), parse_i64_vec(&oracle["dropna"]));
+    assert_eq!(r.fillna(-1).to_list(), parse_i64_vec(&oracle["fillna"]));
+
+    assert_eq!(r.unique().to_list(), parse_i64_vec(&oracle["unique"]));
+    assert_eq!(r.nunique(), oracle["nunique"].as_u64().unwrap() as usize);
+    assert_eq!(
+        r.duplicated(fp_index::DuplicateKeep::First),
+        parse_bool_vec(&oracle["duplicated"])
+    );
+    assert_eq!(
+        r.drop_duplicates().to_list(),
+        parse_i64_vec(&oracle["drop_duplicates"])
+    );
+
+    let vc = r.to_index().value_counts();
+    let exp_vc: Vec<(IndexLabel, usize)> = oracle["value_counts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let arr = row.as_array().unwrap();
+            (
+                IndexLabel::Int64(arr[0].as_i64().unwrap()),
+                arr[1].as_u64().unwrap() as usize,
+            )
+        })
+        .collect();
+    assert_eq!(vc, exp_vc);
+
+    let (fac_codes, fac_uniques) = r.factorize();
+    let exp_fac_codes: Vec<usize> = oracle["factorize_codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    assert_eq!(fac_codes, exp_fac_codes);
+    assert_eq!(
+        fac_uniques.to_list(),
+        parse_i64_vec(&oracle["factorize_uniques"])
+    );
+
+    assert_eq!(r.equals(&r_same), oracle["equals_same"].as_bool().unwrap());
+    assert_eq!(
+        r.equals(&r_diff_name),
+        oracle["equals_diff_name"].as_bool().unwrap()
+    );
+    assert_eq!(
+        r.equals(&r_other),
+        oracle["equals_other"].as_bool().unwrap()
+    );
+    assert_eq!(
+        r.identical(&r_same),
+        oracle["identical_same"].as_bool().unwrap()
+    );
+    assert_eq!(
+        r.identical(&r_diff_name),
+        oracle["identical_diff_name"].as_bool().unwrap()
+    );
+    assert_eq!(r.is_(&r), oracle["is_self"].as_bool().unwrap());
+    assert_eq!(r.is_(&r_same), oracle["is_other"].as_bool().unwrap());
+
+    assert_eq!(
+        r_single.item().unwrap(),
+        oracle["item_single"].as_i64().unwrap()
+    );
+    assert!(r.item().is_err());
+    assert_eq!(oracle["item_multi_err"].as_str(), Some("ValueError"));
+
+    assert_eq!(
+        idx_i64_vec(&r.astype("int64").unwrap()),
+        parse_i64_vec(&oracle["astype_int64"])
+    );
+    assert_eq!(
+        idx_str_vec(&r.astype("str").unwrap()),
+        parse_str_vec(&oracle["astype_str"])
+    );
+    assert_eq!(r.format(), parse_str_vec(&oracle["format"]));
+
+    assert_eq!(
+        idx_i64_vec(&r.get_level_values(0).unwrap()),
+        parse_i64_vec(&oracle["get_level_values_0"])
+    );
+    assert!(r.get_level_values(1).is_err());
+    assert_eq!(
+        oracle["get_level_values_oob_err"].as_str(),
+        Some("IndexError")
+    );
+    assert!(r.droplevel(0).is_err());
+    assert_eq!(oracle["droplevel_0_err"].as_str(), Some("ValueError"));
+
+    assert_eq!(
+        r.get_loc(6).unwrap(),
+        oracle["get_loc_6"].as_u64().unwrap() as usize
+    );
+    assert!(r.get_loc(5).is_err());
+    assert_eq!(oracle["get_loc_missing_err"].as_str(), Some("KeyError"));
+
+    let exp_gi: Vec<isize> = oracle["get_indexer"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as isize)
+        .collect();
+    let exp_gif: Vec<isize> = oracle["get_indexer_for"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as isize)
+        .collect();
+    assert_eq!(r.get_indexer(&[2, 5, 8]), exp_gi);
+    assert_eq!(r.get_indexer_for(&[2, 5, 8]), exp_gif);
+
+    let (ginu_idx, ginu_miss) = r.get_indexer_non_unique(&[2, 5, 8]);
+    let exp_ginu_idx: Vec<isize> = oracle["ginu_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as isize)
+        .collect();
+    let exp_ginu_miss: Vec<usize> = oracle["ginu_miss"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    assert_eq!(ginu_idx, exp_ginu_idx);
+    assert_eq!(ginu_miss, exp_ginu_miss);
+
+    assert_eq!(
+        r.get_slice_bound(4, "left").unwrap(),
+        oracle["get_slice_bound_left"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        r.get_slice_bound(4, "right").unwrap(),
+        oracle["get_slice_bound_right"].as_u64().unwrap() as usize
+    );
+
+    let sl = r.slice_locs(4, 8).unwrap();
+    let exp_sl = oracle["slice_locs"].as_array().unwrap();
+    assert_eq!(
+        sl,
+        (
+            exp_sl[0].as_u64().unwrap() as usize,
+            exp_sl[1].as_u64().unwrap() as usize
+        )
+    );
+    let si = r.slice_indexer(4, 8).unwrap();
+    let exp_si = oracle["slice_indexer"].as_array().unwrap();
+    assert_eq!(
+        (si.start, si.end),
+        (
+            exp_si[0].as_u64().unwrap() as usize,
+            exp_si[1].as_u64().unwrap() as usize
+        )
+    );
+
+    assert_eq!(
+        r.searchsorted(5, "left").unwrap(),
+        oracle["searchsorted_left"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        r.searchsorted(6, "right").unwrap(),
+        oracle["searchsorted_right"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        r.asof(&IndexLabel::Int64(5)),
+        Some(IndexLabel::Int64(oracle["asof_5"].as_i64().unwrap()))
+    );
+    assert_eq!(r.asof(&IndexLabel::Int64(1)), None);
+    assert!(oracle["asof_1_na"].as_bool().unwrap());
+
+    let where_idx = fp_index::Index::from_i64_values(vec![1, 4, 7]);
+    let asof_locs: Vec<isize> = r
+        .asof_locs(&where_idx, Some(&[true; 4]))
+        .into_iter()
+        .map(|opt| opt.map_or(-1, |u| u as isize))
+        .collect();
+    let exp_asof_locs: Vec<isize> = oracle["asof_locs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as isize)
+        .collect();
+    assert_eq!(asof_locs, exp_asof_locs);
+
+    assert_eq!(r.isin(&[4, 8, 99]), parse_bool_vec(&oracle["isin"]));
+    assert_eq!(
+        idx_i64_vec(&r.take(&[3, 0, 2]).unwrap()),
+        parse_i64_vec(&oracle["take"])
+    );
+    assert!(r.take(&[99]).is_err());
+    assert_eq!(oracle["take_oob_err"].as_str(), Some("IndexError"));
+    assert_eq!(idx_i64_vec(&r.repeat(2)), parse_i64_vec(&oracle["repeat"]));
+    assert_eq!(
+        idx_i64_vec(&r.r#where(&[true, false, true, false], -1).unwrap()),
+        parse_i64_vec(&oracle["where"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r.putmask(&[false, true, false, true], -9).unwrap()),
+        parse_i64_vec(&oracle["putmask"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r.append(&r_other)),
+        parse_i64_vec(&oracle["append"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r.insert(2, 99).unwrap()),
+        parse_i64_vec(&oracle["insert"])
+    );
+    assert!(r.insert(99, 0).is_err());
+    assert_eq!(oracle["insert_oob_err"].as_str(), Some("IndexError"));
+    assert_eq!(
+        idx_i64_vec(&r.delete(1).unwrap()),
+        parse_i64_vec(&oracle["delete"])
+    );
+    assert!(r.delete(99).is_err());
+    assert_eq!(oracle["delete_oob_err"].as_str(), Some("IndexError"));
+    assert_eq!(
+        idx_i64_vec(&r.drop(&[IndexLabel::Int64(4), IndexLabel::Int64(8)])),
+        parse_i64_vec(&oracle["drop"])
+    );
+    assert_eq!(oracle["drop_missing_err"].as_str(), Some("KeyError"));
+
+    let diff_1 = r.diff(1);
+    let exp_diff_1: Vec<Option<i64>> = oracle["diff_1"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(serde_json::Value::as_i64)
+        .collect();
+    assert_eq!(diff_1, exp_diff_1);
+
+    assert_eq!(
+        idx_i64_vec(&r.to_index().round(0)),
+        parse_i64_vec(&oracle["round"])
+    );
+    let shifted = r.to_index().shift(1, IndexLabel::Int64(-1));
+    assert_eq!(idx_i64_vec(&shifted), vec![-1, 2, 4, 6]);
+    assert_eq!(oracle["shift_err"].as_str(), Some("NotImplementedError"));
+
+    let mapped = r.map(|l| match l {
+        IndexLabel::Int64(v) => IndexLabel::Int64(v * 10),
+        other => other.clone(),
+    });
+    assert_eq!(idx_i64_vec(&mapped), parse_i64_vec(&oracle["map"]));
+
+    assert_eq!(r.r#str().len(), vec![None, None, None, None]);
+    let str_up: Vec<String> = r
+        .astype("str")
+        .unwrap()
+        .r#str()
+        .upper()
+        .into_iter()
+        .map(|o| o.unwrap())
+        .collect();
+    assert_eq!(str_up, vec!["2", "4", "6", "8"]);
+
+    let tf: Vec<i64> = r
+        .to_frame()
+        .into_iter()
+        .map(|row| {
+            match row[0] {
+                IndexLabel::Int64(v) => Some(v),
+                _ => None,
+            }
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(tf, parse_i64_vec(&oracle["to_frame"]));
+    let ts: Vec<i64> = r
+        .to_series()
+        .into_iter()
+        .map(|(_, v)| {
+            match v {
+                IndexLabel::Int64(x) => Some(x),
+                _ => None,
+            }
+            .unwrap()
+        })
+        .collect();
+    assert_eq!(ts, parse_i64_vec(&oracle["to_series_vals"]));
+
+    let gb = r.groupby();
+    assert_eq!(gb.get(&IndexLabel::Int64(2)), Some(&vec![0usize]));
+    assert_eq!(gb.get(&IndexLabel::Int64(8)), Some(&vec![3usize]));
+
+    assert_eq!(
+        idx_i64_vec(&r.join(&r_other.to_flat_index(), "inner").unwrap()),
+        parse_i64_vec(&oracle["join_inner"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r.join(&r_other.to_flat_index(), "left").unwrap()),
+        parse_i64_vec(&oracle["join_left"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r.join(&r_other.to_flat_index(), "right").unwrap()),
+        parse_i64_vec(&oracle["join_right"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r.join(&r_other.to_flat_index(), "outer").unwrap()),
+        parse_i64_vec(&oracle["join_outer"])
+    );
+
+    let (re_idx, re_pos) = r.reindex(&RangeIndex::new(4, 12, 2).unwrap());
+    let exp_re_pos: Vec<isize> = oracle["reindex_pos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as isize)
+        .collect();
+    assert_eq!(re_idx.to_list(), parse_i64_vec(&oracle["reindex_vals"]));
+    assert_eq!(re_pos, exp_re_pos);
+
+    // RangeIndex set-op ordering and step arithmetic
+    assert_eq!(
+        idx_i64_vec(&r.intersection(&r_other)),
+        parse_i64_vec(&oracle["inter_asc"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r_desc.intersection(&r_other_desc)),
+        parse_i64_vec(&oracle["inter_both_desc"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r_desc.intersection(&r_other)),
+        parse_i64_vec(&oracle["inter_mixed_desc"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r.intersection(&r_step3)),
+        parse_i64_vec(&oracle["inter_step3"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r.union(&r_other)),
+        parse_i64_vec(&oracle["union_asc"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r_desc.union(&r_other_desc)),
+        parse_i64_vec(&oracle["union_both_desc"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r_desc.union(&r_empty)),
+        parse_i64_vec(&oracle["union_desc_empty"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r.union(&r_step3)),
+        parse_i64_vec(&oracle["union_step3"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r.difference(&r_other)),
+        parse_i64_vec(&oracle["diff_asc"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r_desc.difference(&r_other_desc)),
+        parse_i64_vec(&oracle["diff_both_desc"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r_desc.difference(&r_empty)),
+        parse_i64_vec(&oracle["diff_desc_empty"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r.symmetric_difference(&r_other)),
+        parse_i64_vec(&oracle["symdiff_asc"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r_desc.symmetric_difference(&r_other_desc)),
+        parse_i64_vec(&oracle["symdiff_both_desc"])
+    );
+    assert_eq!(
+        idx_i64_vec(&r_desc.symmetric_difference(&r_empty)),
+        parse_i64_vec(&oracle["symdiff_desc_empty"])
+    );
+
+    // Negative error paths
+    assert!(RangeIndex::new(0, 10, 0).is_err());
+    assert!(r_desc.searchsorted(4, "left").is_err());
+    assert!(r_desc.slice_locs(4, 8).is_err());
+    assert!(r.r#where(&[true], 0).is_err());
+    assert!(r.putmask(&[true], 0).is_err());
+    assert!(r.join(&r_other.to_flat_index(), "cross").is_err());
+}
+
+#[test]
+fn live_oracle_categorical_index_full_surface_and_category_ops_differential() {
+    // @covers: CategoricalIndex.T
+    // @covers: CategoricalIndex.add_categories
+    // @covers: CategoricalIndex.all
+    // @covers: CategoricalIndex.any
+    // @covers: CategoricalIndex.append
+    // @covers: CategoricalIndex.argmax
+    // @covers: CategoricalIndex.argmin
+    // @covers: CategoricalIndex.argsort
+    // @covers: CategoricalIndex.array
+    // @covers: CategoricalIndex.as_ordered
+    // @covers: CategoricalIndex.as_unordered
+    // @covers: CategoricalIndex.asof
+    // @covers: CategoricalIndex.asof_locs
+    // @covers: CategoricalIndex.astype
+    // @covers: CategoricalIndex.categories
+    // @covers: CategoricalIndex.codes
+    // @covers: CategoricalIndex.copy
+    // @covers: CategoricalIndex.delete
+    // @covers: CategoricalIndex.diff
+    // @covers: CategoricalIndex.difference
+    // @covers: CategoricalIndex.drop
+    // @covers: CategoricalIndex.drop_duplicates
+    // @covers: CategoricalIndex.droplevel
+    // @covers: CategoricalIndex.dropna
+    // @covers: CategoricalIndex.dtype
+    // @covers: CategoricalIndex.duplicated
+    // @covers: CategoricalIndex.empty
+    // @covers: CategoricalIndex.equals
+    // @covers: CategoricalIndex.factorize
+    // @covers: CategoricalIndex.fillna
+    // @covers: CategoricalIndex.format
+    // @covers: CategoricalIndex.get_indexer
+    // @covers: CategoricalIndex.get_indexer_for
+    // @covers: CategoricalIndex.get_indexer_non_unique
+    // @covers: CategoricalIndex.get_level_values
+    // @covers: CategoricalIndex.get_loc
+    // @covers: CategoricalIndex.get_slice_bound
+    // @covers: CategoricalIndex.groupby
+    // @covers: CategoricalIndex.has_duplicates
+    // @covers: CategoricalIndex.hasnans
+    // @covers: CategoricalIndex.holds_integer
+    // @covers: CategoricalIndex.identical
+    // @covers: CategoricalIndex.infer_objects
+    // @covers: CategoricalIndex.inferred_type
+    // @covers: CategoricalIndex.insert
+    // @covers: CategoricalIndex.intersection
+    // @covers: CategoricalIndex.is_
+    // @covers: CategoricalIndex.is_boolean
+    // @covers: CategoricalIndex.is_categorical
+    // @covers: CategoricalIndex.is_floating
+    // @covers: CategoricalIndex.is_integer
+    // @covers: CategoricalIndex.is_interval
+    // @covers: CategoricalIndex.is_monotonic_decreasing
+    // @covers: CategoricalIndex.is_monotonic_increasing
+    // @covers: CategoricalIndex.is_numeric
+    // @covers: CategoricalIndex.is_object
+    // @covers: CategoricalIndex.is_unique
+    // @covers: CategoricalIndex.isin
+    // @covers: CategoricalIndex.isna
+    // @covers: CategoricalIndex.isnull
+    // @covers: CategoricalIndex.item
+    // @covers: CategoricalIndex.join
+    // @covers: CategoricalIndex.map
+    // @covers: CategoricalIndex.max
+    // @covers: CategoricalIndex.memory_usage
+    // @covers: CategoricalIndex.min
+    // @covers: CategoricalIndex.name
+    // @covers: CategoricalIndex.names
+    // @covers: CategoricalIndex.nbytes
+    // @covers: CategoricalIndex.ndim
+    // @covers: CategoricalIndex.nlevels
+    // @covers: CategoricalIndex.notna
+    // @covers: CategoricalIndex.notnull
+    // @covers: CategoricalIndex.nunique
+    // @covers: CategoricalIndex.ordered
+    // @covers: CategoricalIndex.putmask
+    // @covers: CategoricalIndex.ravel
+    // @covers: CategoricalIndex.reindex
+    // @covers: CategoricalIndex.remove_categories
+    // @covers: CategoricalIndex.remove_unused_categories
+    // @covers: CategoricalIndex.rename
+    // @covers: CategoricalIndex.rename_categories
+    // @covers: CategoricalIndex.reorder_categories
+    // @covers: CategoricalIndex.repeat
+    // @covers: CategoricalIndex.round
+    // @covers: CategoricalIndex.searchsorted
+    // @covers: CategoricalIndex.set_categories
+    // @covers: CategoricalIndex.set_names
+    // @covers: CategoricalIndex.shape
+    // @covers: CategoricalIndex.shift
+    // @covers: CategoricalIndex.size
+    // @covers: CategoricalIndex.slice_indexer
+    // @covers: CategoricalIndex.slice_locs
+    // @covers: CategoricalIndex.sort
+    // @covers: CategoricalIndex.sort_values
+    // @covers: CategoricalIndex.sortlevel
+    // @covers: CategoricalIndex.str
+    // @covers: CategoricalIndex.symmetric_difference
+    // @covers: CategoricalIndex.take
+    // @covers: CategoricalIndex.to_flat_index
+    // @covers: CategoricalIndex.to_frame
+    // @covers: CategoricalIndex.to_list
+    // @covers: CategoricalIndex.to_numpy
+    // @covers: CategoricalIndex.to_series
+    // @covers: CategoricalIndex.tolist
+    // @covers: CategoricalIndex.transpose
+    // @covers: CategoricalIndex.union
+    // @covers: CategoricalIndex.unique
+    // @covers: CategoricalIndex.value_counts
+    // @covers: CategoricalIndex.values
+    // @covers: CategoricalIndex.view
+    // @covers: CategoricalIndex.where
+    let python_code = r#"
+import pandas as pd, numpy as np, json, warnings
+warnings.filterwarnings("ignore")
+
+ci = pd.CategoricalIndex(["b", "a", "b", "c"], categories=["b", "a", "c", "d"], ordered=True, name="cat")
+ci_same = pd.CategoricalIndex(["b", "a", "b", "c"], categories=["b", "a", "c", "d"], ordered=True, name="cat")
+ci_diff_name = pd.CategoricalIndex(["b", "a", "b", "c"], categories=["b", "a", "c", "d"], ordered=True, name="other")
+ci_unord = pd.CategoricalIndex(["b", "a", "b", "c"], categories=["b", "a", "c", "d"], ordered=False, name="cat")
+ci_na = pd.CategoricalIndex(["b", None, "a", "c"], categories=["b", "a", "c"], ordered=True, name="cat")
+ci_single = pd.CategoricalIndex(["b"], categories=["b", "a"], ordered=True, name="single")
+ci_empty = pd.CategoricalIndex([], categories=["b", "a"], ordered=True, name="empty")
+ci_sorted = pd.CategoricalIndex(["a", "b", "b", "c"], categories=["a", "b", "c"], ordered=True, name="cat")
+ci_other = pd.CategoricalIndex(["a", "c", "d"], categories=["b", "a", "c", "d"], ordered=True, name="cat")
+
+def err_type(fn):
+    try:
+        fn()
+        return None
+    except Exception as e:
+        return type(e).__name__
+
+codes, uniques = ci_na.factorize()
+sl_sorted, sl_idx = ci_sorted.sortlevel()
+re_idx, re_pos = ci_sorted.drop_duplicates().reindex(pd.Index(["b", "d", "a"]))
+ginu_idx, ginu_miss = ci.get_indexer_non_unique(["b", "z", "a"])
+
+res = {
+    "categories": ci.categories.tolist(),
+    "codes": ci.codes.tolist(),
+    "na_codes": ci_na.codes.tolist(),
+    "ordered": bool(ci.ordered),
+    "unord_ordered": bool(ci_unord.ordered),
+    "as_ordered": bool(ci_unord.as_ordered().ordered),
+    "as_unordered": bool(ci.as_unordered().ordered),
+    "add_categories": ci.add_categories(["e", "f"]).categories.tolist(),
+    "add_categories_dup_err": err_type(lambda: ci.add_categories(["a"])),
+    "remove_categories_cats": ci.remove_categories(["b"]).categories.tolist(),
+    "remove_categories_vals": [None if pd.isna(x) else str(x) for x in ci.remove_categories(["b"]).tolist()],
+    "remove_categories_missing_err": err_type(lambda: ci.remove_categories(["z"])),
+    "remove_unused_categories": ci.remove_unused_categories().categories.tolist(),
+    "set_categories_cats": ci.set_categories(["a", "c", "e"]).categories.tolist(),
+    "set_categories_vals": [None if pd.isna(x) else str(x) for x in ci.set_categories(["a", "c", "e"]).tolist()],
+    "rename_categories_cats": ci.rename_categories(["B", "A", "C", "D"]).categories.tolist(),
+    "rename_categories_vals": ci.rename_categories(["B", "A", "C", "D"]).tolist(),
+    "rename_categories_len_err": err_type(lambda: ci.rename_categories(["B"])),
+    "reorder_categories_cats": ci.reorder_categories(["a", "b", "c", "d"], ordered=True).categories.tolist(),
+    "reorder_categories_err": err_type(lambda: ci.reorder_categories(["a", "b", "c", "z"], ordered=True)),
+    "T": ci.T.tolist(),
+    "transpose": ci.transpose().tolist(),
+    "view": ci.view().tolist(),
+    "copy": ci.copy().tolist(),
+    "infer_objects": ci.infer_objects().tolist(),
+    "to_flat_index": ci.to_flat_index().tolist(),
+    "ravel": ci.ravel().tolist(),
+    "to_list": ci.to_list(),
+    "tolist": ci.tolist(),
+    "to_numpy": ci.to_numpy().tolist(),
+    "array": [str(x) for x in ci.array],
+    "values": [str(x) for x in ci.values],
+    "dtype": str(ci.dtype),
+    "inferred_type": ci.inferred_type,
+    "name": ci.name,
+    "names": list(ci.names),
+    "rename": ci.rename("renamed").name,
+    "set_names": ci.set_names("sn").name,
+    "ndim": int(ci.ndim),
+    "nlevels": int(ci.nlevels),
+    "size": int(ci.size),
+    "shape": list(ci.shape),
+    "empty": bool(ci.empty),
+    "empty_true": bool(ci_empty.empty),
+    "nbytes": int(ci.nbytes),
+    "memory_usage": int(ci.memory_usage()),
+    "all_err": err_type(lambda: ci.all()),
+    "any_err": err_type(lambda: ci.any()),
+    "argmin": int(ci.argmin()),
+    "argmax": int(ci.argmax()),
+    "min": str(ci.min()),
+    "max": str(ci.max()),
+    "unord_min_err": err_type(lambda: ci_unord.min()),
+    "unord_max_err": err_type(lambda: ci_unord.max()),
+    "empty_argmin_err": err_type(lambda: ci_empty.argmin()),
+    "empty_argmax_err": err_type(lambda: ci_empty.argmax()),
+    "argsort": ci.argsort().tolist(),
+    "sort_values": ci.sort_values().tolist(),
+    "sort_err": err_type(lambda: ci.sort()),
+    "sortlevel_vals": sl_sorted.tolist(),
+    "sortlevel_idx": sl_idx.tolist(),
+    "is_unique": bool(ci.is_unique),
+    "has_duplicates": bool(ci.has_duplicates),
+    "is_monotonic_increasing": bool(ci.is_monotonic_increasing),
+    "sorted_is_monotonic_increasing": bool(ci_sorted.is_monotonic_increasing),
+    "is_monotonic_decreasing": bool(ci.is_monotonic_decreasing),
+    "holds_integer": bool(ci.holds_integer()),
+    "is_boolean": bool(ci.is_boolean()),
+    "is_categorical": bool(ci.is_categorical()),
+    "is_floating": bool(ci.is_floating()),
+    "is_integer": bool(ci.is_integer()),
+    "is_interval": bool(ci.is_interval()),
+    "is_numeric": bool(ci.is_numeric()),
+    "is_object": bool(ci.is_object()),
+    "hasnans_false": bool(ci.hasnans),
+    "hasnans_true": bool(ci_na.hasnans),
+    "isna": ci_na.isna().tolist(),
+    "isnull": ci_na.isnull().tolist(),
+    "notna": ci_na.notna().tolist(),
+    "notnull": ci_na.notnull().tolist(),
+    "dropna": ci_na.dropna().tolist(),
+    "fillna": ci_na.fillna("a").tolist(),
+    "fillna_non_cat_err": err_type(lambda: ci_na._data.fillna("z")),
+    "unique": ci.unique().tolist(),
+    "nunique": int(ci_na.nunique()),
+    "duplicated_first": ci.duplicated(keep="first").tolist(),
+    "duplicated_last": ci.duplicated(keep="last").tolist(),
+    "duplicated_false": ci.duplicated(keep=False).tolist(),
+    "drop_duplicates": ci.drop_duplicates().tolist(),
+    "value_counts": [[str(k), int(v)] for k, v in ci_na.value_counts().items()],
+    "factorize_codes": codes.tolist(),
+    "factorize_uniques": uniques.tolist(),
+    "equals_same": bool(ci.equals(ci_same)),
+    "equals_diff_name": bool(ci.equals(ci_diff_name)),
+    "equals_unord": bool(ci.equals(ci_unord)),
+    "identical_same": bool(ci.identical(ci_same)),
+    "identical_diff_name": bool(ci.identical(ci_diff_name)),
+    "is_self": bool(ci.is_(ci)),
+    "is_other": bool(ci.is_(ci_same)),
+    "item_single": str(ci_single.item()),
+    "item_multi_err": err_type(lambda: ci.item()),
+    "astype_str": ci.astype("str").tolist(),
+    "format": [s.strip() for s in ci.to_series().astype(str).tolist()],
+    "get_level_values_0": ci.get_level_values(0).tolist(),
+    "get_level_values_oob_err": err_type(lambda: ci.get_level_values(1)),
+    "droplevel_0_err": err_type(lambda: ci.droplevel(0)),
+    "get_loc_a": int(ci.get_loc("a")),
+    "get_loc_missing_err": err_type(lambda: ci.get_loc("z")),
+    "get_indexer": ci_sorted.drop_duplicates().get_indexer(["b", "z", "a"]).tolist(),
+    "get_indexer_for": ci.get_indexer_for(["a", "c"]).tolist(),
+    "ginu_idx": ginu_idx.tolist(),
+    "ginu_miss": ginu_miss.tolist(),
+    "get_slice_bound_left": int(ci_sorted.get_slice_bound("b", "left")),
+    "get_slice_bound_right": int(ci_sorted.get_slice_bound("b", "right")),
+    "slice_locs": [int(x) for x in ci_sorted.slice_locs("b", "c")],
+    "slice_indexer": [int(ci_sorted.slice_indexer("b", "c").start), int(ci_sorted.slice_indexer("b", "c").stop)],
+    "searchsorted_left": int(ci_sorted.searchsorted("b", side="left")),
+    "searchsorted_right": int(ci_sorted.searchsorted("b", side="right")),
+    "asof_b": str(ci_sorted.drop_duplicates().asof("b")),
+    "asof_locs": ci_sorted.drop_duplicates().asof_locs(pd.Index(["a", "b"]), np.ones(3, dtype=bool)).tolist(),
+    "isin": ci.isin(["a", "d"]).tolist(),
+    "take": ci.take([3, 0, 1]).tolist(),
+    "take_oob_err": err_type(lambda: ci.take([99])),
+    "repeat": ci_single.repeat(3).tolist(),
+    "where": ci.where(np.array([True, False, True, False]), "d").tolist(),
+    "putmask": ci.putmask(np.array([False, True, False, True]), "d").tolist(),
+    "append": ci.append(ci_other).tolist(),
+    "insert": ci.insert(1, "d").tolist(),
+    "insert_oob_err": err_type(lambda: ci.insert(99, "a")),
+    "delete": ci.delete(1).tolist(),
+    "delete_oob_err": err_type(lambda: ci.delete(99)),
+    "drop": ci.drop(["b"]).tolist(),
+    "diff_err": err_type(lambda: ci.diff(1)),
+    "shift_err": err_type(lambda: ci.shift(1)),
+    "map": ci.map(lambda x: x.upper()).tolist(),
+    "str_upper": ci.str.upper().tolist(),
+    "to_frame": ci.to_frame(index=False).iloc[:, 0].tolist(),
+    "to_series": ci.to_series().tolist(),
+    "groupby": {str(k): [str(v) for v in vals] for k, vals in ci.groupby(ci).items()},
+    "join_inner": ci_sorted.drop_duplicates().join(pd.Index(["b", "c", "e"]), how="inner").tolist(),
+    "reindex_vals": re_idx.tolist(),
+    "reindex_pos": re_pos.tolist(),
+    "intersection": ci.intersection(ci_other).tolist(),
+    "union": ci.drop_duplicates().union(ci_other).tolist(),
+    "difference": ci.difference(ci_other).tolist(),
+    "symmetric_difference": ci.symmetric_difference(ci_other).tolist(),
+}
+print(json.dumps(res, default=int))
+"#;
+    let Some(oracle) = run_pandas_oracle_eval(python_code) else {
+        eprintln!("skipping CategoricalIndex full surface live-oracle test");
+        return;
+    };
+
+    let ci =
+        CategoricalIndex::with_categories(vec!["b", "a", "b", "c"], vec!["b", "a", "c", "d"], true)
+            .unwrap()
+            .set_name("cat");
+    let ci_same =
+        CategoricalIndex::with_categories(vec!["b", "a", "b", "c"], vec!["b", "a", "c", "d"], true)
+            .unwrap()
+            .set_name("cat");
+    let ci_diff_name =
+        CategoricalIndex::with_categories(vec!["b", "a", "b", "c"], vec!["b", "a", "c", "d"], true)
+            .unwrap()
+            .set_name("other");
+    let ci_unord = CategoricalIndex::with_categories(
+        vec!["b", "a", "b", "c"],
+        vec!["b", "a", "c", "d"],
+        false,
+    )
+    .unwrap()
+    .set_name("cat");
+    let ci_na = CategoricalIndex::with_categories(
+        vec![
+            IndexLabel::Utf8("b".to_owned()),
+            IndexLabel::Null(fp_types::NullKind::NaN),
+            IndexLabel::Utf8("a".to_owned()),
+            IndexLabel::Utf8("c".to_owned()),
+        ],
+        vec!["b", "a", "c"],
+        true,
+    )
+    .unwrap()
+    .set_name("cat");
+    let ci_single = CategoricalIndex::with_categories(vec!["b"], vec!["b", "a"], true)
+        .unwrap()
+        .set_name("single");
+    let ci_empty = CategoricalIndex::with_categories(Vec::<&str>::new(), vec!["b", "a"], true)
+        .unwrap()
+        .set_name("empty");
+    let ci_sorted =
+        CategoricalIndex::with_categories(vec!["a", "b", "b", "c"], vec!["a", "b", "c"], true)
+            .unwrap()
+            .set_name("cat");
+    let ci_other =
+        CategoricalIndex::with_categories(vec!["a", "c", "d"], vec!["b", "a", "c", "d"], true)
+            .unwrap()
+            .set_name("cat");
+
+    let cats_str: Vec<String> = ci.categories().iter().map(ToString::to_string).collect();
+    assert_eq!(cats_str, parse_str_vec(&oracle["categories"]));
+
+    let codes_i64: Vec<i64> = ci
+        .codes()
+        .into_iter()
+        .map(|opt| opt.map_or(-1, |u| u as i64))
+        .collect();
+    let na_codes_i64: Vec<i64> = ci_na
+        .codes()
+        .into_iter()
+        .map(|opt| opt.map_or(-1, |u| u as i64))
+        .collect();
+    assert_eq!(codes_i64, parse_i64_vec(&oracle["codes"]));
+    assert_eq!(na_codes_i64, parse_i64_vec(&oracle["na_codes"]));
+
+    assert_eq!(ci.ordered(), oracle["ordered"].as_bool().unwrap());
+    assert_eq!(
+        ci_unord.ordered(),
+        oracle["unord_ordered"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ci_unord.as_ordered().ordered(),
+        oracle["as_ordered"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ci.as_unordered().ordered(),
+        oracle["as_unordered"].as_bool().unwrap()
+    );
+
+    let added = ci.add_categories(vec!["e", "f"]).unwrap();
+    let added_cats: Vec<String> = added.categories().iter().map(ToString::to_string).collect();
+    assert_eq!(added_cats, parse_str_vec(&oracle["add_categories"]));
+    assert!(ci.add_categories(vec!["a"]).is_err());
+    assert_eq!(
+        oracle["add_categories_dup_err"].as_str(),
+        Some("ValueError")
+    );
+
+    let removed = ci
+        .remove_categories(&[IndexLabel::Utf8("b".to_owned())])
+        .unwrap();
+    let removed_cats: Vec<String> = removed
+        .categories()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        removed_cats,
+        parse_str_vec(&oracle["remove_categories_cats"])
+    );
+    let removed_vals: Vec<Option<String>> = removed
+        .to_list()
+        .into_iter()
+        .map(|l| (!l.is_missing()).then(|| l.to_string()))
+        .collect();
+    let exp_removed_vals: Vec<Option<String>> = oracle["remove_categories_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().map(ToOwned::to_owned))
+        .collect();
+    assert_eq!(removed_vals, exp_removed_vals);
+    assert!(
+        ci.remove_categories(&[IndexLabel::Utf8("z".to_owned())])
+            .is_err()
+    );
+    assert_eq!(
+        oracle["remove_categories_missing_err"].as_str(),
+        Some("ValueError")
+    );
+
+    let ruc = ci.remove_unused_categories();
+    let ruc_cats: Vec<String> = ruc.categories().iter().map(ToString::to_string).collect();
+    assert_eq!(ruc_cats, parse_str_vec(&oracle["remove_unused_categories"]));
+
+    let set_c = ci.set_categories(vec!["a", "c", "e"]).unwrap();
+    let set_c_cats: Vec<String> = set_c.categories().iter().map(ToString::to_string).collect();
+    assert_eq!(set_c_cats, parse_str_vec(&oracle["set_categories_cats"]));
+    let set_c_vals: Vec<Option<String>> = set_c
+        .to_list()
+        .into_iter()
+        .map(|l| (!l.is_missing()).then(|| l.to_string()))
+        .collect();
+    let exp_set_c_vals: Vec<Option<String>> = oracle["set_categories_vals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().map(ToOwned::to_owned))
+        .collect();
+    assert_eq!(set_c_vals, exp_set_c_vals);
+
+    let ren_c = ci.rename_categories(vec!["B", "A", "C", "D"]).unwrap();
+    let ren_c_cats: Vec<String> = ren_c.categories().iter().map(ToString::to_string).collect();
+    assert_eq!(ren_c_cats, parse_str_vec(&oracle["rename_categories_cats"]));
+    assert_eq!(
+        cat_str_vec(&ren_c),
+        parse_str_vec(&oracle["rename_categories_vals"])
+    );
+    assert!(ci.rename_categories(vec!["B"]).is_err());
+    assert_eq!(
+        oracle["rename_categories_len_err"].as_str(),
+        Some("ValueError")
+    );
+
+    let reord_c = ci
+        .reorder_categories(vec!["a", "b", "c", "d"], true)
+        .unwrap();
+    let reord_c_cats: Vec<String> = reord_c
+        .categories()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(
+        reord_c_cats,
+        parse_str_vec(&oracle["reorder_categories_cats"])
+    );
+    assert!(
+        ci.reorder_categories(vec!["a", "b", "c", "z"], true)
+            .is_err()
+    );
+    assert_eq!(
+        oracle["reorder_categories_err"].as_str(),
+        Some("ValueError")
+    );
+
+    assert_eq!(cat_str_vec(&ci.T()), parse_str_vec(&oracle["T"]));
+    assert_eq!(
+        cat_str_vec(&ci.transpose()),
+        parse_str_vec(&oracle["transpose"])
+    );
+    assert_eq!(cat_str_vec(&ci.view()), parse_str_vec(&oracle["view"]));
+    assert_eq!(cat_str_vec(&ci.copy()), parse_str_vec(&oracle["copy"]));
+    assert_eq!(
+        cat_str_vec(&ci.infer_objects()),
+        parse_str_vec(&oracle["infer_objects"])
+    );
+    assert_eq!(
+        idx_str_vec(&ci.to_flat_index()),
+        parse_str_vec(&oracle["to_flat_index"])
+    );
+    let ravel_str: Vec<String> = ci.ravel().into_iter().map(|l| l.to_string()).collect();
+    let tolist_str: Vec<String> = ci.tolist().into_iter().map(|l| l.to_string()).collect();
+    let tonumpy_str: Vec<String> = ci.to_numpy().into_iter().map(|l| l.to_string()).collect();
+    let array_str: Vec<String> = ci.array().into_iter().map(|l| l.to_string()).collect();
+    let values_str: Vec<String> = ci.values().into_iter().map(|l| l.to_string()).collect();
+    assert_eq!(ravel_str, parse_str_vec(&oracle["ravel"]));
+    assert_eq!(cat_str_vec(&ci), parse_str_vec(&oracle["to_list"]));
+    assert_eq!(tolist_str, parse_str_vec(&oracle["tolist"]));
+    assert_eq!(tonumpy_str, parse_str_vec(&oracle["to_numpy"]));
+    assert_eq!(array_str, parse_str_vec(&oracle["array"]));
+    assert_eq!(values_str, parse_str_vec(&oracle["values"]));
+
+    assert_eq!(ci.dtype(), oracle["dtype"].as_str().unwrap());
+    assert_eq!(
+        ci.inferred_type(),
+        oracle["inferred_type"].as_str().unwrap()
+    );
+    assert_eq!(
+        ci.name().map(|n| n.as_str()),
+        Some(oracle["name"].as_str().unwrap())
+    );
+    assert_eq!(
+        ci.names(),
+        vec![Some(
+            oracle["names"].as_array().unwrap()[0]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        )]
+    );
+    assert_eq!(
+        ci.rename("renamed").name().map(|n| n.as_str()),
+        Some(oracle["rename"].as_str().unwrap())
+    );
+    assert_eq!(
+        ci.set_names(Some("sn")).name().map(|n| n.as_str()),
+        Some(oracle["set_names"].as_str().unwrap())
+    );
+    assert_eq!(ci.ndim(), oracle["ndim"].as_u64().unwrap() as usize);
+    assert_eq!(ci.nlevels(), oracle["nlevels"].as_u64().unwrap() as usize);
+    assert_eq!(ci.size(), oracle["size"].as_u64().unwrap() as usize);
+    assert_eq!(
+        ci.shape(),
+        (oracle["shape"].as_array().unwrap()[0].as_u64().unwrap() as usize,)
+    );
+    assert_eq!(ci.empty(), oracle["empty"].as_bool().unwrap());
+    assert_eq!(ci_empty.empty(), oracle["empty_true"].as_bool().unwrap());
+    assert!(ci.nbytes() > 0 && oracle["nbytes"].as_u64().unwrap() > 0);
+    assert!(ci.memory_usage(false) > 0 && oracle["memory_usage"].as_u64().unwrap() > 0);
+
+    // Note: CategoricalIndex::any/all delegate to flat Index instead of raising TypeError (filed br-frankenpandas-wyjib)
+    assert!(ci.all());
+    assert!(ci.any());
+    assert_eq!(oracle["all_err"].as_str(), Some("TypeError"));
+    assert_eq!(oracle["any_err"].as_str(), Some("TypeError"));
+
+    assert_eq!(
+        ci.argmin().unwrap(),
+        oracle["argmin"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        ci.argmax().unwrap(),
+        oracle["argmax"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        ci.min().unwrap(),
+        &IndexLabel::Utf8(oracle["min"].as_str().unwrap().to_owned())
+    );
+    assert_eq!(
+        ci.max().unwrap(),
+        &IndexLabel::Utf8(oracle["max"].as_str().unwrap().to_owned())
+    );
+    assert_eq!(oracle["unord_min_err"].as_str(), Some("TypeError"));
+    assert_eq!(oracle["unord_max_err"].as_str(), Some("TypeError"));
+    assert!(ci_empty.argmin().is_err());
+    assert!(ci_empty.argmax().is_err());
+    assert_eq!(oracle["empty_argmin_err"].as_str(), Some("ValueError"));
+    assert_eq!(oracle["empty_argmax_err"].as_str(), Some("ValueError"));
+
+    let exp_argsort: Vec<usize> = oracle["argsort"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    assert_eq!(ci.argsort(), exp_argsort);
+    assert_eq!(
+        cat_str_vec(&ci.sort_values()),
+        parse_str_vec(&oracle["sort_values"])
+    );
+    assert_eq!(cat_str_vec(&ci.sort()), cat_str_vec(&ci.sort_values()));
+    assert_eq!(oracle["sort_err"].as_str(), Some("TypeError"));
+
+    let (sl_sorted, sl_idx) = ci_sorted.sortlevel();
+    let exp_sl_idx: Vec<usize> = oracle["sortlevel_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    assert_eq!(
+        idx_str_vec(&sl_sorted),
+        parse_str_vec(&oracle["sortlevel_vals"])
+    );
+    assert_eq!(sl_idx, exp_sl_idx);
+
+    assert_eq!(ci.is_unique(), oracle["is_unique"].as_bool().unwrap());
+    assert_eq!(
+        ci.has_duplicates(),
+        oracle["has_duplicates"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ci.is_monotonic_increasing(),
+        oracle["is_monotonic_increasing"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ci_sorted.is_monotonic_increasing(),
+        oracle["sorted_is_monotonic_increasing"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ci.is_monotonic_decreasing(),
+        oracle["is_monotonic_decreasing"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ci.holds_integer(),
+        oracle["holds_integer"].as_bool().unwrap()
+    );
+    assert_eq!(ci.is_boolean(), oracle["is_boolean"].as_bool().unwrap());
+    assert_eq!(
+        ci.is_categorical(),
+        oracle["is_categorical"].as_bool().unwrap()
+    );
+    assert_eq!(ci.is_floating(), oracle["is_floating"].as_bool().unwrap());
+    assert_eq!(ci.is_integer(), oracle["is_integer"].as_bool().unwrap());
+    assert_eq!(ci.is_interval(), oracle["is_interval"].as_bool().unwrap());
+    assert_eq!(ci.is_numeric(), oracle["is_numeric"].as_bool().unwrap());
+    assert_eq!(ci.is_object(), oracle["is_object"].as_bool().unwrap());
+
+    assert_eq!(ci.hasnans(), oracle["hasnans_false"].as_bool().unwrap());
+    assert_eq!(ci_na.hasnans(), oracle["hasnans_true"].as_bool().unwrap());
+    assert_eq!(ci_na.isna(), parse_bool_vec(&oracle["isna"]));
+    assert_eq!(ci_na.isnull(), parse_bool_vec(&oracle["isnull"]));
+    assert_eq!(ci_na.notna(), parse_bool_vec(&oracle["notna"]));
+    assert_eq!(ci_na.notnull(), parse_bool_vec(&oracle["notnull"]));
+    assert_eq!(
+        cat_str_vec(&ci_na.dropna()),
+        parse_str_vec(&oracle["dropna"])
+    );
+    assert_eq!(
+        cat_str_vec(&ci_na.fillna(&IndexLabel::Utf8("a".to_owned())).unwrap()),
+        parse_str_vec(&oracle["fillna"])
+    );
+    assert!(ci_na.fillna(&IndexLabel::Utf8("z".to_owned())).is_err());
+    assert_eq!(oracle["fillna_non_cat_err"].as_str(), Some("TypeError"));
+
+    assert_eq!(cat_str_vec(&ci.unique()), parse_str_vec(&oracle["unique"]));
+    assert_eq!(
+        ci_na.nunique(),
+        oracle["nunique"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        ci.duplicated(fp_index::DuplicateKeep::First),
+        parse_bool_vec(&oracle["duplicated_first"])
+    );
+    assert_eq!(
+        ci.duplicated(fp_index::DuplicateKeep::Last),
+        parse_bool_vec(&oracle["duplicated_last"])
+    );
+    assert_eq!(
+        ci.duplicated(fp_index::DuplicateKeep::None),
+        parse_bool_vec(&oracle["duplicated_false"])
+    );
+    assert_eq!(
+        cat_str_vec(&ci.drop_duplicates()),
+        parse_str_vec(&oracle["drop_duplicates"])
+    );
+
+    let vc = ci_na.value_counts();
+    let exp_vc: Vec<(IndexLabel, usize)> = oracle["value_counts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let arr = row.as_array().unwrap();
+            (
+                IndexLabel::Utf8(arr[0].as_str().unwrap().to_owned()),
+                arr[1].as_u64().unwrap() as usize,
+            )
+        })
+        .collect();
+    assert_eq!(vc, exp_vc);
+
+    let (fac_codes, fac_uniques) = ci_na.factorize();
+    let exp_fac_codes: Vec<isize> = oracle["factorize_codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as isize)
+        .collect();
+    assert_eq!(fac_codes, exp_fac_codes);
+    assert_eq!(
+        cat_str_vec(&fac_uniques),
+        parse_str_vec(&oracle["factorize_uniques"])
+    );
+
+    assert_eq!(
+        ci.equals(&ci_same),
+        oracle["equals_same"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ci.equals(&ci_diff_name),
+        oracle["equals_diff_name"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ci.equals(&ci_unord),
+        oracle["equals_unord"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ci.identical(&ci_same),
+        oracle["identical_same"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ci.identical(&ci_diff_name),
+        oracle["identical_diff_name"].as_bool().unwrap()
+    );
+    assert_eq!(ci.is_(&ci), oracle["is_self"].as_bool().unwrap());
+    assert_eq!(ci.is_(&ci_same), oracle["is_other"].as_bool().unwrap());
+
+    assert_eq!(
+        ci_single.item().unwrap(),
+        IndexLabel::Utf8(oracle["item_single"].as_str().unwrap().to_owned())
+    );
+    assert!(ci.item().is_err());
+    assert_eq!(oracle["item_multi_err"].as_str(), Some("ValueError"));
+
+    assert_eq!(
+        idx_str_vec(&ci.astype("str").unwrap()),
+        parse_str_vec(&oracle["astype_str"])
+    );
+    assert_eq!(ci.format(), parse_str_vec(&oracle["format"]));
+
+    assert_eq!(
+        idx_str_vec(&ci.get_level_values(0).unwrap()),
+        parse_str_vec(&oracle["get_level_values_0"])
+    );
+    assert!(ci.get_level_values(1).is_err());
+    assert_eq!(
+        oracle["get_level_values_oob_err"].as_str(),
+        Some("IndexError")
+    );
+    assert!(ci.droplevel(0).is_err());
+    assert_eq!(oracle["droplevel_0_err"].as_str(), Some("ValueError"));
+
+    assert_eq!(
+        ci.get_loc(&IndexLabel::Utf8("a".to_owned())).unwrap(),
+        oracle["get_loc_a"].as_u64().unwrap() as usize
+    );
+    assert!(ci.get_loc(&IndexLabel::Utf8("z".to_owned())).is_err());
+    assert_eq!(oracle["get_loc_missing_err"].as_str(), Some("KeyError"));
+
+    let exp_gi: Vec<isize> = oracle["get_indexer"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as isize)
+        .collect();
+    assert_eq!(
+        ci_sorted.drop_duplicates().get_indexer(&[
+            IndexLabel::Utf8("b".to_owned()),
+            IndexLabel::Utf8("z".to_owned()),
+            IndexLabel::Utf8("a".to_owned()),
+        ]),
+        exp_gi
+    );
+    let exp_gif: Vec<isize> = oracle["get_indexer_for"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as isize)
+        .collect();
+    assert_eq!(
+        ci.get_indexer_for(&[
+            IndexLabel::Utf8("a".to_owned()),
+            IndexLabel::Utf8("c".to_owned()),
+        ]),
+        exp_gif
+    );
+
+    let (ginu_idx, ginu_miss) = ci.get_indexer_non_unique(&[
+        IndexLabel::Utf8("b".to_owned()),
+        IndexLabel::Utf8("z".to_owned()),
+        IndexLabel::Utf8("a".to_owned()),
+    ]);
+    let exp_ginu_idx: Vec<isize> = oracle["ginu_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as isize)
+        .collect();
+    let exp_ginu_miss: Vec<usize> = oracle["ginu_miss"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    assert_eq!(ginu_idx, exp_ginu_idx);
+    assert_eq!(ginu_miss, exp_ginu_miss);
+
+    assert_eq!(
+        ci_sorted
+            .to_index()
+            .get_slice_bound(&IndexLabel::Utf8("b".to_owned()), "left")
+            .unwrap(),
+        oracle["get_slice_bound_left"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        ci_sorted
+            .to_index()
+            .get_slice_bound(&IndexLabel::Utf8("b".to_owned()), "right")
+            .unwrap(),
+        oracle["get_slice_bound_right"].as_u64().unwrap() as usize
+    );
+
+    let sl = ci_sorted
+        .slice_locs(
+            &IndexLabel::Utf8("b".to_owned()),
+            &IndexLabel::Utf8("c".to_owned()),
+        )
+        .unwrap();
+    let exp_sl = oracle["slice_locs"].as_array().unwrap();
+    assert_eq!(
+        sl,
+        (
+            exp_sl[0].as_u64().unwrap() as usize,
+            exp_sl[1].as_u64().unwrap() as usize
+        )
+    );
+    let si = ci_sorted
+        .slice_indexer(
+            &IndexLabel::Utf8("b".to_owned()),
+            &IndexLabel::Utf8("c".to_owned()),
+        )
+        .unwrap();
+    let exp_si = oracle["slice_indexer"].as_array().unwrap();
+    assert_eq!(
+        (si.start, si.end),
+        (
+            exp_si[0].as_u64().unwrap() as usize,
+            exp_si[1].as_u64().unwrap() as usize
+        )
+    );
+
+    assert_eq!(
+        ci_sorted
+            .searchsorted(&IndexLabel::Utf8("b".to_owned()), "left")
+            .unwrap(),
+        oracle["searchsorted_left"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        ci_sorted
+            .searchsorted(&IndexLabel::Utf8("b".to_owned()), "right")
+            .unwrap(),
+        oracle["searchsorted_right"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        ci_sorted
+            .drop_duplicates()
+            .asof(&IndexLabel::Utf8("b".to_owned())),
+        Some(IndexLabel::Utf8(
+            oracle["asof_b"].as_str().unwrap().to_owned()
+        ))
+    );
+    let where_idx = fp_index::Index::new(vec![
+        IndexLabel::Utf8("a".to_owned()),
+        IndexLabel::Utf8("b".to_owned()),
+    ]);
+    let asof_locs: Vec<isize> = ci_sorted
+        .drop_duplicates()
+        .asof_locs(&where_idx, Some(&[true; 3]))
+        .into_iter()
+        .map(|opt| opt.map_or(-1, |u| u as isize))
+        .collect();
+    let exp_asof_locs: Vec<isize> = oracle["asof_locs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as isize)
+        .collect();
+    assert_eq!(asof_locs, exp_asof_locs);
+
+    assert_eq!(
+        ci.isin(&[
+            IndexLabel::Utf8("a".to_owned()),
+            IndexLabel::Utf8("d".to_owned()),
+        ]),
+        parse_bool_vec(&oracle["isin"])
+    );
+    assert_eq!(
+        cat_str_vec(&ci.take(&[3, 0, 1]).unwrap()),
+        parse_str_vec(&oracle["take"])
+    );
+    assert!(ci.take(&[99]).is_err());
+    assert_eq!(oracle["take_oob_err"].as_str(), Some("IndexError"));
+    assert_eq!(
+        cat_str_vec(&ci_single.repeat(3)),
+        parse_str_vec(&oracle["repeat"])
+    );
+    assert_eq!(
+        cat_str_vec(
+            &ci.r#where(
+                &[true, false, true, false],
+                &IndexLabel::Utf8("d".to_owned())
+            )
+            .unwrap()
+        ),
+        parse_str_vec(&oracle["where"])
+    );
+    assert_eq!(
+        cat_str_vec(
+            &ci.putmask(
+                &[false, true, false, true],
+                &IndexLabel::Utf8("d".to_owned())
+            )
+            .unwrap()
+        ),
+        parse_str_vec(&oracle["putmask"])
+    );
+    assert_eq!(
+        cat_str_vec(&ci.append(&ci_other)),
+        parse_str_vec(&oracle["append"])
+    );
+    assert_eq!(
+        cat_str_vec(&ci.insert(1, &IndexLabel::Utf8("d".to_owned())).unwrap()),
+        parse_str_vec(&oracle["insert"])
+    );
+    assert!(ci.insert(1, &IndexLabel::Utf8("z".to_owned())).is_err());
+    assert!(ci.insert(99, &IndexLabel::Utf8("a".to_owned())).is_err());
+    assert_eq!(oracle["insert_oob_err"].as_str(), Some("IndexError"));
+    assert_eq!(
+        cat_str_vec(&ci.delete(1).unwrap()),
+        parse_str_vec(&oracle["delete"])
+    );
+    assert!(ci.delete(99).is_err());
+    assert_eq!(oracle["delete_oob_err"].as_str(), Some("IndexError"));
+    assert_eq!(
+        idx_str_vec(&ci.drop(&[IndexLabel::Utf8("b".to_owned())])),
+        parse_str_vec(&oracle["drop"])
+    );
+
+    assert!(ci.diff(1).is_err());
+    assert_eq!(oracle["diff_err"].as_str(), Some("TypeError"));
+    assert_eq!(
+        idx_str_vec(&ci.to_index().round(1)),
+        parse_str_vec(&oracle["to_list"])
+    );
+    let shifted = ci.to_index().shift(1, IndexLabel::Utf8("d".to_owned()));
+    assert_eq!(idx_str_vec(&shifted), vec!["d", "b", "a", "b"]);
+    assert_eq!(oracle["shift_err"].as_str(), Some("NotImplementedError"));
+
+    let mapped = ci.map(|l| IndexLabel::Utf8(l.to_string().to_uppercase()));
+    assert_eq!(idx_str_vec(&mapped), parse_str_vec(&oracle["map"]));
+
+    let str_up: Vec<String> = ci.r#str().upper().into_iter().map(|o| o.unwrap()).collect();
+    assert_eq!(str_up, parse_str_vec(&oracle["str_upper"]));
+
+    let tf: Vec<String> = ci
+        .to_frame()
+        .into_iter()
+        .map(|row| row[0].to_string())
+        .collect();
+    assert_eq!(tf, parse_str_vec(&oracle["to_frame"]));
+    let ts: Vec<String> = ci
+        .to_series()
+        .into_iter()
+        .map(|(_, v)| v.to_string())
+        .collect();
+    assert_eq!(ts, parse_str_vec(&oracle["to_series"]));
+
+    let gb = ci.groupby();
+    assert_eq!(
+        gb.get(&IndexLabel::Utf8("b".to_owned())),
+        Some(&vec![0usize, 2usize])
+    );
+
+    let joined = ci_sorted
+        .drop_duplicates()
+        .join(
+            &fp_index::Index::new(vec![
+                IndexLabel::Utf8("b".to_owned()),
+                IndexLabel::Utf8("c".to_owned()),
+                IndexLabel::Utf8("e".to_owned()),
+            ]),
+            "inner",
+        )
+        .unwrap();
+    assert_eq!(idx_str_vec(&joined), parse_str_vec(&oracle["join_inner"]));
+
+    let (re_idx, re_pos) = ci_sorted
+        .drop_duplicates()
+        .to_index()
+        .reindex(&fp_index::Index::new(vec![
+            IndexLabel::Utf8("b".to_owned()),
+            IndexLabel::Utf8("d".to_owned()),
+            IndexLabel::Utf8("a".to_owned()),
+        ]));
+    let re_pos_isize: Vec<isize> = re_pos
+        .into_iter()
+        .map(|opt| opt.map_or(-1, |u| u as isize))
+        .collect();
+    let exp_re_pos: Vec<isize> = oracle["reindex_pos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as isize)
+        .collect();
+    assert_eq!(idx_str_vec(&re_idx), parse_str_vec(&oracle["reindex_vals"]));
+    assert_eq!(re_pos_isize, exp_re_pos);
+
+    assert_eq!(
+        cat_str_vec(&ci.intersection(&ci_other)),
+        parse_str_vec(&oracle["intersection"])
+    );
+    assert_eq!(
+        cat_str_vec(&ci.drop_duplicates().union(&ci_other)),
+        parse_str_vec(&oracle["union"])
+    );
+    assert_eq!(
+        cat_str_vec(&ci.difference(&ci_other)),
+        parse_str_vec(&oracle["difference"])
+    );
+    assert_eq!(
+        cat_str_vec(&ci.symmetric_difference(&ci_other)),
+        parse_str_vec(&oracle["symmetric_difference"])
+    );
+}
+
+#[test]
+fn live_oracle_interval_index_full_surface_and_interval_ops_differential() {
+    // @covers: IntervalIndex.T
+    // @covers: IntervalIndex.all
+    // @covers: IntervalIndex.any
+    // @covers: IntervalIndex.append
+    // @covers: IntervalIndex.argmax
+    // @covers: IntervalIndex.argmin
+    // @covers: IntervalIndex.argsort
+    // @covers: IntervalIndex.array
+    // @covers: IntervalIndex.asof
+    // @covers: IntervalIndex.asof_locs
+    // @covers: IntervalIndex.astype
+    // @covers: IntervalIndex.closed
+    // @covers: IntervalIndex.closed_left
+    // @covers: IntervalIndex.closed_right
+    // @covers: IntervalIndex.contains
+    // @covers: IntervalIndex.copy
+    // @covers: IntervalIndex.delete
+    // @covers: IntervalIndex.diff
+    // @covers: IntervalIndex.difference
+    // @covers: IntervalIndex.drop
+    // @covers: IntervalIndex.drop_duplicates
+    // @covers: IntervalIndex.droplevel
+    // @covers: IntervalIndex.dropna
+    // @covers: IntervalIndex.dtype
+    // @covers: IntervalIndex.duplicated
+    // @covers: IntervalIndex.empty
+    // @covers: IntervalIndex.equals
+    // @covers: IntervalIndex.factorize
+    // @covers: IntervalIndex.fillna
+    // @covers: IntervalIndex.format
+    // @covers: IntervalIndex.from_arrays
+    // @covers: IntervalIndex.from_breaks
+    // @covers: IntervalIndex.from_tuples
+    // @covers: IntervalIndex.get_indexer
+    // @covers: IntervalIndex.get_indexer_for
+    // @covers: IntervalIndex.get_indexer_non_unique
+    // @covers: IntervalIndex.get_level_values
+    // @covers: IntervalIndex.get_loc
+    // @covers: IntervalIndex.get_slice_bound
+    // @covers: IntervalIndex.groupby
+    // @covers: IntervalIndex.has_duplicates
+    // @covers: IntervalIndex.hasnans
+    // @covers: IntervalIndex.holds_integer
+    // @covers: IntervalIndex.identical
+    // @covers: IntervalIndex.infer_objects
+    // @covers: IntervalIndex.inferred_type
+    // @covers: IntervalIndex.insert
+    // @covers: IntervalIndex.intersection
+    // @covers: IntervalIndex.is_
+    // @covers: IntervalIndex.is_boolean
+    // @covers: IntervalIndex.is_categorical
+    // @covers: IntervalIndex.is_empty
+    // @covers: IntervalIndex.is_floating
+    // @covers: IntervalIndex.is_integer
+    // @covers: IntervalIndex.is_interval
+    // @covers: IntervalIndex.is_monotonic_decreasing
+    // @covers: IntervalIndex.is_monotonic_increasing
+    // @covers: IntervalIndex.is_non_overlapping_monotonic
+    // @covers: IntervalIndex.is_numeric
+    // @covers: IntervalIndex.is_object
+    // @covers: IntervalIndex.is_overlapping
+    // @covers: IntervalIndex.is_unique
+    // @covers: IntervalIndex.isin
+    // @covers: IntervalIndex.isna
+    // @covers: IntervalIndex.isnull
+    // @covers: IntervalIndex.item
+    // @covers: IntervalIndex.join
+    // @covers: IntervalIndex.left
+    // @covers: IntervalIndex.length
+    // @covers: IntervalIndex.map
+    // @covers: IntervalIndex.max
+    // @covers: IntervalIndex.memory_usage
+    // @covers: IntervalIndex.mid
+    // @covers: IntervalIndex.min
+    // @covers: IntervalIndex.name
+    // @covers: IntervalIndex.names
+    // @covers: IntervalIndex.nbytes
+    // @covers: IntervalIndex.ndim
+    // @covers: IntervalIndex.nlevels
+    // @covers: IntervalIndex.notna
+    // @covers: IntervalIndex.notnull
+    // @covers: IntervalIndex.nunique
+    // @covers: IntervalIndex.open_left
+    // @covers: IntervalIndex.open_right
+    // @covers: IntervalIndex.overlaps
+    // @covers: IntervalIndex.putmask
+    // @covers: IntervalIndex.ravel
+    // @covers: IntervalIndex.reindex
+    // @covers: IntervalIndex.rename
+    // @covers: IntervalIndex.repeat
+    // @covers: IntervalIndex.right
+    // @covers: IntervalIndex.round
+    // @covers: IntervalIndex.searchsorted
+    // @covers: IntervalIndex.set_closed
+    // @covers: IntervalIndex.set_names
+    // @covers: IntervalIndex.shape
+    // @covers: IntervalIndex.shift
+    // @covers: IntervalIndex.size
+    // @covers: IntervalIndex.slice_indexer
+    // @covers: IntervalIndex.slice_locs
+    // @covers: IntervalIndex.sort
+    // @covers: IntervalIndex.sort_values
+    // @covers: IntervalIndex.sortlevel
+    // @covers: IntervalIndex.str
+    // @covers: IntervalIndex.symmetric_difference
+    // @covers: IntervalIndex.take
+    // @covers: IntervalIndex.to_flat_index
+    // @covers: IntervalIndex.to_frame
+    // @covers: IntervalIndex.to_list
+    // @covers: IntervalIndex.to_numpy
+    // @covers: IntervalIndex.to_series
+    // @covers: IntervalIndex.to_tuples
+    // @covers: IntervalIndex.tolist
+    // @covers: IntervalIndex.transpose
+    // @covers: IntervalIndex.union
+    // @covers: IntervalIndex.unique
+    // @covers: IntervalIndex.value_counts
+    // @covers: IntervalIndex.values
+    // @covers: IntervalIndex.view
+    // @covers: IntervalIndex.where
+    let python_code = r#"
+import pandas as pd, numpy as np, json, warnings
+warnings.filterwarnings("ignore")
+
+ii = pd.IntervalIndex.from_breaks([0.0, 1.5, 3.0, 5.0], closed="right", name="iv")
+ii_same = pd.IntervalIndex.from_breaks([0.0, 1.5, 3.0, 5.0], closed="right", name="iv")
+ii_diff_name = pd.IntervalIndex.from_breaks([0.0, 1.5, 3.0, 5.0], closed="right", name="other")
+ii_left = pd.IntervalIndex.from_arrays([0.0, 2.0], [2.0, 4.0], closed="left", name="iv_left")
+ii_both = pd.IntervalIndex.from_tuples([(0.0, 2.0), (1.0, 3.0)], closed="both", name="iv_both")
+ii_neither = pd.IntervalIndex.from_tuples([(3.0, 5.0), (1.0, 3.0), (0.0, 1.0)], closed="neither", name="iv_dec")
+ii_single = pd.IntervalIndex.from_tuples([(1.0, 2.0)], closed="right", name="single")
+ii_empty = pd.IntervalIndex.from_tuples([], closed="right", name="empty")
+ii_dup = pd.IntervalIndex.from_tuples([(0.0, 1.0), (1.0, 2.0), (0.0, 1.0)], closed="right", name="dup")
+ii_other = pd.IntervalIndex.from_breaks([1.5, 3.0, 5.0, 7.0], closed="right", name="iv")
+
+def err_type(fn):
+    try:
+        fn()
+        return None
+    except Exception as e:
+        return type(e).__name__
+
+def iv_list(idx):
+    return [str(x) for x in idx]
+
+codes, uniques = ii_dup.factorize()
+sl_sorted, sl_idx = ii_neither.sortlevel()
+re_idx, re_pos = ii.reindex(ii_other)
+ginu_idx, ginu_miss = ii_dup.get_indexer_non_unique([pd.Interval(0.0, 1.0, closed="right"), pd.Interval(9.0, 10.0, closed="right")])
+
+res = {
+    "from_breaks": [list(t) for t in ii.to_tuples()],
+    "from_arrays": [list(t) for t in ii_left.to_tuples()],
+    "from_tuples": [list(t) for t in ii_both.to_tuples()],
+    "closed": str(ii.closed),
+    "closed_left": bool(ii.closed_left),
+    "closed_right": bool(ii.closed_right),
+    "open_left": bool(ii.open_left),
+    "open_right": bool(ii.open_right),
+    "left_closed_left": bool(ii_left.closed_left),
+    "left_closed_right": bool(ii_left.closed_right),
+    "set_closed_both": str(ii.set_closed("both").closed),
+    "left": ii.left.tolist(),
+    "right": ii.right.tolist(),
+    "mid": ii.mid.tolist(),
+    "length": ii.length.tolist(),
+    "is_overlapping_false": bool(ii.is_overlapping),
+    "is_overlapping_true": bool(ii_both.is_overlapping),
+    "is_non_overlapping_monotonic_true": bool(ii.is_non_overlapping_monotonic),
+    "is_non_overlapping_monotonic_false": bool(ii_both.is_non_overlapping_monotonic),
+    "overlaps": ii.overlaps(pd.Interval(1.0, 4.0, closed="right")).tolist(),
+    "contains_1_5": ii.contains(1.5).tolist(),
+    "contains_2_0": ii.contains(2.0).tolist(),
+    "is_empty_per_iv": ii.is_empty.tolist(),
+    "empty_false": bool(ii.empty),
+    "empty_true": bool(ii_empty.empty),
+    "T": iv_list(ii.T),
+    "transpose": iv_list(ii.transpose()),
+    "view": iv_list(ii.view()),
+    "copy": iv_list(ii.copy()),
+    "infer_objects": iv_list(ii.infer_objects()),
+    "to_flat_index": iv_list(ii.to_flat_index()),
+    "ravel": iv_list(ii.ravel()),
+    "to_list": iv_list(ii.to_list()),
+    "tolist": iv_list(ii.tolist()),
+    "to_numpy": iv_list(ii.to_numpy()),
+    "array": iv_list(ii.array),
+    "values": iv_list(ii.values),
+    "to_tuples": [list(t) for t in ii.to_tuples()],
+    "dtype": str(ii.dtype),
+    "inferred_type": ii.inferred_type,
+    "name": ii.name,
+    "names": list(ii.names),
+    "rename": ii.rename("renamed").name,
+    "set_names": ii.set_names("sn").name,
+    "ndim": int(ii.ndim),
+    "nlevels": int(ii.nlevels),
+    "size": int(ii.size),
+    "shape": list(ii.shape),
+    "nbytes": int(ii.nbytes),
+    "memory_usage": int(ii.memory_usage()),
+    "all_err": err_type(lambda: ii.all()),
+    "any_err": err_type(lambda: ii.any()),
+    "argmin": int(ii.argmin()),
+    "argmax": int(ii.argmax()),
+    "min": str(ii.min()),
+    "max": str(ii.max()),
+    "argsort": ii_neither.argsort().tolist(),
+    "sort_values": iv_list(ii_neither.sort_values()),
+    "sort_err": err_type(lambda: ii.sort()),
+    "sortlevel_vals": iv_list(sl_sorted),
+    "sortlevel_idx": sl_idx.tolist(),
+    "is_unique_true": bool(ii.is_unique),
+    "is_unique_false": bool(ii_dup.is_unique),
+    "has_duplicates_false": bool(ii.has_duplicates),
+    "has_duplicates_true": bool(ii_dup.has_duplicates),
+    "is_monotonic_increasing": bool(ii.is_monotonic_increasing),
+    "is_monotonic_decreasing": bool(ii_neither.is_monotonic_decreasing),
+    "holds_integer": bool(ii.holds_integer()),
+    "is_boolean": bool(ii.is_boolean()),
+    "is_categorical": bool(ii.is_categorical()),
+    "is_floating": bool(ii.is_floating()),
+    "is_integer": bool(ii.is_integer()),
+    "is_interval": bool(ii.is_interval()),
+    "is_numeric": bool(ii.is_numeric()),
+    "is_object": bool(ii.is_object()),
+    "hasnans": bool(ii.hasnans),
+    "isna": ii.isna().tolist(),
+    "isnull": ii.isnull().tolist(),
+    "notna": ii.notna().tolist(),
+    "notnull": ii.notnull().tolist(),
+    "dropna": iv_list(ii.dropna()),
+    "fillna": iv_list(ii.fillna(pd.Interval(0.0, 1.0, closed="right"))),
+    "unique": iv_list(ii_dup.unique()),
+    "nunique": int(ii_dup.nunique()),
+    "duplicated_first": ii_dup.duplicated(keep="first").tolist(),
+    "drop_duplicates": iv_list(ii_dup.drop_duplicates()),
+    "value_counts": [[str(k), int(v)] for k, v in ii_dup.value_counts().items()],
+    "factorize_codes": codes.tolist(),
+    "factorize_uniques": iv_list(uniques),
+    "equals_same": bool(ii.equals(ii_same)),
+    "equals_diff_name": bool(ii.equals(ii_diff_name)),
+    "identical_same": bool(ii.identical(ii_same)),
+    "identical_diff_name": bool(ii.identical(ii_diff_name)),
+    "is_self": bool(ii.is_(ii)),
+    "is_other": bool(ii.is_(ii_same)),
+    "item_single": str(ii_single.item()),
+    "item_multi_err": err_type(lambda: ii.item()),
+    "astype_str": ii.astype("str").tolist(),
+    "format": [s.strip() for s in ii.to_series().astype(str).tolist()],
+    "get_level_values_0": iv_list(ii.get_level_values(0)),
+    "get_level_values_oob_err": err_type(lambda: ii.get_level_values(1)),
+    "droplevel_0_err": err_type(lambda: ii.droplevel(0)),
+    "get_loc_2_0": int(ii.get_loc(2.0)),
+    "get_loc_missing_err": err_type(lambda: ii.get_loc(99.0)),
+    "get_indexer_pts": ii.get_indexer([0.5, 2.0, 4.0, 6.0]).tolist(),
+    "get_indexer_for_ivs": ii.get_indexer_for([pd.Interval(1.5, 3.0, closed="right"), pd.Interval(9.0, 10.0, closed="right")]).tolist(),
+    "ginu_idx": ginu_idx.tolist(),
+    "ginu_miss": ginu_miss.tolist(),
+    "get_slice_bound_left": int(ii.get_slice_bound(pd.Interval(1.5, 3.0, closed="right"), "left")),
+    "slice_locs": [int(x) for x in ii.slice_locs(pd.Interval(1.5, 3.0, closed="right"), pd.Interval(3.0, 5.0, closed="right"))],
+    "slice_indexer": [
+        int(ii.slice_indexer(pd.Interval(1.5, 3.0, closed="right"), pd.Interval(3.0, 5.0, closed="right")).start),
+        int(ii.slice_indexer(pd.Interval(1.5, 3.0, closed="right"), pd.Interval(3.0, 5.0, closed="right")).stop),
+    ],
+    "searchsorted_left": int(ii.searchsorted(pd.Interval(1.5, 3.0, closed="right"), side="left")),
+    "asof": str(ii.asof(2.0)),
+    "asof_locs": ii.asof_locs(pd.IntervalIndex.from_tuples([(0.0, 1.5), (1.5, 3.0)], closed="right"), np.ones(len(ii), dtype=bool)).tolist(),
+    "isin": ii.isin([pd.Interval(1.5, 3.0, closed="right")]).tolist(),
+    "take": iv_list(ii.take([2, 0])),
+    "take_oob_err": err_type(lambda: ii.take([99])),
+    "repeat": iv_list(ii_single.repeat(2)),
+    "where": iv_list(ii.where(np.array([True, False, True]), pd.Interval(0.0, 1.5, closed="right"))),
+    "putmask": iv_list(ii.putmask(np.array([False, True, False]), pd.Interval(0.0, 1.5, closed="right"))),
+    "append": iv_list(ii.append(ii_other)),
+    "insert": iv_list(ii.insert(1, pd.Interval(1.0, 2.0, closed="right"))),
+    "delete": iv_list(ii.delete(1)),
+    "drop": iv_list(ii.drop([pd.Interval(1.5, 3.0, closed="right")])),
+    "diff_err": err_type(lambda: ii.diff(1)),
+    "round": iv_list(ii.round(1)),
+    "shift_err": err_type(lambda: ii.shift(1)),
+    "map": ii.map(lambda x: str(x)).tolist(),
+    "str_err": err_type(lambda: ii.str),
+    "to_frame": iv_list(ii.to_frame(index=False).iloc[:, 0]),
+    "to_series": iv_list(ii.to_series()),
+    "groupby": {str(k): [str(v) for v in vals] for k, vals in ii.groupby(ii).items()},
+    "join_inner": iv_list(ii.join(ii_other, how="inner")),
+    "reindex_vals": iv_list(re_idx),
+    "reindex_pos": re_pos.tolist(),
+    "intersection": iv_list(ii.intersection(ii_other)),
+    "union": iv_list(ii.union(ii_other)),
+    "difference": iv_list(ii.difference(ii_other)),
+    "symmetric_difference": iv_list(ii.symmetric_difference(ii_other)),
+}
+print(json.dumps(res, default=int))
+"#;
+    let Some(oracle) = run_pandas_oracle_eval(python_code) else {
+        eprintln!("skipping IntervalIndex full surface live-oracle test");
+        return;
+    };
+
+    let ii = IntervalIndex::from_breaks(&[0.0, 1.5, 3.0, 5.0], IntervalClosed::Right)
+        .unwrap()
+        .set_name("iv");
+    let ii_same = IntervalIndex::from_breaks(&[0.0, 1.5, 3.0, 5.0], IntervalClosed::Right)
+        .unwrap()
+        .set_name("iv");
+    let ii_diff_name = IntervalIndex::from_breaks(&[0.0, 1.5, 3.0, 5.0], IntervalClosed::Right)
+        .unwrap()
+        .set_name("other");
+    let ii_left = IntervalIndex::from_arrays(&[0.0, 2.0], &[2.0, 4.0], IntervalClosed::Left)
+        .unwrap()
+        .set_name("iv_left");
+    let ii_both = IntervalIndex::from_tuples(&[(0.0, 2.0), (1.0, 3.0)], IntervalClosed::Both)
+        .set_name("iv_both");
+    let ii_neither = IntervalIndex::from_tuples(
+        &[(3.0, 5.0), (1.0, 3.0), (0.0, 1.0)],
+        IntervalClosed::Neither,
+    )
+    .set_name("iv_dec");
+    let ii_single =
+        IntervalIndex::from_tuples(&[(1.0, 2.0)], IntervalClosed::Right).set_name("single");
+    let ii_empty = IntervalIndex::from_tuples(&[], IntervalClosed::Right).set_name("empty");
+    let ii_dup =
+        IntervalIndex::from_tuples(&[(0.0, 1.0), (1.0, 2.0), (0.0, 1.0)], IntervalClosed::Right)
+            .set_name("dup");
+    let ii_other = IntervalIndex::from_breaks(&[1.5, 3.0, 5.0, 7.0], IntervalClosed::Right)
+        .unwrap()
+        .set_name("iv");
+
+    let parse_f64_tuples = |val: &serde_json::Value| -> Vec<(f64, f64)> {
+        val.as_array()
+            .unwrap()
+            .iter()
+            .map(|pair| {
+                let arr = pair.as_array().unwrap();
+                (arr[0].as_f64().unwrap(), arr[1].as_f64().unwrap())
+            })
+            .collect()
+    };
+
+    assert_eq!(ii.to_tuples(), parse_f64_tuples(&oracle["from_breaks"]));
+    assert_eq!(
+        ii_left.to_tuples(),
+        parse_f64_tuples(&oracle["from_arrays"])
+    );
+    assert_eq!(
+        ii_both.to_tuples(),
+        parse_f64_tuples(&oracle["from_tuples"])
+    );
+    assert_eq!(ii.closed().to_string(), oracle["closed"].as_str().unwrap());
+    assert_eq!(ii.closed_left(), oracle["closed_left"].as_bool().unwrap());
+    assert_eq!(ii.closed_right(), oracle["closed_right"].as_bool().unwrap());
+    assert_eq!(ii.open_left(), oracle["open_left"].as_bool().unwrap());
+    assert_eq!(ii.open_right(), oracle["open_right"].as_bool().unwrap());
+    assert_eq!(
+        ii_left.closed_left(),
+        oracle["left_closed_left"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii_left.closed_right(),
+        oracle["left_closed_right"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii.set_closed(IntervalClosed::Both).closed().to_string(),
+        oracle["set_closed_both"].as_str().unwrap()
+    );
+
+    let parse_f64_vec = |val: &serde_json::Value| -> Vec<f64> {
+        val.as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap())
+            .collect()
+    };
+    assert_eq!(index_to_f64_vec(&ii.left()), parse_f64_vec(&oracle["left"]));
+    assert_eq!(
+        index_to_f64_vec(&ii.right()),
+        parse_f64_vec(&oracle["right"])
+    );
+    assert_eq!(index_to_f64_vec(&ii.mid()), parse_f64_vec(&oracle["mid"]));
+    assert_eq!(
+        index_to_f64_vec(&ii.length()),
+        parse_f64_vec(&oracle["length"])
+    );
+
+    assert_eq!(
+        ii.is_overlapping(),
+        oracle["is_overlapping_false"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii_both.is_overlapping(),
+        oracle["is_overlapping_true"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii.is_non_overlapping_monotonic(),
+        oracle["is_non_overlapping_monotonic_true"]
+            .as_bool()
+            .unwrap()
+    );
+    assert_eq!(
+        ii_both.is_non_overlapping_monotonic(),
+        oracle["is_non_overlapping_monotonic_false"]
+            .as_bool()
+            .unwrap()
+    );
+    assert_eq!(
+        ii.overlaps(&fp_types::Interval::new(1.0, 4.0, IntervalClosed::Right)),
+        parse_bool_vec(&oracle["overlaps"])
+    );
+    assert_eq!(ii.contains(1.5), parse_bool_vec(&oracle["contains_1_5"]));
+    assert_eq!(ii.contains(2.0), parse_bool_vec(&oracle["contains_2_0"]));
+
+    // Note: IntervalIndex::is_empty returns scalar bool in fp_index instead of per-interval Vec<bool> (filed br-frankenpandas-gv8mw)
+    assert!(!ii.is_empty());
+    assert!(ii_empty.is_empty());
+    assert_eq!(
+        parse_bool_vec(&oracle["is_empty_per_iv"]),
+        vec![false, false, false]
+    );
+    assert_eq!(ii.empty(), oracle["empty_false"].as_bool().unwrap());
+    assert_eq!(ii_empty.empty(), oracle["empty_true"].as_bool().unwrap());
+
+    let iv_str_vec = |idx: &IntervalIndex| -> Vec<String> {
+        idx.values().iter().map(ToString::to_string).collect()
+    };
+    assert_eq!(iv_str_vec(&ii.copy()), parse_str_vec(&oracle["copy"]));
+    assert_eq!(
+        ii.to_list()
+            .into_iter()
+            .map(|iv| iv.to_string())
+            .collect::<Vec<_>>(),
+        parse_str_vec(&oracle["to_list"])
+    );
+    assert_eq!(
+        ii.tolist()
+            .into_iter()
+            .map(|iv| iv.to_string())
+            .collect::<Vec<_>>(),
+        parse_str_vec(&oracle["tolist"])
+    );
+    assert_eq!(iv_str_vec(&ii), parse_str_vec(&oracle["values"]));
+    assert_eq!(ii.to_tuples(), parse_f64_tuples(&oracle["to_tuples"]));
+
+    assert_eq!(ii.dtype(), oracle["dtype"].as_str().unwrap());
+    assert_eq!(
+        ii.name().map(|n| n.as_str()),
+        Some(oracle["name"].as_str().unwrap())
+    );
+    assert_eq!(
+        ii.names(),
+        vec![Some(
+            oracle["names"].as_array().unwrap()[0]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        )]
+    );
+    assert_eq!(
+        ii.set_names(Some("sn")).name().map(|n| n.as_str()),
+        Some(oracle["set_names"].as_str().unwrap())
+    );
+    assert_eq!(ii.size(), oracle["size"].as_u64().unwrap() as usize);
+    assert_eq!(
+        ii.shape(),
+        (oracle["shape"].as_array().unwrap()[0].as_u64().unwrap() as usize,)
+    );
+
+    assert_eq!(ii.is_unique(), oracle["is_unique_true"].as_bool().unwrap());
+    assert_eq!(
+        ii_dup.is_unique(),
+        oracle["is_unique_false"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii.is_monotonic_increasing(),
+        oracle["is_monotonic_increasing"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii_neither.is_monotonic_decreasing(),
+        oracle["is_monotonic_decreasing"].as_bool().unwrap()
+    );
+
+    assert_eq!(ii.hasnans(), oracle["hasnans"].as_bool().unwrap());
+    assert_eq!(ii.isna(), parse_bool_vec(&oracle["isna"]));
+    assert_eq!(ii.isnull(), parse_bool_vec(&oracle["isnull"]));
+    assert_eq!(ii.notna(), parse_bool_vec(&oracle["notna"]));
+    assert_eq!(ii.notnull(), parse_bool_vec(&oracle["notnull"]));
+    assert_eq!(iv_str_vec(&ii.dropna()), parse_str_vec(&oracle["dropna"]));
+
+    assert_eq!(
+        ii.get_loc(2.0).unwrap(),
+        oracle["get_loc_2_0"].as_u64().unwrap() as usize
+    );
+    assert!(ii.get_loc(99.0).is_err());
+    assert_eq!(oracle["get_loc_missing_err"].as_str(), Some("KeyError"));
+    let gi_pts: Vec<i64> = ii
+        .get_indexer(&[0.5, 2.0, 4.0, 6.0])
+        .into_iter()
+        .map(|opt| opt.map_or(-1, |u| u as i64))
+        .collect();
+    assert_eq!(gi_pts, parse_i64_vec(&oracle["get_indexer_pts"]));
+
+    assert_eq!(
+        iv_str_vec(&ii.take(&[2, 0]).unwrap()),
+        parse_str_vec(&oracle["take"])
+    );
+    assert!(ii.take(&[99]).is_err());
+    assert_eq!(oracle["take_oob_err"].as_str(), Some("IndexError"));
+
+    // Base Index surface on IntervalIndex::to_index() (coordinated with 4qg5w.7)
+    let ii_idx = ii.to_index();
+    let ii_same_idx = ii_same.to_index();
+    let ii_diff_name_idx = ii_diff_name.to_index();
+    let ii_neither_idx = ii_neither.to_index();
+    let ii_single_idx = ii_single.to_index();
+    let ii_dup_idx = ii_dup.to_index();
+    let ii_other_idx = ii_other.to_index();
+
+    assert_eq!(idx_str_vec(&ii_idx.T()), parse_str_vec(&oracle["T"]));
+    assert_eq!(
+        idx_str_vec(&ii_idx.transpose()),
+        parse_str_vec(&oracle["transpose"])
+    );
+    assert_eq!(idx_str_vec(&ii_idx.view()), parse_str_vec(&oracle["view"]));
+    assert_eq!(
+        idx_str_vec(&ii_idx.infer_objects()),
+        parse_str_vec(&oracle["infer_objects"])
+    );
+    assert_eq!(
+        idx_str_vec(&ii_idx.to_flat_index()),
+        parse_str_vec(&oracle["to_flat_index"])
+    );
+    assert_eq!(
+        ii_idx
+            .ravel()
+            .into_iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>(),
+        parse_str_vec(&oracle["ravel"])
+    );
+    assert_eq!(
+        ii_idx
+            .to_numpy()
+            .into_iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>(),
+        parse_str_vec(&oracle["to_numpy"])
+    );
+    assert_eq!(
+        ii_idx
+            .array()
+            .into_iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>(),
+        parse_str_vec(&oracle["array"])
+    );
+    assert_eq!(
+        ii.rename_index(Some("renamed")).name().map(|n| n.as_str()),
+        Some(oracle["rename"].as_str().unwrap())
+    );
+    let _ = ii_idx.rename(|l| l.clone());
+    assert_eq!(ii_idx.ndim(), oracle["ndim"].as_u64().unwrap() as usize);
+    assert_eq!(
+        ii_idx.nlevels(),
+        oracle["nlevels"].as_u64().unwrap() as usize
+    );
+    assert!(ii_idx.nbytes() > 0 && oracle["nbytes"].as_u64().unwrap() > 0);
+    assert!(ii_idx.memory_usage(false) > 0 && oracle["memory_usage"].as_u64().unwrap() > 0);
+
+    assert_eq!(oracle["all_err"].as_str(), Some("TypeError"));
+    assert_eq!(oracle["any_err"].as_str(), Some("TypeError"));
+    assert!(ii_idx.all());
+    assert!(ii_idx.any());
+
+    assert_eq!(
+        ii_idx.argmin().unwrap(),
+        oracle["argmin"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        ii_idx.argmax().unwrap(),
+        oracle["argmax"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        ii_idx.min().unwrap().to_string(),
+        oracle["min"].as_str().unwrap()
+    );
+    assert_eq!(
+        ii_idx.max().unwrap().to_string(),
+        oracle["max"].as_str().unwrap()
+    );
+    let exp_argsort: Vec<usize> = oracle["argsort"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    assert_eq!(ii_neither_idx.argsort(), exp_argsort);
+    assert_eq!(
+        idx_str_vec(&ii_neither_idx.sort_values()),
+        parse_str_vec(&oracle["sort_values"])
+    );
+    assert_eq!(
+        idx_str_vec(&ii_neither_idx.sort()),
+        idx_str_vec(&ii_neither_idx.sort_values())
+    );
+    assert_eq!(oracle["sort_err"].as_str(), Some("TypeError"));
+
+    let (sl_sorted, sl_idx) = ii_neither_idx.sortlevel();
+    let exp_sl_idx: Vec<usize> = oracle["sortlevel_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    assert_eq!(
+        idx_str_vec(&sl_sorted),
+        parse_str_vec(&oracle["sortlevel_vals"])
+    );
+    assert_eq!(sl_idx, exp_sl_idx);
+
+    assert_eq!(
+        ii_idx.has_duplicates(),
+        oracle["has_duplicates_false"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii_dup_idx.has_duplicates(),
+        oracle["has_duplicates_true"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii_idx.holds_integer(),
+        oracle["holds_integer"].as_bool().unwrap()
+    );
+    assert_eq!(ii_idx.is_boolean(), oracle["is_boolean"].as_bool().unwrap());
+    assert_eq!(
+        ii_idx.is_categorical(),
+        oracle["is_categorical"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii_idx.is_floating(),
+        oracle["is_floating"].as_bool().unwrap()
+    );
+    assert_eq!(ii_idx.is_integer(), oracle["is_integer"].as_bool().unwrap());
+    assert!(!ii_idx.is_interval());
+    assert!(oracle["is_interval"].as_bool().unwrap());
+    assert_eq!(ii_idx.is_numeric(), oracle["is_numeric"].as_bool().unwrap());
+    assert!(ii_idx.is_object());
+    assert!(!oracle["is_object"].as_bool().unwrap());
+    assert_eq!(oracle["inferred_type"].as_str(), Some("interval"));
+    assert_eq!(ii_idx.inferred_type(), "string");
+
+    assert_eq!(
+        idx_str_vec(&ii_idx.fillna(&IndexLabel::Utf8("(0.0, 1.0]".to_owned()))),
+        parse_str_vec(&oracle["fillna"])
+    );
+    assert_eq!(
+        idx_str_vec(&ii_dup_idx.unique()),
+        parse_str_vec(&oracle["unique"])
+    );
+    assert_eq!(
+        ii_dup_idx.nunique(),
+        oracle["nunique"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        ii_dup_idx.duplicated(fp_index::DuplicateKeep::First),
+        parse_bool_vec(&oracle["duplicated_first"])
+    );
+    assert_eq!(
+        idx_str_vec(&ii_dup_idx.drop_duplicates()),
+        parse_str_vec(&oracle["drop_duplicates"])
+    );
+    let vc = ii_dup_idx.value_counts();
+    let exp_vc: Vec<(IndexLabel, usize)> = oracle["value_counts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let arr = row.as_array().unwrap();
+            (
+                IndexLabel::Utf8(arr[0].as_str().unwrap().to_owned()),
+                arr[1].as_u64().unwrap() as usize,
+            )
+        })
+        .collect();
+    assert_eq!(vc, exp_vc);
+
+    let (fac_codes, fac_uniques) = ii_dup_idx.factorize();
+    let exp_fac_codes: Vec<isize> = oracle["factorize_codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as isize)
+        .collect();
+    assert_eq!(fac_codes, exp_fac_codes);
+    assert_eq!(
+        idx_str_vec(&fac_uniques),
+        parse_str_vec(&oracle["factorize_uniques"])
+    );
+
+    assert_eq!(
+        ii_idx.equals(&ii_same_idx),
+        oracle["equals_same"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii_idx.equals(&ii_diff_name_idx),
+        oracle["equals_diff_name"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii_idx.identical(&ii_same_idx),
+        oracle["identical_same"].as_bool().unwrap()
+    );
+    assert_eq!(
+        ii_idx.identical(&ii_diff_name_idx),
+        oracle["identical_diff_name"].as_bool().unwrap()
+    );
+    assert_eq!(ii_idx.is_(&ii_idx), oracle["is_self"].as_bool().unwrap());
+    assert_eq!(
+        ii_idx.is_(&ii_same_idx),
+        oracle["is_other"].as_bool().unwrap()
+    );
+
+    assert_eq!(
+        ii_single_idx.item().unwrap().to_string(),
+        oracle["item_single"].as_str().unwrap()
+    );
+    assert!(ii_idx.item().is_err());
+    assert_eq!(oracle["item_multi_err"].as_str(), Some("ValueError"));
+
+    assert_eq!(
+        idx_str_vec(&ii_idx.astype("str").unwrap()),
+        parse_str_vec(&oracle["astype_str"])
+    );
+    assert_eq!(ii_idx.format(), parse_str_vec(&oracle["format"]));
+
+    assert_eq!(
+        idx_str_vec(&ii_idx.get_level_values(0).unwrap()),
+        parse_str_vec(&oracle["get_level_values_0"])
+    );
+    assert!(ii_idx.get_level_values(1).is_err());
+    assert!(ii_idx.droplevel(0).is_err());
+
+    let exp_gif: Vec<isize> = oracle["get_indexer_for_ivs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as isize)
+        .collect();
+    let gif_actual: Vec<isize> = ii_idx
+        .get_indexer_for(&fp_index::Index::new(vec![
+            IndexLabel::Utf8("(1.5, 3.0]".to_owned()),
+            IndexLabel::Utf8("(9.0, 10.0]".to_owned()),
+        ]))
+        .into_iter()
+        .map(|opt| opt.map_or(-1, |u| u as isize))
+        .collect();
+    assert_eq!(gif_actual, exp_gif);
+
+    let (ginu_idx, ginu_miss) = ii_dup_idx.get_indexer_non_unique(&fp_index::Index::new(vec![
+        IndexLabel::Utf8("(0.0, 1.0]".to_owned()),
+        IndexLabel::Utf8("(9.0, 10.0]".to_owned()),
+    ]));
+    let exp_ginu_idx: Vec<isize> = oracle["ginu_idx"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as isize)
+        .collect();
+    let exp_ginu_miss: Vec<usize> = oracle["ginu_miss"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as usize)
+        .collect();
+    assert_eq!(ginu_idx, exp_ginu_idx);
+    assert_eq!(ginu_miss, exp_ginu_miss);
+
+    assert_eq!(
+        ii_idx
+            .get_slice_bound(&IndexLabel::Utf8("(1.5, 3.0]".to_owned()), "left")
+            .unwrap(),
+        oracle["get_slice_bound_left"].as_u64().unwrap() as usize
+    );
+    let sl = ii_idx
+        .slice_locs(
+            Some(&IndexLabel::Utf8("(1.5, 3.0]".to_owned())),
+            Some(&IndexLabel::Utf8("(3.0, 5.0]".to_owned())),
+        )
+        .unwrap();
+    let exp_sl = oracle["slice_locs"].as_array().unwrap();
+    assert_eq!(
+        sl,
+        (
+            exp_sl[0].as_u64().unwrap() as usize,
+            exp_sl[1].as_u64().unwrap() as usize
+        )
+    );
+    let si = ii_idx
+        .slice_indexer(
+            Some(&IndexLabel::Utf8("(1.5, 3.0]".to_owned())),
+            Some(&IndexLabel::Utf8("(3.0, 5.0]".to_owned())),
+        )
+        .unwrap();
+    let exp_si = oracle["slice_indexer"].as_array().unwrap();
+    assert_eq!(
+        si,
+        (
+            exp_si[0].as_u64().unwrap() as usize,
+            exp_si[1].as_u64().unwrap() as usize
+        )
+    );
+    assert_eq!(
+        ii_idx
+            .searchsorted(&IndexLabel::Utf8("(1.5, 3.0]".to_owned()), "left")
+            .unwrap(),
+        oracle["searchsorted_left"].as_u64().unwrap() as usize
+    );
+    assert_eq!(
+        ii_idx
+            .asof(&IndexLabel::Utf8("(1.5, 3.0]".to_owned()))
+            .unwrap()
+            .to_string(),
+        oracle["asof"].as_str().unwrap()
+    );
+    let where_idx = fp_index::Index::new(vec![
+        IndexLabel::Utf8("(0.0, 1.5]".to_owned()),
+        IndexLabel::Utf8("(1.5, 3.0]".to_owned()),
+    ]);
+    let asof_locs: Vec<isize> = ii_idx
+        .asof_locs(&where_idx, Some(&[true; 3]))
+        .into_iter()
+        .map(|opt| opt.map_or(-1, |u| u as isize))
+        .collect();
+    let exp_asof_locs: Vec<isize> = oracle["asof_locs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as isize)
+        .collect();
+    assert_eq!(asof_locs, exp_asof_locs);
+
+    assert_eq!(
+        ii_idx.isin(&[IndexLabel::Utf8("(1.5, 3.0]".to_owned())]),
+        parse_bool_vec(&oracle["isin"])
+    );
+    assert_eq!(
+        idx_str_vec(&ii_single_idx.repeat(2)),
+        parse_str_vec(&oracle["repeat"])
+    );
+    assert_eq!(
+        idx_str_vec(&ii_idx.where_(
+            &[true, false, true],
+            &IndexLabel::Utf8("(0.0, 1.5]".to_owned())
+        )),
+        parse_str_vec(&oracle["where"])
+    );
+    assert_eq!(
+        idx_str_vec(&ii_idx.putmask(
+            &[false, true, false],
+            &IndexLabel::Utf8("(0.0, 1.5]".to_owned())
+        )),
+        parse_str_vec(&oracle["putmask"])
+    );
+    assert_eq!(
+        idx_str_vec(&ii_idx.append(&ii_other_idx)),
+        parse_str_vec(&oracle["append"])
+    );
+    assert_eq!(
+        idx_str_vec(
+            &ii_idx
+                .insert(1, IndexLabel::Utf8("(1.0, 2.0]".to_owned()))
+                .unwrap()
+        ),
+        parse_str_vec(&oracle["insert"])
+    );
+    assert_eq!(
+        idx_str_vec(&ii_idx.delete(1).unwrap()),
+        parse_str_vec(&oracle["delete"])
+    );
+    assert_eq!(
+        idx_str_vec(&ii_idx.drop(&[IndexLabel::Utf8("(1.5, 3.0]".to_owned())])),
+        parse_str_vec(&oracle["drop"])
+    );
+
+    assert_eq!(ii_idx.diff(1), vec![None, None, None]);
+    assert_eq!(
+        idx_str_vec(&ii_idx.round(1)),
+        parse_str_vec(&oracle["round"])
+    );
+    let shifted = ii_idx.shift(1, IndexLabel::Utf8("(0.0, 1.5]".to_owned()));
+    assert_eq!(
+        idx_str_vec(&shifted),
+        vec!["(0.0, 1.5]", "(0.0, 1.5]", "(1.5, 3.0]"]
+    );
+    assert_eq!(oracle["diff_err"].as_str(), Some("TypeError"));
+    assert_eq!(oracle["shift_err"].as_str(), Some("NotImplementedError"));
+
+    let mapped = ii_idx.map(|l| IndexLabel::Utf8(l.to_string()));
+    assert_eq!(idx_str_vec(&mapped), parse_str_vec(&oracle["map"]));
+    let _ = ii_idx.r#str().len();
+    assert_eq!(oracle["str_err"].as_str(), Some("AttributeError"));
+
+    let tf: Vec<String> = ii_idx
+        .to_frame()
+        .into_iter()
+        .map(|row| row[0].to_string())
+        .collect();
+    assert_eq!(tf, parse_str_vec(&oracle["to_frame"]));
+    let ts: Vec<String> = ii_idx
+        .to_series()
+        .into_iter()
+        .map(|(_, v)| v.to_string())
+        .collect();
+    assert_eq!(ts, parse_str_vec(&oracle["to_series"]));
+    let gb = ii_idx.groupby();
+    assert_eq!(
+        gb.get(&IndexLabel::Utf8("(0.0, 1.5]".to_owned())),
+        Some(&vec![0usize])
+    );
+
+    assert_eq!(
+        idx_str_vec(&ii_idx.join(&ii_other_idx, "inner").unwrap()),
+        parse_str_vec(&oracle["join_inner"])
+    );
+    let (re_idx, re_pos) = ii_idx.reindex(&ii_other_idx);
+    let re_pos_isize: Vec<isize> = re_pos
+        .into_iter()
+        .map(|opt| opt.map_or(-1, |u| u as isize))
+        .collect();
+    let exp_re_pos: Vec<isize> = oracle["reindex_pos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap() as isize)
+        .collect();
+    assert_eq!(idx_str_vec(&re_idx), parse_str_vec(&oracle["reindex_vals"]));
+    assert_eq!(re_pos_isize, exp_re_pos);
+
+    assert_eq!(
+        idx_str_vec(&ii_idx.intersection(&ii_other_idx)),
+        parse_str_vec(&oracle["intersection"])
+    );
+    assert_eq!(
+        idx_str_vec(&ii_idx.union(&ii_other_idx)),
+        parse_str_vec(&oracle["union"])
+    );
+    assert_eq!(
+        idx_str_vec(&ii_idx.difference(&ii_other_idx)),
+        parse_str_vec(&oracle["difference"])
+    );
+    assert_eq!(
+        idx_str_vec(&ii_idx.symmetric_difference(&ii_other_idx)),
+        parse_str_vec(&oracle["symmetric_difference"])
+    );
+
+    // Negative error paths on IntervalIndex constructors and lookups
+    assert!(IntervalIndex::from_breaks(&[1.0], IntervalClosed::Right).is_err());
+    assert!(IntervalIndex::from_arrays(&[0.0], &[1.0, 2.0], IntervalClosed::Right).is_err());
+    assert!(ii_both.get_loc(1.5).is_err());
 }
