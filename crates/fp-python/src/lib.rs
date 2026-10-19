@@ -36431,7 +36431,7 @@ impl PySeries {
             refuse_nan_mask(&series_mask.inner)?;
             let s = self
                 .inner
-                .iloc_bool_series(&series_mask.inner)
+                .loc_bool_series(&series_mask.inner)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }

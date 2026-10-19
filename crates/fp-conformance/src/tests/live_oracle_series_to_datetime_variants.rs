@@ -426,8 +426,17 @@ fn live_oracle_series_to_datetime_mixed_tz_strings_matches_pandas() {
         return;
     };
 
-    let actual = fp_frame::to_datetime(
-        &super::build_series(fixture.left.as_ref().expect("left")).expect("series"),
+    let input_series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    assert!(
+        fp_frame::to_datetime(&input_series).is_err(),
+        "default errors='raise' must reject mixed naive/tz-aware format mismatch"
+    );
+    let actual = fp_frame::to_datetime_with_options(
+        &input_series,
+        fp_frame::ToDatetimeOptions {
+            errors: fp_frame::DatetimeErrors::Coerce,
+            ..fp_frame::ToDatetimeOptions::default()
+        },
     )
     .expect("actual series");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");

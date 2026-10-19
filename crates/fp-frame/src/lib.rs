@@ -10906,8 +10906,9 @@ fn present_f64_words(data: &[f64], validity: &ValidityMask) -> Vec<u64> {
 /// keeps: pandas reindexes the mask to the labels, so each row takes its
 /// label's value, and a label repeated in the rows keeps each of its rows
 /// (it kept that label's first row once per occurrence;
-/// br-frankenpandas-hbgr3). A label the mask lacks drops its rows; a mask
-/// repeating a label cannot be reindexed, as pandas'.
+/// br-frankenpandas-hbgr3). A label the mask lacks raises pandas'
+/// `IndexingError` (`br-frankenpandas-747ax`); a mask repeating a label
+/// cannot be reindexed, as pandas'.
 fn reindexed_mask_rows(labels: &[IndexLabel], mask: &Series) -> Result<Vec<usize>, FrameError> {
     if mask.index().has_duplicates() {
         return Err(FrameError::CompatibilityRejected(
@@ -10916,16 +10917,19 @@ fn reindexed_mask_rows(labels: &[IndexLabel], mask: &Series) -> Result<Vec<usize
     }
     let mask_at = mask.index().position_map_first();
     let values = mask.column().values();
-    Ok(labels
-        .iter()
-        .enumerate()
-        .filter(|(_, label)| {
-            mask_at
-                .get(*label)
-                .is_some_and(|&at| matches!(values[at], Scalar::Bool(true)))
-        })
-        .map(|(row, _)| row)
-        .collect())
+    let mut kept = Vec::new();
+    for (row, label) in labels.iter().enumerate() {
+        let Some(&at) = mask_at.get(label) else {
+            return Err(FrameError::CompatibilityRejected(
+                "Unalignable boolean Series provided as indexer (index of the boolean Series and of the indexed object do not match)."
+                    .to_owned(),
+            ));
+        };
+        if matches!(values[at], Scalar::Bool(true)) {
+            kept.push(row);
+        }
+    }
+    Ok(kept)
 }
 
 #[inline]
@@ -17362,9 +17366,16 @@ impl Series {
             return Self::new(self.name.clone(), index, column);
         }
 
-        // Align mask to the Series index (pandas behavior: extra mask labels are ignored).
+        // Align mask to the Series index (pandas behavior: extra mask labels are ignored,
+        // while target labels missing from the mask raise IndexingError; br-frankenpandas-747ax).
         let plan = align(&self.index, &mask.index, AlignMode::Left);
         validate_alignment_plan(&plan)?;
+        if plan.right_positions.iter().any(Option::is_none) {
+            return Err(FrameError::CompatibilityRejected(
+                "Unalignable boolean Series provided as indexer (index of the boolean Series and of the indexed object do not match)."
+                    .to_owned(),
+            ));
+        }
 
         let aligned_data = self.column.reindex_by_positions(&plan.left_positions)?;
         let aligned_mask = mask.column.reindex_by_positions(&plan.right_positions)?;
@@ -17786,12 +17797,27 @@ impl Series {
         self.filter(mask)
     }
 
-    /// Position-based boolean Series mask selection with index alignment.
+    /// Position-based boolean Series mask selection.
     ///
-    /// Matches `series.iloc[bool_series]` in pandas. Semantically identical
-    /// to `loc_bool_series` (delegates to `filter`).
+    /// Matches `series.iloc[bool_series]` in pandas 2.2.3, which refuses a
+    /// `Series` mask (`NotImplementedError` for an integer index, `ValueError`
+    /// otherwise; `br-frankenpandas-qs8b6`).
     pub fn iloc_bool_series(&self, mask: &Self) -> Result<Self, FrameError> {
-        self.filter(mask)
+        let is_int_index = mask.index().is_empty()
+            || mask
+                .index()
+                .labels()
+                .iter()
+                .all(|l| matches!(l, IndexLabel::Int64(_)));
+        if is_int_index {
+            Err(FrameError::CompatibilityRejected(
+                "iLocation based boolean indexing on an integer type is not available".to_owned(),
+            ))
+        } else {
+            Err(FrameError::CompatibilityRejected(
+                "iLocation based boolean indexing cannot use an indexable as a mask".to_owned(),
+            ))
+        }
     }
 
     /// The positions `.loc[start:stop]` selects, resolved as
@@ -25091,6 +25117,11 @@ impl Series {
     ///
     /// Matches `pd.Series.mean()`.
     pub fn mean(&self) -> Result<Scalar, FrameError> {
+        if self.categorical.is_some() {
+            return Err(FrameError::CompatibilityRejected(
+                "category dtype does not support aggregation 'mean'".to_owned(),
+            ));
+        }
         if matches!(self.column.dtype(), DType::Datetime64 { .. }) {
             return Ok(self.datetime_mean());
         }
@@ -25146,6 +25177,11 @@ impl Series {
                 }
                 let clamped = mean_ns.clamp(i64::MIN as f64, i64::MAX as f64);
                 return Ok(Scalar::Timedelta64(clamped as i64));
+            }
+            Scalar::Utf8(value) => {
+                return Err(FrameError::Column(ColumnError::Type(
+                    fp_types::TypeError::NonNumericValue { value },
+                )));
             }
             _ => return Ok(Scalar::Float64(f64::NAN)),
         };
@@ -259174,7 +259210,6 @@ mod resample_spread_single_pass_7x91u {
         }
     }
 }
-
 /// Rolling / expanding cov and corr against live pandas 2.2.3 bits: pandas
 /// composes them from its window means and variances. x is the n026a walk
 /// (NaN where `k % 37 == 5`), y = `(k * 31 % 17) / 3 + x / 4` (NaN where

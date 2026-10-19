@@ -6183,6 +6183,7 @@ fn parse_csv_datetime_values(values: &[Scalar]) -> Result<Option<Vec<Scalar>>, I
             // pandas keeps a mixed naive+tz-aware parse_dates column as object
             // rather than datetime64 (br-frankenpandas-unz0t).
             mixed_tz_as_object: true,
+            errors: fp_frame::DatetimeErrors::Coerce,
             ..ToDatetimeOptions::default()
         },
     )?;
