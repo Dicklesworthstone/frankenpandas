@@ -3444,9 +3444,8 @@ print(json.dumps(res, default=int))
     assert!(ci.nbytes() > 0 && oracle["nbytes"].as_u64().unwrap() > 0);
     assert!(ci.memory_usage(false) > 0 && oracle["memory_usage"].as_u64().unwrap() > 0);
 
-    // Note: CategoricalIndex::any/all delegate to flat Index instead of raising TypeError (filed br-frankenpandas-wyjib)
-    assert!(ci.all());
-    assert!(ci.any());
+    assert!(ci.all().is_err());
+    assert!(ci.any().is_err());
     assert_eq!(oracle["all_err"].as_str(), Some("TypeError"));
     assert_eq!(oracle["any_err"].as_str(), Some("TypeError"));
 
@@ -3466,6 +3465,10 @@ print(json.dumps(res, default=int))
         ci.max().unwrap(),
         &IndexLabel::Utf8(oracle["max"].as_str().unwrap().to_owned())
     );
+    assert_eq!(ci_unord.min(), None);
+    assert_eq!(ci_unord.max(), None);
+    assert!(ci_unord.try_min().is_err());
+    assert!(ci_unord.try_max().is_err());
     assert_eq!(oracle["unord_min_err"].as_str(), Some("TypeError"));
     assert_eq!(oracle["unord_max_err"].as_str(), Some("TypeError"));
     assert!(ci_empty.argmin().is_err());
@@ -4345,13 +4348,8 @@ print(json.dumps(res, default=int))
     assert_eq!(ii.contains(1.5), parse_bool_vec(&oracle["contains_1_5"]));
     assert_eq!(ii.contains(2.0), parse_bool_vec(&oracle["contains_2_0"]));
 
-    // Note: IntervalIndex::is_empty returns scalar bool in fp_index instead of per-interval Vec<bool> (filed br-frankenpandas-gv8mw)
-    assert!(!ii.is_empty());
-    assert!(ii_empty.is_empty());
-    assert_eq!(
-        parse_bool_vec(&oracle["is_empty_per_iv"]),
-        vec![false, false, false]
-    );
+    assert_eq!(ii.is_empty(), parse_bool_vec(&oracle["is_empty_per_iv"]));
+    assert!(ii_empty.is_empty().is_empty());
     assert_eq!(ii.empty(), oracle["empty_false"].as_bool().unwrap());
     assert_eq!(ii_empty.empty(), oracle["empty_true"].as_bool().unwrap());
 

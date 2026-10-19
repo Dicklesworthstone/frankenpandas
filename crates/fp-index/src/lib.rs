@@ -20064,16 +20064,20 @@ impl CategoricalIndex {
         self.to_flat_index().to_series()
     }
 
-    /// Whether any category label coerces to true.
-    #[must_use]
-    pub fn any(&self) -> bool {
-        self.to_flat_index().any()
+    /// Reduction `any()` is not supported on CategoricalIndex in pandas 2.2.3
+    /// (`TypeError: 'Categorical' with dtype category does not support reduction 'any'`).
+    pub fn any(&self) -> Result<bool, IndexError> {
+        Err(IndexError::TypeError(
+            "'Categorical' with dtype category does not support reduction 'any'".to_owned(),
+        ))
     }
 
-    /// Whether all category labels coerce to true.
-    #[must_use]
-    pub fn all(&self) -> bool {
-        self.to_flat_index().all()
+    /// Reduction `all()` is not supported on CategoricalIndex in pandas 2.2.3
+    /// (`TypeError: 'Categorical' with dtype category does not support reduction 'all'`).
+    pub fn all(&self) -> Result<bool, IndexError> {
+        Err(IndexError::TypeError(
+            "'Categorical' with dtype category does not support reduction 'all'".to_owned(),
+        ))
     }
 
     /// Get labels for a level. CategoricalIndex is flat and only accepts level 0.
@@ -20129,10 +20133,14 @@ impl CategoricalIndex {
         self.to_flat_index().join(other, how)
     }
 
-    /// Sort category labels and return the positional sorter.
+    /// Sort category labels by category code order and return the positional sorter.
     #[must_use]
     pub fn sortlevel(&self) -> (Index, Vec<usize>) {
-        self.to_flat_index().sortlevel()
+        let positions = self.argsort();
+        let sorted_labels: Vec<IndexLabel> =
+            positions.iter().map(|&p| self.labels[p].clone()).collect();
+        let sorted_index = Index::new(sorted_labels).set_names(self.name.as_deref());
+        (sorted_index, positions)
     }
 
     /// Set the index name, matching `pd.CategoricalIndex.rename(name)`.
@@ -20180,27 +20188,47 @@ impl CategoricalIndex {
         self.clone()
     }
 
-    /// Binary-search insertion position, matching
-    /// `pd.CategoricalIndex.searchsorted(value, side)`. Forwarded through
-    /// the labels' flat Index.
+    /// Binary-search insertion position in category code order, matching
+    /// `pd.CategoricalIndex.searchsorted(value, side)`.
     pub fn searchsorted(&self, value: &IndexLabel, side: &str) -> Result<usize, IndexError> {
-        self.to_index().searchsorted(value, side)
+        if side != "left" && side != "right" {
+            return Err(IndexError::InvalidArgument(format!(
+                "invalid searchsorted side: {side:?}"
+            )));
+        }
+        let map = self.category_index_map();
+        let target_rank = if value.is_missing() {
+            usize::MAX
+        } else {
+            map.get(value).copied().ok_or_else(|| {
+                IndexError::TypeError(format!(
+                    "Cannot setitem on a Categorical with a new category ({value}), set the categories first"
+                ))
+            })?
+        };
+        let ranks: Vec<usize> = self
+            .labels
+            .iter()
+            .map(|l| map.get(l).copied().unwrap_or(usize::MAX))
+            .collect();
+        let pos = if side == "left" {
+            ranks.partition_point(|&r| r < target_rank)
+        } else {
+            ranks.partition_point(|&r| r <= target_rank)
+        };
+        Ok(pos)
     }
 
-    /// Find positions of `[start, end]` for a label slice, matching
-    /// `pd.CategoricalIndex.slice_locs(start, end)`. Requires labels to
-    /// be sorted (so the searchsorted result lines up with the slice
-    /// boundary).
+    /// Find positions of `[start, end]` for a label slice in category code order,
+    /// matching `pd.CategoricalIndex.slice_locs(start, end)`.
     pub fn slice_locs(
         &self,
         start: &IndexLabel,
         end: &IndexLabel,
     ) -> Result<(usize, usize), IndexError> {
-        let labels_sorted = self.labels.windows(2).all(|w| w[0] <= w[1]);
-        if !labels_sorted {
+        if !self.is_monotonic_increasing() {
             return Err(IndexError::InvalidArgument(
-                "slice_locs requires a CategoricalIndex with labels sorted lexicographically"
-                    .to_owned(),
+                "slice_locs requires a monotonic increasing CategoricalIndex".to_owned(),
             ));
         }
         let left = self.searchsorted(start, "left")?;
@@ -20525,9 +20553,8 @@ impl CategoricalIndex {
         })
     }
 
-    /// Position of the maximum label, matching
-    /// `pd.CategoricalIndex.argmax()`. ordered=true uses category
-    /// position; unordered uses lexicographic ordering. Empty raises
+    /// Position of the maximum label in category code order, matching
+    /// `pd.CategoricalIndex.argmax()` (`self.codes.argmax()`). Empty raises
     /// pandas-style "attempt to get argmax of an empty sequence".
     pub fn argmax(&self) -> Result<usize, IndexError> {
         if self.labels.is_empty() {
@@ -20540,9 +20567,8 @@ impl CategoricalIndex {
         })
     }
 
-    /// The position of the first largest (`largest`) or smallest label,
-    /// missing labels skipped: by category position when ordered, by the
-    /// labels themselves otherwise. None when no label is present.
+    /// The position of the first largest (`largest`) or smallest label by
+    /// category code order, missing labels skipped. None when no label is present.
     fn extreme_position(&self, largest: bool) -> Option<usize> {
         let map = self.category_index_map();
         let mut best: Option<usize> = None;
@@ -20552,10 +20578,9 @@ impl CategoricalIndex {
             }
             let better = best.is_none_or(|at| {
                 let current = &self.labels[at];
-                let order = if self.ordered {
-                    map.get(label).cmp(&map.get(current))
-                } else {
-                    label.cmp(current)
+                let order = match (map.get(label), map.get(current)) {
+                    (Some(l_rank), Some(c_rank)) => l_rank.cmp(c_rank),
+                    _ => label.cmp(current),
                 };
                 if largest {
                     order.is_gt()
@@ -20570,8 +20595,8 @@ impl CategoricalIndex {
         best
     }
 
-    /// Position of the minimum label, matching
-    /// `pd.CategoricalIndex.argmin()`. Same ordering rules as argmax.
+    /// Position of the minimum label in category code order, matching
+    /// `pd.CategoricalIndex.argmin()` (`self.codes.argmin()`).
     pub fn argmin(&self) -> Result<usize, IndexError> {
         if self.labels.is_empty() {
             return Err(IndexError::InvalidArgument(
@@ -20583,18 +20608,46 @@ impl CategoricalIndex {
         })
     }
 
-    /// Smallest label in category order when ordered, by the labels
-    /// themselves when unordered, matching `pd.CategoricalIndex.min()`
-    /// (missing labels skipped). None when no label is present.
+    /// Smallest label in category order when ordered (`None` when unordered or
+    /// when no non-missing label is present).
     #[must_use]
     pub fn min(&self) -> Option<&IndexLabel> {
+        if !self.ordered {
+            return None;
+        }
         self.extreme_position(false).map(|at| &self.labels[at])
     }
 
-    /// Largest label, matching `pd.CategoricalIndex.max()`.
+    /// Fallible `min()` matching `pd.CategoricalIndex.min()`: raises
+    /// `IndexError::TypeError` on unordered `CategoricalIndex`.
+    pub fn try_min(&self) -> Result<Option<&IndexLabel>, IndexError> {
+        if !self.ordered {
+            return Err(IndexError::TypeError(
+                "Categorical is not ordered for operation min\nyou can use .as_ordered() to change the Categorical to an ordered one\n".to_owned(),
+            ));
+        }
+        Ok(self.extreme_position(false).map(|at| &self.labels[at]))
+    }
+
+    /// Largest label in category order when ordered (`None` when unordered or
+    /// when no non-missing label is present).
     #[must_use]
     pub fn max(&self) -> Option<&IndexLabel> {
+        if !self.ordered {
+            return None;
+        }
         self.extreme_position(true).map(|at| &self.labels[at])
+    }
+
+    /// Fallible `max()` matching `pd.CategoricalIndex.max()`: raises
+    /// `IndexError::TypeError` on unordered `CategoricalIndex`.
+    pub fn try_max(&self) -> Result<Option<&IndexLabel>, IndexError> {
+        if !self.ordered {
+            return Err(IndexError::TypeError(
+                "Categorical is not ordered for operation max\nyou can use .as_ordered() to change the Categorical to an ordered one\n".to_owned(),
+            ));
+        }
+        Ok(self.extreme_position(true).map(|at| &self.labels[at]))
     }
 
     /// First-seen unique labels, matching `pd.CategoricalIndex.unique()`.
@@ -20645,7 +20698,8 @@ impl CategoricalIndex {
     }
 
     /// Value counts, matching `pd.CategoricalIndex.value_counts()`: the
-    /// present labels' counts, missing ones left out (dropna).
+    /// present labels' counts followed by unused categories with count 0,
+    /// missing ones left out (dropna).
     #[must_use]
     pub fn value_counts(&self) -> Vec<(IndexLabel, usize)> {
         let mut pairs = if let Some(codes) = &self.category_codes {
@@ -20656,6 +20710,16 @@ impl CategoricalIndex {
             self.value_counts_by_hash()
         };
         pairs.retain(|(label, _)| !label.is_missing());
+        if pairs.len() < self.categories.len() {
+            let seen: FxHashSet<&IndexLabel> = pairs.iter().map(|(label, _)| label).collect();
+            let unused: Vec<(IndexLabel, usize)> = self
+                .categories
+                .iter()
+                .filter(|cat| !cat.is_missing() && !seen.contains(cat))
+                .map(|cat| (cat.clone(), 0))
+                .collect();
+            pairs.extend(unused);
+        }
         pairs
     }
 
@@ -20816,13 +20880,15 @@ impl IntervalIndex {
     }
 
     #[must_use]
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.values.len()
     }
 
+    /// Per-interval emptiness indicator (`pd.IntervalIndex.is_empty`).
     #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.values.is_empty()
+    pub fn is_empty(&self) -> Vec<bool> {
+        self.values.iter().map(Interval::is_empty).collect()
     }
 
     #[must_use]
@@ -20876,7 +20942,7 @@ impl IntervalIndex {
 
     #[must_use]
     pub fn empty(&self) -> bool {
-        self.is_empty()
+        self.values.is_empty()
     }
 
     #[must_use]
@@ -20891,12 +20957,17 @@ impl IntervalIndex {
 
     #[must_use]
     pub fn hasnans(&self) -> bool {
-        false
+        self.values
+            .iter()
+            .any(|iv| iv.left.is_nan() || iv.right.is_nan())
     }
 
     #[must_use]
     pub fn isna(&self) -> Vec<bool> {
-        vec![false; self.len()]
+        self.values
+            .iter()
+            .map(|iv| iv.left.is_nan() || iv.right.is_nan())
+            .collect()
     }
 
     #[must_use]
@@ -20906,7 +20977,10 @@ impl IntervalIndex {
 
     #[must_use]
     pub fn notna(&self) -> Vec<bool> {
-        vec![true; self.len()]
+        self.values
+            .iter()
+            .map(|iv| !iv.left.is_nan() && !iv.right.is_nan())
+            .collect()
     }
 
     #[must_use]
@@ -20916,7 +20990,16 @@ impl IntervalIndex {
 
     #[must_use]
     pub fn dropna(&self) -> Self {
-        self.clone()
+        Self {
+            values: self
+                .values
+                .iter()
+                .copied()
+                .filter(|iv| !iv.left.is_nan() && !iv.right.is_nan())
+                .collect(),
+            closed: self.closed,
+            name: self.name.clone(),
+        }
     }
 
     /// Return an `Index` containing the left endpoints of each interval.
@@ -22196,6 +22279,183 @@ pub enum DateOffset {
     MonthEnd(i32),
 }
 
+impl DateOffset {
+    /// Offset multiplier (`pd.DateOffset.n`).
+    #[must_use]
+    pub const fn n(&self) -> i32 {
+        match *self {
+            Self::Day(n) | Self::BusinessDay(n) | Self::MonthEnd(n) => n,
+        }
+    }
+
+    /// Canonical offset rule name (`pd.DateOffset.name`).
+    #[must_use]
+    pub const fn name(&self) -> &'static str {
+        match *self {
+            Self::Day(_) => "D",
+            Self::BusinessDay(_) => "B",
+            Self::MonthEnd(_) => "ME",
+        }
+    }
+
+    /// Canonical rule code (`pd.DateOffset.rule_code`).
+    #[must_use]
+    pub const fn rule_code(&self) -> &'static str {
+        self.name()
+    }
+
+    /// Frequency string with multiplier when `n != 1` (`pd.DateOffset.freqstr`).
+    #[must_use]
+    pub fn freqstr(&self) -> String {
+        let code = self.rule_code();
+        let n = self.n();
+        if n == 1 {
+            code.to_owned()
+        } else {
+            format!("{n}{code}")
+        }
+    }
+
+    /// Unit-step offset of the same kind (`pd.DateOffset.base`).
+    #[must_use]
+    pub const fn base(&self) -> Self {
+        match *self {
+            Self::Day(_) => Self::Day(1),
+            Self::BusinessDay(_) => Self::BusinessDay(1),
+            Self::MonthEnd(_) => Self::MonthEnd(1),
+        }
+    }
+
+    /// Return a copy of this offset (`pd.DateOffset.copy`).
+    #[must_use]
+    pub const fn copy(&self) -> Self {
+        *self
+    }
+
+    /// Whether the offset normalizes timestamps to midnight (`pd.DateOffset.normalize`).
+    #[must_use]
+    pub const fn normalize(&self) -> bool {
+        false
+    }
+
+    /// Keyword arguments dictionary (`pd.DateOffset.kwds`).
+    #[must_use]
+    pub fn kwds(&self) -> std::collections::BTreeMap<String, String> {
+        std::collections::BTreeMap::new()
+    }
+
+    /// Whether the offset is anchored (`pd.DateOffset.is_anchored`).
+    #[must_use]
+    pub const fn is_anchored(&self) -> bool {
+        match *self {
+            Self::Day(_) => false,
+            Self::BusinessDay(n) | Self::MonthEnd(n) => n == 1,
+        }
+    }
+
+    /// Fixed nanosecond span for tick-compatible offsets (`pd.DateOffset.nanos`).
+    /// Non-fixed calendar offsets (`BusinessDay`, `MonthEnd`) return `Err`.
+    pub fn nanos(&self) -> Result<i64, DateRangeError> {
+        match *self {
+            Self::Day(days) => i64::from(days)
+                .checked_mul(Timedelta::NANOS_PER_DAY)
+                .ok_or(DateRangeError::InvalidRange),
+            Self::BusinessDay(_) | Self::MonthEnd(_) => Err(DateRangeError::InvalidRange),
+        }
+    }
+
+    /// Check whether a wall-clock nanosecond timestamp lies on this offset.
+    pub fn is_on_offset_nanos(&self, nanos: i64) -> Result<bool, DateRangeError> {
+        let (date, _) = split_datetime_nanos(nanos)?;
+        match *self {
+            Self::Day(_) => Ok(true),
+            Self::BusinessDay(_) => Ok(is_business_day(date)),
+            Self::MonthEnd(_) => {
+                use chrono::Datelike;
+                Ok(date == last_day_of_month(date.year(), date.month())?)
+            }
+        }
+    }
+
+    /// Check whether a `Timestamp` lies on this offset (`pd.DateOffset.is_on_offset`).
+    pub fn is_on_offset(&self, ts: &fp_types::Timestamp) -> Result<bool, DateRangeError> {
+        self.is_on_offset_nanos(ts.wall_nanos())
+    }
+
+    /// Apply this offset to a `Timestamp`, respecting its timezone and DST rules.
+    pub fn apply_to_timestamp(
+        &self,
+        ts: &fp_types::Timestamp,
+    ) -> Result<fp_types::Timestamp, DateRangeError> {
+        let shifted = apply_date_offset_in_tz(ts.value(), *self, ts.tz.as_deref())?;
+        Ok(match ts.tz.as_deref() {
+            Some(tz) => fp_types::Timestamp::from_nanos_tz(shifted, tz),
+            None => fp_types::Timestamp::from_nanos(shifted),
+        })
+    }
+
+    /// Roll a `Timestamp` forward to the next offset boundary if not already on offset
+    /// (`pd.DateOffset.rollforward`).
+    pub fn rollforward(
+        &self,
+        ts: &fp_types::Timestamp,
+    ) -> Result<fp_types::Timestamp, DateRangeError> {
+        if self.is_on_offset(ts)? {
+            Ok(ts.clone())
+        } else {
+            self.base().apply_to_timestamp(ts)
+        }
+    }
+
+    /// Roll a `Timestamp` backward to the previous offset boundary if not already on offset
+    /// (`pd.DateOffset.rollback`).
+    pub fn rollback(
+        &self,
+        ts: &fp_types::Timestamp,
+    ) -> Result<fp_types::Timestamp, DateRangeError> {
+        if self.is_on_offset(ts)? {
+            Ok(ts.clone())
+        } else {
+            let neg_base = match *self {
+                Self::Day(_) => Self::Day(-1),
+                Self::BusinessDay(_) => Self::BusinessDay(-1),
+                Self::MonthEnd(_) => Self::MonthEnd(-1),
+            };
+            neg_base.apply_to_timestamp(ts)
+        }
+    }
+
+    #[must_use]
+    pub fn is_month_start(&self, ts: &fp_types::Timestamp) -> bool {
+        ts.is_month_start().unwrap_or(false)
+    }
+
+    #[must_use]
+    pub fn is_month_end(&self, ts: &fp_types::Timestamp) -> bool {
+        ts.is_month_end().unwrap_or(false)
+    }
+
+    #[must_use]
+    pub fn is_quarter_start(&self, ts: &fp_types::Timestamp) -> bool {
+        ts.is_quarter_start().unwrap_or(false)
+    }
+
+    #[must_use]
+    pub fn is_quarter_end(&self, ts: &fp_types::Timestamp) -> bool {
+        ts.is_quarter_end().unwrap_or(false)
+    }
+
+    #[must_use]
+    pub fn is_year_start(&self, ts: &fp_types::Timestamp) -> bool {
+        ts.is_year_start().unwrap_or(false)
+    }
+
+    #[must_use]
+    pub fn is_year_end(&self, ts: &fp_types::Timestamp) -> bool {
+        ts.is_year_end().unwrap_or(false)
+    }
+}
+
 /// Apply a date offset to a timestamp string and return nanoseconds since epoch.
 ///
 /// This mirrors `pd.Timestamp(timestamp) + pd.offsets.<Offset>(n)` for the
@@ -22203,6 +22463,29 @@ pub enum DateOffset {
 pub fn apply_date_offset(timestamp: &str, offset: DateOffset) -> Result<i64, DateRangeError> {
     let nanos = parse_datetime_to_nanos(timestamp)?;
     apply_date_offset_to_nanos(nanos, offset)
+}
+
+/// Apply a date offset to a UTC nanosecond timestamp in an optional timezone.
+///
+/// Fixed-duration offsets (`Day`) step in UTC time; calendar offsets
+/// (`BusinessDay`, `MonthEnd`) step in the timezone's local wall-clock time
+/// and convert back to UTC so local wall-clock time and weekday classification
+/// are preserved across DST transitions and negative/positive UTC offsets.
+pub fn apply_date_offset_in_tz(
+    nanos: i64,
+    offset: DateOffset,
+    tz: Option<&str>,
+) -> Result<i64, DateRangeError> {
+    match (offset, tz) {
+        (DateOffset::Day(_), _) | (_, None) => apply_date_offset_to_nanos(nanos, offset),
+        (DateOffset::BusinessDay(_) | DateOffset::MonthEnd(_), Some(tz_name)) => {
+            let wall_nanos = fp_types::tz_utc_to_wall_nanos(tz_name, nanos)
+                .map_err(|_| DateRangeError::InvalidRange)?;
+            let shifted_wall = apply_date_offset_to_nanos(wall_nanos, offset)?;
+            fp_types::tz_wall_to_utc_nanos(tz_name, shifted_wall)
+                .map_err(|_| DateRangeError::InvalidRange)
+        }
+    }
 }
 
 /// Apply a date offset to a nanosecond timestamp.
@@ -41047,10 +41330,10 @@ mod tests {
 
         let cat = super::CategoricalIndex::from_values(vec![String::new(), "x".to_owned()], false);
         let cat_flat = cat.to_flat_index();
-        assert_eq!(cat.any(), cat_flat.any());
-        assert_eq!(cat.all(), cat_flat.all());
-        assert!(cat.any());
-        assert!(!cat.all());
+        assert!(cat.any().is_err());
+        assert!(cat.all().is_err());
+        assert!(cat_flat.any());
+        assert!(!cat_flat.all());
     }
 
     #[test]
@@ -41581,9 +41864,8 @@ mod tests {
             false,
         );
         let (cat_sorted, cat_order) = cat.sortlevel();
-        let (flat_cat_sorted, flat_cat_order) = cat.to_flat_index().sortlevel();
-        assert_eq!(cat_sorted, flat_cat_sorted);
-        assert_eq!(cat_order, flat_cat_order);
+        assert_eq!(cat_sorted, cat.sort_values().to_flat_index());
+        assert_eq!(cat_order, cat.argsort());
         let drop_cat = [super::IndexLabel::Utf8("b".to_owned())];
         assert_eq!(cat.drop(&drop_cat), cat.to_flat_index().drop(&drop_cat));
     }
@@ -44588,10 +44870,11 @@ mod tests {
         );
 
         // Non-monotonic rejects.
-        let unsorted = super::CategoricalIndex::from_values(
+        let unsorted = super::CategoricalIndex::with_categories(
             vec!["c".to_owned(), "a".to_owned(), "b".to_owned()],
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
             false,
-        );
+        )?;
         assert!(
             unsorted
                 .slice_locs(&IndexLabel::from("a"), &IndexLabel::from("c"))
@@ -45287,7 +45570,8 @@ mod tests {
 
     #[test]
     fn categorical_index_value_counts_use_rank_counts_uza04200() {
-        fn value_counts_oracle(labels: &[IndexLabel]) -> Vec<(IndexLabel, usize)> {
+        fn value_counts_oracle(index: &super::CategoricalIndex) -> Vec<(IndexLabel, usize)> {
+            let labels = index.labels();
             let mut order = Vec::<&IndexLabel>::new();
             let mut counts = std::collections::HashMap::<&IndexLabel, usize>::new();
             for label in labels {
@@ -45305,11 +45589,16 @@ mod tests {
                 })
                 .collect();
             pairs.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+            for cat in index.categories() {
+                if !cat.is_missing() && !counts.contains_key(cat) {
+                    pairs.push((cat.clone(), 0));
+                }
+            }
             pairs
         }
 
         fn assert_value_counts_matches_oracle(index: &super::CategoricalIndex) {
-            assert_eq!(index.value_counts(), value_counts_oracle(index.labels()));
+            assert_eq!(index.value_counts(), value_counts_oracle(index));
         }
 
         let categories = vec![
@@ -45338,6 +45627,7 @@ mod tests {
                 (IndexLabel::from("low"), 3),
                 (IndexLabel::from("high"), 2),
                 (IndexLabel::from("med"), 1),
+                (IndexLabel::from("unused"), 0),
             ]
         );
         assert_value_counts_matches_oracle(&repeated);
@@ -47134,7 +47424,8 @@ mod interval_index_tests {
             .expect("from_breaks");
         assert_eq!(ii.len(), 3);
         assert_eq!(ii.closed(), IntervalClosed::Right);
-        assert!(!ii.is_empty());
+        assert!(!ii.empty());
+        assert_eq!(ii.is_empty(), vec![false, false, false]);
         assert_eq!(ii.shape(), (3,));
         assert_eq!(ii.dtype(), "interval[float64, right]");
 
@@ -47209,9 +47500,158 @@ mod interval_index_tests {
         assert_eq!(ii.notnull(), vec![true, true]);
         assert_eq!(ii.dropna(), ii);
 
+        // Per-interval emptiness and NaN endpoint detection (br-frankenpandas-gv8mw)
+        let ii_mixed = IntervalIndex::from_tuples(
+            &[(0.0, 1.0), (1.0, 1.0), (2.0, 3.0)],
+            IntervalClosed::Right,
+        );
+        assert_eq!(ii_mixed.is_empty(), vec![false, true, false]);
+        assert!(!ii_mixed.empty());
+        let ii_na = IntervalIndex::from_arrays(
+            &[0.0, f64::NAN, 2.0],
+            &[1.0, f64::NAN, 3.0],
+            IntervalClosed::Right,
+        )
+        .expect("from_arrays")
+        .set_name("iv_na");
+        assert!(ii_na.hasnans());
+        assert_eq!(ii_na.isna(), vec![false, true, false]);
+        assert_eq!(ii_na.isnull(), vec![false, true, false]);
+        assert_eq!(ii_na.notna(), vec![true, false, true]);
+        assert_eq!(ii_na.notnull(), vec![true, false, true]);
+        let dropped = ii_na.dropna();
+        assert_eq!(dropped.to_tuples(), vec![(0.0, 1.0), (2.0, 3.0)]);
+        assert_eq!(dropped.name().map(|n| n.as_str()), Some("iv_na"));
+        assert_eq!(dropped.closed(), IntervalClosed::Right);
+
         // Rename
         let renamed = ii.rename_index(Some("new_name"));
         assert_eq!(renamed.name().map(|n| n.as_str()), Some("new_name"));
+    }
+
+    #[test]
+    fn test_categorical_and_date_offset_parity_fixes_8346i_wyjib_kzuug_20h33() {
+        use fp_types::Timestamp;
+
+        use super::{CategoricalIndex, DateOffset, apply_date_offset_in_tz};
+
+        // br-frankenpandas-wyjib & br-frankenpandas-20h33:
+        // Unordered categorical argmin/argmax use category code order (not lexicographical),
+        // min/max return None (and try_min/try_max return TypeError), and any/all return TypeError.
+        let ci_unord = CategoricalIndex::with_categories(
+            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+            vec!["b".to_owned(), "a".to_owned(), "c".to_owned()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(ci_unord.argmin().unwrap(), 1); // "b" has code 0 at index 1
+        assert_eq!(ci_unord.argmax().unwrap(), 2); // "c" has code 2 at index 2
+        assert_eq!(ci_unord.min(), None);
+        assert_eq!(ci_unord.max(), None);
+        assert!(ci_unord.try_min().is_err());
+        assert!(ci_unord.try_max().is_err());
+        assert!(ci_unord.any().is_err());
+        assert!(ci_unord.all().is_err());
+
+        // br-frankenpandas-20h33: searchsorted, slice_locs, slice_indexer, sortlevel use category code order.
+        let ci_code_sorted = CategoricalIndex::with_categories(
+            vec![
+                "b".to_owned(),
+                "a".to_owned(),
+                "a".to_owned(),
+                "c".to_owned(),
+            ],
+            vec![
+                "b".to_owned(),
+                "a".to_owned(),
+                "c".to_owned(),
+                "d".to_owned(),
+            ],
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            ci_code_sorted
+                .searchsorted(&IndexLabel::from("a"), "left")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            ci_code_sorted
+                .searchsorted(&IndexLabel::from("a"), "right")
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            ci_code_sorted
+                .slice_locs(&IndexLabel::from("b"), &IndexLabel::from("c"))
+                .unwrap(),
+            (0, 4)
+        );
+        assert_eq!(
+            ci_code_sorted
+                .slice_indexer(&IndexLabel::from("b"), &IndexLabel::from("a"))
+                .unwrap(),
+            0..3
+        );
+        let (sl_idx, sl_pos) = ci_unord.sortlevel();
+        assert_eq!(
+            sl_idx.labels(),
+            &[
+                IndexLabel::from("b"),
+                IndexLabel::from("a"),
+                IndexLabel::from("c")
+            ]
+        );
+        assert_eq!(sl_pos, vec![1, 0, 2]);
+
+        // br-frankenpandas-8346i: DateOffset metadata and timezone/DST awareness.
+        let bday = DateOffset::BusinessDay(2);
+        assert_eq!(bday.n(), 2);
+        assert_eq!(bday.name(), "B");
+        assert_eq!(bday.rule_code(), "B");
+        assert_eq!(bday.freqstr(), "2B");
+        assert_eq!(bday.base(), DateOffset::BusinessDay(1));
+        assert!(!bday.is_anchored());
+        assert!(bday.base().is_anchored());
+        assert!(bday.nanos().is_err());
+        assert_eq!(
+            DateOffset::Day(2).nanos().unwrap(),
+            2 * fp_types::Timedelta::NANOS_PER_DAY
+        );
+
+        // Thursday 2024-03-07 20:00 EST (Friday 2024-03-08 01:00 UTC) + BusinessDay(1)
+        // in America/New_York lands on Friday 2024-03-08 20:00 EST (Saturday 01:00 UTC),
+        // NOT Monday!
+        let thu_est = Timestamp::parse("2024-03-07T20:00:00")
+            .unwrap()
+            .try_tz_localize(Some("America/New_York"))
+            .unwrap();
+        let fri_est = DateOffset::BusinessDay(1)
+            .apply_to_timestamp(&thu_est)
+            .unwrap();
+        assert_eq!(fri_est.isoformat(), "2024-03-08T20:00:00-05:00");
+        assert_eq!(
+            apply_date_offset_in_tz(
+                thu_est.value(),
+                DateOffset::BusinessDay(1),
+                Some("America/New_York")
+            )
+            .unwrap(),
+            fri_est.value()
+        );
+
+        let mid_feb = Timestamp::parse("2024-02-15").unwrap();
+        let me = DateOffset::MonthEnd(1);
+        assert!(!me.is_on_offset(&mid_feb).unwrap());
+        assert_eq!(
+            me.rollforward(&mid_feb).unwrap().isoformat(),
+            "2024-02-29T00:00:00"
+        );
+        assert_eq!(
+            me.rollback(&mid_feb).unwrap().isoformat(),
+            "2024-01-31T00:00:00"
+        );
     }
 
     #[test]
@@ -47442,5 +47882,160 @@ mod infer_freq_like_pandas_acelo {
             let got = infer_freq_from_timestamps(&stamps).unwrap();
             assert_eq!(got.as_deref().unwrap_or("None"), want, "{case}");
         }
+    }
+
+    #[test]
+    fn categorical_interval_and_date_offset_parity_fixes_wyjib_kzuug_20h33_gv8mw_8346i() {
+        use fp_types::Timestamp;
+
+        use super::{
+            CategoricalIndex, DateOffset, IndexLabel, Interval, IntervalClosed, IntervalIndex,
+            apply_date_offset_in_tz,
+        };
+
+        // wyjib: unordered CategoricalIndex rejects min/max/any/all, supports argmin/argmax by code order.
+        let unordered =
+            CategoricalIndex::with_categories(vec!["a", "b", "c"], vec!["c", "a", "b"], false)
+                .unwrap();
+        assert_eq!(unordered.min(), None);
+        assert_eq!(unordered.max(), None);
+        assert!(unordered.try_min().is_err());
+        assert!(unordered.try_max().is_err());
+        assert_eq!(unordered.argmin().unwrap(), 2);
+        assert_eq!(unordered.argmax().unwrap(), 1);
+        assert!(unordered.any().is_err());
+        assert!(unordered.all().is_err());
+
+        let ordered =
+            CategoricalIndex::with_categories(vec!["a", "b", "c"], vec!["c", "a", "b"], true)
+                .unwrap();
+        let label_c = IndexLabel::from("c");
+        let label_b = IndexLabel::from("b");
+        assert_eq!(ordered.min(), Some(&label_c));
+        assert_eq!(ordered.max(), Some(&label_b));
+        assert_eq!(ordered.try_min().unwrap(), Some(&label_c));
+        assert_eq!(ordered.try_max().unwrap(), Some(&label_b));
+        assert!(ordered.any().is_err());
+        assert!(ordered.all().is_err());
+
+        // kzuug: value_counts includes unused categories with count 0.
+        let cat_unused =
+            CategoricalIndex::with_categories(vec!["a", "a", "b"], vec!["a", "b", "c", "d"], false)
+                .unwrap();
+        assert_eq!(
+            cat_unused.value_counts(),
+            vec![
+                (IndexLabel::from("a"), 2),
+                (IndexLabel::from("b"), 1),
+                (IndexLabel::from("c"), 0),
+                (IndexLabel::from("d"), 0),
+            ]
+        );
+
+        // 20h33: searchsorted, slice_locs, slice_indexer, sortlevel use category code order.
+        let cat_custom =
+            CategoricalIndex::with_categories(vec!["c", "a", "b"], vec!["c", "a", "b"], true)
+                .unwrap();
+        assert_eq!(
+            cat_custom
+                .searchsorted(&IndexLabel::from("a"), "left")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            cat_custom
+                .searchsorted(&IndexLabel::from("a"), "right")
+                .unwrap(),
+            2
+        );
+        assert!(
+            cat_custom
+                .searchsorted(&IndexLabel::from("z"), "left")
+                .is_err()
+        );
+        assert_eq!(
+            cat_custom
+                .slice_locs(&IndexLabel::from("c"), &IndexLabel::from("a"))
+                .unwrap(),
+            (0, 2)
+        );
+        assert_eq!(
+            cat_custom
+                .slice_indexer(&IndexLabel::from("c"), &IndexLabel::from("a"))
+                .unwrap(),
+            0..2
+        );
+        let cat_unsorted =
+            CategoricalIndex::with_categories(vec!["a", "c", "b"], vec!["c", "a", "b"], true)
+                .unwrap();
+        let (sorted_idx, order) = cat_unsorted.sortlevel();
+        assert_eq!(
+            sorted_idx.labels(),
+            &[
+                IndexLabel::from("c"),
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+            ]
+        );
+        assert_eq!(order, vec![1, 0, 2]);
+
+        // gv8mw: IntervalIndex::is_empty is per-interval Vec<bool>; empty is len()==0; NaN endpoints are missing.
+        let iv_idx = IntervalIndex::new(vec![
+            Interval::new(0.0, 0.0, IntervalClosed::Right),
+            Interval::new(0.0, 0.0, IntervalClosed::Both),
+            Interval::new(0.0, 1.0, IntervalClosed::Right),
+            Interval::new(f64::NAN, 1.0, IntervalClosed::Right),
+        ]);
+        assert_eq!(iv_idx.is_empty(), vec![true, false, false, false]);
+        assert!(!iv_idx.empty());
+        assert!(IntervalIndex::new(vec![]).empty());
+        assert!(iv_idx.hasnans());
+        assert_eq!(iv_idx.isna(), vec![false, false, false, true]);
+        assert_eq!(iv_idx.notna(), vec![true, true, true, false]);
+        assert_eq!(iv_idx.dropna().len(), 3);
+
+        // 8346i: DateOffset metadata and DST-aware calendar arithmetic.
+        let me2 = DateOffset::MonthEnd(2);
+        assert_eq!(me2.n(), 2);
+        assert_eq!(me2.name(), "ME");
+        assert_eq!(me2.rule_code(), "ME");
+        assert_eq!(me2.freqstr(), "2ME");
+        assert_eq!(me2.base(), DateOffset::MonthEnd(1));
+        assert_eq!(me2.copy(), me2);
+        assert!(!me2.normalize());
+        assert!(me2.kwds().is_empty());
+        assert!(!me2.is_anchored());
+        assert!(DateOffset::MonthEnd(1).is_anchored());
+        assert!(me2.nanos().is_err());
+        assert_eq!(
+            DateOffset::Day(2).nanos().unwrap(),
+            2 * 86_400 * 1_000_000_000
+        );
+        let jan15 = Timestamp::parse("2024-01-15").unwrap();
+        let jan31 = Timestamp::parse("2024-01-31").unwrap();
+        let dec31 = Timestamp::parse("2023-12-31").unwrap();
+        assert!(!DateOffset::MonthEnd(1).is_on_offset(&jan15).unwrap());
+        assert!(DateOffset::MonthEnd(1).is_on_offset(&jan31).unwrap());
+        assert!(DateOffset::MonthEnd(1).is_month_end(&jan31));
+        assert_eq!(DateOffset::MonthEnd(1).rollforward(&jan15).unwrap(), jan31);
+        assert_eq!(DateOffset::MonthEnd(1).rollback(&jan15).unwrap(), dec31);
+
+        let pre_spring = Timestamp::parse("2024-03-08 10:00:00")
+            .unwrap()
+            .tz_localize(Some("America/New_York"));
+        let post_spring = apply_date_offset_in_tz(
+            pre_spring.value(),
+            DateOffset::BusinessDay(1),
+            Some("America/New_York"),
+        )
+        .unwrap();
+        let expected_spring = Timestamp::parse("2024-03-11 10:00:00")
+            .unwrap()
+            .tz_localize(Some("America/New_York"));
+        assert_eq!(post_spring, expected_spring.value());
+        assert_eq!(
+            post_spring - pre_spring.value(),
+            (3 * 24 - 1) * 3_600 * 1_000_000_000
+        );
     }
 }

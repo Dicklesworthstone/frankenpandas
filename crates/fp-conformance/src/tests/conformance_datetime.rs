@@ -868,10 +868,7 @@ fn live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differenti
     // @covers: Timestamp.utctimetuple, Timestamp.value, Timestamp.week, Timestamp.weekday
     // @covers: Timestamp.weekofyear, Timestamp.year
     use fp_index::{DateOffset, PeriodIndex, apply_date_offset, apply_date_offset_to_nanos};
-    use fp_types::{
-        Interval, IntervalClosed, Period, PeriodFreq, Timedelta, Timestamp, tz_utc_to_wall_nanos,
-        tz_wall_to_utc_nanos,
-    };
+    use fp_types::{Interval, IntervalClosed, Period, PeriodFreq, Timedelta, Timestamp};
 
     let Some(oracle) = run_pandas_dt_oracle_eval(
         r#"
@@ -1006,12 +1003,19 @@ out = {
     "me_freqstr": str(me_off.freqstr),
     "me_n": int(me_off.n),
     "me_is_anchored": bool(me_off.is_anchored()),
-    "me_on_offset_feb29": bool(me_off.is_on_offset( pd.Timestamp("2024-02-29") )),
-    "me_on_offset_feb28": bool(me_off.is_on_offset( pd.Timestamp("2024-02-28") )),
+    "me_is_on_offset_feb29": bool(me_off.is_on_offset(pd.Timestamp("2024-02-29"))),
+    "me_is_on_offset_feb15": bool(me_off.is_on_offset(pd.Timestamp("2024-02-15"))),
     "me_rollforward_feb15": int(me_off.rollforward(pd.Timestamp("2024-02-15")).value),
     "me_rollback_feb15": int(me_off.rollback(pd.Timestamp("2024-02-15")).value),
+    "me_is_month_end_feb29": bool(me_off.is_month_end(pd.Timestamp("2024-02-29"))),
+    "me_is_month_start_feb01": bool(me_off.is_month_start(pd.Timestamp("2024-02-01"))),
     "day_nanos": int(day_off.nanos),
     "bday_n": int(bday_off.n),
+    "bday_name": str(bday_off.name),
+    "bday_rule_code": str(bday_off.rule_code),
+    "bday_freqstr": str(bday_off.freqstr),
+    "bday_is_anchored": bool(bday_off.is_anchored()),
+    "bday_normalize": bool(bday_off.normalize),
 }
 print(json.dumps(out))
 "#,
@@ -1295,11 +1299,9 @@ print(json.dumps(out))
     );
 
     // Calendar offsets (BusinessDay, MonthEnd) preserve wall-clock time across DST
-    // in America/New_York when applied in local wall-clock coordinates:
+    // in America/New_York via fp_index::apply_date_offset_in_tz:
     let apply_tz_calendar_offset = |utc_ns: i64, off: DateOffset, tz: &str| -> i64 {
-        let wall_ns = tz_utc_to_wall_nanos(tz, utc_ns).unwrap();
-        let shifted_wall = apply_date_offset_to_nanos(wall_ns, off).unwrap();
-        tz_wall_to_utc_nanos(tz, shifted_wall).unwrap()
+        fp_index::apply_date_offset_in_tz(utc_ns, off, Some(tz)).unwrap()
     };
 
     let spring_bday1_utc =
@@ -1342,17 +1344,62 @@ print(json.dumps(out))
     let naive_utc_bday1 = apply_date_offset_to_nanos(thu_utc, DateOffset::BusinessDay(1)).unwrap();
     assert_ne!(naive_utc_bday1, oracle["thu_bday1_utc"].as_i64().unwrap());
 
-    // DateOffset rollforward / rollback / is_on_offset behavior via MonthEnd(0) / MonthEnd(1)
+    // DateOffset metadata, rollforward, rollback, and is_on_offset methods
+    let bday_off = DateOffset::BusinessDay(2);
+    assert_eq!(bday_off.n() as i64, oracle["bday_n"].as_i64().unwrap());
+    assert_eq!(bday_off.name(), oracle["bday_name"].as_str().unwrap());
     assert_eq!(
-        apply_date_offset("2024-02-29", DateOffset::MonthEnd(0)).unwrap(),
-        Timestamp::parse("2024-02-29").unwrap().value()
+        bday_off.rule_code(),
+        oracle["bday_rule_code"].as_str().unwrap()
+    );
+    assert_eq!(bday_off.freqstr(), oracle["bday_freqstr"].as_str().unwrap());
+    assert_eq!(
+        bday_off.is_anchored(),
+        oracle["bday_is_anchored"].as_bool().unwrap()
     );
     assert_eq!(
-        apply_date_offset("2024-02-15", DateOffset::MonthEnd(0)).unwrap(),
+        bday_off.normalize(),
+        oracle["bday_normalize"].as_bool().unwrap()
+    );
+    assert_eq!(bday_off.copy(), bday_off);
+    assert!(bday_off.kwds().is_empty());
+
+    let me_off = DateOffset::MonthEnd(1);
+    assert_eq!(me_off.n() as i64, oracle["me_n"].as_i64().unwrap());
+    assert_eq!(me_off.name(), oracle["me_name"].as_str().unwrap());
+    assert_eq!(me_off.freqstr(), oracle["me_freqstr"].as_str().unwrap());
+    assert_eq!(
+        me_off.is_anchored(),
+        oracle["me_is_anchored"].as_bool().unwrap()
+    );
+    let ts_feb29 = Timestamp::parse("2024-02-29").unwrap();
+    let ts_feb15 = Timestamp::parse("2024-02-15").unwrap();
+    assert_eq!(
+        me_off.is_on_offset(&ts_feb29).unwrap(),
+        oracle["me_is_on_offset_feb29"].as_bool().unwrap()
+    );
+    assert_eq!(
+        me_off.is_on_offset(&ts_feb15).unwrap(),
+        oracle["me_is_on_offset_feb15"].as_bool().unwrap()
+    );
+    assert_eq!(
+        me_off.rollforward(&ts_feb15).unwrap().value(),
         oracle["me_rollforward_feb15"].as_i64().unwrap()
     );
     assert_eq!(
-        apply_date_offset("2024-02-15", DateOffset::MonthEnd(-1)).unwrap(),
+        me_off.rollback(&ts_feb15).unwrap().value(),
         oracle["me_rollback_feb15"].as_i64().unwrap()
+    );
+    assert_eq!(
+        me_off.is_month_end(&ts_feb29),
+        oracle["me_is_month_end_feb29"].as_bool().unwrap()
+    );
+    assert_eq!(
+        me_off.is_month_start(&Timestamp::parse("2024-02-01").unwrap()),
+        oracle["me_is_month_start_feb01"].as_bool().unwrap()
+    );
+    assert_eq!(
+        apply_date_offset("2024-02-29", DateOffset::MonthEnd(0)).unwrap(),
+        ts_feb29.value()
     );
 }
