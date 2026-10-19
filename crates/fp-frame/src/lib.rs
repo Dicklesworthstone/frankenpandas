@@ -33315,6 +33315,11 @@ impl Series {
     /// Matches `pd.Series.agg(["sum", "mean", "std"])`. Returns a Series
     /// whose index contains the function names and values contain the results.
     pub fn agg(&self, funcs: &[&str]) -> Result<Self, FrameError> {
+        if funcs.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "No objects to concatenate".to_owned(),
+            ));
+        }
         let mut labels = Vec::with_capacity(funcs.len());
         let mut values = Vec::with_capacity(funcs.len());
         for &func_name in funcs {
@@ -68397,7 +68402,15 @@ impl DatetimeAccessor<'_> {
         // them - those directives were left in the output as written
         // ('%B %A %j'; dt_strftime_matches_generic_path).
         if !six_directive_format(&fmt) {
-            return to_datetime(self.series)?.dt().strftime(format);
+            return to_datetime_with_options(
+                self.series,
+                ToDatetimeOptions {
+                    errors: DatetimeErrors::Coerce,
+                    ..ToDatetimeOptions::default()
+                },
+            )?
+            .dt()
+            .strftime(format);
         }
         self.extract_component(
             |s| {
@@ -72020,9 +72033,9 @@ pub struct ToDatetimeOptions<'a> {
     /// parse_dates (br-frankenpandas-unz0t); off for bare `to_datetime`.
     pub mixed_tz_as_object: bool,
     /// pandas' `errors=`: a string that does not parse, or does not match
-    /// the column's one inferred format, is NaT (`Coerce`, the default
-    /// here, which `read_csv(parse_dates=)` relies on) or pandas' ValueError
-    /// (`Raise`, what `pd.to_datetime` defaults to).
+    /// the column's one inferred format, raises pandas' ValueError (`Raise`,
+    /// the default here, matching `pd.to_datetime`) or becomes NaT (`Coerce`,
+    /// which `read_csv(parse_dates=)` passes explicitly).
     pub errors: DatetimeErrors,
     /// pandas' `dayfirst=`: a numeric date's two short slots read day then
     /// month (see [`guess_day_month_format`]).
@@ -72053,7 +72066,7 @@ impl Default for ToDatetimeOptions<'_> {
             origin: None,
             infer_mixed_timezone: true,
             mixed_tz_as_object: false,
-            errors: DatetimeErrors::Coerce,
+            errors: DatetimeErrors::Raise,
             dayfirst: false,
             yearfirst: false,
             list_input: false,
@@ -76781,7 +76794,7 @@ pub fn index_to_series(index: &Index, name: Option<&str>) -> Result<Series, Fram
 /// Matches `pd.concat([s1, s2, ...])` semantics:
 /// - Index labels are concatenated in order (duplicates preserved).
 /// - Values are type-coerced to a common dtype.
-/// - Empty input returns an empty Series named "concat".
+/// - Empty input is rejected with `No objects to concatenate`.
 pub fn concat_series(series_list: &[&Series]) -> Result<Series, FrameError> {
     concat_series_with_ignore_index(series_list, false)
 }
@@ -77057,7 +77070,9 @@ pub fn concat_series_with_ignore_index(
     ignore_index: bool,
 ) -> Result<Series, FrameError> {
     if series_list.is_empty() {
-        return Series::from_values("concat", Vec::new(), Vec::new());
+        return Err(FrameError::CompatibilityRejected(
+            "No objects to concatenate".to_owned(),
+        ));
     }
 
     let total_len: usize = series_list.iter().map(|s| s.len()).sum();
@@ -78105,7 +78120,7 @@ pub fn reindex_fill_column(
 ///   all-valid int64 column widens to float64; a column that already carried a
 ///   missing value is nullable and keeps its dtype with a `Null` gap. See
 ///   `column_with_invented_gaps` (br-frankenpandas-nywa8).
-/// - Empty input returns an empty DataFrame.
+/// - Empty input is rejected with `No objects to concatenate`.
 pub fn concat_dataframes(frames: &[&DataFrame]) -> Result<DataFrame, FrameError> {
     concat_dataframes_with_ignore_index(frames, false)
 }
@@ -78120,7 +78135,9 @@ pub fn concat_dataframes_with_ignore_index(
     ignore_index: bool,
 ) -> Result<DataFrame, FrameError> {
     if frames.is_empty() {
-        return DataFrame::new(Index::new(Vec::new()), BTreeMap::new());
+        return Err(FrameError::CompatibilityRejected(
+            "No objects to concatenate".to_owned(),
+        ));
     }
     // Identically keyed frames whose column keys repeat (['a', 'a', 'b'], or
     // MultiIndex columns whose leaf names repeat) concatenate column by
@@ -78520,14 +78537,16 @@ pub fn concat_dataframes_with_keys(
     frames: &[&DataFrame],
     keys: &[&str],
 ) -> Result<DataFrame, FrameError> {
+    if frames.is_empty() {
+        return Err(FrameError::CompatibilityRejected(
+            "No objects to concatenate".to_owned(),
+        ));
+    }
+
     if frames.len() != keys.len() {
         return Err(FrameError::CompatibilityRejected(
             "concat: number of frames must match number of keys".to_owned(),
         ));
-    }
-
-    if frames.is_empty() {
-        return DataFrame::new(Index::new(Vec::new()), BTreeMap::new());
     }
 
     let total_len: usize = frames.iter().map(|f| f.len()).sum();
