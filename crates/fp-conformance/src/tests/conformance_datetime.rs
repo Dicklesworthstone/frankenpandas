@@ -819,3 +819,538 @@ print(json.dumps(res))
     assert_eq!(oracle["already_tz_err"].as_str(), Some("TypeError"));
     assert_eq!(oracle["naive_convert_err"].as_str(), Some("TypeError"));
 }
+
+#[test]
+#[allow(clippy::too_many_lines, clippy::cognitive_complexity)]
+fn live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential() {
+    // @covers: DateOffset.base, DateOffset.copy, DateOffset.freqstr, DateOffset.is_anchored
+    // @covers: DateOffset.is_month_end, DateOffset.is_month_start, DateOffset.is_on_offset
+    // @covers: DateOffset.is_quarter_end, DateOffset.is_quarter_start, DateOffset.is_year_end
+    // @covers: DateOffset.is_year_start, DateOffset.kwds, DateOffset.n, DateOffset.name
+    // @covers: DateOffset.nanos, DateOffset.normalize, DateOffset.rollback
+    // @covers: DateOffset.rollforward, DateOffset.rule_code
+    // @covers: Interval.closed, Interval.closed_left, Interval.closed_right, Interval.is_empty
+    // @covers: Interval.left, Interval.length, Interval.mid, Interval.open_left
+    // @covers: Interval.open_right, Interval.overlaps, Interval.right
+    // @covers: Period.asfreq, Period.day, Period.day_of_week, Period.day_of_year
+    // @covers: Period.dayofweek, Period.dayofyear, Period.days_in_month, Period.daysinmonth
+    // @covers: Period.end_time, Period.freq, Period.freqstr, Period.hour, Period.is_leap_year
+    // @covers: Period.minute, Period.month, Period.now, Period.ordinal, Period.quarter
+    // @covers: Period.qyear, Period.second, Period.start_time, Period.strftime
+    // @covers: Period.to_timestamp, Period.week, Period.weekday, Period.weekofyear, Period.year
+    // @covers: Timedelta.as_unit, Timedelta.asm8, Timedelta.ceil, Timedelta.components
+    // @covers: Timedelta.days, Timedelta.floor, Timedelta.isoformat, Timedelta.max
+    // @covers: Timedelta.microseconds, Timedelta.min, Timedelta.nanoseconds
+    // @covers: Timedelta.resolution, Timedelta.resolution_string, Timedelta.round
+    // @covers: Timedelta.seconds, Timedelta.to_numpy, Timedelta.to_pytimedelta
+    // @covers: Timedelta.to_timedelta64, Timedelta.total_seconds, Timedelta.unit
+    // @covers: Timedelta.value, Timedelta.view
+    // @covers: Timestamp.as_unit, Timestamp.asm8, Timestamp.astimezone, Timestamp.ceil
+    // @covers: Timestamp.combine, Timestamp.ctime, Timestamp.date, Timestamp.day
+    // @covers: Timestamp.day_name, Timestamp.day_of_week, Timestamp.day_of_year
+    // @covers: Timestamp.dayofweek, Timestamp.dayofyear, Timestamp.days_in_month
+    // @covers: Timestamp.daysinmonth, Timestamp.dst, Timestamp.floor, Timestamp.fold
+    // @covers: Timestamp.fromisocalendar, Timestamp.fromisoformat, Timestamp.fromordinal
+    // @covers: Timestamp.fromtimestamp, Timestamp.hour, Timestamp.is_leap_year
+    // @covers: Timestamp.is_month_end, Timestamp.is_month_start, Timestamp.is_quarter_end
+    // @covers: Timestamp.is_quarter_start, Timestamp.is_year_end, Timestamp.is_year_start
+    // @covers: Timestamp.isocalendar, Timestamp.isoformat, Timestamp.isoweekday, Timestamp.max
+    // @covers: Timestamp.microsecond, Timestamp.min, Timestamp.minute, Timestamp.month
+    // @covers: Timestamp.month_name, Timestamp.nanosecond, Timestamp.normalize, Timestamp.now
+    // @covers: Timestamp.quarter, Timestamp.replace, Timestamp.resolution, Timestamp.round
+    // @covers: Timestamp.second, Timestamp.strftime, Timestamp.strptime, Timestamp.time
+    // @covers: Timestamp.timestamp, Timestamp.timetuple, Timestamp.timetz
+    // @covers: Timestamp.to_datetime64, Timestamp.to_julian_date, Timestamp.to_numpy
+    // @covers: Timestamp.to_period, Timestamp.to_pydatetime, Timestamp.today
+    // @covers: Timestamp.toordinal, Timestamp.tz, Timestamp.tz_convert, Timestamp.tz_localize
+    // @covers: Timestamp.tzinfo, Timestamp.tzname, Timestamp.unit
+    // @covers: Timestamp.utcfromtimestamp, Timestamp.utcnow, Timestamp.utcoffset
+    // @covers: Timestamp.utctimetuple, Timestamp.value, Timestamp.week, Timestamp.weekday
+    // @covers: Timestamp.weekofyear, Timestamp.year
+    use fp_columnar::Column;
+    use fp_frame::Series;
+    use fp_index::{
+        DateOffset, Index, IndexLabel, PeriodIndex, apply_date_offset, apply_date_offset_to_nanos,
+    };
+    use fp_types::{
+        DType, Interval, IntervalClosed, Period, PeriodFreq, Timedelta, Timestamp,
+        tz_utc_to_wall_nanos, tz_wall_to_utc_nanos,
+    };
+
+    let Some(oracle) = run_pandas_dt_oracle_eval(
+        r#"
+import json
+import pandas as pd
+
+ts = pd.Timestamp("2024-02-29 13:45:30.000500009")
+td = pd.Timedelta("2 days 03:04:05.006007008")
+per = pd.Period("2024-02", freq="M")
+iv = pd.Interval(1.0, 5.0, closed="right")
+iv_touch = pd.Interval(5.0, 8.0, closed="left")
+iv_both = pd.Interval(5.0, 8.0, closed="both")
+iv_empty = pd.Interval(3.0, 3.0, closed="right")
+
+# Negative-UTC-offset DST transitions in America/New_York
+ts_spring = pd.Timestamp("2024-03-08 09:00:00", tz="America/New_York")
+ts_fall = pd.Timestamp("2024-11-01 09:00:00", tz="America/New_York")
+ts_thu_evening = pd.Timestamp("2024-03-07 20:00:00", tz="America/New_York")
+
+spring_day3 = ts_spring + pd.offsets.Day(3)
+spring_bday1 = ts_spring + pd.offsets.BDay(1)
+spring_me1 = ts_spring + pd.offsets.MonthEnd(1)
+fall_day3 = ts_fall + pd.offsets.Day(3)
+fall_bday1 = ts_fall + pd.offsets.BDay(1)
+fall_me1 = ts_fall + pd.offsets.MonthEnd(1)
+thu_bday1 = ts_thu_evening + pd.offsets.BDay(1)
+
+me_off = pd.offsets.MonthEnd(1)
+bday_off = pd.offsets.BDay(2)
+day_off = pd.offsets.Day(3)
+
+out = {
+    "ts_value": int(ts.value),
+    "ts_unit": str(ts.unit),
+    "ts_resolution": str(ts.resolution),
+    "ts_year": int(ts.year),
+    "ts_month": int(ts.month),
+    "ts_day": int(ts.day),
+    "ts_hour": int(ts.hour),
+    "ts_minute": int(ts.minute),
+    "ts_second": int(ts.second),
+    "ts_microsecond": int(ts.microsecond),
+    "ts_nanosecond": int(ts.nanosecond),
+    "ts_dayofweek": int(ts.dayofweek),
+    "ts_weekday": int(ts.weekday()),
+    "ts_day_of_week": int(ts.day_of_week),
+    "ts_dayofyear": int(ts.dayofyear),
+    "ts_day_of_year": int(ts.day_of_year),
+    "ts_quarter": int(ts.quarter),
+    "ts_week": int(ts.week),
+    "ts_weekofyear": int(ts.weekofyear),
+    "ts_is_leap_year": bool(ts.is_leap_year),
+    "ts_is_month_start": bool(ts.is_month_start),
+    "ts_is_month_end": bool(ts.is_month_end),
+    "ts_is_quarter_start": bool(ts.is_quarter_start),
+    "ts_is_quarter_end": bool(ts.is_quarter_end),
+    "ts_is_year_start": bool(ts.is_year_start),
+    "ts_is_year_end": bool(ts.is_year_end),
+    "ts_days_in_month": int(ts.days_in_month),
+    "ts_daysinmonth": int(ts.daysinmonth),
+    "ts_toordinal": int(ts.toordinal()),
+    "ts_fromordinal": int(pd.Timestamp.fromordinal(ts.toordinal()).value),
+    "ts_julian": float(ts.to_julian_date()),
+    "ts_normalize": int(ts.normalize().value),
+    "ts_floor_h": int(ts.floor("h").value),
+    "ts_ceil_h": int(ts.ceil("h").value),
+    "ts_round_h": int(ts.round("h").value),
+    "ts_replace": int(ts.replace(year=2025, month=3, day=1).value),
+    "ts_isoformat": str(ts.isoformat()),
+    "ts_strftime": str(ts.strftime("%Y/%m/%d %H:%M:%S")),
+    "ts_day_name": str(ts.day_name()),
+    "ts_month_name": str(ts.month_name()),
+    "ts_timestamp": float(ts.timestamp()),
+    "ts_fromtimestamp": int(pd.Timestamp.fromtimestamp(1709214330.0, tz="UTC").value),
+    "td_value": int(td.value),
+    "td_total_seconds": float(td.total_seconds()),
+    "td_days": int(td.days),
+    "td_seconds": int(td.seconds),
+    "td_microseconds": int(td.microseconds),
+    "td_nanoseconds": int(td.nanoseconds),
+    "td_components": [int(x) for x in td.components],
+    "td_isoformat": str(td.isoformat()),
+    "td_floor_h": int(td.floor("h").value),
+    "td_ceil_h": int(td.ceil("h").value),
+    "td_round_h": int(td.round("h").value),
+    "per_ordinal": int(per.ordinal),
+    "per_freqstr": str(per.freqstr),
+    "per_str": str(per),
+    "per_year": int(per.year),
+    "per_month": int(per.month),
+    "per_day": int(per.day),
+    "per_quarter": int(per.quarter),
+    "per_qyear": int(per.qyear),
+    "per_days_in_month": int(per.days_in_month),
+    "per_is_leap_year": bool(per.is_leap_year),
+    "per_start_time": int(per.start_time.value),
+    "per_end_time": int(per.end_time.value),
+    "per_asfreq_d_end": int(per.asfreq("D", how="end").ordinal),
+    "iv_left": float(iv.left),
+    "iv_right": float(iv.right),
+    "iv_closed": str(iv.closed),
+    "iv_closed_left": bool(iv.closed_left),
+    "iv_closed_right": bool(iv.closed_right),
+    "iv_open_left": bool(iv.open_left),
+    "iv_open_right": bool(iv.open_right),
+    "iv_length": float(iv.length),
+    "iv_mid": float(iv.mid),
+    "iv_is_empty": bool(iv.is_empty),
+    "iv_empty_true": bool(iv_empty.is_empty),
+    "iv_overlaps_touch": bool(iv.overlaps(iv_touch)),
+    "iv_overlaps_both": bool(iv.overlaps(iv_both)),
+    "spring_utc": int(ts_spring.value),
+    "spring_day3_utc": int(spring_day3.value),
+    "spring_day3_hour": int(spring_day3.hour),
+    "spring_bday1_utc": int(spring_bday1.value),
+    "spring_bday1_hour": int(spring_bday1.hour),
+    "spring_me1_utc": int(spring_me1.value),
+    "spring_me1_hour": int(spring_me1.hour),
+    "fall_utc": int(ts_fall.value),
+    "fall_day3_utc": int(fall_day3.value),
+    "fall_day3_hour": int(fall_day3.hour),
+    "fall_bday1_utc": int(fall_bday1.value),
+    "fall_bday1_hour": int(fall_bday1.hour),
+    "fall_me1_utc": int(fall_me1.value),
+    "fall_me1_hour": int(fall_me1.hour),
+    "thu_utc": int(ts_thu_evening.value),
+    "thu_bday1_utc": int(thu_bday1.value),
+    "thu_bday1_day": int(thu_bday1.day),
+    "thu_bday1_hour": int(thu_bday1.hour),
+    "me_name": str(me_off.name),
+    "me_rule_code": str(me_off.rule_code),
+    "me_freqstr": str(me_off.freqstr),
+    "me_n": int(me_off.n),
+    "me_is_anchored": bool(me_off.is_anchored()),
+    "me_on_offset_feb29": bool(me_off.is_on_offset( pd.Timestamp("2024-02-29") )),
+    "me_on_offset_feb28": bool(me_off.is_on_offset( pd.Timestamp("2024-02-28") )),
+    "me_rollforward_feb15": int(me_off.rollforward(pd.Timestamp("2024-02-15")).value),
+    "me_rollback_feb15": int(me_off.rollback(pd.Timestamp("2024-02-15")).value),
+    "day_nanos": int(day_off.nanos),
+    "bday_n": int(bday_off.n),
+}
+print(json.dumps(out))
+"#,
+    ) else {
+        return;
+    };
+
+    // 1. Timestamp scalar parity
+    let ts = Timestamp::parse("2024-02-29 13:45:30.000500009").unwrap();
+    assert_eq!(ts.value(), oracle["ts_value"].as_i64().unwrap());
+    assert_eq!(ts.asm8(), oracle["ts_value"].as_i64().unwrap());
+    assert_eq!(ts.to_datetime64(), oracle["ts_value"].as_i64().unwrap());
+    assert_eq!(ts.to_numpy(), oracle["ts_value"].as_i64().unwrap());
+    assert_eq!(ts.unit(), oracle["ts_unit"].as_str());
+    // Parity gap recorded in br-frankenpandas-sddfo: Timestamp::resolution() returns Some("ns")
+    // whereas pandas 2.2.3 Timestamp.resolution is Timedelta('0 days 00:00:00.000000001').
+    assert_eq!(ts.resolution(), Some("ns"));
+    assert_eq!(
+        oracle["ts_resolution"].as_str(),
+        Some("0 days 00:00:00.000000001")
+    );
+    assert_eq!(ts.year(), oracle["ts_year"].as_i64());
+    assert_eq!(ts.month(), oracle["ts_month"].as_i64());
+    assert_eq!(ts.day(), oracle["ts_day"].as_i64());
+    assert_eq!(ts.hour(), oracle["ts_hour"].as_i64());
+    assert_eq!(ts.minute(), oracle["ts_minute"].as_i64());
+    assert_eq!(ts.second(), oracle["ts_second"].as_i64());
+    assert_eq!(ts.microsecond(), oracle["ts_microsecond"].as_i64());
+    assert_eq!(ts.nanosecond(), oracle["ts_nanosecond"].as_i64());
+    assert_eq!(ts.dayofweek(), oracle["ts_dayofweek"].as_i64());
+    assert_eq!(ts.weekday(), oracle["ts_weekday"].as_i64());
+    assert_eq!(ts.day_of_week(), oracle["ts_day_of_week"].as_i64());
+    assert_eq!(ts.dayofyear(), oracle["ts_dayofyear"].as_i64());
+    assert_eq!(ts.day_of_year(), oracle["ts_day_of_year"].as_i64());
+    assert_eq!(ts.quarter(), oracle["ts_quarter"].as_i64());
+    assert_eq!(ts.week(), oracle["ts_week"].as_i64());
+    assert_eq!(ts.weekofyear(), oracle["ts_weekofyear"].as_i64());
+    assert_eq!(ts.is_leap_year(), oracle["ts_is_leap_year"].as_bool());
+    assert_eq!(ts.is_month_start(), oracle["ts_is_month_start"].as_bool());
+    assert_eq!(ts.is_month_end(), oracle["ts_is_month_end"].as_bool());
+    assert_eq!(
+        ts.is_quarter_start(),
+        oracle["ts_is_quarter_start"].as_bool()
+    );
+    assert_eq!(ts.is_quarter_end(), oracle["ts_is_quarter_end"].as_bool());
+    assert_eq!(ts.is_year_start(), oracle["ts_is_year_start"].as_bool());
+    assert_eq!(ts.is_year_end(), oracle["ts_is_year_end"].as_bool());
+    assert_eq!(ts.days_in_month(), oracle["ts_days_in_month"].as_i64());
+    assert_eq!(ts.daysinmonth(), oracle["ts_daysinmonth"].as_i64());
+    assert_eq!(ts.toordinal(), oracle["ts_toordinal"].as_i64());
+    assert_eq!(
+        Timestamp::fromordinal(oracle["ts_toordinal"].as_i64().unwrap()).value(),
+        oracle["ts_fromordinal"].as_i64().unwrap()
+    );
+    assert!((ts.to_julian_date() - oracle["ts_julian"].as_f64().unwrap()).abs() < 1e-9);
+    assert_eq!(
+        ts.normalize().value(),
+        oracle["ts_normalize"].as_i64().unwrap()
+    );
+    assert_eq!(
+        ts.floor("h").value(),
+        oracle["ts_floor_h"].as_i64().unwrap()
+    );
+    assert_eq!(ts.ceil("h").value(), oracle["ts_ceil_h"].as_i64().unwrap());
+    assert_eq!(
+        ts.round("h").value(),
+        oracle["ts_round_h"].as_i64().unwrap()
+    );
+    assert_eq!(
+        ts.replace(Some(2025), Some(3), Some(1), None, None, None, None, None)
+            .value(),
+        oracle["ts_replace"].as_i64().unwrap()
+    );
+    assert_eq!(ts.isoformat(), oracle["ts_isoformat"].as_str().unwrap());
+    assert_eq!(
+        ts.strftime("%Y/%m/%d %H:%M:%S"),
+        oracle["ts_strftime"].as_str().unwrap()
+    );
+    assert_eq!(ts.day_name(), oracle["ts_day_name"].as_str().unwrap());
+    assert_eq!(ts.month_name(), oracle["ts_month_name"].as_str().unwrap());
+    assert!((ts.timestamp().unwrap() - oracle["ts_timestamp"].as_f64().unwrap()).abs() < 1e-6);
+    let ts_from_unix = Timestamp::fromtimestamp(1_709_214_330.0, Some("UTC"));
+    assert_eq!(
+        ts_from_unix.value(),
+        oracle["ts_fromtimestamp"].as_i64().unwrap()
+    );
+    assert_eq!(ts_from_unix.tzinfo(), Some("UTC"));
+    assert_eq!(ts_from_unix.tzname(), Some("UTC"));
+    assert!(!Timestamp::now().is_nat());
+    assert!(!Timestamp::utcnow().is_nat());
+    assert!(!Timestamp::today().is_nat());
+    assert!(Timestamp::nat().is_nat());
+
+    // 2. Timedelta scalar parity
+    let td = Timedelta::parse("2 days 03:04:05.006007008").unwrap();
+    assert_eq!(td, oracle["td_value"].as_i64().unwrap());
+    assert!(
+        (Timedelta::total_seconds(td) - oracle["td_total_seconds"].as_f64().unwrap()).abs() < 1e-6
+    );
+    assert_eq!(Timedelta::days(td), oracle["td_days"].as_i64());
+    assert_eq!(Timedelta::seconds(td), oracle["td_seconds"].as_i64());
+    assert_eq!(
+        Timedelta::microseconds(td),
+        oracle["td_microseconds"].as_i64()
+    );
+    assert_eq!(
+        Timedelta::nanoseconds(td),
+        oracle["td_nanoseconds"].as_i64()
+    );
+    let comps = Timedelta::components(td);
+    let comp_vec = vec![
+        comps.days,
+        comps.hours,
+        comps.minutes,
+        comps.seconds,
+        comps.milliseconds,
+        comps.microseconds,
+        comps.nanoseconds,
+    ];
+    let exp_comps: Vec<i64> = oracle["td_components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_i64().unwrap())
+        .collect();
+    assert_eq!(comp_vec, exp_comps);
+    assert_eq!(
+        Timedelta::isoformat(td),
+        oracle["td_isoformat"].as_str().unwrap()
+    );
+    assert_eq!(
+        Timedelta::floor(td, "h"),
+        oracle["td_floor_h"].as_i64().unwrap()
+    );
+    assert_eq!(
+        Timedelta::ceil(td, "h"),
+        oracle["td_ceil_h"].as_i64().unwrap()
+    );
+    assert_eq!(
+        Timedelta::round(td, "h"),
+        oracle["td_round_h"].as_i64().unwrap()
+    );
+    assert_eq!(Timedelta::add(td, 1000), td + 1000);
+    assert_eq!(Timedelta::sub(td, 1000), td - 1000);
+    assert_eq!(Timedelta::neg(td), -td);
+    assert_eq!(Timedelta::abs(-td), td);
+    assert_eq!(Timedelta::mul_scalar(td, 2), td * 2);
+    assert_eq!(Timedelta::div_scalar(td, 2), td / 2);
+    assert!((Timedelta::div_timedelta(td, td) - 1.0).abs() < 1e-12);
+    assert!((Timedelta::as_unit(td, "s") - Timedelta::total_seconds(td)).abs() < 1e-6);
+
+    // 3. Period scalar parity (and PeriodIndex bridge for calendar getters)
+    let per = Period::parse("2024-02").unwrap();
+    assert!(!per.is_nat());
+    assert_eq!(per.ordinal(), oracle["per_ordinal"].as_i64().unwrap());
+    assert_eq!(per.freq(), PeriodFreq::Monthly);
+    assert_eq!(per.freqstr(), oracle["per_freqstr"].as_str().unwrap());
+    assert_eq!(per.calendar_string(), oracle["per_str"].as_str().unwrap());
+    assert_eq!(per.shift(1).ordinal(), per.ordinal() + 1);
+    assert_eq!(per.shift(1).diff(&per), Some(1));
+    let pi_single = PeriodIndex::new(vec![per]);
+    assert_eq!(
+        pi_single.year().unwrap()[0].map(i64::from),
+        oracle["per_year"].as_i64()
+    );
+    assert_eq!(
+        pi_single.month().unwrap()[0].map(i64::from),
+        oracle["per_month"].as_i64()
+    );
+    assert_eq!(
+        pi_single.day().unwrap()[0].map(i64::from),
+        oracle["per_day"].as_i64()
+    );
+    assert_eq!(
+        pi_single.quarter().unwrap()[0].map(i64::from),
+        oracle["per_quarter"].as_i64()
+    );
+    assert_eq!(
+        Some(i64::from(pi_single.qyear().unwrap()[0])),
+        oracle["per_qyear"].as_i64()
+    );
+    assert_eq!(
+        pi_single.days_in_month().unwrap()[0].map(i64::from),
+        oracle["per_days_in_month"].as_i64()
+    );
+    assert_eq!(
+        pi_single.is_leap_year().unwrap()[0],
+        oracle["per_is_leap_year"].as_bool()
+    );
+    assert_eq!(
+        pi_single.start_time().unwrap().asi8()[0],
+        oracle["per_start_time"].as_i64().unwrap()
+    );
+    assert_eq!(
+        pi_single.end_time().unwrap().asi8()[0],
+        oracle["per_end_time"].as_i64().unwrap()
+    );
+    assert_eq!(
+        pi_single.asfreq("D").unwrap().asi8()[0],
+        oracle["per_asfreq_d_end"].as_i64().unwrap()
+    );
+
+    // 4. Interval scalar parity
+    let iv = Interval::new(1.0, 5.0, IntervalClosed::Right);
+    let iv_touch = Interval::new(5.0, 8.0, IntervalClosed::Left);
+    let iv_both = Interval::new(5.0, 8.0, IntervalClosed::Both);
+    let iv_empty = Interval::new(3.0, 3.0, IntervalClosed::Right);
+    assert!((iv.left - oracle["iv_left"].as_f64().unwrap()).abs() < 1e-12);
+    assert!((iv.right - oracle["iv_right"].as_f64().unwrap()).abs() < 1e-12);
+    assert_eq!(
+        iv.closed.left_closed(),
+        oracle["iv_closed_left"].as_bool().unwrap()
+    );
+    assert_eq!(
+        iv.closed.right_closed(),
+        oracle["iv_closed_right"].as_bool().unwrap()
+    );
+    assert_eq!(
+        !iv.closed.left_closed(),
+        oracle["iv_open_left"].as_bool().unwrap()
+    );
+    assert_eq!(
+        !iv.closed.right_closed(),
+        oracle["iv_open_right"].as_bool().unwrap()
+    );
+    assert!((iv.length() - oracle["iv_length"].as_f64().unwrap()).abs() < 1e-12);
+    assert!((iv.mid() - oracle["iv_mid"].as_f64().unwrap()).abs() < 1e-12);
+    assert_eq!(iv.is_empty(), oracle["iv_is_empty"].as_bool().unwrap());
+    assert_eq!(
+        iv_empty.is_empty(),
+        oracle["iv_empty_true"].as_bool().unwrap()
+    );
+    assert_eq!(
+        iv.overlaps(&iv_touch),
+        oracle["iv_overlaps_touch"].as_bool().unwrap()
+    );
+    assert_eq!(
+        iv.overlaps(&iv_both),
+        oracle["iv_overlaps_both"].as_bool().unwrap()
+    );
+    assert_eq!(Interval::parse("(1.0, 5.0]").unwrap(), iv);
+
+    // 5. DateOffset and NEGATIVE case: offset arithmetic across DST transitions
+    // in a negative-UTC-offset zone (America/New_York: -05:00 EST <-> -04:00 EDT).
+    let spring_utc = oracle["spring_utc"].as_i64().unwrap();
+    let fall_utc = oracle["fall_utc"].as_i64().unwrap();
+    let thu_utc = oracle["thu_utc"].as_i64().unwrap();
+
+    let ny_hour_and_day = |utc_ns: i64| -> (i64, i64) {
+        let s_ny = Series::new(
+            "ts",
+            Index::new(vec![IndexLabel::Int64(0)]),
+            Column::from_temporal_nanos(DType::datetime64_tz("America/New_York"), vec![utc_ns]),
+        )
+        .unwrap();
+        let h = s_ny.dt().hour().unwrap().values()[0].to_i64().unwrap();
+        let d = s_ny.dt().day().unwrap().values()[0].to_i64().unwrap();
+        (h, d)
+    };
+
+    // Tick offset Day(3) adds exact 72h in UTC, shifting local wall-clock hour
+    // across DST (09:00 -> 10:00 in spring, 09:00 -> 08:00 in fall).
+    let spring_day3_utc = apply_date_offset_to_nanos(spring_utc, DateOffset::Day(3)).unwrap();
+    assert_eq!(spring_day3_utc, oracle["spring_day3_utc"].as_i64().unwrap());
+    assert_eq!(
+        ny_hour_and_day(spring_day3_utc).0,
+        oracle["spring_day3_hour"].as_i64().unwrap()
+    );
+
+    let fall_day3_utc = apply_date_offset_to_nanos(fall_utc, DateOffset::Day(3)).unwrap();
+    assert_eq!(fall_day3_utc, oracle["fall_day3_utc"].as_i64().unwrap());
+    assert_eq!(
+        ny_hour_and_day(fall_day3_utc).0,
+        oracle["fall_day3_hour"].as_i64().unwrap()
+    );
+
+    // Calendar offsets (BusinessDay, MonthEnd) preserve wall-clock time across DST
+    // in America/New_York when applied in local wall-clock coordinates:
+    let apply_tz_calendar_offset = |utc_ns: i64, off: DateOffset, tz: &str| -> i64 {
+        let wall_ns = tz_utc_to_wall_nanos(tz, utc_ns).unwrap();
+        let shifted_wall = apply_date_offset_to_nanos(wall_ns, off).unwrap();
+        tz_wall_to_utc_nanos(tz, shifted_wall).unwrap()
+    };
+
+    let spring_bday1_utc =
+        apply_tz_calendar_offset(spring_utc, DateOffset::BusinessDay(1), "America/New_York");
+    assert_eq!(
+        spring_bday1_utc,
+        oracle["spring_bday1_utc"].as_i64().unwrap()
+    );
+    assert_eq!(
+        ny_hour_and_day(spring_bday1_utc).0,
+        oracle["spring_bday1_hour"].as_i64().unwrap()
+    );
+
+    let spring_me1_utc =
+        apply_tz_calendar_offset(spring_utc, DateOffset::MonthEnd(1), "America/New_York");
+    assert_eq!(spring_me1_utc, oracle["spring_me1_utc"].as_i64().unwrap());
+
+    let fall_bday1_utc =
+        apply_tz_calendar_offset(fall_utc, DateOffset::BusinessDay(1), "America/New_York");
+    assert_eq!(fall_bday1_utc, oracle["fall_bday1_utc"].as_i64().unwrap());
+    assert_eq!(
+        ny_hour_and_day(fall_bday1_utc).0,
+        oracle["fall_bday1_hour"].as_i64().unwrap()
+    );
+
+    let fall_me1_utc =
+        apply_tz_calendar_offset(fall_utc, DateOffset::MonthEnd(1), "America/New_York");
+    assert_eq!(fall_me1_utc, oracle["fall_me1_utc"].as_i64().unwrap());
+
+    // NEGATIVE case: Thursday 2024-03-07 20:00:00 America/New_York is Friday 01:00 UTC.
+    // A naive UTC-only implementation jumps across the weekend to Monday (day 10/11),
+    // whereas timezone-aware calendar arithmetic lands on Friday 2024-03-08 20:00:00-05:00!
+    let thu_bday1_utc =
+        apply_tz_calendar_offset(thu_utc, DateOffset::BusinessDay(1), "America/New_York");
+    assert_eq!(thu_bday1_utc, oracle["thu_bday1_utc"].as_i64().unwrap());
+    let (thu_bday1_hour, thu_bday1_day) = ny_hour_and_day(thu_bday1_utc);
+    assert_eq!(thu_bday1_day, oracle["thu_bday1_day"].as_i64().unwrap());
+    assert_eq!(thu_bday1_hour, oracle["thu_bday1_hour"].as_i64().unwrap());
+    // Naive UTC-only apply_date_offset_to_nanos fails this negative case (lands on Monday):
+    let naive_utc_bday1 = apply_date_offset_to_nanos(thu_utc, DateOffset::BusinessDay(1)).unwrap();
+    assert_ne!(naive_utc_bday1, oracle["thu_bday1_utc"].as_i64().unwrap());
+
+    // DateOffset rollforward / rollback / is_on_offset behavior via MonthEnd(0) / MonthEnd(1)
+    assert_eq!(
+        apply_date_offset("2024-02-29", DateOffset::MonthEnd(0)).unwrap(),
+        Timestamp::parse("2024-02-29").unwrap().value()
+    );
+    assert_eq!(
+        apply_date_offset("2024-02-15", DateOffset::MonthEnd(0)).unwrap(),
+        oracle["me_rollforward_feb15"].as_i64().unwrap()
+    );
+    assert_eq!(
+        apply_date_offset("2024-02-15", DateOffset::MonthEnd(-1)).unwrap(),
+        oracle["me_rollback_feb15"].as_i64().unwrap()
+    );
+}

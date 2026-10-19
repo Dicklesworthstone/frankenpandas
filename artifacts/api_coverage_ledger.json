@@ -3835,116 +3835,154 @@
     },
     "DateOffset": {
       "base": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "copy": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "freqstr": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_anchored": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_month_end": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_month_start": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_on_offset": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_quarter_end": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_quarter_start": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_year_end": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_year_start": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "kwds": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "n": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "name": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "nanos": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "normalize": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "rollback": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "rollforward": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "rule_code": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       }
@@ -6300,68 +6338,90 @@
     },
     "Interval": {
       "closed": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "closed_left": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "closed_right": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_empty": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "left": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "length": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "mid": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "open_left": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "open_right": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "overlaps": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "right": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       }
@@ -8277,164 +8337,218 @@
     },
     "Period": {
       "asfreq": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "day": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "day_of_week": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "day_of_year": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "dayofweek": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "dayofyear": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "days_in_month": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "daysinmonth": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "end_time": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "freq": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "freqstr": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "hour": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_leap_year": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "minute": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "month": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "now": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ordinal": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "quarter": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "qyear": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "second": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "start_time": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "strftime": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_timestamp": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "week": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "weekday": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "weekofyear": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "year": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       }
@@ -15072,134 +15186,178 @@
     },
     "Timedelta": {
       "as_unit": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "asm8": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ceil": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "components": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "days": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "floor": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "isoformat": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "max": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "microseconds": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "min": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "nanoseconds": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "resolution": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "resolution_string": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "round": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "seconds": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_numpy": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_pytimedelta": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_timedelta64": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "total_seconds": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "unit": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "value": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "view": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       }
@@ -16176,466 +16334,620 @@
     },
     "Timestamp": {
       "as_unit": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "asm8": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "astimezone": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ceil": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "combine": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ctime": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "date": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "day": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "day_name": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "day_of_week": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "day_of_year": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "dayofweek": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "dayofyear": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "days_in_month": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "daysinmonth": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "dst": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "floor": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "fold": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "fromisocalendar": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "fromisoformat": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "fromordinal": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "fromtimestamp": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "hour": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_leap_year": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_month_end": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_month_start": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_quarter_end": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_quarter_start": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_year_end": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "is_year_start": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "isocalendar": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "isoformat": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "isoweekday": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "max": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "microsecond": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "min": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "minute": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "month": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "month_name": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "nanosecond": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "normalize": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "now": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "quarter": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "replace": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "resolution": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "round": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "second": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "strftime": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "strptime": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "time": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "timestamp": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "timetuple": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "timetz": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_datetime64": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_julian_date": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_numpy": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_period": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_pydatetime": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "today": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "toordinal": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "tz": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "tz_convert": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "tz_localize": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "tzinfo": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "tzname": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "unit": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "utcfromtimestamp": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "utcnow": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "utcoffset": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "utctimetuple": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "value": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "week": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "weekday": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "weekofyear": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "year": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_datetime.rs::live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       }
     },
     "pandas_top_level": {
       "array": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "bdate_range": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
@@ -16646,104 +16958,137 @@
           "crates/fp-conformance/src/tests/conformance_merge_join_concat.rs::conformance_concat_axis0_large_ordered_blocks",
           "crates/fp-conformance/src/tests/conformance_merge_join_concat.rs::conformance_concat_axis0_outer_column_union",
           "crates/fp-conformance/src/tests/conformance_merge_join_concat.rs::conformance_concat_axis1_outer_index_alignment",
-          "crates/fp-conformance/src/tests/conformance_merge_join_concat.rs::conformance_concat_axis1_outer_int_columns_promote_to_float"
+          "crates/fp-conformance/src/tests/conformance_merge_join_concat.rs::conformance_concat_axis1_outer_int_columns_promote_to_float",
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
         ],
         "packets": [],
         "skipped_tests": []
       },
       "crosstab": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "cut": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "date_range": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "describe_option": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "eval": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "factorize": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "from_dummies": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_dummies": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_option": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "infer_freq": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "interval_range": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "isna": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "isnull": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "json_normalize": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "lreshape": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "melt": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
@@ -16754,254 +17099,337 @@
           "crates/fp-conformance/src/tests/conformance_merge_join_concat.rs::conformance_merge_inner_empty_left",
           "crates/fp-conformance/src/tests/conformance_merge_join_concat.rs::conformance_merge_inner_null_keys_match",
           "crates/fp-conformance/src/tests/conformance_merge_join_concat.rs::conformance_merge_left_single_row_mixed_dtypes",
-          "crates/fp-conformance/src/tests/conformance_merge_join_concat.rs::conformance_merge_outer_sort_true_with_suffixes"
+          "crates/fp-conformance/src/tests/conformance_merge_join_concat.rs::conformance_merge_outer_sort_true_with_suffixes",
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
         ],
         "packets": [],
         "skipped_tests": []
       },
       "merge_asof": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "merge_ordered": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "notna": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "notnull": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "period_range": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "pivot": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "pivot_table": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "qcut": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_clipboard": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_csv": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_excel": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_feather": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_fwf": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_gbq": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_hdf": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_html": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_json": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_orc": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_parquet": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_pickle": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_sas": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_spss": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_sql": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_sql_query": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_sql_table": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_stata": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_table": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "read_xml": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "reset_option": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "set_eng_float_format": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "set_option": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "show_versions": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "test": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "timedelta_range": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_datetime": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_numeric": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_pickle": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "to_timedelta": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "unique": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "value_counts": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "wide_to_long": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_reshape.rs::live_oracle_pandas_top_level_functions_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       }
@@ -17039,18 +17467,18 @@
         "uncovered": 2
       },
       "scalar_offset": {
-        "covered_live": 0,
+        "covered_live": 154,
         "packet_only": 0,
         "skipped_only": 0,
         "total": 154,
-        "uncovered": 154
+        "uncovered": 0
       },
       "top_level": {
-        "covered_live": 2,
+        "covered_live": 61,
         "packet_only": 0,
         "skipped_only": 0,
         "total": 61,
-        "uncovered": 59
+        "uncovered": 0
       }
     },
     "by_surface": {
@@ -17082,13 +17510,13 @@
         "zero": 0
       },
       "DateOffset": {
-        "covered_live": 0,
+        "covered_live": 19,
         "family": "scalar_offset",
-        "full": 0,
+        "full": 19,
         "packet_only": 0,
         "skipped_only": 0,
         "total": 19,
-        "zero": 19
+        "zero": 0
       },
       "DatetimeIndex": {
         "covered_live": 154,
@@ -17127,13 +17555,13 @@
         "zero": 0
       },
       "Interval": {
-        "covered_live": 0,
+        "covered_live": 11,
         "family": "scalar_offset",
-        "full": 0,
+        "full": 11,
         "packet_only": 0,
         "skipped_only": 0,
         "total": 11,
-        "zero": 11
+        "zero": 0
       },
       "IntervalIndex": {
         "covered_live": 120,
@@ -17154,13 +17582,13 @@
         "zero": 0
       },
       "Period": {
-        "covered_live": 0,
+        "covered_live": 27,
         "family": "scalar_offset",
-        "full": 0,
+        "full": 27,
         "packet_only": 0,
         "skipped_only": 0,
         "total": 27,
-        "zero": 27
+        "zero": 0
       },
       "PeriodIndex": {
         "covered_live": 130,
@@ -17271,13 +17699,13 @@
         "zero": 0
       },
       "Timedelta": {
-        "covered_live": 0,
+        "covered_live": 22,
         "family": "scalar_offset",
-        "full": 0,
+        "full": 22,
         "packet_only": 0,
         "skipped_only": 0,
         "total": 22,
-        "zero": 22
+        "zero": 0
       },
       "TimedeltaIndex": {
         "covered_live": 121,
@@ -17289,31 +17717,31 @@
         "zero": 0
       },
       "Timestamp": {
-        "covered_live": 0,
+        "covered_live": 75,
         "family": "scalar_offset",
-        "full": 0,
+        "full": 75,
         "packet_only": 0,
         "skipped_only": 0,
         "total": 75,
-        "zero": 75
+        "zero": 0
       },
       "pandas_top_level": {
-        "covered_live": 2,
+        "covered_live": 61,
         "family": "top_level",
-        "full": 2,
+        "full": 61,
         "packet_only": 0,
         "skipped_only": 0,
         "total": 61,
-        "zero": 59
+        "zero": 0
       }
     },
-    "covered_live": 1502,
-    "live_coverage_percent": 77.42,
+    "covered_live": 1715,
+    "live_coverage_percent": 88.4,
     "packet_only": 27,
-    "packet_or_live_coverage_percent": 78.81,
+    "packet_or_live_coverage_percent": 89.79,
     "skipped_only": 0,
     "surface_count": 28,
     "total_members": 1940,
-    "uncovered": 411
+    "uncovered": 198
   }
 }
