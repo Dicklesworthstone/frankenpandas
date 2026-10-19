@@ -317,18 +317,6 @@ fn run_pandas_oracle_eval(code: &str) -> Option<serde_json::Value> {
     }
     let cfg = strict_config();
     let python = &cfg.python_bin;
-    let ver_ok = std::process::Command::new(python)
-        .args([
-            "-c",
-            "import pandas, sys; sys.exit(0 if pandas.__version__ == '2.2.3' else 1)",
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .ok()?;
-    if !ver_ok.success() {
-        return None;
-    }
     let mut child = std::process::Command::new(python)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -336,6 +324,8 @@ fn run_pandas_oracle_eval(code: &str) -> Option<serde_json::Value> {
         .spawn()
         .ok()?;
     if let Some(mut stdin) = child.stdin.take() {
+        let guard = b"import pandas, sys\nif pandas.__version__ != '2.2.3':\n    print('\"__SKIP_VERSION__\"')\n    sys.exit(0)\n";
+        let _ = stdin.write_all(guard);
         let _ = stdin.write_all(code.as_bytes());
     }
     let output = child.wait_with_output().ok()?;
@@ -346,7 +336,12 @@ fn run_pandas_oracle_eval(code: &str) -> Option<serde_json::Value> {
         String::from_utf8_lossy(&output.stderr),
         String::from_utf8_lossy(&output.stdout),
     );
-    Some(serde_json::from_slice(&output.stdout).expect("valid index oracle json"))
+    let val: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("valid index oracle json");
+    if val.as_str() == Some("__SKIP_VERSION__") {
+        return None;
+    }
+    Some(val)
 }
 
 fn index_to_f64_vec(idx: &fp_index::Index) -> Vec<f64> {

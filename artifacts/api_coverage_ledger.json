@@ -5185,32 +5185,41 @@
     },
     "Expanding": {
       "agg": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "aggregate": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "apply": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "corr": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "count": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_expanding_count_with_nulls"
         ],
         "packets": [
@@ -5220,26 +5229,33 @@
         "skipped_tests": []
       },
       "cov": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "exclusions": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "kurt": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "max": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_expanding_max_default"
         ],
         "packets": [
@@ -5251,6 +5267,7 @@
       "mean": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_expanding_mean_default"
         ],
         "packets": [
@@ -5260,14 +5277,17 @@
         "skipped_tests": []
       },
       "median": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "min": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_expanding_min_default"
         ],
         "packets": [
@@ -5277,14 +5297,17 @@
         "skipped_tests": []
       },
       "ndim": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "quantile": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_expanding_quantile"
         ],
         "packets": [
@@ -5294,26 +5317,33 @@
         "skipped_tests": []
       },
       "rank": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "sem": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "skew": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "std": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_expanding_std"
         ],
         "packets": [
@@ -5325,6 +5355,7 @@
       "sum": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_expanding_sum_default"
         ],
         "packets": [
@@ -5336,6 +5367,7 @@
       "var": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_expanding_var"
         ],
         "packets": [
@@ -5347,38 +5379,49 @@
     },
     "ExponentialMovingWindow": {
       "agg": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_ewm_full_surface_options_and_online_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "aggregate": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_ewm_full_surface_options_and_online_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "corr": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_ewm_full_surface_options_and_online_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "cov": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_ewm_full_surface_options_and_online_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "exclusions": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_ewm_full_surface_options_and_online_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "mean": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_ewm_full_surface_options_and_online_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_ewm_mean_alpha_05",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_ewm_mean_span"
         ],
@@ -5389,32 +5432,42 @@
         "skipped_tests": []
       },
       "ndim": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_ewm_full_surface_options_and_online_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "online": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_ewm_full_surface_options_and_online_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "std": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_ewm_full_surface_options_and_online_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "sum": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_ewm_full_surface_options_and_online_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "var": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_ewm_full_surface_options_and_online_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       }
@@ -10285,26 +10338,34 @@
     },
     "Resampler": {
       "agg": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "aggregate": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "apply": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "asfreq": {
-        "last_result": "packet_only",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [
           "fp_p2d_471_series_resample_asfreq_gap_strict",
           "fp_p2d_478_series_resample_asfreq_first_bin_empty_strict"
@@ -10312,8 +10373,10 @@
         "skipped_tests": []
       },
       "bfill": {
-        "last_result": "packet_only",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [
           "fp_p2d_473_series_resample_bfill_gap_strict",
           "fp_p2d_480_series_resample_bfill_first_bin_empty_strict"
@@ -10323,6 +10386,7 @@
       "count": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_resample_count_daily"
         ],
         "packets": [
@@ -10334,14 +10398,18 @@
         "skipped_tests": []
       },
       "exclusions": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ffill": {
-        "last_result": "packet_only",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [
           "fp_p2d_472_series_resample_ffill_limit1_gap_strict",
           "fp_p2d_479_series_resample_ffill_first_bin_empty_strict"
@@ -10349,74 +10417,97 @@
         "skipped_tests": []
       },
       "fillna": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "first": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "get_group": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "grouper": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "groups": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "indices": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "interpolate": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "keys": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "last": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "level": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "max": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "mean": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_resample_mean_weekly",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_resample_mean_daily"
         ],
@@ -10429,86 +10520,113 @@
         "skipped_tests": []
       },
       "median": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "min": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ndim": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "nearest": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ngroups": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "nunique": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "ohlc": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "pipe": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "prod": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "quantile": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "sem": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "size": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "std": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "sum": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_resample_sum_daily",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_resample_sum_monthly",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_resample_sum_daily"
@@ -10533,46 +10651,59 @@
         "skipped_tests": []
       },
       "transform": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "var": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_resampler_full_surface_options_and_tz_offsets_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       }
     },
     "Rolling": {
       "agg": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "aggregate": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "apply": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "corr": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "count": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_rolling_count_window_3"
         ],
         "packets": [
@@ -10582,26 +10713,33 @@
         "skipped_tests": []
       },
       "cov": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "exclusions": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "kurt": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "max": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_rolling_max_min_periods_2",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_rolling_max_window_3"
         ],
@@ -10614,6 +10752,7 @@
       "mean": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_rolling_mean_window_2_min_periods_1",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_dataframe_rolling_mean_window_3",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_rolling_mean_min_periods_1",
@@ -10629,14 +10768,17 @@
         "skipped_tests": []
       },
       "median": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "min": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_rolling_min_min_periods_2",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_rolling_min_window_3"
         ],
@@ -10648,38 +10790,49 @@
         "skipped_tests": []
       },
       "ndim": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "quantile": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "rank": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "sem": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "skew": {
-        "last_result": "uncovered",
-        "live_tests": [],
+        "last_result": "covered_live",
+        "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential"
+        ],
         "packets": [],
         "skipped_tests": []
       },
       "std": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_rolling_std_min_periods_2",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_rolling_std_window_3"
         ],
@@ -10692,6 +10845,7 @@
       "sum": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_rolling_sum_min_periods_2",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_rolling_sum_window_2"
         ],
@@ -10704,6 +10858,7 @@
       "var": {
         "last_result": "covered_live",
         "live_tests": [
+          "crates/fp-conformance/src/tests/conformance_window.rs::live_oracle_rolling_and_expanding_full_surface_differential",
           "crates/fp-conformance/src/tests/live_oracle_dataframe_series_core.rs::live_oracle_series_rolling_var_window_3"
         ],
         "packets": [
@@ -16715,11 +16870,11 @@
         "uncovered": 197
       },
       "groupby_window": {
-        "covered_live": 154,
-        "packet_only": 3,
+        "covered_live": 222,
+        "packet_only": 0,
         "skipped_only": 0,
         "total": 222,
-        "uncovered": 65
+        "uncovered": 0
       },
       "index": {
         "covered_live": 961,
@@ -16790,22 +16945,22 @@
         "zero": 0
       },
       "Expanding": {
-        "covered_live": 8,
+        "covered_live": 20,
         "family": "groupby_window",
-        "full": 8,
+        "full": 20,
         "packet_only": 0,
         "skipped_only": 0,
         "total": 20,
-        "zero": 12
+        "zero": 0
       },
       "ExponentialMovingWindow": {
-        "covered_live": 1,
+        "covered_live": 11,
         "family": "groupby_window",
-        "full": 1,
+        "full": 11,
         "packet_only": 0,
         "skipped_only": 0,
         "total": 11,
-        "zero": 10
+        "zero": 0
       },
       "Index": {
         "covered_live": 101,
@@ -16871,22 +17026,22 @@
         "zero": 0
       },
       "Resampler": {
-        "covered_live": 3,
+        "covered_live": 36,
         "family": "groupby_window",
-        "full": 6,
-        "packet_only": 3,
+        "full": 36,
+        "packet_only": 0,
         "skipped_only": 0,
         "total": 36,
-        "zero": 30
+        "zero": 0
       },
       "Rolling": {
-        "covered_live": 7,
+        "covered_live": 20,
         "family": "groupby_window",
-        "full": 7,
+        "full": 20,
         "packet_only": 0,
         "skipped_only": 0,
         "total": 20,
-        "zero": 13
+        "zero": 0
       },
       "Series": {
         "covered_live": 91,
@@ -16997,13 +17152,13 @@
         "zero": 59
       }
     },
-    "covered_live": 1364,
-    "live_coverage_percent": 70.31,
-    "packet_only": 61,
-    "packet_or_live_coverage_percent": 73.45,
+    "covered_live": 1432,
+    "live_coverage_percent": 73.81,
+    "packet_only": 58,
+    "packet_or_live_coverage_percent": 76.8,
     "skipped_only": 0,
     "surface_count": 28,
     "total_members": 1940,
-    "uncovered": 515
+    "uncovered": 450
   }
 }
