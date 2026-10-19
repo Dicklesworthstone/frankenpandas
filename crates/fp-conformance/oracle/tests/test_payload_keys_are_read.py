@@ -62,6 +62,7 @@ STRUCTURAL_KEYS = {
     "expected_scalar",
     "expected_dtype",
     "expected_error_contains",
+    "expected_error_category",
     "expected_error",
     # FixtureRetirement metadata (crates/fp-conformance/src/lib.rs `retired`).
     # Both run paths return a Retired result BEFORE any OracleRequest is built

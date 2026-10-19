@@ -2255,6 +2255,8 @@ pub struct PacketFixture {
     pub expected_frame: Option<FixtureExpectedDataFrame>,
     #[serde(default)]
     pub expected_error_contains: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_error_category: Option<ExpectedErrorCategory>,
     #[serde(default)]
     pub expected_alignment: Option<FixtureExpectedAlignment>,
     #[serde(default)]
@@ -4317,6 +4319,288 @@ fn classify_oracle_error(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpectedErrorCategory {
+    Type,
+    Value,
+    Key,
+    Index,
+    Io,
+    Unsupported,
+}
+
+impl ExpectedErrorCategory {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Type => "Type",
+            Self::Value => "Value",
+            Self::Key => "Key",
+            Self::Index => "Index",
+            Self::Io => "IO",
+            Self::Unsupported => "Unsupported",
+        }
+    }
+}
+
+#[must_use]
+pub fn classify_python_exception_class_category(exc_class: &str) -> Option<ExpectedErrorCategory> {
+    match exc_class {
+        "TypeError" | "AttributeError" => Some(ExpectedErrorCategory::Type),
+        "ValueError"
+        | "MergeError"
+        | "DuplicateLabelError"
+        | "ParserError"
+        | "EmptyDataError"
+        | "OutOfBoundsDatetime"
+        | "OutOfBoundsTimedelta"
+        | "IntCastingNaNError"
+        | "NullFrequencyError"
+        | "DateParseError"
+        | "OverflowError" => Some(ExpectedErrorCategory::Value),
+        "KeyError" | "UnsortedIndexError" | "UnknownTimeZoneError" => {
+            Some(ExpectedErrorCategory::Key)
+        }
+        "IndexError" | "IndexingError" | "InvalidIndexError" => Some(ExpectedErrorCategory::Index),
+        "OSError" | "IOError" | "FileNotFoundError" | "PermissionError" | "DatabaseError" => {
+            Some(ExpectedErrorCategory::Io)
+        }
+        "NotImplementedError" => Some(ExpectedErrorCategory::Unsupported),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn classify_error_message_category(msg: &str) -> (ExpectedErrorCategory, &'static str) {
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains("no such file or directory")
+        || lower.contains("filenotfounderror")
+        || lower.contains("os error")
+    {
+        return (ExpectedErrorCategory::Io, "FileNotFoundError");
+    }
+    if lower.contains("unalignable boolean series") || lower.contains("too many indexers") {
+        return (ExpectedErrorCategory::Index, "IndexingError");
+    }
+    if lower.contains("reindexing only valid with uniquely valued index")
+        || (lower.contains("duplicate index")
+            && !lower.contains("set_index")
+            && !lower.contains("duplicate index labels"))
+    {
+        return (ExpectedErrorCategory::Index, "InvalidIndexError");
+    }
+    if (lower.contains("out of bounds")
+        && !lower.contains("categorical_from_codes")
+        && !lower.contains("nanosecond timestamp")
+        && !lower.contains("timedelta"))
+        || lower.contains("positional indexers are out-of-bounds")
+        || lower.contains("indices are out-of-bounds")
+        || lower.contains("boolean index has wrong length")
+    {
+        return (ExpectedErrorCategory::Index, "IndexError");
+    }
+    if lower.contains("not implemented")
+        || lower.contains("unimplemented")
+        || (lower.contains("not supported") && lower.contains("pivot_table"))
+    {
+        return (ExpectedErrorCategory::Unsupported, "NotImplementedError");
+    }
+    if (lower.contains("column") && lower.contains("not found"))
+        || lower.contains("loc label not found")
+        || lower.contains("xs key not found")
+        || (lower.contains("group") && lower.contains("not found"))
+        || lower.contains("key not found")
+        || (lower.contains("label") && lower.contains("not found"))
+        || lower.contains("not found in index")
+        || lower.contains("not in index")
+        || lower.contains("not in the [columns]")
+        || lower.contains("not in the [index]")
+        || lower.contains("not found in axis")
+        || lower.trim() == "not found"
+    {
+        return (ExpectedErrorCategory::Key, "KeyError");
+    }
+    if (lower.contains("set_flags") && lower.contains("duplicate"))
+        || lower.contains("duplicatelabelerror")
+        || lower.contains("index has duplicates")
+        || (lower.contains("cannot specify") && lower.contains("allows_duplicate_labels"))
+    {
+        return (ExpectedErrorCategory::Value, "DuplicateLabelError");
+    }
+    if lower.contains("csv error")
+        || lower.contains("parsererror")
+        || lower.contains("error tokenizing data")
+        || lower.contains("eof inside string")
+    {
+        return (ExpectedErrorCategory::Value, "ParserError");
+    }
+    if lower.contains("merge keys are not unique")
+        || lower.contains("not a one-to-one")
+        || lower.contains("not a one-to-many")
+        || lower.contains("not a many-to-one")
+        || lower.contains("join_type='cross'")
+        || lower.contains("can not pass on, right_on, left_on")
+        || lower.contains("incompatible merge")
+    {
+        return (ExpectedErrorCategory::Value, "MergeError");
+    }
+    if lower.contains("cannot convert non-finite values") || lower.contains("intcastingnanerror") {
+        return (ExpectedErrorCategory::Value, "IntCastingNaNError");
+    }
+    if lower.contains("cannot convert tz-naive")
+        || lower.contains("already tz-aware")
+        || lower.contains("can only use .dt accessor")
+        || lower.contains("can only use .str accessor")
+        || lower.contains("can only use .cat accessor")
+        || lower.contains("total_seconds")
+        || lower.contains("cannot reduce non-numeric")
+        || lower.contains("agg function failed")
+        || (lower.contains("could not convert string")
+            && !lower.contains("could not convert string to float"))
+        || lower.contains("not supported between instances of")
+        || lower.contains("between: cannot compare")
+        || lower.contains("invalid comparison between dtype=")
+        || lower.contains("categorical is not ordered for operation")
+        || lower.contains("cannot perform rank with non-ordered categorical")
+        || lower.contains("unordered categoricals can only compare")
+        || lower.contains("numpy boolean subtract")
+        || lower.contains("type does not support")
+        || lower.contains("cannot cast scalar")
+        || lower.contains("cannot cast float")
+        || lower.contains("expected 0/1 for bool cast")
+        || lower.contains("invalid value '-inf' for dtype int64")
+    {
+        return (ExpectedErrorCategory::Type, "TypeError");
+    }
+    (ExpectedErrorCategory::Value, "ValueError")
+}
+
+#[must_use]
+pub fn classify_index_error_category(
+    err: &fp_index::IndexError,
+) -> (ExpectedErrorCategory, &'static str) {
+    match err {
+        fp_index::IndexError::OutOfBounds { .. } => (ExpectedErrorCategory::Index, "IndexError"),
+        fp_index::IndexError::LabelNotFound(_) | fp_index::IndexError::KeyError(_) => {
+            (ExpectedErrorCategory::Key, "KeyError")
+        }
+        fp_index::IndexError::TypeError(_) | fp_index::IndexError::TimeZoneMismatch(_) => {
+            (ExpectedErrorCategory::Type, "TypeError")
+        }
+        fp_index::IndexError::TimeZone(fp_types::TimeZoneError::Unknown(_)) => {
+            (ExpectedErrorCategory::Key, "KeyError")
+        }
+        fp_index::IndexError::TimeZone(_)
+        | fp_index::IndexError::InvalidAlignmentVectors
+        | fp_index::IndexError::LengthMismatch { .. }
+        | fp_index::IndexError::InvalidArgument(_) => (ExpectedErrorCategory::Value, "ValueError"),
+        _ => (ExpectedErrorCategory::Value, "ValueError"),
+    }
+}
+
+#[must_use]
+pub fn classify_frame_error_category(err: &FrameError) -> (ExpectedErrorCategory, &'static str) {
+    match err {
+        FrameError::Index(idx_err) => classify_index_error_category(idx_err),
+        FrameError::LengthMismatch { .. } => (ExpectedErrorCategory::Value, "ValueError"),
+        FrameError::AssertionFailed(_) => (ExpectedErrorCategory::Value, "ValueError"),
+        FrameError::Column(col_err) => match col_err {
+            fp_columnar::ColumnError::IntCastingNaN => {
+                (ExpectedErrorCategory::Value, "IntCastingNaNError")
+            }
+            fp_columnar::ColumnError::UnsupportedCast(_)
+            | fp_columnar::ColumnError::InvalidMaskType { .. }
+            | fp_columnar::ColumnError::DTypeMismatch { .. } => {
+                (ExpectedErrorCategory::Type, "TypeError")
+            }
+            fp_columnar::ColumnError::Type(te) => match te {
+                fp_types::TypeError::ValueNotParseable { .. }
+                | fp_types::TypeError::InvalidIntervalStep { .. }
+                | fp_types::TypeError::IntervalStepDoesNotDivide { .. }
+                | fp_types::TypeError::IntervalRangeParameterCount => {
+                    (ExpectedErrorCategory::Value, "ValueError")
+                }
+                fp_types::TypeError::InvalidCast {
+                    from: fp_types::DType::Utf8,
+                    to:
+                        fp_types::DType::Int64
+                        | fp_types::DType::Int64Nullable
+                        | fp_types::DType::Float64
+                        | fp_types::DType::Float64Nullable
+                        | fp_types::DType::Timedelta64,
+                } => (ExpectedErrorCategory::Value, "ValueError"),
+                fp_types::TypeError::InvalidCast {
+                    from: fp_types::DType::Utf8,
+                    to,
+                } if to.is_datetime() => (ExpectedErrorCategory::Value, "ValueError"),
+                fp_types::TypeError::LossyFloatToInt { value } if !value.is_finite() => {
+                    (ExpectedErrorCategory::Value, "IntCastingNaNError")
+                }
+                _ => (ExpectedErrorCategory::Type, "TypeError"),
+            },
+            _ => (ExpectedErrorCategory::Value, "ValueError"),
+        },
+        FrameError::CompatibilityRejected(msg) => classify_error_message_category(msg),
+        _ => classify_error_message_category(&err.to_string()),
+    }
+}
+
+#[must_use]
+pub fn classify_join_error_category(
+    err: &fp_join::JoinError,
+) -> (ExpectedErrorCategory, &'static str) {
+    match err {
+        fp_join::JoinError::Frame(fe) => {
+            let (cat, cls) = classify_frame_error_category(fe);
+            if cat == ExpectedErrorCategory::Value {
+                let msg = fe.to_string().to_ascii_lowercase();
+                if msg.contains("one_to_one")
+                    || msg.contains("one_to_many")
+                    || msg.contains("many_to_one")
+                    || msg.contains("not unique")
+                    || msg.contains("join_type='cross'")
+                    || msg.contains("incompatible merge")
+                {
+                    return (ExpectedErrorCategory::Value, "MergeError");
+                }
+            }
+            (cat, cls)
+        }
+        fp_join::JoinError::Column(ce) => {
+            classify_frame_error_category(&FrameError::Column(ce.clone()))
+        }
+    }
+}
+
+#[must_use]
+pub fn classify_io_error_category(err: &FpIoError) -> (ExpectedErrorCategory, &'static str) {
+    match err {
+        FpIoError::Io(io_err) => match io_err.kind() {
+            std::io::ErrorKind::NotFound => (ExpectedErrorCategory::Io, "FileNotFoundError"),
+            _ => (ExpectedErrorCategory::Io, "OSError"),
+        },
+        FpIoError::CsvFieldCount { .. }
+        | FpIoError::CsvUnterminatedQuote
+        | FpIoError::Csv(_)
+        | FpIoError::CsvDialect(_) => (ExpectedErrorCategory::Value, "ParserError"),
+        FpIoError::MissingHeaders => (ExpectedErrorCategory::Value, "EmptyDataError"),
+        FpIoError::Deferred(_) => (ExpectedErrorCategory::Unsupported, "NotImplementedError"),
+        FpIoError::Frame(fe) => classify_frame_error_category(fe),
+        FpIoError::Index(ie) => classify_index_error_category(ie),
+        FpIoError::Column(ce) => classify_frame_error_category(&FrameError::Column(ce.clone())),
+        _ => (ExpectedErrorCategory::Value, "ValueError"),
+    }
+}
+
+#[must_use]
+pub fn compare_expected_error_category(
+    actual_err: &FrameError,
+    expected: ExpectedErrorCategory,
+) -> bool {
+    classify_frame_error_category(actual_err).0 == expected
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum ResolvedExpected {
     Series(FixtureExpectedSeries),
@@ -5225,6 +5509,7 @@ fn apply_oracle_response_to_generated_fixture(
     fixture.expected_scalar = response.expected_scalar.take();
     fixture.expected_dtype = response.expected_dtype.take();
     fixture.expected_error_contains = None;
+    fixture.expected_error_category = None;
     fixture.oracle_source = Some(FixtureOracleSource::Fixture);
 
     let has_expected = fixture.expected_series.is_some()
@@ -13596,6 +13881,9 @@ fn fixture_expected(fixture: &PacketFixture) -> Result<ResolvedExpected, Harness
     if let Some(expected_error_contains) = fixture.expected_error_contains.clone() {
         return Ok(ResolvedExpected::ErrorContains(expected_error_contains));
     }
+    if fixture.expected_error_category.is_some() {
+        return Ok(ResolvedExpected::ErrorAny);
+    }
 
     match fixture.operation {
         FixtureOperation::SeriesAdd
@@ -14099,21 +14387,30 @@ fn resolve_expected_oracle_error(
     fixture: &PacketFixture,
     oracle_error: String,
 ) -> Result<ResolvedExpected, HarnessError> {
-    let expected = fixture.expected_error_contains.as_deref().ok_or_else(|| {
-        HarnessError::FixtureFormat(format!(
+    if fixture.expected_error_contains.is_none() && fixture.expected_error_category.is_none() {
+        return Err(HarnessError::FixtureFormat(format!(
             "oracle returned an error for non-error case {}: {oracle_error}",
             fixture.case_id
-        ))
-    })?;
-
-    if oracle_error.contains(expected) {
-        Ok(ResolvedExpected::ErrorAny)
-    } else {
-        Err(HarnessError::FixtureFormat(format!(
+        )));
+    }
+    if let Some(expected_cat) = fixture.expected_error_category {
+        let (actual_cat, _) = classify_error_message_category(&oracle_error);
+        if actual_cat != expected_cat {
+            return Err(HarnessError::FixtureFormat(format!(
+                "oracle error category mismatch for {}: expected {:?}, got {:?} ({oracle_error})",
+                fixture.case_id, expected_cat, actual_cat
+            )));
+        }
+    }
+    if let Some(expected) = fixture.expected_error_contains.as_deref()
+        && !oracle_error.contains(expected)
+    {
+        return Err(HarnessError::FixtureFormat(format!(
             "oracle error for {} did not contain expected substring {expected:?}: {oracle_error}",
             fixture.case_id
-        )))
+        )));
     }
+    Ok(ResolvedExpected::ErrorAny)
 }
 
 /// Parse the pinned pandas version from the oracle requirements file
@@ -14157,7 +14454,7 @@ fn verify_oracle_pandas_pin(
     };
     if provenance.pandas_version == pin {
         return Ok(());
-    }
+    };
     let message = format!(
         "oracle pandas {} != pinned {pin}: refusing a cross-version comparison \
          (br-frankenpandas-rc-oracle-provenance-guard-d8wt4)",
@@ -14182,7 +14479,8 @@ fn capture_live_oracle_expected(
         }
     }
 
-    let expects_error = fixture.expected_error_contains.is_some();
+    let expects_error =
+        fixture.expected_error_contains.is_some() || fixture.expected_error_category.is_some();
     let allow_system_pandas_fallback = config.allows_system_pandas_fallback();
 
     if !config.oracle_root.exists() && !allow_system_pandas_fallback {

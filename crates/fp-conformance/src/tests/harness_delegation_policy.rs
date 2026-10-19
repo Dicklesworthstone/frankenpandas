@@ -308,6 +308,7 @@ fn every_fixture_option_reaches_the_oracle_request_00de2() {
         "expected_scalar",
         "expected_dtype",
         "expected_error_contains",
+        "expected_error_category",
         "excel_input_base64",
         "feather_input_base64",
         "ipc_stream_input_base64",
