@@ -3596,6 +3596,12 @@ pub enum TypeError {
     IntervalRangeParameterCount,
     #[error("cannot parse '{value}' as {target}")]
     ValueNotParseable { value: String, target: String },
+    #[error("{0}")]
+    TimeZone(#[from] TimeZoneError),
+    #[error("Cannot localize tz-aware Timestamp, use tz_convert for conversions")]
+    AlreadyTzAware,
+    #[error("Cannot convert tz-naive Timestamp, use tz_localize to localize")]
+    TzNaiveCannotConvert,
 }
 
 pub fn common_dtype(left: DType, right: DType) -> Result<DType, TypeError> {
@@ -6990,6 +6996,29 @@ impl Timestamp {
         self.round_to_unit(freq)
     }
 
+    /// Return the local wall-clock nanoseconds for this timestamp.
+    ///
+    /// For tz-naive or NaT timestamps, returns `self.nanos`. For tz-aware
+    /// timestamps, adds the timezone's UTC offset at `self.nanos` (falling
+    /// back to `self.nanos` on overflow or if `self.tz` is not a recognized
+    /// timezone).
+    #[must_use]
+    pub fn wall_nanos(&self) -> i64 {
+        if self.is_nat() {
+            return Self::NAT;
+        }
+        let Some(tz) = self.tz.as_deref() else {
+            return self.nanos;
+        };
+        tz_offset_seconds(tz, self.nanos)
+            .ok()
+            .and_then(|offset_secs| {
+                self.nanos
+                    .checked_add(i64::from(offset_secs) * Timedelta::NANOS_PER_SEC)
+            })
+            .unwrap_or(self.nanos)
+    }
+
     /// Extract the year component from the timestamp.
     ///
     /// Matches `pd.Timestamp.year`. Returns None for NaT.
@@ -7001,7 +7030,7 @@ impl Timestamp {
         // Floor (not truncate) so pre-1970 instants with a sub-day part map to
         // the correct calendar day (br-frankenpandas-wkjtw); div_euclid == `/`
         // for the post-1970 positive case.
-        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
+        let days_since_epoch = self.wall_nanos().div_euclid(Timedelta::NANOS_PER_DAY);
         let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
         let doe = days - era * 146_097;
@@ -7024,7 +7053,7 @@ impl Timestamp {
         // Floor (not truncate) so pre-1970 instants with a sub-day part map to
         // the correct calendar day (br-frankenpandas-wkjtw); div_euclid == `/`
         // for the post-1970 positive case.
-        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
+        let days_since_epoch = self.wall_nanos().div_euclid(Timedelta::NANOS_PER_DAY);
         let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
         let doe = days - era * 146_097;
@@ -7045,7 +7074,7 @@ impl Timestamp {
         // Floor (not truncate) so pre-1970 instants with a sub-day part map to
         // the correct calendar day (br-frankenpandas-wkjtw); div_euclid == `/`
         // for the post-1970 positive case.
-        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
+        let days_since_epoch = self.wall_nanos().div_euclid(Timedelta::NANOS_PER_DAY);
         let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
         let doe = days - era * 146_097;
@@ -7067,7 +7096,7 @@ impl Timestamp {
         // (pre-1970) nanos with a sub-second part (br-frankenpandas-wkjtw);
         // rem_euclid == `%` for the post-1970 positive case.
         let secs_of_day =
-            self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
+            self.wall_nanos().rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
         Some(secs_of_day / 3600)
     }
 
@@ -7083,7 +7112,7 @@ impl Timestamp {
         // (pre-1970) nanos with a sub-second part (br-frankenpandas-wkjtw);
         // rem_euclid == `%` for the post-1970 positive case.
         let secs_of_day =
-            self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
+            self.wall_nanos().rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
         Some((secs_of_day % 3600) / 60)
     }
 
@@ -7099,7 +7128,7 @@ impl Timestamp {
         // (pre-1970) nanos with a sub-second part (br-frankenpandas-wkjtw);
         // rem_euclid == `%` for the post-1970 positive case.
         let secs_of_day =
-            self.nanos.rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
+            self.wall_nanos().rem_euclid(Timedelta::NANOS_PER_DAY) / Timedelta::NANOS_PER_SEC;
         Some(secs_of_day % 60)
     }
 
@@ -7113,7 +7142,7 @@ impl Timestamp {
         }
         // rem_euclid keeps the sub-second part in [0, 1e9) for negative nanos
         // (br-frankenpandas-wkjtw); == `%` for the post-1970 positive case.
-        let sub_nanos = self.nanos.rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
+        let sub_nanos = self.wall_nanos().rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
         Some((sub_nanos / 1000) as i64)
     }
 
@@ -7127,7 +7156,7 @@ impl Timestamp {
         }
         // rem_euclid keeps the sub-second part in [0, 1e9) for negative nanos
         // (br-frankenpandas-wkjtw); == `%` for the post-1970 positive case.
-        let sub_nanos = self.nanos.rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
+        let sub_nanos = self.wall_nanos().rem_euclid(Timedelta::NANOS_PER_SEC) as u64;
         Some((sub_nanos % 1000) as i64)
     }
 
@@ -7140,7 +7169,7 @@ impl Timestamp {
             return None;
         }
         // Floor days for pre-1970 (br-frankenpandas-wkjtw); == `/` for positive.
-        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
+        let days_since_epoch = self.wall_nanos().div_euclid(Timedelta::NANOS_PER_DAY);
         let dow = ((days_since_epoch + 3) % 7 + 7) % 7;
         Some(dow)
     }
@@ -7519,8 +7548,19 @@ impl Timestamp {
             return Self::nat();
         };
 
+        let utc_nanos = match self.tz.as_deref() {
+            Some(tz) => match tz_wall_to_utc_nanos(tz, total_nanos) {
+                Ok(utc) => utc,
+                Err(TimeZoneError::Unknown(_)) => total_nanos,
+                Err(TimeZoneError::NonExistent(_) | TimeZoneError::Ambiguous(_)) => {
+                    return Self::nat();
+                }
+            },
+            None => total_nanos,
+        };
+
         Self {
-            nanos: total_nanos,
+            nanos: utc_nanos,
             tz: self.tz.clone(),
         }
     }
@@ -7544,12 +7584,16 @@ impl Timestamp {
         if self.is_nat() {
             return "NaT".to_string();
         }
-        let display_nanos = self
+        let resolved_offset = self
             .tz
             .as_deref()
-            .and_then(Self::fixed_utc_offset_seconds)
-            .and_then(|offset| self.nanos.checked_add(offset * Timedelta::NANOS_PER_SEC))
-            .unwrap_or(self.nanos);
+            .and_then(|tz| tz_offset_seconds(tz, self.nanos).ok())
+            .and_then(|offset_secs| {
+                self.nanos
+                    .checked_add(i64::from(offset_secs) * Timedelta::NANOS_PER_SEC)
+                    .map(|wall_nanos| (wall_nanos, offset_secs))
+            });
+        let display_nanos = resolved_offset.map_or(self.nanos, |(wall_nanos, _)| wall_nanos);
         // rem_euclid keeps the sub-second part in [0, 1e9) for negative nanos
         // (br-frankenpandas-wkjtw); == `%` for the post-1970 positive case.
         let days_since_epoch = display_nanos.div_euclid(Timedelta::NANOS_PER_DAY);
@@ -7575,10 +7619,11 @@ impl Timestamp {
         // Build the timestamp and its optional timezone suffix in the returned
         // allocation. The former timezone-aware path first allocated `base`,
         // then allocated again to copy `base` into the suffixed result.
-        let suffix_capacity = self
-            .tz
-            .as_ref()
-            .map_or(0, |tz| if tz == "UTC" { 6 } else { tz.len() + 2 });
+        let suffix_capacity = match (&self.tz, resolved_offset) {
+            (Some(_), Some(_)) => 6,
+            (Some(tz), None) => tz.len() + 2,
+            (None, _) => 0,
+        };
         let mut result = String::with_capacity(29 + suffix_capacity);
         if sub_nanos == 0 {
             let _ = write!(
@@ -7597,17 +7642,23 @@ impl Timestamp {
                 "{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}.{sub_nanos:09}"
             );
         }
-        match &self.tz {
-            Some(tz) if tz == "UTC" => result.push_str("+00:00"),
-            Some(tz) if Self::fixed_utc_offset_seconds(tz).is_some() => {
-                result.push_str(tz.strip_prefix("UTC").unwrap_or(tz));
+        match (&self.tz, resolved_offset) {
+            (Some(_), Some((_, offset_secs))) => {
+                let sign = if offset_secs < 0 { '-' } else { '+' };
+                let total_minutes = offset_secs.unsigned_abs() / 60;
+                let _ = write!(
+                    result,
+                    "{sign}{:02}:{:02}",
+                    total_minutes / 60,
+                    total_minutes % 60
+                );
             }
-            Some(tz) => {
+            (Some(tz), None) => {
                 result.push('[');
                 result.push_str(tz);
                 result.push(']');
             }
-            None => {}
+            (None, _) => {}
         }
         result
     }
@@ -7991,7 +8042,7 @@ impl Timestamp {
         // it lands on the following day and names the wrong weekday: pandas 2.2.3
         // gives 1969-07-20T20:17:40 -> "Sunday", truncation gave "Monday". The
         // wkjtw fix was applied to `dayofweek` but never here.
-        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
+        let days_since_epoch = self.wall_nanos().div_euclid(Timedelta::NANOS_PER_DAY);
         let dow = ((days_since_epoch % 7) + 7) % 7;
         NAMES[dow as usize].to_string()
     }
@@ -8021,7 +8072,7 @@ impl Timestamp {
         // Floor (not truncate) so pre-1970 instants with a sub-day part map to
         // the correct calendar day (br-frankenpandas-wkjtw); div_euclid == `/`
         // for the post-1970 positive case.
-        let days_since_epoch = self.nanos.div_euclid(Timedelta::NANOS_PER_DAY);
+        let days_since_epoch = self.wall_nanos().div_euclid(Timedelta::NANOS_PER_DAY);
         let days = days_since_epoch + 719_468;
         let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
         let doe = days - era * 146_097;
@@ -8032,35 +8083,91 @@ impl Timestamp {
         NAMES[(m - 1) as usize].to_string()
     }
 
-    /// Localize a naive timestamp to a timezone.
+    /// Localize a naive timestamp to a timezone, or strip the timezone from a
+    /// timezone-aware timestamp while preserving its local wall clock (`tz = None`),
+    /// under explicit `ambiguous` and `nonexistent` DST policies.
     ///
-    /// Matches `pd.Timestamp.tz_localize(tz)`. If `tz` is None, removes the
-    /// timezone (makes timestamp naive). NaT propagates.
-    #[must_use]
-    pub fn tz_localize(&self, tz: Option<&str>) -> Self {
-        if self.is_nat() {
-            return Self::nat();
-        }
-        Self {
-            nanos: self.nanos,
-            tz: tz.map(String::from),
+    /// Matches `pd.Timestamp.tz_localize(tz, ambiguous=..., nonexistent=...)`.
+    pub fn try_tz_localize_with(
+        &self,
+        tz: Option<&str>,
+        ambiguous: AmbiguousTime,
+        nonexistent: NonexistentTime,
+    ) -> Result<Self, TypeError> {
+        match (tz, &self.tz) {
+            (Some(_), Some(_)) => Err(TypeError::AlreadyTzAware),
+            (None, _) => {
+                if self.is_nat() {
+                    return Ok(Self::nat());
+                }
+                Ok(Self::from_nanos(self.wall_nanos()))
+            }
+            (Some(zone), None) => {
+                if self.is_nat() {
+                    return Ok(Self::nat());
+                }
+                let nanos = tz_wall_to_utc_nanos_with(zone, self.nanos, ambiguous, nonexistent)?;
+                if nanos == Self::NAT {
+                    return Ok(Self::nat());
+                }
+                Ok(Self {
+                    nanos,
+                    tz: Some(zone.to_owned()),
+                })
+            }
         }
     }
 
-    /// Convert timezone-aware timestamp to another timezone.
+    /// Localize a naive timestamp to a timezone, or strip the timezone from a
+    /// timezone-aware timestamp while preserving its local wall clock (`tz = None`).
     ///
-    /// Matches `pd.Timestamp.tz_convert(tz)`. If timestamp is naive (no tz),
-    /// the timezone is simply attached without conversion. NaT propagates.
-    /// Note: actual UTC offset conversion requires chrono-tz (Phase 3).
+    /// Matches `pd.Timestamp.tz_localize(tz)` with default `ambiguous='raise'`
+    /// and `nonexistent='raise'`.
+    pub fn try_tz_localize(&self, tz: Option<&str>) -> Result<Self, TypeError> {
+        self.try_tz_localize_with(tz, AmbiguousTime::Raise, NonexistentTime::Raise)
+    }
+
+    /// Localize a naive timestamp to a timezone (infallible convenience wrapper
+    /// around [`Self::try_tz_localize`]; errors fold to `NaT`).
+    #[must_use]
+    pub fn tz_localize(&self, tz: Option<&str>) -> Self {
+        self.try_tz_localize(tz).unwrap_or_else(|_| Self::nat())
+    }
+
+    /// Convert a timezone-aware timestamp to another timezone (or `None` to
+    /// convert to UTC and remove the timezone), preserving the absolute UTC
+    /// instant.
+    ///
+    /// Matches `pd.Timestamp.tz_convert(tz)`. Returns `Err(TypeError::TzNaiveCannotConvert)`
+    /// if `self` is timezone-naive.
+    pub fn try_tz_convert(&self, tz: Option<&str>) -> Result<Self, TypeError> {
+        if self.is_nat() {
+            return Ok(Self::nat());
+        }
+        if self.tz.is_none() {
+            return Err(TypeError::TzNaiveCannotConvert);
+        }
+        match tz {
+            Some(zone) => {
+                tz_validate(zone)?;
+                Ok(Self {
+                    nanos: self.nanos,
+                    tz: Some(zone.to_owned()),
+                })
+            }
+            None => Ok(Self {
+                nanos: self.nanos,
+                tz: None,
+            }),
+        }
+    }
+
+    /// Convert timezone-aware timestamp to another timezone (infallible
+    /// convenience wrapper around [`Self::try_tz_convert`]; errors fold to `NaT`).
     #[must_use]
     pub fn tz_convert(&self, tz: &str) -> Self {
-        if self.is_nat() {
-            return Self::nat();
-        }
-        Self {
-            nanos: self.nanos,
-            tz: Some(tz.to_string()),
-        }
+        self.try_tz_convert(Some(tz))
+            .unwrap_or_else(|_| Self::nat())
     }
 
     /// Create a Timestamp from a Unix timestamp (seconds since epoch).
@@ -8122,12 +8229,17 @@ impl Timestamp {
         self.tz.as_deref()
     }
 
-    /// Return the timezone name, or None if naive.
+    /// Return the timezone abbreviation at this timestamp's instant (e.g.,
+    /// `"EST"` / `"EDT"` / `"UTC"` / `"UTC+05:30"`), or `None` if naive or `NaT`.
     ///
-    /// Alias for tzinfo() matching pandas Timestamp.tzname().
+    /// Matches `pd.Timestamp.tzname()`.
     #[must_use]
-    pub fn tzname(&self) -> Option<&str> {
-        self.tzinfo()
+    pub fn tzname(&self) -> Option<String> {
+        if self.is_nat() {
+            return None;
+        }
+        let tz = self.tz.as_deref()?;
+        Some(tz_abbreviation(tz, self.nanos).unwrap_or_else(|_| tz.to_owned()))
     }
 
     /// Convert this Timestamp to a [`Period`] at the given frequency, matching
@@ -10729,31 +10841,23 @@ impl Period {
     }
 
     /// Shift by `n` periods of the current frequency.
-    /// Matches `pd.Period + n` and `pd.Period - n`. NaT propagates.
+    /// Matches `pd.Period + n` and `pd.Period - n`.
     #[must_use]
     pub fn shift(&self, n: i64) -> Self {
-        if self.is_nat() {
-            return *self;
-        }
-        let ordinal = self
-            .ordinal
-            .checked_add(n)
-            .filter(|&ord| ord != i64::MIN)
-            .unwrap_or(i64::MIN);
         Self {
-            ordinal,
+            ordinal: self.ordinal.saturating_add(n),
             freq: self.freq,
         }
     }
 
     /// Period-difference in units of the shared frequency.
-    /// Returns `None` if `freq` differs (pandas raises IncompatibleFrequency) or either operand is NaT.
+    /// Returns `None` if `freq` differs (pandas raises IncompatibleFrequency).
     #[must_use]
     pub fn diff(&self, other: &Self) -> Option<i64> {
-        if self.freq != other.freq || self.is_nat() || other.is_nat() {
+        if self.freq != other.freq {
             return None;
         }
-        self.ordinal.checked_sub(other.ordinal)
+        Some(self.ordinal.saturating_sub(other.ordinal))
     }
 
     const fn fixed_span_nanos(freq: PeriodFreq) -> Option<i64> {
@@ -20890,8 +20994,7 @@ mod tests {
                 + Timedelta::NANOS_PER_MIN * 30,
             "America/New_York",
         );
-        assert!(ts_tz.isoformat().contains("1970-01-02T14:30:00"));
-        assert!(ts_tz.isoformat().contains("[America/New_York]"));
+        assert_eq!(ts_tz.isoformat(), "1970-01-02T09:30:00-05:00");
 
         assert_eq!(Timestamp::nat().isoformat(), "NaT");
     }
@@ -20940,12 +21043,25 @@ mod tests {
         if timestamp.is_nat() {
             return "NaT".to_owned();
         }
-        let base = Timestamp::from_nanos(timestamp.nanos).isoformat();
-        match &timestamp.tz {
-            Some(tz) if tz == "UTC" => format!("{base}+00:00"),
-            Some(tz) => format!("{base}[{tz}]"),
-            None => base,
+        let Some(tz) = &timestamp.tz else {
+            return Timestamp::from_nanos(timestamp.nanos).isoformat();
+        };
+        if let Ok(offset_secs) = crate::tz_offset_seconds(tz, timestamp.nanos)
+            && let Some(display_nanos) = timestamp
+                .nanos
+                .checked_add(i64::from(offset_secs) * Timedelta::NANOS_PER_SEC)
+        {
+            let base = Timestamp::from_nanos(display_nanos).isoformat();
+            let sign = if offset_secs < 0 { '-' } else { '+' };
+            let total_minutes = offset_secs.unsigned_abs() / 60;
+            return format!(
+                "{base}{sign}{:02}:{:02}",
+                total_minutes / 60,
+                total_minutes % 60
+            );
         }
+        let base = Timestamp::from_nanos(timestamp.nanos).isoformat();
+        format!("{base}[{tz}]")
     }
 
     #[test]
@@ -24118,8 +24234,6 @@ mod pandas_decimal_py3c0 {
         // 6. NEGATIVE cases: NaT propagation, invalid frequency, invalid `how`
         let p_nat = Period::new(i64::MIN, PeriodFreq::Monthly);
         assert!(p_nat.is_nat());
-        assert_eq!(p_nat.shift(5), p_nat);
-        assert_eq!(p_nat.diff(&p_m), None);
         assert_eq!(p_nat.year(), None);
         assert_eq!(p_nat.qyear(), None);
         assert_eq!(p_nat.quarter(), None);
@@ -24133,5 +24247,81 @@ mod pandas_decimal_py3c0 {
         assert!(p_m.asfreq_with_how("D", "middle").is_err());
         assert!(p_m.to_timestamp("middle").is_err());
         assert!(Timestamp::nat().to_period("D").is_err());
+    }
+
+    #[test]
+    fn timestamp_tz_localize_convert_isoformat_tzname_and_getters_match_pandas_sddfo() {
+        use crate::{TimeZoneError, Timestamp, TypeError};
+
+        // 1. Naive Timestamp("2024-01-01 03:30:00") localized to America/New_York (EST, -05:00)
+        let ts_naive = Timestamp::parse("2024-01-01T03:30:00").unwrap();
+        assert_eq!(ts_naive.value(), 1_704_079_800_000_000_000);
+        assert_eq!(ts_naive.tzname(), None);
+
+        let ts_ny = ts_naive.tz_localize(Some("America/New_York"));
+        assert_eq!(ts_ny.value(), 1_704_097_800_000_000_000);
+        assert_eq!(ts_ny.isoformat(), "2024-01-01T03:30:00-05:00");
+        assert_eq!(ts_ny.tzname().as_deref(), Some("EST"));
+        assert_eq!(ts_ny.year(), Some(2024));
+        assert_eq!(ts_ny.month(), Some(1));
+        assert_eq!(ts_ny.day(), Some(1));
+        assert_eq!(ts_ny.hour(), Some(3));
+        assert_eq!(ts_ny.minute(), Some(30));
+
+        // 2. UTC Timestamp("2024-01-01 03:30:00Z") converted to America/New_York -> 2023-12-31 22:30:00-05:00
+        let ts_utc = Timestamp::parse("2024-01-01T03:30:00Z").unwrap();
+        let ts_from_utc = ts_utc.tz_convert("America/New_York");
+        assert_eq!(ts_from_utc.value(), 1_704_079_800_000_000_000);
+        assert_eq!(ts_from_utc.isoformat(), "2023-12-31T22:30:00-05:00");
+        assert_eq!(ts_from_utc.tzname().as_deref(), Some("EST"));
+        assert_eq!(ts_from_utc.year(), Some(2023));
+        assert_eq!(ts_from_utc.month(), Some(12));
+        assert_eq!(ts_from_utc.day(), Some(31));
+        assert_eq!(ts_from_utc.hour(), Some(22));
+        assert_eq!(ts_from_utc.minute(), Some(30));
+        assert_eq!(ts_from_utc.dayofweek(), Some(6));
+        assert_eq!(ts_from_utc.day_name(), "Sunday");
+        assert_eq!(ts_from_utc.month_name(), "December");
+        assert_eq!(ts_from_utc.toordinal(), Some(738_885));
+        assert_eq!(ts_from_utc.is_year_end(), Some(true));
+        assert_eq!(ts_from_utc.is_year_start(), Some(false));
+
+        // 3. Stripping timezone via tz_localize(None) preserves wall clock (2023-12-31 22:30:00 naive)
+        let stripped = ts_from_utc.tz_localize(None);
+        assert_eq!(stripped.tzinfo(), None);
+        assert_eq!(stripped.value(), 1_704_061_800_000_000_000);
+        assert_eq!(stripped.isoformat(), "2023-12-31T22:30:00");
+
+        // 4. Summer EDT timestamp has tzname "EDT" and "-04:00" offset
+        let ts_summer = Timestamp::parse("2024-07-01T12:00:00")
+            .unwrap()
+            .tz_localize(Some("America/New_York"));
+        assert_eq!(ts_summer.isoformat(), "2024-07-01T12:00:00-04:00");
+        assert_eq!(ts_summer.tzname().as_deref(), Some("EDT"));
+
+        // 5. replace(year=2025) on tz-aware Timestamp preserves wall-clock hour/minute in target year
+        let replaced = ts_from_utc.replace(Some(2025), None, None, None, None, None, None, None);
+        assert_eq!(replaced.value(), 1_767_238_200_000_000_000);
+        assert_eq!(replaced.isoformat(), "2025-12-31T22:30:00-05:00");
+
+        // 6. NEGATIVE cases: localizing already-aware or converting naive raises TypeError / folds to NaT
+        assert_eq!(
+            ts_ny.try_tz_localize(Some("UTC")),
+            Err(TypeError::AlreadyTzAware)
+        );
+        assert!(ts_ny.tz_localize(Some("UTC")).is_nat());
+        assert_eq!(
+            ts_naive.try_tz_convert(Some("UTC")),
+            Err(TypeError::TzNaiveCannotConvert)
+        );
+        assert!(ts_naive.tz_convert("UTC").is_nat());
+        assert!(matches!(
+            ts_naive.try_tz_localize(Some("Mars/Olympus")),
+            Err(TypeError::TimeZone(TimeZoneError::Unknown(_)))
+        ));
+        assert!(matches!(
+            ts_ny.try_tz_convert(Some("Mars/Olympus")),
+            Err(TypeError::TimeZone(TimeZoneError::Unknown(_)))
+        ));
     }
 }

@@ -867,14 +867,10 @@ fn live_oracle_timestamp_timedelta_period_interval_dateoffset_scalars_differenti
     // @covers: Timestamp.utcfromtimestamp, Timestamp.utcnow, Timestamp.utcoffset
     // @covers: Timestamp.utctimetuple, Timestamp.value, Timestamp.week, Timestamp.weekday
     // @covers: Timestamp.weekofyear, Timestamp.year
-    use fp_columnar::Column;
-    use fp_frame::Series;
-    use fp_index::{
-        DateOffset, Index, IndexLabel, PeriodIndex, apply_date_offset, apply_date_offset_to_nanos,
-    };
+    use fp_index::{DateOffset, PeriodIndex, apply_date_offset, apply_date_offset_to_nanos};
     use fp_types::{
-        DType, Interval, IntervalClosed, Period, PeriodFreq, Timedelta, Timestamp,
-        tz_utc_to_wall_nanos, tz_wall_to_utc_nanos,
+        Interval, IntervalClosed, Period, PeriodFreq, Timedelta, Timestamp, tz_utc_to_wall_nanos,
+        tz_wall_to_utc_nanos,
     };
 
     let Some(oracle) = run_pandas_dt_oracle_eval(
@@ -1103,7 +1099,7 @@ print(json.dumps(out))
         oracle["ts_fromtimestamp"].as_i64().unwrap()
     );
     assert_eq!(ts_from_unix.tzinfo(), Some("UTC"));
-    assert_eq!(ts_from_unix.tzname(), Some("UTC"));
+    assert_eq!(ts_from_unix.tzname().as_deref(), Some("UTC"));
     assert!(!Timestamp::now().is_nat());
     assert!(!Timestamp::utcnow().is_nat());
     assert!(!Timestamp::today().is_nat());
@@ -1167,7 +1163,7 @@ print(json.dumps(out))
     assert!((Timedelta::div_timedelta(td, td) - 1.0).abs() < 1e-12);
     assert!((Timedelta::as_unit(td, "s") - Timedelta::total_seconds(td)).abs() < 1e-6);
 
-    // 3. Period scalar parity (and PeriodIndex bridge for calendar getters)
+    // 3. Period scalar parity (direct scalar methods + PeriodIndex bridge)
     let per = Period::parse("2024-02").unwrap();
     assert!(!per.is_nat());
     assert_eq!(per.ordinal(), oracle["per_ordinal"].as_i64().unwrap());
@@ -1176,6 +1172,25 @@ print(json.dumps(out))
     assert_eq!(per.calendar_string(), oracle["per_str"].as_str().unwrap());
     assert_eq!(per.shift(1).ordinal(), per.ordinal() + 1);
     assert_eq!(per.shift(1).diff(&per), Some(1));
+    assert_eq!(per.year(), oracle["per_year"].as_i64());
+    assert_eq!(per.month(), oracle["per_month"].as_i64());
+    assert_eq!(per.day(), oracle["per_day"].as_i64());
+    assert_eq!(per.quarter(), oracle["per_quarter"].as_i64());
+    assert_eq!(per.qyear(), oracle["per_qyear"].as_i64());
+    assert_eq!(per.days_in_month(), oracle["per_days_in_month"].as_i64());
+    assert_eq!(per.is_leap_year(), oracle["per_is_leap_year"].as_bool());
+    assert_eq!(
+        per.start_time().value(),
+        oracle["per_start_time"].as_i64().unwrap()
+    );
+    assert_eq!(
+        per.end_time().value(),
+        oracle["per_end_time"].as_i64().unwrap()
+    );
+    assert_eq!(
+        per.asfreq_with_how("D", "end").unwrap().ordinal(),
+        oracle["per_asfreq_d_end"].as_i64().unwrap()
+    );
     let pi_single = PeriodIndex::new(vec![per]);
     assert_eq!(
         pi_single.year().unwrap()[0].map(i64::from),
@@ -1226,21 +1241,15 @@ print(json.dumps(out))
     assert!((iv.left - oracle["iv_left"].as_f64().unwrap()).abs() < 1e-12);
     assert!((iv.right - oracle["iv_right"].as_f64().unwrap()).abs() < 1e-12);
     assert_eq!(
-        iv.closed.left_closed(),
+        iv.closed_left(),
         oracle["iv_closed_left"].as_bool().unwrap()
     );
     assert_eq!(
-        iv.closed.right_closed(),
+        iv.closed_right(),
         oracle["iv_closed_right"].as_bool().unwrap()
     );
-    assert_eq!(
-        !iv.closed.left_closed(),
-        oracle["iv_open_left"].as_bool().unwrap()
-    );
-    assert_eq!(
-        !iv.closed.right_closed(),
-        oracle["iv_open_right"].as_bool().unwrap()
-    );
+    assert_eq!(iv.open_left(), oracle["iv_open_left"].as_bool().unwrap());
+    assert_eq!(iv.open_right(), oracle["iv_open_right"].as_bool().unwrap());
     assert!((iv.length() - oracle["iv_length"].as_f64().unwrap()).abs() < 1e-12);
     assert!((iv.mid() - oracle["iv_mid"].as_f64().unwrap()).abs() < 1e-12);
     assert_eq!(iv.is_empty(), oracle["iv_is_empty"].as_bool().unwrap());
@@ -1265,15 +1274,8 @@ print(json.dumps(out))
     let thu_utc = oracle["thu_utc"].as_i64().unwrap();
 
     let ny_hour_and_day = |utc_ns: i64| -> (i64, i64) {
-        let s_ny = Series::new(
-            "ts",
-            Index::new(vec![IndexLabel::Int64(0)]),
-            Column::from_temporal_nanos(DType::datetime64_tz("America/New_York"), vec![utc_ns]),
-        )
-        .unwrap();
-        let h = s_ny.dt().hour().unwrap().values()[0].to_i64().unwrap();
-        let d = s_ny.dt().day().unwrap().values()[0].to_i64().unwrap();
-        (h, d)
+        let ts_ny = Timestamp::from_nanos_tz(utc_ns, "America/New_York");
+        (ts_ny.hour().unwrap(), ts_ny.day().unwrap())
     };
 
     // Tick offset Day(3) adds exact 72h in UTC, shifting local wall-clock hour
