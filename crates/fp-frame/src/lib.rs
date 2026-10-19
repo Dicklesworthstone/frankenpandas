@@ -78689,7 +78689,9 @@ pub fn concat_dataframes_with_keys(
 
 fn concat_dataframes_axis0_inner(frames: &[&DataFrame]) -> Result<DataFrame, FrameError> {
     if frames.is_empty() {
-        return DataFrame::new(Index::new(Vec::new()), BTreeMap::new());
+        return Err(FrameError::CompatibilityRejected(
+            "No objects to concatenate".to_owned(),
+        ));
     }
     // Equal column axes share every column: the inner join is the outer one,
     // which keeps repeated column keys apart (i17d4).
@@ -78807,7 +78809,9 @@ fn concat_dataframes_axis1(
     join: ConcatJoin,
 ) -> Result<DataFrame, FrameError> {
     if frames.is_empty() {
-        return DataFrame::new(Index::new(Vec::new()), BTreeMap::new());
+        return Err(FrameError::CompatibilityRejected(
+            "No objects to concatenate".to_owned(),
+        ));
     }
 
     // Per br-frankenpandas-nfja5: pandas concat axis=1 preserves shared
@@ -89005,6 +89009,12 @@ impl DataFrame {
 
         let plan = align(&self.index, mask.index(), AlignMode::Left);
         validate_alignment_plan(&plan)?;
+        if plan.right_positions.iter().any(Option::is_none) {
+            return Err(FrameError::CompatibilityRejected(
+                "Unalignable boolean Series provided as indexer (index of the boolean Series and of the indexed object do not match)."
+                    .to_owned(),
+            ));
+        }
 
         let aligned_mask = mask.column().reindex_by_positions(&plan.right_positions)?;
         if let Some(offending) = aligned_mask
@@ -92348,12 +92358,27 @@ impl DataFrame {
         self.filter_rows(mask)
     }
 
-    /// Position-based boolean Series mask row selection with index alignment.
+    /// Position-based boolean Series mask row selection.
     ///
-    /// Matches `df.iloc[bool_series]` in pandas. Semantically identical to
-    /// `loc_bool_series` (delegates to `filter_rows`).
+    /// Matches `df.iloc[bool_series]` in pandas 2.2.3, which refuses a `Series`
+    /// mask (`NotImplementedError` for an integer index, `ValueError` otherwise;
+    /// `br-frankenpandas-qs8b6`).
     pub fn iloc_bool_series(&self, mask: &Series) -> Result<Self, FrameError> {
-        self.filter_rows(mask)
+        let is_int_index = mask.index().is_empty()
+            || mask
+                .index()
+                .labels()
+                .iter()
+                .all(|l| matches!(l, IndexLabel::Int64(_)));
+        if is_int_index {
+            Err(FrameError::CompatibilityRejected(
+                "iLocation based boolean indexing on an integer type is not available".to_owned(),
+            ))
+        } else {
+            Err(FrameError::CompatibilityRejected(
+                "iLocation based boolean indexing cannot use an indexable as a mask".to_owned(),
+            ))
+        }
     }
 
     /// Label-based slice row selection (inclusive on both ends).
