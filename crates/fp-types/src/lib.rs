@@ -8129,6 +8129,44 @@ impl Timestamp {
     pub fn tzname(&self) -> Option<&str> {
         self.tzinfo()
     }
+
+    /// Convert this Timestamp to a [`Period`] at the given frequency, matching
+    /// `pd.Timestamp.to_period(freq)`. Timezone-aware timestamps convert their
+    /// local wall-clock instant and drop the timezone.
+    pub fn to_period(&self, freq: &str) -> Result<Period, TypeError> {
+        if self.is_nat() {
+            return Err(TypeError::ValueIsMissing {
+                kind: NullKind::NaT,
+            });
+        }
+        let target_freq = PeriodFreq::parse(freq).ok_or_else(|| TypeError::ValueNotParseable {
+            value: freq.to_owned(),
+            target: "PeriodFreq".to_owned(),
+        })?;
+        let offset_secs = self
+            .tz
+            .as_deref()
+            .and_then(|tz| {
+                tz_offset_seconds(tz, self.nanos)
+                    .ok()
+                    .map(i64::from)
+                    .or_else(|| Self::fixed_utc_offset_seconds(tz))
+            })
+            .unwrap_or(0);
+        let wall_nanos = offset_secs
+            .checked_mul(Timedelta::NANOS_PER_SEC)
+            .and_then(|offset_nanos| self.nanos.checked_add(offset_nanos))
+            .ok_or_else(|| TypeError::ValueNotParseable {
+                value: self.to_string(),
+                target: format!("Period[{target_freq}]"),
+            })?;
+        Period::from_timestamp_nanos(wall_nanos, target_freq).ok_or_else(|| {
+            TypeError::ValueNotParseable {
+                value: self.to_string(),
+                target: format!("Period[{target_freq}]"),
+            }
+        })
+    }
 }
 
 impl std::fmt::Display for Timestamp {
@@ -9931,13 +9969,13 @@ pub enum IntervalClosed {
 impl IntervalClosed {
     /// Left endpoint included?
     #[must_use]
-    pub fn left_closed(self) -> bool {
+    pub const fn left_closed(self) -> bool {
         matches!(self, Self::Left | Self::Both)
     }
 
     /// Right endpoint included?
     #[must_use]
-    pub fn right_closed(self) -> bool {
+    pub const fn right_closed(self) -> bool {
         matches!(self, Self::Right | Self::Both)
     }
 }
@@ -10090,6 +10128,30 @@ impl Interval {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.left == self.right && !matches!(self.closed, IntervalClosed::Both)
+    }
+
+    /// Whether the interval is closed on the left side (`pd.Interval.closed_left`).
+    #[must_use]
+    pub const fn closed_left(&self) -> bool {
+        self.closed.left_closed()
+    }
+
+    /// Whether the interval is closed on the right side (`pd.Interval.closed_right`).
+    #[must_use]
+    pub const fn closed_right(&self) -> bool {
+        self.closed.right_closed()
+    }
+
+    /// Whether the interval is open on the left side (`pd.Interval.open_left`).
+    #[must_use]
+    pub const fn open_left(&self) -> bool {
+        !self.closed.left_closed()
+    }
+
+    /// Whether the interval is open on the right side (`pd.Interval.open_right`).
+    #[must_use]
+    pub const fn open_right(&self) -> bool {
+        !self.closed.right_closed()
     }
 
     /// Does `value` fall inside this interval?
@@ -10667,23 +10729,434 @@ impl Period {
     }
 
     /// Shift by `n` periods of the current frequency.
-    /// Matches `pd.Period + n` and `pd.Period - n`.
+    /// Matches `pd.Period + n` and `pd.Period - n`. NaT propagates.
     #[must_use]
     pub fn shift(&self, n: i64) -> Self {
+        if self.is_nat() {
+            return *self;
+        }
+        let ordinal = self
+            .ordinal
+            .checked_add(n)
+            .filter(|&ord| ord != i64::MIN)
+            .unwrap_or(i64::MIN);
         Self {
-            ordinal: self.ordinal.saturating_add(n),
+            ordinal,
             freq: self.freq,
         }
     }
 
     /// Period-difference in units of the shared frequency.
-    /// Returns `None` if `freq` differs (pandas raises IncompatibleFrequency).
+    /// Returns `None` if `freq` differs (pandas raises IncompatibleFrequency) or either operand is NaT.
     #[must_use]
     pub fn diff(&self, other: &Self) -> Option<i64> {
-        if self.freq != other.freq {
+        if self.freq != other.freq || self.is_nat() || other.is_nat() {
             return None;
         }
-        Some(self.ordinal.saturating_sub(other.ordinal))
+        self.ordinal.checked_sub(other.ordinal)
+    }
+
+    const fn fixed_span_nanos(freq: PeriodFreq) -> Option<i64> {
+        match freq {
+            PeriodFreq::Daily => Some(Timedelta::NANOS_PER_DAY),
+            PeriodFreq::Hourly => Some(Timedelta::NANOS_PER_HOUR),
+            PeriodFreq::Minutely => Some(Timedelta::NANOS_PER_MIN),
+            PeriodFreq::Secondly => Some(Timedelta::NANOS_PER_SEC),
+            PeriodFreq::Milliseconds => Some(Timedelta::NANOS_PER_MILLI),
+            PeriodFreq::Microseconds => Some(Timedelta::NANOS_PER_MICRO),
+            PeriodFreq::Nanoseconds => Some(1),
+            _ => None,
+        }
+    }
+
+    /// Construct a `Period` at `freq` containing the wall-clock instant `nanos`.
+    /// Returns `None` if `nanos` is `Timestamp::NAT` or overflows the ordinal axis.
+    #[must_use]
+    pub fn from_timestamp_nanos(nanos: i64, freq: PeriodFreq) -> Option<Self> {
+        Self::from_timestamp_nanos_with_business_roll(nanos, freq, true)
+    }
+
+    fn from_timestamp_nanos_with_business_roll(
+        nanos: i64,
+        freq: PeriodFreq,
+        roll_business_forward: bool,
+    ) -> Option<Self> {
+        if nanos == Timestamp::NAT {
+            return None;
+        }
+        let days = nanos.div_euclid(Timedelta::NANOS_PER_DAY);
+        let (year, month, _day) = civil_from_days(days);
+        let ordinal = match freq {
+            PeriodFreq::Annual(_) => {
+                let months = year
+                    .checked_sub(1970)?
+                    .checked_mul(12)?
+                    .checked_add(i64::from(month) - 1)?
+                    .checked_add(freq.fiscal_month_shift())?;
+                months.div_euclid(12)
+            }
+            PeriodFreq::Quarterly(_) => {
+                let months = year
+                    .checked_sub(1970)?
+                    .checked_mul(12)?
+                    .checked_add(i64::from(month) - 1)?
+                    .checked_add(freq.fiscal_month_shift())?;
+                months.div_euclid(3)
+            }
+            PeriodFreq::Monthly => year
+                .checked_sub(1970)?
+                .checked_mul(12)?
+                .checked_add(i64::from(month) - 1)?,
+            PeriodFreq::Weekly(_) => {
+                const WEEK_ANCHOR_DAY: i64 = -10;
+                days.checked_sub(WEEK_ANCHOR_DAY + freq.week_start_shift())?
+                    .div_euclid(7)
+            }
+            PeriodFreq::Daily => days,
+            PeriodFreq::Business => {
+                let dow = (days + 3).rem_euclid(7);
+                let adjusted_days = match (dow, roll_business_forward) {
+                    (5, true) => days.checked_add(2)?,
+                    (6, true) => days.checked_add(1)?,
+                    (5, false) => days.checked_sub(1)?,
+                    (6, false) => days.checked_sub(2)?,
+                    _ => days,
+                };
+                let rem_ordinal = match adjusted_days.rem_euclid(7) {
+                    0 => 0,
+                    1 => 1,
+                    4 => 2,
+                    5 => 3,
+                    6 => 4,
+                    _ => return None,
+                };
+                adjusted_days
+                    .div_euclid(7)
+                    .checked_mul(5)?
+                    .checked_add(rem_ordinal)?
+            }
+            PeriodFreq::Hourly => nanos.div_euclid(Timedelta::NANOS_PER_HOUR),
+            PeriodFreq::Minutely => nanos.div_euclid(Timedelta::NANOS_PER_MIN),
+            PeriodFreq::Secondly => nanos.div_euclid(Timedelta::NANOS_PER_SEC),
+            PeriodFreq::Milliseconds => nanos.div_euclid(Timedelta::NANOS_PER_MILLI),
+            PeriodFreq::Microseconds => nanos.div_euclid(Timedelta::NANOS_PER_MICRO),
+            PeriodFreq::Nanoseconds => nanos,
+        };
+        (ordinal != i64::MIN).then_some(Self::new(ordinal, freq))
+    }
+
+    /// Return the current UTC period for `freq`, matching `pd.Period.now(freq)`.
+    pub fn now(freq: &str) -> Result<Self, TypeError> {
+        Timestamp::now().to_period(freq)
+    }
+
+    /// Epoch nanoseconds of this period's inclusive start boundary (`pd.Period.start_time`).
+    /// Returns `None` for `NaT` or out-of-range ordinals.
+    #[must_use]
+    pub fn start_nanos(&self) -> Option<i64> {
+        if self.is_nat() {
+            return None;
+        }
+        let nanos = match self.freq {
+            PeriodFreq::Annual(_) | PeriodFreq::Quarterly(_) => {
+                let months = if matches!(self.freq, PeriodFreq::Annual(_)) {
+                    12_i64
+                } else {
+                    3_i64
+                };
+                let month_ordinal = self
+                    .ordinal
+                    .checked_mul(months)?
+                    .checked_sub(self.freq.fiscal_month_shift())?;
+                let year = 1970_i64.checked_add(month_ordinal.div_euclid(12))?;
+                let month = u32::try_from(month_ordinal.rem_euclid(12) + 1).ok()?;
+                days_from_civil(year, month, 1).checked_mul(Timedelta::NANOS_PER_DAY)?
+            }
+            PeriodFreq::Monthly => {
+                let year = 1970_i64.checked_add(self.ordinal.div_euclid(12))?;
+                let month = u32::try_from(self.ordinal.rem_euclid(12) + 1).ok()?;
+                days_from_civil(year, month, 1).checked_mul(Timedelta::NANOS_PER_DAY)?
+            }
+            PeriodFreq::Weekly(_) => {
+                const WEEK_ANCHOR_DAY: i64 = -10;
+                let days = self
+                    .ordinal
+                    .checked_mul(7)?
+                    .checked_add(WEEK_ANCHOR_DAY + self.freq.week_start_shift())?;
+                days.checked_mul(Timedelta::NANOS_PER_DAY)?
+            }
+            PeriodFreq::Daily => self.ordinal.checked_mul(Timedelta::NANOS_PER_DAY)?,
+            PeriodFreq::Business => {
+                const WEEKDAY_OFFSET: [i64; 5] = [0, 1, 4, 5, 6];
+                let offset = WEEKDAY_OFFSET[self.ordinal.rem_euclid(5) as usize];
+                let days = self
+                    .ordinal
+                    .div_euclid(5)
+                    .checked_mul(7)?
+                    .checked_add(offset)?;
+                days.checked_mul(Timedelta::NANOS_PER_DAY)?
+            }
+            PeriodFreq::Hourly => self.ordinal.checked_mul(Timedelta::NANOS_PER_HOUR)?,
+            PeriodFreq::Minutely => self.ordinal.checked_mul(Timedelta::NANOS_PER_MIN)?,
+            PeriodFreq::Secondly => self.ordinal.checked_mul(Timedelta::NANOS_PER_SEC)?,
+            PeriodFreq::Milliseconds => self.ordinal.checked_mul(Timedelta::NANOS_PER_MILLI)?,
+            PeriodFreq::Microseconds => self.ordinal.checked_mul(Timedelta::NANOS_PER_MICRO)?,
+            PeriodFreq::Nanoseconds => self.ordinal,
+        };
+        (nanos != Timestamp::NAT).then_some(nanos)
+    }
+
+    /// Epoch nanoseconds of this period's inclusive end boundary (`pd.Period.end_time`).
+    /// Returns `None` for `NaT` or out-of-range ordinals.
+    #[must_use]
+    pub fn end_nanos(&self) -> Option<i64> {
+        if self.is_nat() {
+            return None;
+        }
+        if self.freq == PeriodFreq::Business {
+            let start = self.start_nanos()?;
+            let end = start.checked_add(Timedelta::NANOS_PER_DAY - 1)?;
+            return (end != Timestamp::NAT).then_some(end);
+        }
+        let next = Self::new(self.ordinal.checked_add(1)?, self.freq);
+        let end = next.start_nanos()?.checked_sub(1)?;
+        (end != Timestamp::NAT).then_some(end)
+    }
+
+    /// Timestamp at the period's start boundary (`pd.Period.start_time`).
+    /// Returns `Timestamp::nat()` for `NaT` or out-of-range ordinals.
+    #[must_use]
+    pub fn start_time(&self) -> Timestamp {
+        self.start_nanos()
+            .map_or_else(Timestamp::nat, Timestamp::from_nanos)
+    }
+
+    /// Timestamp at the period's inclusive end boundary (`pd.Period.end_time`).
+    /// Returns `Timestamp::nat()` for `NaT` or out-of-range ordinals.
+    #[must_use]
+    pub fn end_time(&self) -> Timestamp {
+        self.end_nanos()
+            .map_or_else(Timestamp::nat, Timestamp::from_nanos)
+    }
+
+    /// Convert period to a `Timestamp` at the requested boundary (`"start"`/`"S"` or `"end"`/`"E"`),
+    /// matching `pd.Period.to_timestamp(how=...)`.
+    pub fn to_timestamp(&self, how: &str) -> Result<Timestamp, TypeError> {
+        match how.trim().to_ascii_lowercase().as_str() {
+            "" | "s" | "start" | "begin" | "b" => Ok(self.start_time()),
+            "e" | "end" | "finish" => Ok(self.end_time()),
+            _ => Err(TypeError::ValueNotParseable {
+                value: how.to_owned(),
+                target: "Period::to_timestamp how ('start' or 'end')".to_owned(),
+            }),
+        }
+    }
+
+    /// Convert period to a new frequency using pandas' default `"end"` boundary,
+    /// matching `pd.Period.asfreq(freq)`.
+    pub fn asfreq(&self, freq: &str) -> Result<Self, TypeError> {
+        self.asfreq_with_how(freq, "end")
+    }
+
+    /// Convert period to a new frequency at the requested boundary (`"start"`/`"S"` or `"end"`/`"E"`),
+    /// matching `pd.Period.asfreq(freq, how)`.
+    pub fn asfreq_with_how(&self, freq: &str, how: &str) -> Result<Self, TypeError> {
+        let target_freq = PeriodFreq::parse(freq).ok_or_else(|| TypeError::ValueNotParseable {
+            value: freq.to_owned(),
+            target: "PeriodFreq".to_owned(),
+        })?;
+        let is_start = match how.trim().to_ascii_lowercase().as_str() {
+            "" | "e" | "end" | "finish" => false,
+            "s" | "start" | "begin" | "b" => true,
+            _ => {
+                return Err(TypeError::ValueNotParseable {
+                    value: how.to_owned(),
+                    target: "Period::asfreq how ('start' or 'end')".to_owned(),
+                });
+            }
+        };
+        if self.is_nat() {
+            return Ok(Self::new(i64::MIN, target_freq));
+        }
+        let boundary_nanos = if is_start {
+            self.start_nanos()
+        } else {
+            self.end_nanos()
+        }
+        .ok_or_else(|| TypeError::ValueNotParseable {
+            value: self.to_string(),
+            target: "Period boundary Timestamp".to_owned(),
+        })?;
+        // pandas rolls a weekend day of a day-or-finer source to a business day
+        // the opposite way from a week/month/quarter/year source: end rolls forward
+        // to Monday, start rolls back to Friday; coarse sources roll end back to Friday.
+        let flips =
+            target_freq == PeriodFreq::Business && Self::fixed_span_nanos(self.freq).is_some();
+        let roll_business_forward = if flips { !is_start } else { is_start };
+        Self::from_timestamp_nanos_with_business_roll(
+            boundary_nanos,
+            target_freq,
+            roll_business_forward,
+        )
+        .ok_or_else(|| TypeError::ValueNotParseable {
+            value: self.to_string(),
+            target: format!("Period[{target_freq}]"),
+        })
+    }
+
+    /// Instant used by pandas `get_date_info` for date/time component accessors:
+    /// sub-daily and daily/business periods use their start instant; coarser
+    /// calendar periods (weekly, monthly, quarterly, annual) use midnight of
+    /// their end date.
+    fn field_timestamp(&self) -> Timestamp {
+        if self.is_nat() {
+            return Timestamp::nat();
+        }
+        let nanos = match self.freq {
+            PeriodFreq::Daily
+            | PeriodFreq::Business
+            | PeriodFreq::Hourly
+            | PeriodFreq::Minutely
+            | PeriodFreq::Secondly
+            | PeriodFreq::Milliseconds
+            | PeriodFreq::Microseconds
+            | PeriodFreq::Nanoseconds => self.start_nanos(),
+            PeriodFreq::Weekly(_)
+            | PeriodFreq::Monthly
+            | PeriodFreq::Quarterly(_)
+            | PeriodFreq::Annual(_) => self
+                .end_nanos()
+                .map(|end| end - end.rem_euclid(Timedelta::NANOS_PER_DAY)),
+        };
+        nanos.map_or_else(Timestamp::nat, Timestamp::from_nanos)
+    }
+
+    /// Format period using strftime directives (`pd.Period.strftime`).
+    /// Returns `"NaT"` for `NaT`.
+    #[must_use]
+    pub fn strftime(&self, fmt: &str) -> String {
+        self.field_timestamp().strftime(fmt)
+    }
+
+    /// Calendar year of the period (`pd.Period.year`). Returns `None` for `NaT`.
+    #[must_use]
+    pub fn year(&self) -> Option<i64> {
+        self.field_timestamp().year()
+    }
+
+    /// Calendar month (1-12) of the period (`pd.Period.month`). Returns `None` for `NaT`.
+    #[must_use]
+    pub fn month(&self) -> Option<i64> {
+        self.field_timestamp().month()
+    }
+
+    /// Calendar day of month (1-31) of the period (`pd.Period.day`). Returns `None` for `NaT`.
+    #[must_use]
+    pub fn day(&self) -> Option<i64> {
+        self.field_timestamp().day()
+    }
+
+    /// Hour component (0-23) of the period (`pd.Period.hour`). Returns `None` for `NaT`.
+    #[must_use]
+    pub fn hour(&self) -> Option<i64> {
+        self.field_timestamp().hour()
+    }
+
+    /// Minute component (0-59) of the period (`pd.Period.minute`). Returns `None` for `NaT`.
+    #[must_use]
+    pub fn minute(&self) -> Option<i64> {
+        self.field_timestamp().minute()
+    }
+
+    /// Second component (0-59) of the period (`pd.Period.second`). Returns `None` for `NaT`.
+    #[must_use]
+    pub fn second(&self) -> Option<i64> {
+        self.field_timestamp().second()
+    }
+
+    /// Quarter (1-4) of the period (`pd.Period.quarter`): fiscal quarter for
+    /// `Quarterly` frequencies, calendar quarter of the end date otherwise.
+    #[must_use]
+    pub fn quarter(&self) -> Option<i64> {
+        if self.is_nat() {
+            return None;
+        }
+        match self.freq {
+            PeriodFreq::Quarterly(_) => Some(self.ordinal.rem_euclid(4) + 1),
+            _ => self.field_timestamp().quarter(),
+        }
+    }
+
+    /// Fiscal year of the period (`pd.Period.qyear`). Returns `None` for `NaT`.
+    #[must_use]
+    pub fn qyear(&self) -> Option<i64> {
+        if self.is_nat() {
+            return None;
+        }
+        match self.freq {
+            PeriodFreq::Quarterly(_) => 1970_i64.checked_add(self.ordinal.div_euclid(4)),
+            _ => self.year(),
+        }
+    }
+
+    /// Day of the week (Monday=0, Sunday=6), matching `pd.Period.dayofweek`.
+    #[must_use]
+    pub fn dayofweek(&self) -> Option<i64> {
+        self.field_timestamp().dayofweek()
+    }
+
+    /// Alias for [`dayofweek`](Self::dayofweek), matching `pd.Period.day_of_week`.
+    #[must_use]
+    pub fn day_of_week(&self) -> Option<i64> {
+        self.dayofweek()
+    }
+
+    /// Alias for [`dayofweek`](Self::dayofweek), matching `pd.Period.weekday`.
+    #[must_use]
+    pub fn weekday(&self) -> Option<i64> {
+        self.dayofweek()
+    }
+
+    /// Day of the year (1-366), matching `pd.Period.dayofyear`.
+    #[must_use]
+    pub fn dayofyear(&self) -> Option<i64> {
+        self.field_timestamp().dayofyear()
+    }
+
+    /// Alias for [`dayofyear`](Self::dayofyear), matching `pd.Period.day_of_year`.
+    #[must_use]
+    pub fn day_of_year(&self) -> Option<i64> {
+        self.dayofyear()
+    }
+
+    /// Number of days in the period's month (28-31), matching `pd.Period.days_in_month`.
+    #[must_use]
+    pub fn days_in_month(&self) -> Option<i64> {
+        self.field_timestamp().days_in_month()
+    }
+
+    /// Alias for [`days_in_month`](Self::days_in_month), matching `pd.Period.daysinmonth`.
+    #[must_use]
+    pub fn daysinmonth(&self) -> Option<i64> {
+        self.days_in_month()
+    }
+
+    /// ISO-8601 week number (1-53), matching `pd.Period.week`.
+    #[must_use]
+    pub fn week(&self) -> Option<i64> {
+        self.field_timestamp().week()
+    }
+
+    /// Alias for [`week`](Self::week), matching `pd.Period.weekofyear`.
+    #[must_use]
+    pub fn weekofyear(&self) -> Option<i64> {
+        self.week()
+    }
+
+    /// Whether the period's year is a leap year (`pd.Period.is_leap_year`).
+    #[must_use]
+    pub fn is_leap_year(&self) -> Option<bool> {
+        self.field_timestamp().is_leap_year()
     }
 
     /// Parse common pandas `Period(...)` strings and infer the frequency.
@@ -23542,5 +24015,123 @@ mod pandas_decimal_py3c0 {
         assert_eq!(parsed.left, 1.5);
         assert_eq!(parsed.right, 3.5);
         assert_eq!(parsed.closed, IntervalClosed::Left);
+    }
+
+    #[test]
+    fn period_scalar_calendar_asfreq_to_timestamp_and_interval_closed_open_match_pandas_uo1wg() {
+        use super::{Interval, IntervalClosed, Period, PeriodFreq, Timestamp};
+
+        // 1. Interval closed_left / closed_right / open_left / open_right across all 4 variants
+        let right = Interval::new(0.0, 5.0, IntervalClosed::Right);
+        assert!(!right.closed_left());
+        assert!(right.closed_right());
+        assert!(right.open_left());
+        assert!(!right.open_right());
+
+        let left = Interval::new(0.0, 5.0, IntervalClosed::Left);
+        assert!(left.closed_left());
+        assert!(!left.closed_right());
+        assert!(!left.open_left());
+        assert!(left.open_right());
+
+        let both = Interval::new(0.0, 5.0, IntervalClosed::Both);
+        assert!(both.closed_left());
+        assert!(both.closed_right());
+        assert!(!both.open_left());
+        assert!(!both.open_right());
+
+        let neither = Interval::new(0.0, 5.0, IntervalClosed::Neither);
+        assert!(!neither.closed_left());
+        assert!(!neither.closed_right());
+        assert!(neither.open_left());
+        assert!(neither.open_right());
+
+        // 2. Period("2024-03", freq="M")
+        let p_m = Period::parse("2024-03").expect("2024-03");
+        assert_eq!(p_m.year(), Some(2024));
+        assert_eq!(p_m.month(), Some(3));
+        assert_eq!(p_m.day(), Some(31));
+        assert_eq!(p_m.hour(), Some(0));
+        assert_eq!(p_m.minute(), Some(0));
+        assert_eq!(p_m.second(), Some(0));
+        assert_eq!(p_m.quarter(), Some(1));
+        assert_eq!(p_m.qyear(), Some(2024));
+        assert_eq!(p_m.weekday(), Some(6));
+        assert_eq!(p_m.dayofweek(), Some(6));
+        assert_eq!(p_m.day_of_week(), Some(6));
+        assert_eq!(p_m.dayofyear(), Some(91));
+        assert_eq!(p_m.day_of_year(), Some(91));
+        assert_eq!(p_m.days_in_month(), Some(31));
+        assert_eq!(p_m.daysinmonth(), Some(31));
+        assert_eq!(p_m.week(), Some(13));
+        assert_eq!(p_m.weekofyear(), Some(13));
+        assert_eq!(p_m.is_leap_year(), Some(true));
+        assert_eq!(p_m.start_time().value(), 1_709_251_200_000_000_000);
+        assert_eq!(p_m.end_time().value(), 1_711_929_599_999_999_999);
+        assert_eq!(p_m.to_timestamp("start").unwrap(), p_m.start_time());
+        assert_eq!(p_m.to_timestamp("end").unwrap(), p_m.end_time());
+        assert_eq!(
+            p_m.asfreq("D").unwrap(),
+            Period::parse("2024-03-31").unwrap()
+        );
+        assert_eq!(
+            p_m.asfreq_with_how("D", "start").unwrap(),
+            Period::parse("2024-03-01").unwrap()
+        );
+        assert_eq!(p_m.strftime("%Y-%m-%d"), "2024-03-31");
+
+        // 3. Fiscal Quarterly Period("2025Q1", freq="Q-JAN") -> ends 2024-04-30
+        let ts_feb = Timestamp::parse("2024-02-15").unwrap();
+        let p_qjan = ts_feb.to_period("Q-JAN").unwrap();
+        assert_eq!(p_qjan.to_string(), "2025Q1");
+        assert_eq!(p_qjan.year(), Some(2024));
+        assert_eq!(p_qjan.qyear(), Some(2025));
+        assert_eq!(p_qjan.quarter(), Some(1));
+        assert_eq!(p_qjan.month(), Some(4));
+        assert_eq!(p_qjan.day(), Some(30));
+        assert_eq!(p_qjan.days_in_month(), Some(30));
+        assert_eq!(p_qjan.start_time().value(), 1_706_745_600_000_000_000);
+        assert_eq!(p_qjan.end_time().value(), 1_714_521_599_999_999_999);
+        assert_eq!(p_qjan.strftime("%Y-%m-%d"), "2024-04-30");
+
+        // 4. Business Friday Period("2024-03-15", freq="B") -> end_time is Friday 23:59:59.999999999, NOT Sunday
+        let p_fri = Timestamp::parse("2024-03-15")
+            .unwrap()
+            .to_period("B")
+            .unwrap();
+        assert_eq!(p_fri.day(), Some(15));
+        assert_eq!(p_fri.weekday(), Some(4));
+        assert_eq!(
+            p_fri.end_time().value(),
+            p_fri.start_time().value() + 86_400_000_000_000 - 1
+        );
+        assert_eq!(
+            p_fri.asfreq_with_how("D", "E").unwrap(),
+            Period::parse("2024-03-15").unwrap()
+        );
+
+        // 5. Period::now("D") succeeds and matches Timestamp::now().to_period("D")
+        let p_now = Period::now("D").expect("Period::now(D)");
+        assert_eq!(p_now.freq(), PeriodFreq::Daily);
+        assert!(!p_now.is_nat());
+
+        // 6. NEGATIVE cases: NaT propagation, invalid frequency, invalid `how`
+        let p_nat = Period::new(i64::MIN, PeriodFreq::Monthly);
+        assert!(p_nat.is_nat());
+        assert_eq!(p_nat.shift(5), p_nat);
+        assert_eq!(p_nat.diff(&p_m), None);
+        assert_eq!(p_nat.year(), None);
+        assert_eq!(p_nat.qyear(), None);
+        assert_eq!(p_nat.quarter(), None);
+        assert_eq!(p_nat.is_leap_year(), None);
+        assert!(p_nat.start_time().is_nat());
+        assert!(p_nat.end_time().is_nat());
+        assert_eq!(p_nat.strftime("%Y-%m-%d"), "NaT");
+        assert!(p_nat.asfreq("D").unwrap().is_nat());
+        assert_eq!(p_nat.asfreq("D").unwrap().freq(), PeriodFreq::Daily);
+        assert!(p_m.asfreq("NOT_A_FREQ").is_err());
+        assert!(p_m.asfreq_with_how("D", "middle").is_err());
+        assert!(p_m.to_timestamp("middle").is_err());
+        assert!(Timestamp::nat().to_period("D").is_err());
     }
 }
