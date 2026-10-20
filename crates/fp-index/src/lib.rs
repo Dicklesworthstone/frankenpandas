@@ -11017,9 +11017,7 @@ impl DatetimeIndex {
                     Ok(Period::new(i64::MIN, period_freq))
                 }
                 IndexLabel::Datetime64(nanos) => datetime_nanos_to_period(*nanos, period_freq),
-                IndexLabel::Null(fp_types::NullKind::NaT) => {
-                    Ok(Period::new(i64::MIN, period_freq))
-                }
+                IndexLabel::Null(fp_types::NullKind::NaT) => Ok(Period::new(i64::MIN, period_freq)),
                 other => Err(IndexError::InvalidArgument(format!(
                     "to_period requires DatetimeIndex labels, got {other:?}"
                 ))),
@@ -39893,12 +39891,18 @@ mod tests {
         let dt = super::DatetimeIndex::new(vec![]);
         assert_eq!(dt.unit(), "ns");
         assert_eq!(dt.resolution(), "day");
-        assert_eq!(super::DatetimeIndex::new(vec![1]).resolution(), "nanosecond");
+        assert_eq!(
+            super::DatetimeIndex::new(vec![1]).resolution(),
+            "nanosecond"
+        );
 
         let td = super::TimedeltaIndex::new(vec![]);
         assert_eq!(td.unit(), "ns");
         assert_eq!(td.resolution(), "day");
-        assert_eq!(super::TimedeltaIndex::new(vec![1]).resolution(), "nanosecond");
+        assert_eq!(
+            super::TimedeltaIndex::new(vec![1]).resolution(),
+            "nanosecond"
+        );
     }
 
     #[test]
