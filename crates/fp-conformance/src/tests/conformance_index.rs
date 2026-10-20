@@ -1543,6 +1543,8 @@ print(json.dumps(res))
         .map(|v| v.as_bool().unwrap())
         .collect();
     assert_eq!(i_mix.isna(), exp_mix_isna);
+    assert!(i_nan.astype("int64").is_err());
+    assert!(i_mix.astype("int64").is_err());
 }
 
 #[test]
@@ -1772,9 +1774,9 @@ print(json.dumps(res))
         })),
         parse_i64_vec(&oracle["map"])
     );
-    // Positional shift with fill (tracked against pandas NotImplementedError in br-frankenpandas-g7cmb)
+    assert!(i_asc.shift(1, None).is_err());
     assert_eq!(
-        to_i64_vec(&i_asc.shift(1, IndexLabel::Int64(-1))),
+        to_i64_vec(&i_asc.shift_positional(1, IndexLabel::Int64(-1))),
         vec![-1, 10, 20, 30]
     );
     let diff_1: Vec<Option<i64>> = i_asc
@@ -2392,9 +2394,10 @@ print(json.dumps(res, default=int))
     assert_eq!(r.values().to_vec(), parse_i64_vec(&oracle["values"]));
     assert_eq!(r.dtype(), oracle["dtype"].as_str().unwrap());
     assert_eq!(r.inferred_type(), oracle["inferred_type"].as_str().unwrap());
-    // Note: empty RangeIndex.inferred_type is "integer" in pandas 2.2.3 vs "empty" in fp_index (filed br-frankenpandas-hysyx)
-    assert_eq!(r_empty.inferred_type(), "empty");
-    assert_eq!(oracle["empty_inferred_type"].as_str(), Some("integer"));
+    assert_eq!(
+        r_empty.inferred_type(),
+        oracle["empty_inferred_type"].as_str().unwrap()
+    );
     assert_eq!(
         r.name().map(|n| n.as_str()),
         Some(oracle["name"].as_str().unwrap())
@@ -2551,7 +2554,7 @@ print(json.dumps(res, default=int))
         parse_i64_vec(&oracle["drop_duplicates"])
     );
 
-    let vc = r.to_index().value_counts();
+    let vc = r.value_counts();
     let exp_vc: Vec<(IndexLabel, usize)> = oracle["value_counts"]
         .as_array()
         .unwrap()
@@ -2613,6 +2616,27 @@ print(json.dumps(res, default=int))
     assert_eq!(
         idx_str_vec(&r.astype("str").unwrap()),
         parse_str_vec(&oracle["astype_str"])
+    );
+    assert_eq!(
+        r.astype("float64").unwrap().labels(),
+        &[
+            IndexLabel::Float64(fp_index::OrderedF64(2.0)),
+            IndexLabel::Float64(fp_index::OrderedF64(4.0)),
+            IndexLabel::Float64(fp_index::OrderedF64(6.0)),
+            IndexLabel::Float64(fp_index::OrderedF64(8.0)),
+        ]
+    );
+    assert_eq!(
+        RangeIndex::new(0, 3, 1)
+            .unwrap()
+            .astype("bool")
+            .unwrap()
+            .labels(),
+        &[
+            IndexLabel::Bool(false),
+            IndexLabel::Bool(true),
+            IndexLabel::Bool(true),
+        ]
     );
     assert_eq!(r.format(), parse_str_vec(&oracle["format"]));
 
@@ -2756,9 +2780,13 @@ print(json.dumps(res, default=int))
     assert!(r.delete(99).is_err());
     assert_eq!(oracle["delete_oob_err"].as_str(), Some("IndexError"));
     assert_eq!(
-        idx_i64_vec(&r.drop(&[IndexLabel::Int64(4), IndexLabel::Int64(8)])),
+        idx_i64_vec(
+            &r.drop(&[IndexLabel::Int64(4), IndexLabel::Int64(8)])
+                .unwrap()
+        ),
         parse_i64_vec(&oracle["drop"])
     );
+    assert!(r.drop(&[IndexLabel::Int64(99)]).is_err());
     assert_eq!(oracle["drop_missing_err"].as_str(), Some("KeyError"));
 
     let diff_1 = r.diff(1);
@@ -2770,12 +2798,8 @@ print(json.dumps(res, default=int))
         .collect();
     assert_eq!(diff_1, exp_diff_1);
 
-    assert_eq!(
-        idx_i64_vec(&r.to_index().round(0)),
-        parse_i64_vec(&oracle["round"])
-    );
-    let shifted = r.to_index().shift(1, IndexLabel::Int64(-1));
-    assert_eq!(idx_i64_vec(&shifted), vec![-1, 2, 4, 6]);
+    assert_eq!(idx_i64_vec(&r.round(0)), parse_i64_vec(&oracle["round"]));
+    assert!(r.shift(1, None).is_err());
     assert_eq!(oracle["shift_err"].as_str(), Some("NotImplementedError"));
 
     let mapped = r.map(|l| match l {
@@ -3848,9 +3872,10 @@ print(json.dumps(res, default=int))
     assert!(ci.delete(99).is_err());
     assert_eq!(oracle["delete_oob_err"].as_str(), Some("IndexError"));
     assert_eq!(
-        idx_str_vec(&ci.drop(&[IndexLabel::Utf8("b".to_owned())])),
+        idx_str_vec(&ci.drop(&[IndexLabel::Utf8("b".to_owned())]).unwrap()),
         parse_str_vec(&oracle["drop"])
     );
+    assert!(ci.drop(&[IndexLabel::Utf8("z".to_owned())]).is_err());
 
     assert!(ci.diff(1).is_err());
     assert_eq!(oracle["diff_err"].as_str(), Some("TypeError"));
@@ -3858,8 +3883,7 @@ print(json.dumps(res, default=int))
         idx_str_vec(&ci.to_index().round(1)),
         parse_str_vec(&oracle["to_list"])
     );
-    let shifted = ci.to_index().shift(1, IndexLabel::Utf8("d".to_owned()));
-    assert_eq!(idx_str_vec(&shifted), vec!["d", "b", "a", "b"]);
+    assert!(ci.shift(1, None).is_err());
     assert_eq!(oracle["shift_err"].as_str(), Some("NotImplementedError"));
 
     let mapped = ci.map(|l| IndexLabel::Utf8(l.to_string().to_uppercase()));
@@ -4823,11 +4847,7 @@ print(json.dumps(res, default=int))
         idx_str_vec(&ii_idx.round(1)),
         parse_str_vec(&oracle["round"])
     );
-    let shifted = ii_idx.shift(1, IndexLabel::Utf8("(0.0, 1.5]".to_owned()));
-    assert_eq!(
-        idx_str_vec(&shifted),
-        vec!["(0.0, 1.5]", "(0.0, 1.5]", "(1.5, 3.0]"]
-    );
+    assert!(ii_idx.shift(1, None).is_err());
     assert_eq!(oracle["diff_err"].as_str(), Some("TypeError"));
     assert_eq!(oracle["shift_err"].as_str(), Some("NotImplementedError"));
 

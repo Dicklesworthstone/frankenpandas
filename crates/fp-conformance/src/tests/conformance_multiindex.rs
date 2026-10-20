@@ -906,9 +906,16 @@ print(json.dumps(res))
         ),
         parse_tuples_str_i64(&oracle["putmask"])
     );
+    assert!(
+        mi.r#where(
+            &[true, false, true, false],
+            vec![IndexLabel::Utf8("z".to_owned()), IndexLabel::Int64(9)],
+        )
+        .is_err()
+    );
     assert_eq!(
         tuples_str_i64(
-            &mi.r#where(
+            &mi.where_tuple(
                 &[true, false, true, false],
                 vec![IndexLabel::Utf8("z".to_owned()), IndexLabel::Int64(9)],
             )
@@ -997,10 +1004,10 @@ print(json.dumps(res))
         dropped_na.len(),
         oracle["dropna_any"].as_array().unwrap().len()
     );
-    let filled_na = mi_nan.fillna(&IndexLabel::Utf8("MISSING".to_owned()));
-    assert_eq!(
-        filled_na.to_list()[1][0],
-        IndexLabel::Utf8("MISSING".to_owned())
+    assert!(
+        mi_nan
+            .fillna(&IndexLabel::Utf8("MISSING".to_owned()))
+            .is_err()
     );
 }
 

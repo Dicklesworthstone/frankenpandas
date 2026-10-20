@@ -6956,6 +6956,59 @@ impl Index {
         ))
     }
 
+    /// Convert labels to Int64 (`pd.Index.astype('int64')`), rejecting
+    /// unparseable strings, non-finite floats (NaN/inf), missing values,
+    /// intervals, and arbitrary objects.
+    pub fn astype_int_strict(&self) -> Result<Self, IndexError> {
+        if self.labels.has_lazy_int64_backing()
+            && let Some(values) = self.labels.int64_view()
+        {
+            return Ok(self.propagate_name(Self::from_i64_values(values.as_ref().clone())));
+        }
+        let float = |bits: i64| f64::from_bits(bits.cast_unsigned());
+        if let Some(bits) = self.labels.float64_bits() {
+            if bits
+                .iter()
+                .fold(true, |finite, &bits| finite & float(bits).is_finite())
+            {
+                return Ok(self.propagate_name(Self::from_i64_values(
+                    bits.iter().map(|&bits| float(bits) as i64).collect(),
+                )));
+            }
+            return Err(IndexError::InvalidArgument(
+                "Cannot convert non-finite values (NA or inf) to integer".to_owned(),
+            ));
+        }
+        let is_temporal_index =
+            self.dtype().starts_with("datetime64[") || self.dtype() == "timedelta64[ns]";
+        let values = self
+            .labels
+            .iter()
+            .map(|l| match l {
+                IndexLabel::Int64(v) => Ok(*v),
+                IndexLabel::Float64(v) if v.0.is_finite() => Ok(v.0 as i64),
+                IndexLabel::Float64(_) | IndexLabel::Null(fp_types::NullKind::NaN) => {
+                    Err(IndexError::InvalidArgument(
+                        "Cannot convert non-finite values (NA or inf) to integer".to_owned(),
+                    ))
+                }
+                IndexLabel::Bool(b) => Ok(i64::from(*b)),
+                IndexLabel::Utf8(s) => s.trim().parse::<i64>().map_err(|_| {
+                    IndexError::InvalidArgument(format!(
+                        "invalid literal for int() with base 10: {s:?}"
+                    ))
+                }),
+                IndexLabel::Timedelta64(ns) | IndexLabel::Datetime64(ns) => Ok(*ns),
+                IndexLabel::Period(period) => Ok(period.ordinal),
+                IndexLabel::Null(fp_types::NullKind::NaT) if is_temporal_index => Ok(i64::MIN),
+                IndexLabel::Object(_) | IndexLabel::Interval(_) | IndexLabel::Null(_) => Err(
+                    IndexError::InvalidArgument(format!("cannot cast index label {l:?} to int64")),
+                ),
+            })
+            .collect::<Result<Vec<i64>, IndexError>>()?;
+        Ok(self.propagate_name(Self::from_i64_values(values)))
+    }
+
     /// Convert labels to Float64 (`pd.Index.astype('float64')`): integers and
     /// bools widen, numeric strings parse, a missing label becomes NaN;
     /// datetimes, timedeltas and non-numeric strings are pandas' TypeError /
@@ -7235,7 +7288,7 @@ impl Index {
             // The labels' own int64 / float64, whatever width they were
             // declared (an int32 index's astype('int64') stayed int32).
             "int" | "int64" => (
-                self.astype_int().with_declared_dtype(None),
+                self.astype_int_strict()?.with_declared_dtype(None),
                 DeclaredDtype::Int64,
             ),
             "float" | "float64" => (
@@ -7506,12 +7559,18 @@ impl Index {
     /// the semantics of `pd.Series.shift`, applied to labels. The two share a name and
     /// nothing else.
     ///
-    /// Kept as a FrankenPandas operation (its behaviour is pinned by
-    /// `index_shift_positive_pads_left` / `_negative_pads_right` / `_zero_is_clone`);
-    /// only the false parity claim is removed. Positive periods shift right, negative
-    /// shift left.
+    /// Unsupported temporal shift on non-temporal `Index`, matching
+    /// `pd.Index.shift(periods=1, freq=None)` raising `NotImplementedError`.
+    pub fn shift(&self, _periods: i64, _freq: Option<&str>) -> Result<Self, IndexError> {
+        Err(IndexError::InvalidArgument(
+            "This method is only implemented for DatetimeIndex, PeriodIndex and TimedeltaIndex"
+                .to_owned(),
+        ))
+    }
+
+    /// Shift the labels by `periods` positions, filling vacated slots with `fill`.
     #[must_use]
-    pub fn shift(&self, periods: i64, fill: IndexLabel) -> Self {
+    pub fn shift_positional(&self, periods: i64, fill: IndexLabel) -> Self {
         let len = self.labels.len();
         if len == 0 || periods == 0 {
             return self.clone();
@@ -16648,7 +16707,7 @@ impl RangeIndex {
 
     #[must_use]
     pub fn inferred_type(&self) -> &'static str {
-        if self.is_empty() { "empty" } else { "integer" }
+        "integer"
     }
 
     #[must_use]
@@ -17620,6 +17679,20 @@ impl RangeIndex {
     pub fn astype(&self, dtype: &str) -> Result<Index, IndexError> {
         match dtype {
             "int" | "int64" => Ok(self.to_flat_index()),
+            "float" | "float64" => {
+                #[allow(clippy::cast_precision_loss)]
+                let values: Vec<f64> = (0..self.len())
+                    .map(|position| self.value_at(position) as f64)
+                    .collect();
+                let mut out = Index::from_f64_values(values);
+                if out.is_empty() {
+                    out = out.with_declared_dtype(Some(DeclaredDtype::Float64));
+                }
+                if let Some(name) = self.name() {
+                    out = out.set_name(name);
+                }
+                Ok(out)
+            }
             "str" | "string" | "object" => {
                 let labels = (0..self.len())
                     .map(|position| IndexLabel::Utf8(self.value_at(position).to_string()))
@@ -17648,9 +17721,7 @@ impl RangeIndex {
                     ))
                 }
             }
-            other => Err(IndexError::InvalidArgument(format!(
-                "unsupported Index.astype dtype {other:?}"
-            ))),
+            other => self.to_flat_index().astype(other),
         }
     }
 
@@ -17756,9 +17827,44 @@ impl RangeIndex {
             .collect()
     }
 
-    /// Drop range labels, returning a flat Index.
+    /// Drop range labels (`errors="raise"`), returning `Err` if any label is
+    /// not present in the range, matching `pd.RangeIndex.drop(labels)`.
+    pub fn drop(&self, labels_to_drop: &[IndexLabel]) -> Result<Index, IndexError> {
+        let len = self.len();
+        let mut drop_positions = vec![false; len];
+        for label in labels_to_drop {
+            let candidate = match label {
+                IndexLabel::Int64(value) => Some(*value),
+                #[allow(clippy::cast_possible_truncation)]
+                IndexLabel::Float64(value)
+                    if value.0.is_finite()
+                        && value.0.fract() == 0.0
+                        && value.0.abs() < 9_223_372_036_854_775_808.0 =>
+                {
+                    Some(value.0 as i64)
+                }
+                _ => None,
+            };
+            let Some(position) = candidate.and_then(|value| self.position_of_value(value)) else {
+                return Err(IndexError::InvalidArgument(format!(
+                    "[{label:?}] not found in axis"
+                )));
+            };
+            drop_positions[position] = true;
+        }
+        let labels = (0..len)
+            .filter_map(|position| (!drop_positions[position]).then_some(self.value_at(position)))
+            .collect();
+        let mut out = Index::from_i64_values(labels);
+        if let Some(name) = self.name() {
+            out = out.set_name(name);
+        }
+        Ok(out)
+    }
+
+    /// Drop range labels (`errors="ignore"`), silently ignoring missing labels.
     #[must_use]
-    pub fn drop(&self, labels_to_drop: &[IndexLabel]) -> Index {
+    pub fn drop_labels(&self, labels_to_drop: &[IndexLabel]) -> Index {
         let len = self.len();
         let mut drop_positions = vec![false; len];
         for label in labels_to_drop {
@@ -17776,6 +17882,42 @@ impl RangeIndex {
             out = out.set_name(name);
         }
         out
+    }
+
+    /// Count occurrences of each distinct label, matching `pd.RangeIndex.value_counts()`.
+    #[must_use]
+    pub fn value_counts(&self) -> Vec<(IndexLabel, usize)> {
+        (0..self.len())
+            .map(|position| (IndexLabel::Int64(self.value_at(position)), 1))
+            .collect()
+    }
+
+    /// Count occurrences of each distinct label with pandas-style options.
+    #[must_use]
+    pub fn value_counts_with_options(
+        &self,
+        normalize: bool,
+        sort: bool,
+        ascending: bool,
+        dropna: bool,
+    ) -> Vec<(IndexLabel, Scalar)> {
+        self.to_index()
+            .value_counts_with_options(normalize, sort, ascending, dropna)
+    }
+
+    /// Round labels to `decimals`, matching `pd.RangeIndex.round(decimals)`.
+    #[must_use]
+    pub fn round(&self, decimals: i32) -> Index {
+        self.to_index().round(decimals)
+    }
+
+    /// Unsupported temporal shift on `RangeIndex`, matching
+    /// `pd.RangeIndex.shift(periods=1, freq=None)` raising `NotImplementedError`.
+    pub fn shift(&self, _periods: i64, _freq: Option<&str>) -> Result<Self, IndexError> {
+        Err(IndexError::InvalidArgument(
+            "This method is only implemented for DatetimeIndex, PeriodIndex and TimedeltaIndex"
+                .to_owned(),
+        ))
     }
 
     fn apply_join_name(&self, other: &Index, mut out: Index) -> Index {
@@ -20241,10 +20383,32 @@ impl CategoricalIndex {
         self.to_flat_index().asof_locs(where_index, mask)
     }
 
-    /// Drop category labels, returning a flat Index.
+    /// Drop category labels (`errors="raise"`), returning `Err` if any label is
+    /// not present, matching `pd.CategoricalIndex.drop(labels)`.
+    pub fn drop(&self, labels_to_drop: &[IndexLabel]) -> Result<Index, IndexError> {
+        for label in labels_to_drop {
+            if !self.labels.contains(label) {
+                return Err(IndexError::InvalidArgument(format!(
+                    "[{label:?}] not found in axis"
+                )));
+            }
+        }
+        Ok(self.to_flat_index().drop(labels_to_drop))
+    }
+
+    /// Drop category labels (`errors="ignore"`), silently ignoring missing labels.
     #[must_use]
-    pub fn drop(&self, labels_to_drop: &[IndexLabel]) -> Index {
+    pub fn drop_labels(&self, labels_to_drop: &[IndexLabel]) -> Index {
         self.to_flat_index().drop(labels_to_drop)
+    }
+
+    /// Unsupported temporal shift on `CategoricalIndex`, matching
+    /// `pd.CategoricalIndex.shift(periods=1, freq=None)` raising `NotImplementedError`.
+    pub fn shift(&self, _periods: i64, _freq: Option<&str>) -> Result<Self, IndexError> {
+        Err(IndexError::InvalidArgument(
+            "This method is only implemented for DatetimeIndex, PeriodIndex and TimedeltaIndex"
+                .to_owned(),
+        ))
     }
 
     /// Join category labels with another flat Index.
@@ -24886,26 +25050,9 @@ impl MultiIndex {
         Err(Self::multi_index_isna_error())
     }
 
-    /// Replace missing labels in every level with one scalar label.
-    #[must_use]
-    pub fn fillna(&self, value: &IndexLabel) -> Self {
-        let levels = self
-            .levels
-            .iter()
-            .map(|level| {
-                level
-                    .iter()
-                    .map(|label| {
-                        if label.is_missing() {
-                            value.clone()
-                        } else {
-                            label.clone()
-                        }
-                    })
-                    .collect()
-            })
-            .collect();
-        Self::from_levels_and_names(levels, self.names.clone())
+    /// `MultiIndex.fillna` is not defined in pandas (`NotImplementedError: isna is not defined for MultiIndex`).
+    pub fn fillna(&self, _value: &IndexLabel) -> Result<Self, IndexError> {
+        Err(Self::multi_index_isna_error())
     }
 
     /// Replace missing labels with one replacement per level.
@@ -24965,8 +25112,15 @@ impl MultiIndex {
         Self::from_tuples_with_names(tuples, self.names.clone())
     }
 
+    /// `MultiIndex.where` is not supported in pandas (`NotImplementedError: .where is not supported for MultiIndex operations`).
+    pub fn r#where(&self, _cond: &[bool], _other: Vec<IndexLabel>) -> Result<Self, IndexError> {
+        Err(IndexError::InvalidArgument(
+            ".where is not supported for MultiIndex operations".to_owned(),
+        ))
+    }
+
     /// Keep original tuples where `cond` is true, otherwise use `other`.
-    pub fn r#where(&self, cond: &[bool], other: Vec<IndexLabel>) -> Result<Self, IndexError> {
+    pub fn where_tuple(&self, cond: &[bool], other: Vec<IndexLabel>) -> Result<Self, IndexError> {
         if cond.len() != self.len() {
             return Err(IndexError::LengthMismatch {
                 expected: self.len(),
@@ -33985,7 +34139,8 @@ mod tests {
     #[test]
     fn index_shift_positive_pads_left() {
         let idx = Index::from_i64(vec![1, 2, 3, 4]).set_name("k");
-        let shifted = idx.shift(2, IndexLabel::Int64(-1));
+        assert!(idx.shift(2, None).is_err());
+        let shifted = idx.shift_positional(2, IndexLabel::Int64(-1));
         assert_eq!(
             shifted.labels(),
             &[
@@ -34001,7 +34156,7 @@ mod tests {
     #[test]
     fn index_shift_negative_pads_right() {
         let idx = Index::from_i64(vec![1, 2, 3, 4]);
-        let shifted = idx.shift(-1, IndexLabel::Int64(0));
+        let shifted = idx.shift_positional(-1, IndexLabel::Int64(0));
         assert_eq!(
             shifted.labels(),
             &[
@@ -34016,14 +34171,14 @@ mod tests {
     #[test]
     fn index_shift_zero_is_clone() {
         let idx = Index::from_i64(vec![1, 2, 3]);
-        let shifted = idx.shift(0, IndexLabel::Int64(-1));
+        let shifted = idx.shift_positional(0, IndexLabel::Int64(-1));
         assert_eq!(shifted.labels(), idx.labels());
     }
 
     #[test]
     fn index_shift_larger_than_len_fills_all() {
         let idx = Index::from_i64(vec![1, 2, 3]);
-        let shifted = idx.shift(10, IndexLabel::Int64(-1));
+        let shifted = idx.shift_positional(10, IndexLabel::Int64(-1));
         assert_eq!(
             shifted.labels(),
             &[
@@ -34039,7 +34194,7 @@ mod tests {
         let index = Index::from_i64_values(vec![1, 2, 3, 4]).set_name("k");
         assert!(index.labels.materialized.get().is_none());
 
-        let shifted = index.shift(2, IndexLabel::Int64(-1));
+        let shifted = index.shift_positional(2, IndexLabel::Int64(-1));
 
         assert_eq!(shifted.name().map(|n| n.as_str()), Some("k"));
         assert_eq!(
@@ -34061,10 +34216,12 @@ mod tests {
         .set_name("k");
         assert_eq!(
             shifted.labels(),
-            materialized.shift(2, IndexLabel::Int64(-1)).labels()
+            materialized
+                .shift_positional(2, IndexLabel::Int64(-1))
+                .labels()
         );
 
-        let filled = index.shift(10, IndexLabel::Int64(0));
+        let filled = index.shift_positional(10, IndexLabel::Int64(0));
         assert_eq!(
             filled.labels.int64_view().unwrap().as_slice(),
             &[0, 0, 0, 0]
@@ -34079,7 +34236,7 @@ mod tests {
             .set_name("axis");
         assert!(index.labels.materialized.get().is_none());
 
-        let shifted = index.shift(-1, IndexLabel::Int64(99));
+        let shifted = index.shift_positional(-1, IndexLabel::Int64(99));
 
         assert_eq!(shifted.name().map(|n| n.as_str()), Some("axis"));
         assert_eq!(
@@ -37719,19 +37876,11 @@ mod tests {
         assert_eq!(mi.copy(), mi);
         assert_eq!(mi.remove_unused_levels(), mi);
 
-        let scalar_filled = mi.fillna(&IndexLabel::Utf8("missing".into()));
-        assert_eq!(
-            scalar_filled.to_list(),
-            vec![
-                vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)],
-                vec![IndexLabel::Utf8("missing".into()), IndexLabel::Int64(2)],
-                vec![
-                    IndexLabel::Utf8("b".into()),
-                    IndexLabel::Utf8("missing".into())
-                ],
-                vec![IndexLabel::Utf8("c".into()), IndexLabel::Int64(3)],
-            ]
-        );
+        assert!(matches!(
+            mi.fillna(&IndexLabel::Utf8("missing".into())),
+            Err(super::IndexError::InvalidArgument(message))
+                if message == "isna is not defined for MultiIndex"
+        ));
 
         let tuple_filled = mi
             .fillna_tuple(&[IndexLabel::Utf8("z".into()), IndexLabel::Int64(0)])
@@ -37773,8 +37922,17 @@ mod tests {
                 .is_err()
         );
 
+        assert!(matches!(
+            mi.r#where(
+                &[true, false, true, false],
+                vec![IndexLabel::Utf8("fallback".into()), IndexLabel::Int64(5)],
+            ),
+            Err(super::IndexError::InvalidArgument(message))
+                if message == ".where is not supported for MultiIndex operations"
+        ));
+
         let where_result = mi
-            .r#where(
+            .where_tuple(
                 &[true, false, true, false],
                 vec![IndexLabel::Utf8("fallback".into()), IndexLabel::Int64(5)],
             )
@@ -41832,10 +41990,20 @@ mod tests {
             ]
         );
 
+        let as_float = range.astype("float64").unwrap();
+        assert_eq!(as_float.name().map(|n| n.as_str()), Some("r"));
+        assert_eq!(
+            as_float.labels(),
+            &[
+                super::IndexLabel::Float64(super::OrderedF64(9.0)),
+                super::IndexLabel::Float64(super::OrderedF64(5.0)),
+                super::IndexLabel::Float64(super::OrderedF64(1.0)),
+            ]
+        );
         assert!(matches!(
-            range.astype("float64"),
+            range.astype("bogus"),
             Err(super::IndexError::InvalidArgument(message))
-                if message == "unsupported Index.astype dtype \"float64\""
+                if message == "unsupported Index.astype dtype \"bogus\""
         ));
         assert!(matches!(
             range.astype("datetime64[ns]"),
@@ -41994,7 +42162,14 @@ mod tests {
         assert_eq!(cat_sorted, cat.sort_values().to_flat_index());
         assert_eq!(cat_order, cat.argsort());
         let drop_cat = [super::IndexLabel::Utf8("b".to_owned())];
-        assert_eq!(cat.drop(&drop_cat), cat.to_flat_index().drop(&drop_cat));
+        assert_eq!(
+            cat.drop(&drop_cat).unwrap(),
+            cat.to_flat_index().drop(&drop_cat)
+        );
+        assert!(
+            cat.drop(&[super::IndexLabel::Utf8("z".to_owned())])
+                .is_err()
+        );
     }
 
     #[test]
@@ -42182,11 +42357,12 @@ mod tests {
             ]
         );
 
-        assert!(matches!(
-            super::DatetimeIndex::new(vec![i64::MIN]).to_period("M"),
-            Err(super::IndexError::InvalidArgument(message))
-                if message.contains("invalid or NaT datetime nanos")
-        ));
+        assert_eq!(
+            super::DatetimeIndex::new(vec![i64::MIN])
+                .to_period("M")?
+                .values(),
+            &[Period::new(i64::MIN, PeriodFreq::Monthly)]
+        );
         assert!(matches!(
             dt.to_period("fortnight"),
             Err(super::IndexError::InvalidArgument(message))
@@ -44334,11 +44510,9 @@ mod tests {
     #[test]
     fn range_index_drop_filters_direct_values_ayakf() {
         let range = super::RangeIndex::new(8, 0, -2).unwrap().set_name("r");
-        let dropped = range.drop(&[
-            IndexLabel::Int64(6),
-            IndexLabel::Utf8("6".to_owned()),
-            IndexLabel::Int64(2),
-        ]);
+        let dropped = range
+            .drop(&[IndexLabel::Int64(6), IndexLabel::Int64(2)])
+            .unwrap();
 
         assert_eq!(dropped.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(dropped.labels.int64_view().unwrap().as_slice(), &[8, 4]);
@@ -44346,21 +44520,37 @@ mod tests {
             dropped.labels.materialized.get().is_none(),
             "RangeIndex::drop should keep typed Int64 output backing"
         );
+        assert!(
+            range
+                .drop(&[IndexLabel::Int64(6), IndexLabel::Utf8("6".to_owned())])
+                .is_err()
+        );
+        let dropped_labels = range.drop_labels(&[
+            IndexLabel::Int64(6),
+            IndexLabel::Utf8("6".to_owned()),
+            IndexLabel::Int64(2),
+        ]);
+        assert_eq!(
+            dropped_labels.labels.int64_view().unwrap().as_slice(),
+            &[8, 4]
+        );
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap();
-        assert!(empty.drop(&[IndexLabel::Int64(0)]).is_empty());
+        assert!(empty.drop(&[IndexLabel::Int64(0)]).is_err());
+        assert!(empty.drop(&[]).unwrap().is_empty());
+        assert!(empty.drop_labels(&[IndexLabel::Int64(0)]).is_empty());
     }
 
     #[test]
     fn range_index_drop_marks_positions_without_hash_uza04155() {
         let range = super::RangeIndex::new(9, -3, -3).unwrap().set_name("r");
-        let dropped = range.drop(&[
-            IndexLabel::Int64(6),
-            IndexLabel::Int64(6),
-            IndexLabel::Utf8("6".to_owned()),
-            IndexLabel::Int64(99),
-            IndexLabel::Int64(0),
-        ]);
+        let dropped = range
+            .drop(&[
+                IndexLabel::Int64(6),
+                IndexLabel::Int64(6),
+                IndexLabel::Int64(0),
+            ])
+            .unwrap();
 
         assert_eq!(dropped.name().map(|n| n.as_str()), Some("r"));
         assert_eq!(dropped.labels.int64_view().unwrap().as_slice(), &[9, 3]);
@@ -44368,11 +44558,24 @@ mod tests {
             dropped.labels.materialized.get().is_none(),
             "RangeIndex::drop should write a typed Int64 result without object materialization"
         );
+        assert!(range.drop(&[IndexLabel::Int64(99)]).is_err());
+
+        let dropped_labels = range.drop_labels(&[
+            IndexLabel::Int64(6),
+            IndexLabel::Int64(6),
+            IndexLabel::Utf8("6".to_owned()),
+            IndexLabel::Int64(99),
+            IndexLabel::Int64(0),
+        ]);
+        assert_eq!(
+            dropped_labels.labels.int64_view().unwrap().as_slice(),
+            &[9, 3]
+        );
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap();
         assert!(
             empty
-                .drop(&[IndexLabel::Int64(0), IndexLabel::Utf8("0".to_owned())])
+                .drop_labels(&[IndexLabel::Int64(0), IndexLabel::Utf8("0".to_owned())])
                 .is_empty()
         );
     }
@@ -48284,5 +48487,114 @@ mod infer_freq_like_pandas_acelo {
         assert!(mixed_int_float.is_floating());
         assert!(!mixed_int_float.is_integer());
         assert!(!mixed_int_float.is_numeric());
+    }
+
+    #[test]
+    fn range_categorical_multiindex_and_index_shift_astype_drop_parity_hysyx_qzknb_l5mic_g7cmb() {
+        // hysyx: RangeIndex empty inferred_type is "integer", astype supports float64/bool/int32,
+        // value_counts and round work, and RangeIndex::drop / CategoricalIndex::drop reject missing labels.
+        let r_empty = RangeIndex::new(5, 5, 1).unwrap();
+        assert_eq!(r_empty.inferred_type(), "integer");
+
+        let r = RangeIndex::new(0, 6, 2).unwrap();
+        assert_eq!(
+            r.astype("float64").unwrap().labels(),
+            &[
+                IndexLabel::Float64(OrderedF64(0.0)),
+                IndexLabel::Float64(OrderedF64(2.0)),
+                IndexLabel::Float64(OrderedF64(4.0)),
+            ]
+        );
+        assert_eq!(
+            r.astype("bool").unwrap().labels(),
+            &[
+                IndexLabel::Bool(false),
+                IndexLabel::Bool(true),
+                IndexLabel::Bool(true),
+            ]
+        );
+        assert_eq!(
+            r.astype("int32").unwrap().labels(),
+            &[
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(4),
+            ]
+        );
+        assert_eq!(r.round(0), r.to_flat_index());
+        assert_eq!(
+            r.value_counts(),
+            vec![
+                (IndexLabel::Int64(0), 1),
+                (IndexLabel::Int64(2), 1),
+                (IndexLabel::Int64(4), 1),
+            ]
+        );
+        assert_eq!(
+            r.drop(&[IndexLabel::Int64(2), IndexLabel::Float64(OrderedF64(4.0))])
+                .unwrap()
+                .labels(),
+            &[IndexLabel::Int64(0)]
+        );
+        assert!(r.drop(&[IndexLabel::Int64(99)]).is_err());
+
+        let ci = CategoricalIndex::from_values(
+            vec!["a".to_owned(), "b".to_owned(), "a".to_owned()],
+            false,
+        );
+        assert_eq!(
+            ci.drop(&[IndexLabel::Utf8("a".to_owned())])
+                .unwrap()
+                .labels(),
+            &[IndexLabel::Utf8("b".to_owned())]
+        );
+        assert!(ci.drop(&[IndexLabel::Utf8("z".to_owned())]).is_err());
+
+        // qzknb: Index::astype("int64") rejects unparseable strings, NaN/Null, and non-finite floats.
+        let parseable = Index::new(vec![
+            IndexLabel::Utf8("10".to_owned()),
+            IndexLabel::Utf8("-20".to_owned()),
+            IndexLabel::Float64(OrderedF64(3.9)),
+            IndexLabel::Bool(true),
+        ]);
+        assert_eq!(
+            parseable.astype("int64").unwrap().labels(),
+            &[
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(-20),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(1),
+            ]
+        );
+        let unparseable = Index::new(vec![IndexLabel::Int64(1), IndexLabel::Utf8("x".to_owned())]);
+        assert!(unparseable.astype("int64").is_err());
+        let with_nan = Index::new(vec![
+            IndexLabel::Float64(OrderedF64(1.0)),
+            IndexLabel::Null(fp_types::NullKind::NaN),
+        ]);
+        assert!(with_nan.astype("int64").is_err());
+
+        // g7cmb: Index::shift, RangeIndex::shift, CategoricalIndex::shift return Err.
+        assert!(Index::from_i64(vec![1, 2, 3]).shift(1, None).is_err());
+        assert!(r.shift(1, None).is_err());
+        assert!(ci.shift(1, None).is_err());
+
+        // l5mic: MultiIndex::fillna and MultiIndex::where return Err.
+        let mi = MultiIndex::from_tuples(vec![
+            vec![IndexLabel::Utf8("a".to_owned()), IndexLabel::Int64(1)],
+            vec![
+                IndexLabel::Null(fp_types::NullKind::NaN),
+                IndexLabel::Int64(2),
+            ],
+        ])
+        .unwrap();
+        assert!(mi.fillna(&IndexLabel::Utf8("X".to_owned())).is_err());
+        assert!(
+            mi.r#where(
+                &[true, false],
+                vec![IndexLabel::Utf8("z".to_owned()), IndexLabel::Int64(9)],
+            )
+            .is_err()
+        );
     }
 }
