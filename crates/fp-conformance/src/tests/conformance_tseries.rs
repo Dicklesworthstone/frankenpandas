@@ -1091,13 +1091,14 @@ def dump_dti(dti):
         "day_name": opt_str(dti.day_name()),
         "isocalendar": iso_rows,
         "strftime": opt_str(dti.strftime("%Y-%m-%d %H:%M:%S %z")),
-        "period_m": [int(v) for v in dti.dropna().to_period("M").asi8.tolist()],
+        "period_m": [int(v) for v in dti.to_period("M").asi8.tolist()],
         "floor_h": [int(v) for v in dti.floor("h").asi8.tolist()],
         "ceil_h": [int(v) for v in dti.ceil("h").asi8.tolist()],
         "round_h": [int(v) for v in dti.round("h").asi8.tolist()],
         "normalize": [int(v) for v in dti.normalize().asi8.tolist()],
         "is_normalized": bool(dti.is_normalized),
-        "norm_is_normalized": bool(dti.dropna().normalize().is_normalized),
+        "norm_is_normalized": bool(dti.normalize().is_normalized),
+        "norm_dropna_is_normalized": bool(dti.dropna().normalize().is_normalized),
         "at_time": [int(v) for v in dti.indexer_at_time(dti[1].time().isoformat()).tolist()],
         "between_time": [int(v) for v in dti.indexer_between_time("20:00:00", "23:59:59").tolist()],
         "julian": [None if pd.isna(v) else float(v) for v in dti.to_julian_date()],
@@ -1301,9 +1302,8 @@ print(json.dumps(out))
             to_opt_str("strftime"),
             "{label}: strftime"
         );
-        // Note: NaT propagation in to_period is tracked in br-frankenpandas-hmtsq
         assert_eq!(
-            dti.dropna().to_period("M").expect("to_period").asi8(),
+            dti.to_period("M").expect("to_period").asi8(),
             to_i64_vec("period_m"),
             "{label}: to_period(M)"
         );
@@ -1334,14 +1334,18 @@ print(json.dumps(out))
             exp["is_normalized"].as_bool().expect("bool"),
             "{label}: is_normalized"
         );
-        // Note: NaT in is_normalized is tracked in br-frankenpandas-fscxx
+        assert_eq!(
+            norm.is_normalized(),
+            exp["norm_is_normalized"].as_bool().expect("bool"),
+            "{label}: norm.is_normalized"
+        );
         assert_eq!(
             dti.dropna()
                 .normalize()
                 .expect("norm dropna")
                 .is_normalized(),
-            exp["norm_is_normalized"].as_bool().expect("bool"),
-            "{label}: norm.is_normalized"
+            exp["norm_dropna_is_normalized"].as_bool().expect("bool"),
+            "{label}: norm_dropna.is_normalized"
         );
         let exp_at_time: Vec<usize> = exp["at_time"]
             .as_array()
@@ -1374,11 +1378,7 @@ print(json.dumps(out))
             .iter()
             .map(serde_json::Value::as_f64)
             .collect();
-        // Note: tz-aware wall-clock Julian Date is tracked in br-frankenpandas-n3wmb
-        let actual_julian = dti
-            .tz_localize(None)
-            .expect("tz_localize(None)")
-            .to_julian_date();
+        let actual_julian = dti.to_julian_date();
         assert_eq!(actual_julian.len(), exp_julian.len());
         for (a, e) in actual_julian.iter().zip(exp_julian.iter()) {
             match (a, e) {
@@ -1710,7 +1710,7 @@ print(json.dumps(out))
     );
     assert_eq!(sorted.unit(), oracle["unit"].as_str().expect("unit"));
     assert_eq!(sorted.as_unit("ns").expect("as_unit").asi8(), sorted.asi8());
-    // Sub-day data-driven resolution is tracked in br-frankenpandas-bmxeu
+    assert_eq!(sorted.resolution(), "day");
     assert_eq!(
         DatetimeIndex::new(vec![d0 + 1]).resolution(),
         oracle["resolution_ns"].as_str().expect("resolution")
@@ -2283,7 +2283,7 @@ print(json.dumps(out))
         regular.as_unit("ns").expect("as_unit").asi8(),
         regular.asi8()
     );
-    // Sub-day data-driven resolution is tracked in br-frankenpandas-bmxeu
+    assert_eq!(regular.resolution(), "day");
     assert_eq!(mixed.resolution(), "nanosecond");
     assert_eq!(
         regular.intersection(&other).asi8(),
@@ -2488,6 +2488,7 @@ fn live_oracle_period_index_fields_asfreq_timestamps_and_ops_differential() {
     // @covers: PeriodIndex.end_time
     // @covers: PeriodIndex.equals
     // @covers: PeriodIndex.factorize
+    // @covers: PeriodIndex.fillna
     // @covers: PeriodIndex.format
     // @covers: PeriodIndex.freq
     // @covers: PeriodIndex.freqstr
@@ -2498,6 +2499,7 @@ fn live_oracle_period_index_fields_asfreq_timestamps_and_ops_differential() {
     // @covers: PeriodIndex.get_indexer_non_unique
     // @covers: PeriodIndex.get_level_values
     // @covers: PeriodIndex.get_loc
+    // @covers: PeriodIndex.get_slice_bound
     // @covers: PeriodIndex.groupby
     // @covers: PeriodIndex.has_duplicates
     // @covers: PeriodIndex.hasnans
@@ -2860,6 +2862,8 @@ print(json.dumps(out))
     assert_eq!(pi.get_indexer_non_unique(other.values()).0, exp_indexer);
     assert_eq!(pi.reindex(&other).1, exp_indexer);
     assert_eq!(pi.searchsorted(p2, "left").expect("ss"), 2);
+    assert_eq!(pi.get_slice_bound(p2, "left").expect("bound left"), 2);
+    assert_eq!(pi.get_slice_bound(p2, "right").expect("bound right"), 3);
     assert_eq!(
         pi.slice_locs(p1, p2).expect("slice_locs"),
         (
@@ -2883,6 +2887,12 @@ print(json.dumps(out))
     assert_eq!(pi.notna(), vec![true; 4]);
     assert_eq!(pi.notnull(), vec![true; 4]);
     assert_eq!(pi.dropna().asi8(), pi.asi8());
+    let pi_with_nat = PeriodIndex::new(vec![p0, Period::new(i64::MIN, PeriodFreq::Monthly), p2]);
+    assert_eq!(
+        pi_with_nat.fillna(p1).expect("fillna").values(),
+        &[p0, p1, p2]
+    );
+    assert_eq!(pi_with_nat.dropna().values(), &[p0, p2]);
     assert!(pi.is_unique());
     assert!(!pi.has_duplicates());
     assert!(pi.is_monotonic_increasing());

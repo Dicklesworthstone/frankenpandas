@@ -25180,7 +25180,10 @@ impl Series {
             }
             Scalar::Utf8(value) => {
                 return Err(FrameError::Column(ColumnError::Type(
-                    fp_types::TypeError::NonNumericValue { value },
+                    fp_types::TypeError::NonNumericValue {
+                        value,
+                        dtype: DType::Utf8,
+                    },
                 )));
             }
             _ => return Ok(Scalar::Float64(f64::NAN)),

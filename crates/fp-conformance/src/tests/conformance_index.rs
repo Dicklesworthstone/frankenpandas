@@ -1223,6 +1223,12 @@ print(json.dumps(res))
         i_asc.is_floating(),
         oracle["asc_is_floating"].as_bool().unwrap()
     );
+    assert!(i_nan.is_floating());
+    assert!(i_nan.is_numeric());
+    assert!(!i_nan.is_integer());
+    let i_bool = Index::new(vec![IndexLabel::Bool(true), IndexLabel::Bool(false)]);
+    assert!(i_bool.is_boolean());
+    assert!(!i_bool.is_numeric());
     assert_eq!(
         i_asc.is_interval(),
         oracle["asc_is_interval"].as_bool().unwrap()

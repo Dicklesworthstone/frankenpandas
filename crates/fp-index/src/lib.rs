@@ -8510,10 +8510,10 @@ impl Index {
         std::ptr::eq(self, other)
     }
 
-    /// Whether all non-missing labels are booleans.
+    /// Whether all non-missing labels are booleans, matching `pd.Index.is_boolean()`.
     #[must_use]
     pub fn is_boolean(&self) -> bool {
-        false
+        self.inferred_type() == "boolean"
     }
 
     /// Whether this generic index is categorical.
@@ -8522,24 +8522,19 @@ impl Index {
         false
     }
 
-    /// Whether all non-missing labels are floating-point.
+    /// Whether this index is a floating type, matching `pd.Index.is_floating()`.
     #[must_use]
     pub fn is_floating(&self) -> bool {
-        false
+        matches!(
+            self.inferred_type(),
+            "floating" | "mixed-integer-float" | "integer-na"
+        )
     }
 
-    /// Whether all non-missing labels are Int64 labels.
+    /// Whether all non-missing labels are Int64 labels, matching `pd.Index.is_integer()`.
     #[must_use]
     pub fn is_integer(&self) -> bool {
-        if self.labels.has_lazy_int64_backing() {
-            return !self.labels.is_empty();
-        }
-        !self.labels.is_empty()
-            && self
-                .labels
-                .iter()
-                .filter(|label| !label.is_missing())
-                .all(|label| matches!(label, IndexLabel::Int64(_)))
+        self.inferred_type() == "integer"
     }
 
     /// Whether this generic index is interval-typed.
@@ -8548,10 +8543,10 @@ impl Index {
         false
     }
 
-    /// Whether all non-missing labels are numeric.
+    /// Whether all non-missing labels are numeric, matching `pd.Index.is_numeric()`.
     #[must_use]
     pub fn is_numeric(&self) -> bool {
-        self.is_integer()
+        matches!(self.inferred_type(), "integer" | "floating")
     }
 
     /// Whether this index is object-backed.
@@ -10992,26 +10987,49 @@ impl DatetimeIndex {
 
     /// Convert datetime labels to period ordinals at the requested frequency,
     /// matching `pd.DatetimeIndex.to_period(freq)` for supported fixed
-    /// calendar frequencies.
+    /// calendar frequencies. NaT entries propagate as Period NaT.
     pub fn to_period(&self, freq: &str) -> Result<PeriodIndex, IndexError> {
         let period_freq = PeriodFreq::parse(freq).ok_or_else(|| {
             IndexError::InvalidArgument(format!("to_period: unsupported frequency '{freq}'"))
         })?;
+        if let Some(wall) = self.wall_nanos() {
+            let periods = wall
+                .iter()
+                .map(|&nanos| {
+                    if nanos == i64::MIN {
+                        Ok(Period::new(i64::MIN, period_freq))
+                    } else {
+                        datetime_nanos_to_period(nanos, period_freq)
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok(PeriodIndex {
+                values: periods,
+                name: self.name().cloned(),
+                built_freq: Some(period_freq),
+            });
+        }
         let periods = self
             .wall_labels()
             .iter()
             .map(|label| match label {
+                IndexLabel::Datetime64(nanos) if *nanos == i64::MIN => {
+                    Ok(Period::new(i64::MIN, period_freq))
+                }
                 IndexLabel::Datetime64(nanos) => datetime_nanos_to_period(*nanos, period_freq),
+                IndexLabel::Null(fp_types::NullKind::NaT) => {
+                    Ok(Period::new(i64::MIN, period_freq))
+                }
                 other => Err(IndexError::InvalidArgument(format!(
                     "to_period requires DatetimeIndex labels, got {other:?}"
                 ))),
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut out = PeriodIndex::new(periods);
-        if let Some(name) = self.name() {
-            out = out.set_name(name);
-        }
-        Ok(out)
+        Ok(PeriodIndex {
+            values: periods,
+            name: self.name().cloned(),
+            built_freq: Some(period_freq),
+        })
     }
 
     /// Format each timestamp as Python's strftime does, matching
@@ -12059,14 +12077,24 @@ impl DatetimeIndex {
 
     /// Convert each label to its Julian Date, matching
     /// `pd.DatetimeIndex.to_julian_date()`. The formula is
-    /// `JD = unix_seconds / 86400 + 2440587.5` and the result is
-    /// computed in f64; NAT propagates as `None`.
+    /// `JD = unix_seconds / 86400 + 2440587.5` over each label's wall-clock
+    /// timestamp in f64; NaT propagates as `None`.
     #[must_use]
     pub fn to_julian_date(&self) -> Vec<Option<f64>> {
         const SECONDS_PER_DAY: f64 = 86_400.0;
         const UNIX_EPOCH_JD: f64 = 2_440_587.5;
-        self.index
-            .labels()
+        if let Some(wall) = self.wall_nanos() {
+            return wall
+                .iter()
+                .map(|&nanos| {
+                    (nanos != i64::MIN).then(|| {
+                        let secs = (nanos as f64) / 1_000_000_000.0;
+                        secs / SECONDS_PER_DAY + UNIX_EPOCH_JD
+                    })
+                })
+                .collect();
+        }
+        self.wall_labels()
             .iter()
             .map(|label| match label {
                 IndexLabel::Datetime64(nanos) if *nanos != i64::MIN => {
@@ -12384,11 +12412,19 @@ impl DatetimeIndex {
         "ns"
     }
 
-    /// Resolution string, matching `pd.DatetimeIndex.resolution`. Always
-    /// `"nanosecond"` because the underlying storage is fixed at ns.
+    /// Data-driven resolution string (`"day"`, `"hour"`, `"minute"`,
+    /// `"second"`, `"millisecond"`, `"microsecond"`, or `"nanosecond"`),
+    /// matching `pd.DatetimeIndex.resolution`.
     #[must_use]
     pub fn resolution(&self) -> &'static str {
-        "nanosecond"
+        if let Some(wall) = self.wall_nanos() {
+            return nanos_resolution(wall.iter().copied());
+        }
+        let labels = self.wall_labels();
+        nanos_resolution(labels.iter().filter_map(|label| match label {
+            IndexLabel::Datetime64(nanos) => Some(*nanos),
+            _ => None,
+        }))
     }
 
     /// First position of `value`, matching `pd.DatetimeIndex.get_loc(value)`.
@@ -12995,7 +13031,7 @@ impl DatetimeIndex {
         self.rezoned(normalized.with_freq(freq))
     }
 
-    /// Whether every label is at its wall-clock midnight (NAT counts as
+    /// Whether every label is at its wall-clock midnight (NaT is not
     /// normalized), matching `pd.DatetimeIndex.is_normalized`.
     #[must_use]
     pub fn is_normalized(&self) -> bool {
@@ -13005,14 +13041,60 @@ impl DatetimeIndex {
         if let Some(wall) = self.wall_nanos() {
             return wall
                 .iter()
-                .all(|&nanos| nanos == i64::MIN || nanos.rem_euclid(nanos_per_day) == 0);
+                .all(|&nanos| nanos != i64::MIN && nanos.rem_euclid(nanos_per_day) == 0);
         }
         self.wall_labels().iter().all(|label| match label {
             IndexLabel::Datetime64(nanos) => {
-                *nanos == i64::MIN || nanos.rem_euclid(nanos_per_day) == 0
+                *nanos != i64::MIN && nanos.rem_euclid(nanos_per_day) == 0
             }
-            _ => true,
+            _ => false,
         })
+    }
+}
+
+fn nanos_resolution(nanos_iter: impl Iterator<Item = i64>) -> &'static str {
+    const NANOS_PER_DAY: i64 = 86_400_000_000_000;
+    const NANOS_PER_HOUR: i64 = 3_600_000_000_000;
+    const NANOS_PER_MINUTE: i64 = 60_000_000_000;
+    const NANOS_PER_SECOND: i64 = 1_000_000_000;
+    const NANOS_PER_MILLISECOND: i64 = 1_000_000;
+    const NANOS_PER_MICROSECOND: i64 = 1_000;
+
+    // 0 = day, 1 = hour, 2 = minute, 3 = second, 4 = millisecond, 5 = microsecond, 6 = nanosecond
+    let mut finest = 0u8;
+    for nanos in nanos_iter {
+        if nanos == i64::MIN {
+            continue;
+        }
+        let sub_day = nanos.rem_euclid(NANOS_PER_DAY);
+        if sub_day == 0 {
+            continue;
+        }
+        let level = if sub_day % NANOS_PER_MICROSECOND != 0 {
+            return "nanosecond";
+        } else if sub_day % NANOS_PER_MILLISECOND != 0 {
+            5
+        } else if sub_day % NANOS_PER_SECOND != 0 {
+            4
+        } else if sub_day % NANOS_PER_MINUTE != 0 {
+            3
+        } else if sub_day % NANOS_PER_HOUR != 0 {
+            2
+        } else {
+            1
+        };
+        if level > finest {
+            finest = level;
+        }
+    }
+    match finest {
+        0 => "day",
+        1 => "hour",
+        2 => "minute",
+        3 => "second",
+        4 => "millisecond",
+        5 => "microsecond",
+        _ => "nanosecond",
     }
 }
 
@@ -13733,18 +13815,19 @@ impl TimedeltaIndex {
         "ns"
     }
 
-    /// Resolution string. Always `"nanosecond"`.
-    ///
-    /// ⚠️ TWO ways this is not parity. (a) `pd.TimedeltaIndex.resolution` does
-    /// NOT exist (measured 2.2.3: `AttributeError`) even though
-    /// `pd.DatetimeIndex.resolution` DOES. (b) Where pandas has a `resolution`,
-    /// it describes the DATA, not the storage unit: `resolution` on a
-    /// `DatetimeIndex` of day-aligned labels returns `'day'`. The fixed
-    /// `"nanosecond"` here answers a different question, and the class-level
-    /// `pd.Timedelta.resolution` is a `Timedelta` of 1ns, not a string.
+    /// Data-driven resolution string (`"day"`, `"hour"`, `"minute"`,
+    /// `"second"`, `"millisecond"`, `"microsecond"`, or `"nanosecond"`),
+    /// computed from the finest non-zero sub-day component across non-NaT
+    /// entries.
     #[must_use]
     pub fn resolution(&self) -> &'static str {
-        "nanosecond"
+        if let Some(nanos) = self.index.labels.timedelta64_nanos() {
+            return nanos_resolution(nanos.iter().copied());
+        }
+        nanos_resolution(self.index.labels().iter().filter_map(|label| match label {
+            IndexLabel::Timedelta64(nanos) => Some(*nanos),
+            _ => None,
+        }))
     }
 
     /// First position of `value`, matching `pd.TimedeltaIndex.get_loc(value)`.
@@ -14734,12 +14817,43 @@ impl PeriodIndex {
         self.notna()
     }
 
-    /// Drop missing labels, matching `pd.PeriodIndex.dropna()`.
-    ///
-    /// With no native Period NaT sentinel, this is a name-preserving clone.
+    /// Drop missing labels (`Period::is_nat`), matching `pd.PeriodIndex.dropna()`.
     #[must_use]
     pub fn dropna(&self) -> Self {
-        self.clone()
+        Self {
+            values: self
+                .values
+                .iter()
+                .copied()
+                .filter(|period| !period.is_nat())
+                .collect(),
+            name: self.name.clone(),
+            built_freq: self.freq(),
+        }
+    }
+
+    /// Replace missing (`NaT`) period labels with `value`, matching
+    /// `pd.PeriodIndex.fillna(value)`. The replacement period must share the
+    /// index frequency.
+    pub fn fillna(&self, value: Period) -> Result<Self, IndexError> {
+        if let Some(freq) = self.freq()
+            && freq != value.freq
+        {
+            return Err(IndexError::InvalidArgument(format!(
+                "fillna: replacement frequency {:?} does not match index frequency {:?}",
+                value.freq, freq
+            )));
+        }
+        let values: Vec<Period> = self
+            .values
+            .iter()
+            .map(|period| if period.is_nat() { value } else { *period })
+            .collect();
+        Ok(Self {
+            values,
+            name: self.name.clone(),
+            built_freq: self.freq().or(Some(value.freq)),
+        })
     }
 
     #[must_use]
@@ -15666,6 +15780,13 @@ impl PeriodIndex {
             }
         }
         Ok(lo)
+    }
+
+    /// Position of the slice boundary for `label` and `side`, matching
+    /// `pd.PeriodIndex.get_slice_bound(label, side)`. Mirrors
+    /// `searchsorted(label, side)`.
+    pub fn get_slice_bound(&self, label: Period, side: &str) -> Result<usize, IndexError> {
+        self.searchsorted(label, side)
     }
 
     /// Half-open positional range for a period slice, matching
@@ -39771,11 +39892,13 @@ mod tests {
     fn datetime_timedelta_unit_resolution_match_pandas_c50rv() {
         let dt = super::DatetimeIndex::new(vec![]);
         assert_eq!(dt.unit(), "ns");
-        assert_eq!(dt.resolution(), "nanosecond");
+        assert_eq!(dt.resolution(), "day");
+        assert_eq!(super::DatetimeIndex::new(vec![1]).resolution(), "nanosecond");
 
         let td = super::TimedeltaIndex::new(vec![]);
         assert_eq!(td.unit(), "ns");
-        assert_eq!(td.resolution(), "nanosecond");
+        assert_eq!(td.resolution(), "day");
+        assert_eq!(super::TimedeltaIndex::new(vec![1]).resolution(), "nanosecond");
     }
 
     #[test]
@@ -46372,7 +46495,8 @@ mod tests {
             vec![Some(1_705_276_800_i64 * NS), Some(midnight), None]
         );
         assert_eq!(normed.name().map(|n| n.as_str()), Some("when"));
-        assert!(normed.is_normalized());
+        assert!(!normed.is_normalized());
+        assert!(normed.dropna().is_normalized());
     }
 
     #[test]
@@ -46387,7 +46511,7 @@ mod tests {
         assert!(only_midnight.is_normalized());
 
         let only_nat = super::DatetimeIndex::new(vec![i64::MIN, i64::MIN]);
-        assert!(only_nat.is_normalized());
+        assert!(!only_nat.is_normalized());
 
         let empty = super::DatetimeIndex::new(vec![]);
         assert!(empty.is_normalized());
@@ -47845,7 +47969,7 @@ mod interval_index_tests {
 /// family and its `infer_freq`.
 #[cfg(test)]
 mod infer_freq_like_pandas_acelo {
-    use super::infer_freq_from_timestamps;
+    use super::*;
 
     #[test]
     fn every_family_as_pandas_infers_it() {
@@ -48037,5 +48161,124 @@ mod infer_freq_like_pandas_acelo {
             post_spring - pre_spring.value(),
             (3 * 24 - 1) * 3_600 * 1_000_000_000
         );
+    }
+
+    #[test]
+    fn temporal_and_type_predicates_parity_hmtsq_bmxeu_gfnsg_fscxx_n3wmb_094fy() {
+        // hmtsq: DatetimeIndex::to_period propagates NaT as Period NaT.
+        let jan = Timestamp::parse("2024-01-15").unwrap().nanos;
+        let mar = Timestamp::parse("2024-03-20").unwrap().nanos;
+        let dti = DatetimeIndex::new(vec![jan, i64::MIN, mar]).set_name("dt");
+        let pi = dti.to_period("M").expect("to_period with NaT");
+        assert_eq!(pi.name().map(|n| n.as_str()), Some("dt"));
+        assert_eq!(pi.freq(), Some(PeriodFreq::Monthly));
+        assert_eq!(pi.isna(), vec![false, true, false]);
+        assert_eq!(
+            pi.asi8(),
+            vec![
+                Period::parse("2024-01").unwrap().ordinal,
+                i64::MIN,
+                Period::parse("2024-03").unwrap().ordinal,
+            ]
+        );
+
+        // gfnsg: PeriodIndex::fillna, dropna, and get_slice_bound.
+        let feb_p = Period::parse("2024-02").unwrap();
+        let filled = pi.fillna(feb_p).expect("fillna same freq");
+        assert!(!filled.hasnans());
+        assert_eq!(filled.values()[1], feb_p);
+        let dropped = pi.dropna();
+        assert_eq!(dropped.len(), 2);
+        assert!(!dropped.hasnans());
+        let bad_freq_p = Period::parse("2024-02-01").unwrap();
+        assert!(pi.fillna(bad_freq_p).is_err());
+
+        let p_jan = Period::parse("2024-01").unwrap();
+        let p_mar = Period::parse("2024-03").unwrap();
+        let p_may = Period::parse("2024-05").unwrap();
+        let p_sorted = PeriodIndex::new(vec![p_jan, p_mar, p_mar, p_may]);
+        assert_eq!(p_sorted.get_slice_bound(p_mar, "left").unwrap(), 1);
+        assert_eq!(p_sorted.get_slice_bound(p_mar, "right").unwrap(), 3);
+        assert_eq!(p_sorted.get_slice_bound(feb_p, "left").unwrap(), 1);
+        assert!(p_sorted.get_slice_bound(p_mar, "middle").is_err());
+        assert!(p_sorted.get_slice_bound(bad_freq_p, "left").is_err());
+
+        // bmxeu: DatetimeIndex::resolution and TimedeltaIndex::resolution are data-driven.
+        let day_ns: i64 = 86_400_000_000_000;
+        assert_eq!(
+            DatetimeIndex::new(vec![day_ns, i64::MIN]).resolution(),
+            "day"
+        );
+        assert_eq!(
+            DatetimeIndex::new(vec![day_ns + 3_600_000_000_000]).resolution(),
+            "hour"
+        );
+        assert_eq!(
+            DatetimeIndex::new(vec![day_ns + 60_000_000_000]).resolution(),
+            "minute"
+        );
+        assert_eq!(
+            DatetimeIndex::new(vec![day_ns + 1_000_000_000]).resolution(),
+            "second"
+        );
+        assert_eq!(
+            DatetimeIndex::new(vec![day_ns + 1_000_000]).resolution(),
+            "millisecond"
+        );
+        assert_eq!(
+            DatetimeIndex::new(vec![day_ns + 1_000]).resolution(),
+            "microsecond"
+        );
+        assert_eq!(
+            DatetimeIndex::new(vec![day_ns + 1]).resolution(),
+            "nanosecond"
+        );
+        assert_eq!(
+            TimedeltaIndex::new(vec![day_ns, -2 * day_ns]).resolution(),
+            "day"
+        );
+        assert_eq!(
+            TimedeltaIndex::new(vec![day_ns, 3_600_000_000_000]).resolution(),
+            "hour"
+        );
+
+        // fscxx: DatetimeIndex::is_normalized returns false when NaT is present.
+        assert!(DatetimeIndex::new(vec![day_ns]).is_normalized());
+        assert!(!DatetimeIndex::new(vec![day_ns, i64::MIN]).is_normalized());
+
+        // n3wmb: DatetimeIndex::to_julian_date uses wall-clock labels on tz-aware index.
+        let naive_ts = Timestamp::parse("2024-01-01 14:30:45").unwrap().nanos;
+        let ny_dti = DatetimeIndex::new(vec![naive_ts, i64::MIN])
+            .tz_localize(Some("America/New_York"))
+            .unwrap();
+        let naive_dti = DatetimeIndex::new(vec![naive_ts, i64::MIN]);
+        assert_eq!(ny_dti.to_julian_date(), naive_dti.to_julian_date());
+        let utc_converted = ny_dti.tz_convert(Some("UTC")).unwrap();
+        assert_ne!(ny_dti.to_julian_date(), utc_converted.to_julian_date());
+
+        // 094fy: Index::is_boolean, is_floating, and is_numeric on Bool and Float64 indexes.
+        let bool_idx = Index::new(vec![IndexLabel::Bool(true), IndexLabel::Bool(false)]);
+        assert!(bool_idx.is_boolean());
+        assert!(!bool_idx.is_floating());
+        assert!(!bool_idx.is_integer());
+        assert!(!bool_idx.is_numeric());
+
+        let float_idx = Index::new(vec![
+            IndexLabel::Float64(OrderedF64(1.5)),
+            IndexLabel::Float64(OrderedF64(2.5)),
+        ]);
+        assert!(!float_idx.is_boolean());
+        assert!(float_idx.is_floating());
+        assert!(!float_idx.is_integer());
+        assert!(float_idx.is_numeric());
+
+        let mixed_int_float = Index::new(vec![
+            IndexLabel::Int64(1),
+            IndexLabel::Float64(OrderedF64(2.5)),
+        ]);
+        assert!(!mixed_int_float.is_boolean());
+        assert!(mixed_int_float.is_floating());
+        assert!(!mixed_int_float.is_integer());
+        assert!(!mixed_int_float.is_numeric());
     }
 }
