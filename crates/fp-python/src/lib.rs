@@ -12757,6 +12757,7 @@ fn coded_levels_of_numpy_arrays(
     }
     let mut uniques: Vec<Vec<IndexLabel>> = Vec::new();
     let mut codes: Vec<Vec<u32>> = Vec::new();
+    let mut widths: Vec<Option<NumericWidth>> = Vec::new();
     for array in arrays.try_iter()? {
         let array = array?;
         if array.get_type().name()? != "ndarray" || array.getattr("ndim")?.extract::<usize>()? != 1
@@ -12776,6 +12777,7 @@ fn coded_levels_of_numpy_arrays(
             };
             codes.push(level_codes);
             uniques.push(level_uniques);
+            widths.push(None);
             continue;
         }
         if !matches!(kind.as_str(), "i" | "u" | "f" | "b") {
@@ -12784,6 +12786,7 @@ fn coded_levels_of_numpy_arrays(
         let Some(column) = py_array_like_column(py, &array)? else {
             return Ok(None);
         };
+        let width = column.width();
         let Ok((level_codes, level_uniques)) = column.factorize() else {
             return Ok(None);
         };
@@ -12804,11 +12807,21 @@ fn coded_levels_of_numpy_arrays(
                 .map(scalar_to_index_label_converter)
                 .collect(),
         );
+        widths.push(width);
     }
     if codes.is_empty() || codes.iter().any(|level| level.len() != codes[0].len()) {
         return Ok(None);
     }
-    Ok(MultiIndex::from_coded_levels(uniques, codes).ok())
+    Ok(MultiIndex::from_coded_levels(uniques, codes)
+        .ok()
+        .map(|mut mi| {
+            for (level, width) in widths.into_iter().enumerate() {
+                if width.is_some() {
+                    mi = mi.with_level_width(level, width);
+                }
+            }
+            mi
+        }))
 }
 
 /// A 1-D object / unicode array's codes against text `categories`, each
@@ -12913,6 +12926,93 @@ fn array_zone(array: &Bound<'_, PyAny>) -> Option<String> {
     sequence_zone(array)
 }
 
+/// The narrow numpy numeric width (`int32`, `uint8`, `float32`, ...) of a
+/// MultiIndex level array (br-frankenpandas-13bjo).
+fn array_width(array: &Bound<'_, PyAny>) -> Option<NumericWidth> {
+    if let Ok(idx) = array.extract::<PyRef<'_, PyIndex>>() {
+        return idx.inner.width();
+    }
+    if let Ok(series) = array.extract::<PyRef<'_, PySeries>>() {
+        return series.inner.column().width();
+    }
+    let name = array
+        .getattr("dtype")
+        .and_then(|d| d.getattr("name"))
+        .and_then(|n| n.extract::<String>())
+        .ok()?;
+    NumericWidth::parse(&name).and_then(|(w, nullable)| (!nullable).then_some(w))
+}
+
+/// Whether `array` carries an explicit `object` dtype (`np.ndarray`, `Series`,
+/// or `Index` of `dtype=object`).
+fn is_explicit_object_array(array: &Bound<'_, PyAny>) -> bool {
+    array
+        .getattr("dtype")
+        .and_then(|d| d.getattr("kind"))
+        .and_then(|k| k.extract::<String>())
+        .is_ok_and(|k| k == "O")
+}
+
+/// Normalize a MultiIndex level's parsed labels as pandas' `factorize` does
+/// (br-frankenpandas-ffrkp): `None` is coded `-1` (which reads back as `NaN`,
+/// or `NaT` on a temporal level), and in an object level `1` and `1.0` share
+/// the first-seen value's code.
+fn factorize_multiindex_level_labels(
+    mut col: Vec<IndexLabel>,
+    is_object_dtype: bool,
+) -> Vec<IndexLabel> {
+    if col
+        .iter()
+        .any(|l| matches!(l, IndexLabel::Null(NullKind::Null)))
+    {
+        let temporal = col.iter().any(|l| !l.is_missing())
+            && col.iter().all(|l| {
+                l.is_missing()
+                    || matches!(
+                        l,
+                        IndexLabel::Datetime64(_) | IndexLabel::Timedelta64(_) | IndexLabel::Period(_)
+                    )
+            });
+        let replacement = if temporal {
+            IndexLabel::Null(NullKind::NaT)
+        } else {
+            IndexLabel::Null(NullKind::NaN)
+        };
+        for label in &mut col {
+            if matches!(label, IndexLabel::Null(NullKind::Null)) {
+                *label = replacement.clone();
+            }
+        }
+    }
+    let has_int = col.iter().any(|l| matches!(l, IndexLabel::Int64(_)));
+    let has_float = col.iter().any(|l| matches!(l, IndexLabel::Float64(_)));
+    if has_int && has_float {
+        let non_numeric = col.iter().any(|l| {
+            !l.is_missing() && !matches!(l, IndexLabel::Int64(_) | IndexLabel::Float64(_))
+        });
+        if is_object_dtype || non_numeric {
+            let mut seen: FxHashSet<IndexLabel> = FxHashSet::default();
+            for label in &mut col {
+                if label.is_missing() {
+                    continue;
+                }
+                if let Some(existing) = seen.get(label) {
+                    *label = existing.clone();
+                } else {
+                    seen.insert(label.clone());
+                }
+            }
+        } else {
+            for label in &mut col {
+                if let IndexLabel::Int64(v) = label {
+                    *label = IndexLabel::Float64(fp_index::OrderedF64(*v as f64));
+                }
+            }
+        }
+    }
+    col
+}
+
 /// A MultiIndex level's `label` as Python holds it: an instant of a zoned
 /// level a Timestamp in its zone (it was naive; br-frankenpandas-c4v57), any other as
 /// [`index_label_to_py`] makes it.
@@ -12949,6 +13049,62 @@ fn multiindex_tuple_to_py<'py>(
         .into_iter()
         .enumerate()
         .map(|(level, label)| level_label_to_py(py, multi, level, label))
+        .collect::<PyResult<Vec<_>>>()?;
+    PyTuple::new(py, parts)
+}
+
+/// Row `position`'s tuple of `multi` with each numeric/bool level's element as
+/// its numpy scalar (`np.int64`, `np.int32`, `np.float64`, `np.bool_`), as
+/// pandas' `MultiIndex[i]` and `df.loc[tuple].name` / `df.iloc[i].name` return
+/// (br-frankenpandas-13bjo).
+fn multiindex_scalar_tuple_to_py<'py>(
+    py: Python<'py>,
+    multi: &MultiIndex,
+    position: usize,
+) -> PyResult<Bound<'py, PyTuple>> {
+    let parts = multi
+        .get_tuple(position)
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(level, label)| {
+            if label.is_missing() {
+                return level_label_to_py(py, multi, level, label);
+            }
+            let level_labels = multi.level_labels(level).unwrap_or_default();
+            let width = multi.level_width(level);
+            let non_missing: Vec<&IndexLabel> = level_labels
+                .iter()
+                .filter(|l| !l.is_missing())
+                .collect();
+            if !non_missing.is_empty()
+                && non_missing.iter().all(|l| matches!(l, IndexLabel::Int64(_)))
+                && let IndexLabel::Int64(v) = label
+            {
+                return numpy_scalar_of(py, &Scalar::Int64(*v), width);
+            }
+            if !non_missing.is_empty()
+                && non_missing
+                    .iter()
+                    .all(|l| matches!(l, IndexLabel::Float64(_) | IndexLabel::Int64(_)))
+            {
+                let f = match label {
+                    IndexLabel::Float64(v) => Some(v.0),
+                    IndexLabel::Int64(v) => Some(*v as f64),
+                    _ => None,
+                };
+                if let Some(f) = f {
+                    return numpy_scalar_of(py, &Scalar::Float64(f), width);
+                }
+            }
+            if !non_missing.is_empty()
+                && non_missing.iter().all(|l| matches!(l, IndexLabel::Bool(_)))
+                && let IndexLabel::Bool(b) = label
+            {
+                return numpy_scalar_of(py, &Scalar::Bool(*b), None);
+            }
+            level_label_to_py(py, multi, level, label)
+        })
         .collect::<PyResult<Vec<_>>>()?;
     PyTuple::new(py, parts)
 }
@@ -21000,14 +21156,17 @@ impl PyMultiIndex {
         }
         let mut parsed_arrays: Vec<Vec<IndexLabel>> = Vec::new();
         // Each array's zone when it holds aware instants of one: its level's
-        // (br-frankenpandas-c4v57).
+        // (br-frankenpandas-c4v57), and its narrow numeric width (13bjo).
         let mut zones: Vec<Option<String>> = Vec::new();
+        let mut widths: Vec<Option<NumericWidth>> = Vec::new();
         if let Ok(seq) = arrays.cast::<pyo3::types::PySequence>() {
             let len = seq.len()?;
             parsed_arrays.reserve(len);
             for i in 0..len {
                 let arr = seq.get_item(i)?;
                 zones.push(array_zone(&arr));
+                widths.push(array_width(&arr));
+                let is_obj = is_explicit_object_array(&arr);
                 if let Ok(subseq) = arr.cast::<pyo3::types::PySequence>() {
                     let sublen = subseq.len()?;
                     let mut col = Vec::with_capacity(sublen);
@@ -21015,14 +21174,14 @@ impl PyMultiIndex {
                         let item = subseq.get_item(j)?;
                         col.push(py_to_index_label(&item)?);
                     }
-                    parsed_arrays.push(col);
+                    parsed_arrays.push(factorize_multiindex_level_labels(col, is_obj));
                 } else if let Ok(it) = arr.try_iter() {
                     let mut col = Vec::new();
                     for item in it {
                         let item = item?;
                         col.push(py_to_index_label(&item)?);
                     }
-                    parsed_arrays.push(col);
+                    parsed_arrays.push(factorize_multiindex_level_labels(col, is_obj));
                 } else {
                     return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                         "Each array must be a sequence of labels",
@@ -21033,6 +21192,8 @@ impl PyMultiIndex {
             for arr in iter {
                 let arr = arr?;
                 zones.push(array_zone(&arr));
+                widths.push(array_width(&arr));
+                let is_obj = is_explicit_object_array(&arr);
                 if let Ok(subseq) = arr.cast::<pyo3::types::PySequence>() {
                     let sublen = subseq.len()?;
                     let mut col = Vec::with_capacity(sublen);
@@ -21040,14 +21201,14 @@ impl PyMultiIndex {
                         let item = subseq.get_item(j)?;
                         col.push(py_to_index_label(&item)?);
                     }
-                    parsed_arrays.push(col);
+                    parsed_arrays.push(factorize_multiindex_level_labels(col, is_obj));
                 } else if let Ok(it) = arr.try_iter() {
                     let mut col = Vec::new();
                     for item in it {
                         let item = item?;
                         col.push(py_to_index_label(&item)?);
                     }
-                    parsed_arrays.push(col);
+                    parsed_arrays.push(factorize_multiindex_level_labels(col, is_obj));
                 } else {
                     return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                         "Each array must be a sequence of labels",
@@ -21066,6 +21227,11 @@ impl PyMultiIndex {
                 inner = inner.with_level_zone(level, zone.as_deref());
             }
         }
+        for (level, width) in widths.into_iter().enumerate() {
+            if width.is_some() {
+                inner = inner.with_level_width(level, width);
+            }
+        }
         if let Some(ns) = extract_index_names_flexible(names)? {
             inner = inner.set_names(ns);
         }
@@ -21081,14 +21247,18 @@ impl PyMultiIndex {
     ) -> PyResult<Self> {
         let _ = sortorder;
         let mut parsed_iterables: Vec<Vec<IndexLabel>> = Vec::new();
-        // Each iterable's zone when it holds aware instants of one (br-frankenpandas-c4v57).
+        // Each iterable's zone when it holds aware instants of one (br-frankenpandas-c4v57),
+        // and its narrow numeric width (13bjo).
         let mut zones: Vec<Option<String>> = Vec::new();
+        let mut widths: Vec<Option<NumericWidth>> = Vec::new();
         if let Ok(seq) = iterables.cast::<pyo3::types::PySequence>() {
             let len = seq.len()?;
             parsed_iterables.reserve(len);
             for i in 0..len {
                 let it = seq.get_item(i)?;
                 zones.push(array_zone(&it));
+                widths.push(array_width(&it));
+                let is_obj = is_explicit_object_array(&it);
                 // A numpy array of numbers or bools read as its column: an
                 // element a Python object made and converted
                 // (br-frankenpandas-2k5lw).
@@ -21122,14 +21292,14 @@ impl PyMultiIndex {
                         let item = subseq.get_item(j)?;
                         row.push(py_to_index_label(&item)?);
                     }
-                    parsed_iterables.push(row);
+                    parsed_iterables.push(factorize_multiindex_level_labels(row, is_obj));
                 } else if let Ok(iter) = it.try_iter() {
                     let mut row = Vec::new();
                     for item in iter {
                         let item = item?;
                         row.push(py_to_index_label(&item)?);
                     }
-                    parsed_iterables.push(row);
+                    parsed_iterables.push(factorize_multiindex_level_labels(row, is_obj));
                 } else {
                     return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                         "Each iterable must be a sequence of labels",
@@ -21140,6 +21310,8 @@ impl PyMultiIndex {
             for it in iter {
                 let it = it?;
                 zones.push(array_zone(&it));
+                widths.push(array_width(&it));
+                let is_obj = is_explicit_object_array(&it);
                 if let Ok(subseq) = it.cast::<pyo3::types::PySequence>() {
                     let sublen = subseq.len()?;
                     let mut row = Vec::with_capacity(sublen);
@@ -21147,14 +21319,14 @@ impl PyMultiIndex {
                         let item = subseq.get_item(j)?;
                         row.push(py_to_index_label(&item)?);
                     }
-                    parsed_iterables.push(row);
+                    parsed_iterables.push(factorize_multiindex_level_labels(row, is_obj));
                 } else if let Ok(it) = it.try_iter() {
                     let mut row = Vec::new();
                     for item in it {
                         let item = item?;
                         row.push(py_to_index_label(&item)?);
                     }
-                    parsed_iterables.push(row);
+                    parsed_iterables.push(factorize_multiindex_level_labels(row, is_obj));
                 } else {
                     return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                         "Each iterable must be a sequence of labels",
@@ -21171,6 +21343,11 @@ impl PyMultiIndex {
         for (level, zone) in zones.iter().enumerate() {
             if zone.is_some() {
                 inner = inner.with_level_zone(level, zone.as_deref());
+            }
+        }
+        for (level, width) in widths.into_iter().enumerate() {
+            if width.is_some() {
+                inner = inner.with_level_width(level, width);
             }
         }
         if let Some(ns) = extract_index_names_flexible(names)? {
@@ -21245,7 +21422,14 @@ impl PyMultiIndex {
     }
 
     fn __iter__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
-        iter_by_position(slf.as_any())
+        let py = slf.py();
+        Ok(slf
+            .borrow()
+            .to_list(py)?
+            .bind(py)
+            .try_iter()?
+            .into_any()
+            .unbind())
     }
 
     /// pandas refuses an index's truth value (it was its length's).
@@ -21500,7 +21684,7 @@ impl PyMultiIndex {
                 "index out of bounds",
             ));
         }
-        Ok(multiindex_tuple_to_py(py, &self.inner, pos)?
+        Ok(multiindex_scalar_tuple_to_py(py, &self.inner, pos)?
             .into_any()
             .unbind())
     }
@@ -22180,18 +22364,20 @@ impl PyMultiIndex {
                         Scalar::Null(k) => IndexLabel::Null(*k),
                     })
                     .collect();
+                let labels = factorize_multiindex_level_labels(labels, is_object_column(col));
                 column_data.push((Some((*col_name).clone()), labels));
             }
             let mut mi = MultiIndex::from_frame(column_data).map_err(index_error_to_py)?;
-            // A zoned column's level keeps its zone (br-frankenpandas-c4v57).
+            // A zoned column's level keeps its zone (br-frankenpandas-c4v57),
+            // and a narrow numeric column's level keeps its width (13bjo).
             for (level, col_name) in cols.iter().enumerate() {
-                let zone = pdf
-                    .inner
-                    .column(col_name)
-                    .and_then(Column::timezone)
-                    .map(str::to_owned);
+                let col = pdf.inner.column(col_name);
+                let zone = col.and_then(Column::timezone).map(str::to_owned);
                 if zone.is_some() {
                     mi = mi.with_level_zone(level, zone.as_deref());
+                }
+                if let Some(width) = col.and_then(Column::width) {
+                    mi = mi.with_level_width(level, Some(width));
                 }
             }
             if let Some(ns) = extract_index_names_flexible(names)? {
@@ -58857,7 +59043,12 @@ impl PyDataFrame {
                 .inner
                 .iloc_row(i64::try_from(position).unwrap_or(i64::MAX))
                 .map_err(frame_error_to_py)?;
-            let row = zoned_row(py, &self.inner, row)?;
+            let mut row = zoned_row(py, &self.inner, row)?;
+            if self.inner.row_multiindex().is_some() {
+                row = row
+                    .rename(py_series_name(py_label.bind(py))?)
+                    .map_err(frame_error_to_py)?;
+            }
             let py_s = Py::new(py, PySeries { inner: row })?;
             list.push(pyo3::types::PyTuple::new(py, &[py_label, py_s.into_any()])?);
         }
@@ -59700,10 +59891,14 @@ impl PyDataFrame {
                     let row = frame
                         .iloc_row(i64::try_from(position).unwrap_or(i64::MAX))
                         .map_err(frame_error_to_py)?;
-                    PySeries {
-                        inner: zoned_row(py, &frame, row)?,
+                    let mut inner = zoned_row(py, &frame, row)?;
+                    if let Some(multi) = frame.row_multiindex() {
+                        let key = multiindex_tuple_to_py(py, multi, position)?;
+                        inner = inner
+                            .rename(py_series_name(key.as_any())?)
+                            .map_err(frame_error_to_py)?;
                     }
-                    .into_bound_py_any(py)?
+                    PySeries { inner }.into_bound_py_any(py)?
                 }
             };
             results.push(func.call(prepend_arg(piece, Some(&args))?, kwargs)?);
@@ -63499,7 +63694,18 @@ impl PyDataFrameILoc {
                     .inner
                     .iloc_row(r)
                     .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
-                let row_series = zoned_row(py, &self.inner, row_series)?;
+                let mut row_series = zoned_row(py, &self.inner, row_series)?;
+                if let Some(multi) = self.inner.row_multiindex() {
+                    let pos = if r < 0 {
+                        (self.inner.len() as i64 + r) as usize
+                    } else {
+                        r as usize
+                    };
+                    let key = multiindex_scalar_tuple_to_py(py, multi, pos)?;
+                    row_series = row_series
+                        .rename(py_series_name(key.as_any())?)
+                        .map_err(frame_error_to_py)?;
+                }
                 if let Ok(col_slice) = col_key.cast::<pyo3::types::PySlice>() {
                     let sub = slice_rows(col_slice, self.inner.num_columns())?
                         .of_series(&row_series)
@@ -63637,7 +63843,18 @@ impl PyDataFrameILoc {
                 .inner
                 .iloc_row(pos)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
-            let row = zoned_row(py, &self.inner, row)?;
+            let mut row = zoned_row(py, &self.inner, row)?;
+            if let Some(multi) = self.inner.row_multiindex() {
+                let row_pos = if pos < 0 {
+                    (self.inner.len() as i64 + pos) as usize
+                } else {
+                    pos as usize
+                };
+                let key = multiindex_scalar_tuple_to_py(py, multi, row_pos)?;
+                row = row
+                    .rename(py_series_name(key.as_any())?)
+                    .map_err(frame_error_to_py)?;
+            }
             return Ok(Py::new(py, PySeries { inner: row })?.into_any());
         }
         if let Ok(slice) = key.cast::<pyo3::types::PySlice>() {
