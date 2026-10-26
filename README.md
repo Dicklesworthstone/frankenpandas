@@ -159,7 +159,7 @@ frankenpandas/
 │   ├── frankenpandas/    # Unified facade crate with prelude (more than 2,000 lines)
 │   ├── fp-types/         # Scalar, DType (incl. nullable Int64/Float64/boolean), Timestamp, Timedelta, Period, Interval, NanOps (more than 20,000 lines)
 │   ├── fp-columnar/      # Column with typed Arc<[f64]>/Arc<[i64]> backings, ValidityMask, vectorized kernels (more than 60,000 lines)
-│   ├── fp-dot-kernel/    # The one crate compiled with +avx2,+fma: f64 dot product and elementwise kernels, runtime-dispatched (more than 2,500 lines)
+│   ├── fp-dot-kernel/    # The one crate compiled with +avx2,+fma: f64 dot product and elementwise kernels, runtime-dispatched (more than 3,000 lines)
 │   ├── fp-index/         # Index, MultiIndex, 5 typed variants, alignment planning (more than 40,000 lines)
 │   ├── fp-frame/         # DataFrame, Series, Categorical, accessors, windows, resample (more than 250,000 lines)
 │   ├── fp-expr/          # Expression parser, eval()/query(), @local + backtick (more than 9,000 lines)
@@ -1130,7 +1130,7 @@ All error types are re-exported through the `frankenpandas` facade crate.
 | fp-frankentui tests | ~22 | TUI snapshot model, E2E scenario harness |
 | **fp-conformance tests** | **1,387 packets + more than 800 `live_oracle_*` and more than 200 `conformance_*` tests** | Differential conformance against pandas oracle (live + fixture replay). These execute a real differential only when a pandas oracle is reachable: the pinned `.venv-oracle` (auto-detected) or `FP_PYTHON_BIN`. Without one they report PASS by skipping, unless `FP_REQUIRE_LIVE_ORACLE=1` makes a missing oracle a failure (as in CI). |
 | Property-based (proptest) | 100+ | DType coercion, IO round-trip (CSV/JSON/SQL/Excel/Feather/Parquet/Arrow IPC), ValidityMask algebra, DataFrame arithmetic invariants, stateful op-chain |
-| Fuzz harnesses | **30 targets** under `fuzz/fuzz_targets/` | Parquet IO, Arrow IPC stream, scalar cast, Series arithmetic, groupby_sum, join, column arithmetic, Excel IO, index alignment, shift metamorphic, eval/query, semantic_eq, pivot_table dispatch, groupby agg dispatch, rolling window, parallel + TSan, SQL read, DataFrame constructor + merge |
+| Fuzz harnesses | **31 targets** under `fuzz/fuzz_targets/` | Parquet IO, Arrow IPC stream, scalar cast, Series arithmetic, groupby_sum, join, column arithmetic, Excel IO, index alignment, shift metamorphic, eval/query, semantic_eq, pivot_table dispatch, groupby agg dispatch, rolling window, parallel + TSan, SQL read, DataFrame constructor + merge, differential vs live pandas oracle |
 | Metamorphic tests | Several families | Null/NaN, join/reshape, value_counts, cumsum round-trip, quantile interpolation invariants, cov_with_options, GroupBy idxmin/idxmax Utf8, shift inner-overlap |
 
 **Total: more than 7,500 `#[test]` markers under `crates/*/src` and more than 8,000 `#[test]` markers across all of `crates/`, plus 1,387 packet JSON files.**
@@ -1869,7 +1869,7 @@ A: As of 2026-10-13 the tracker holds more than 4,800 beads, of which about 210 
 | Done | Native deterministic SVG/HTML plotting renderer | Zero-dependency pure safe-Rust SVG/HTML renderer in `fp-frame` supporting line, bar, barh, hist, box, kde, density, area, pie, scatter, hexbin across DataFrame, Series, and GroupBy |
 | Medium | Lazy evaluation / query planning | Would enable optimization across chained operations |
 | Low | Native HDF5 PyTables-compatible table/storer layouts | `read_hdf` / `to_hdf` provide a keyed snapshot surface today (feature-gated) |
-| Low | Differential fuzzing against the live pandas oracle | Designed in `docs/planning/DIFFERENTIAL_FUZZ_DESIGN.md` but never implemented (`br-frankenpandas-rc-differential-fuzz-decision-kgohb`); deferred until CI runs reliably again — the fixed packet corpus + CI live-oracle batch subsumes most of the goal meanwhile |
+| Done | Differential fuzzing against the live pandas oracle | Implemented in `crates/fp-conformance/src/fuzz.rs` and `fuzz/fuzz_targets/fuzz_differential_vs_pandas.rs` (`br-frankenpandas-rc0923-epic-full-surface-conformance-j0lg5.6`, designed in `docs/planning/DIFFERENTIAL_FUZZ_DESIGN.md`): persistent stdin/stdout pandas 2.2.3 batch worker, swarm-testing feature subset generator, single-op and multi-step `DataFrameOpChain` executor, deterministic shrinker, and repro-packet emitter |
 | Done | Clipboard IO | Implemented via OS clipboard tools (`wl-paste`/`xclip`/`xsel`/`pbpaste` and copy equivalents) |
 | Low | `to_gbq` Google BigQuery writer | Needs Google Cloud SDK |
 | Done | SAS reader | `read_sas` handles sas7bdat and XPORT; SPSS (`read_spss`) remains deferred |
@@ -2264,7 +2264,7 @@ Beyond the differential harness, CI also runs:
 - `cargo audit`: security advisories
 - `cargo deny check`: license/source policy
 - `cargo machete`: unused dependency detection
-- **Fuzz regression corpus**: every PR replays the regression seeds for all 30 fuzz targets
+- **Fuzz regression corpus**: every PR replays the regression seeds for all 31 fuzz targets
 - **Perf baseline gate**: `cargo test -p fp-conformance --test perf_baselines -- --ignored` fails when a FrankenPandas join or filter workload's p95 exceeds its committed absolute budget (`fixtures/perf_budgets.json`); it runs no pandas arm, so it catches regressions, not losses to pandas
 
 A green run has passed all of these. Cadence matters: the full matrix runs on pull requests and on a daily schedule (the push trigger was removed on 2026-08-22 because runs were superseded faster than they completed), and a lighter fast gate (`cargo fmt --check` per crate, `cargo check --workspace --all-targets`, leaf-crate unit tests) runs every two hours. `cargo fmt --check` is run per crate because rustfmt cannot format the two largest crate roots (fp-columnar, fp-frame) on any available runner; their formatting is unenforced until they are split.
@@ -2289,7 +2289,7 @@ The build will fail if `unsafe` ever appears in a workspace crate. The closest a
 - **`chrono-tz`** for the IANA time-zone database.
 - **`bumpalo`** for the bump allocator used by the arena-backed GroupBy/Join path.
 - **`proptest`** for the property-test framework that backs the 100+ invariants.
-- **`libfuzzer-sys`** + `cargo-fuzz` for the 30 fuzz targets.
+- **`libfuzzer-sys`** + `cargo-fuzz` for the 31 fuzz targets.
 - **`hdf5-metno`** for the optional HDF5 backend.
 - **`raptorq`** for the repair-symbol envelope around durable artifacts.
 - **The pandas core team**, whose library is the oracle we test and benchmark against. The clean-room reimplementation is only tractable because the original API surface is so consistently specified.

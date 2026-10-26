@@ -221,5 +221,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_differential_vs_pandas"
+path = "fuzz_targets/fuzz_differential_vs_pandas.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

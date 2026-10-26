@@ -38232,8 +38232,6 @@ def test_groupby_value_counts_like_pandas_rc14i(column: str, options: str) -> No
         "category key groupby sort=False": {},
     }[options]
 
-    if column == "o":
-        pytest.skip("1, 1.0 and True as one object value is br-frankenpandas-bz15u")
     if column == "c" and options == "two keys":
         pytest.skip("every (key, key, category) product with zeros is br-frankenpandas-oe9l6")
 
@@ -41755,7 +41753,6 @@ def test_read_csv_parse_dates_like_pandas_z6oif(case: str) -> None:
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.xfail(strict=True, reason="br-frankenpandas-7tort: the parse_dates general path parses object text")
 def test_read_csv_parse_dates_fallback_keeps_object_text_7tort() -> None:
     # A parse_dates read the fast route declines (a zoned date column) keeps
     # an object column's source text, as pandas: '1' stays '1'.
@@ -45695,3 +45692,100 @@ def test_census_more17_losses_like_pandas_aykex(case: str) -> None:
     # frame's category cast held as codes, a categorical sort by them, a
     # label slice of an unsorted unique int index, a concat's float range.
     _more9_check(_AYKEX_CENSUS_CASES, case)
+
+
+_ML0AZ_MERGE_CASES = {
+    "single text equal left len": lambda m: m.DataFrame(
+        {"t": list("baAacbx"), "lv": list(range(7))}
+    ).merge(
+        m.DataFrame({"t": list("abacq"), "rv": [10, 20, 30, 40, 50]}),
+        on="t",
+    ),
+    "single int equal left len": lambda m: m.DataFrame(
+        {"k": [2, 1, 9, 1, 3, 2, 8], "lv": list(range(7))}
+    ).merge(
+        m.DataFrame({"k": [1, 2, 1, 3, 7], "rv": [10, 20, 30, 40, 50]}),
+        on="k",
+    ),
+    "two keys (text, int) equal left len": lambda m: m.DataFrame(
+        {
+            "t": list("baAacbx"),
+            "i": [2, 1, 9, 1, 3, 2, 8],
+            "lv": list(range(7)),
+        }
+    ).merge(
+        m.DataFrame(
+            {
+                "t": list("abacq"),
+                "i": [1, 2, 1, 3, 7],
+                "rv": [10, 20, 30, 40, 50],
+            }
+        ),
+        on=["t", "i"],
+    ),
+    "longer than left (NEGATIVE)": lambda m: m.DataFrame(
+        {"t": list("baAacb"), "lv": list(range(6))}
+    ).merge(
+        m.DataFrame({"t": list("abacq"), "rv": [10, 20, 30, 40, 50]}),
+        on="t",
+    ),
+    "shorter than left (NEGATIVE)": lambda m: m.DataFrame(
+        {"t": list("baAacbxy"), "lv": list(range(8))}
+    ).merge(
+        m.DataFrame({"t": list("abacq"), "rv": [10, 20, 30, 40, 50]}),
+        on="t",
+    ),
+    "sort=True (NEGATIVE)": lambda m: m.DataFrame(
+        {"t": list("baAacbx"), "lv": list(range(7))}
+    ).merge(
+        m.DataFrame({"t": list("abacq"), "rv": [10, 20, 30, 40, 50]}),
+        on="t",
+        sort=True,
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_ML0AZ_MERGE_CASES))
+def test_inner_merge_equal_left_len_order_like_pandas_ml0az(case: str) -> None:
+    # Inner merge (sort=False) whose output length equals len(left) with
+    # duplicate matches reorders rows by pandas' rev[left_sorter] shortcut
+    # (br-frankenpandas-ml0az).
+    _more9_check(_ML0AZ_MERGE_CASES, case)
+
+
+_BZ15U_OBJECT_CASES = {
+    "series value_counts": lambda m: m.Series(
+        [1, 1.0, "a", True, 2], dtype=object
+    ).value_counts(),
+    "series unique": lambda m: list(
+        m.Series([1, 1.0, "a", True, 2], dtype=object).unique()
+    ),
+    "series drop_duplicates": lambda m: m.Series(
+        [1, 1.0, "a", True, 2], dtype=object
+    ).drop_duplicates(),
+    "series nunique": lambda m: m.Series(
+        [1, 1.0, "a", True, 2], dtype=object
+    ).nunique(),
+    "df drop_duplicates": lambda m: m.DataFrame(
+        {"o": [1, 1.0, "a", True, 2], "v": [10, 20, 30, 40, 50]}
+    ).drop_duplicates(subset=["o"]),
+    "df nunique": lambda m: m.DataFrame(
+        {"o": [1, 1.0, "a", True, 2]}
+    ).nunique(),
+    "groupby value_counts": lambda m: m.DataFrame(
+        {"g": ["x", "x", "x", "y", "y"], "o": [1, 1.0, "a", True, 2]}
+    )
+    .groupby("g")["o"]
+    .value_counts(),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_BZ15U_OBJECT_CASES))
+def test_object_column_one_float_true_dedup_like_pandas_bz15u(case: str) -> None:
+    # Python hashes 1, 1.0, and True to the same bucket in object columns
+    # (br-frankenpandas-bz15u).
+    _more9_check(_BZ15U_OBJECT_CASES, case)
+
+

@@ -1161,7 +1161,7 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = monthly.asfreq()?;
     let _ = monthly.ffill(None)?;
     let _ = monthly.bfill(None)?;
-    let _ = monthly.fillna(&Scalar::Float64(0.0))?;
+    let _ = monthly.fillna("ffill", None)?;
     let _ = monthly.interpolate()?;
     let _ = monthly.nearest(None)?;
     let _ = monthly.quantile(0.5)?;
@@ -1281,7 +1281,7 @@ fn readme_window_operations_compiles_and_runs() -> Result<(), Box<dyn std::error
     let _ = drs.asfreq()?;
     let _ = drs.ffill(None)?;
     let _ = drs.bfill(None)?;
-    let _ = drs.fillna(&Scalar::Float64(0.0))?;
+    let _ = drs.fillna("ffill", None)?;
     let _ = drs.interpolate()?;
     let _ = drs.nearest(None)?;
     let _ = drs.quantile(0.5)?;

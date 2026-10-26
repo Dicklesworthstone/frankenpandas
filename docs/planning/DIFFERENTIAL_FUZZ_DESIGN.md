@@ -92,12 +92,22 @@ regressions.
 
 ## Implementation roadmap
 
-- **Phase 1 (now):** this design doc + tracker.
-- **Phase 2:** long-lived oracle subprocess + minimal alphabet (5
-  ops) + in-harness comparator.
-- **Phase 3:** nightly CI workflow running the target for 60 min.
-- **Phase 4:** expand op alphabet to match the conformance suite's
-  430 covered ops.
+- **Phase 1 (completed):** this design doc + tracker.
+- **Phase 2 (completed in `br-frankenpandas-rc0923-epic-full-surface-conformance-j0lg5.6`):**
+  long-lived oracle subprocess (`LongLivedOracleWorker` in
+  `crates/fp-conformance/src/fuzz.rs`) + single-op alphabet (`nan_sum`,
+  `nan_mean`, `nan_min`, `nan_max`, `series_add`, `groupby_sum`) +
+  stateful multi-step `DataFrameOpChain` (`SortIndex`, `SortValues`,
+  `DropNa`, `FillNaZero`, `ResetIndexDrop`, `SelectColumns`, `Head`,
+  `Tail`) + swarm-testing configuration (`DifferentialSwarmConfig`) +
+  deterministic shrinker (`shrink_differential_fuzz_input`) +
+  repro-packet emitter (`DifferentialReproPacket`).
+- **Phase 3 (completed in `br-frankenpandas-rc0923-epic-full-surface-conformance-j0lg5.6`):**
+  `fuzz/fuzz_targets/fuzz_differential_vs_pandas.rs` wired into
+  `.github/workflows/fuzz-nightly.yml` with pinned `.venv-oracle`
+  provisioning.
+- **Phase 4:** continue expanding the op alphabet alongside new
+  conformance families.
 
 ## Related beads
 

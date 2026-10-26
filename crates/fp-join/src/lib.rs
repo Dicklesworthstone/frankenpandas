@@ -1398,6 +1398,92 @@ fn sort_merge_rows_by_join_keys(
     reorder_vec_by_index(right_positions, &order);
 }
 
+/// Match pandas `libjoin.inner_join(..., sort=False)` when `output_len == left.len()`
+/// but not every left row matched once (some left row matched multiple times and
+/// another matched zero times, so `left_positions != 0..left.len()`).
+///
+/// In pandas 2.2.3 `inner_join(..., sort=False)` groups matched rows by the
+/// factorized left group codes (`0, 1, 2, ...` in first-seen left order, with
+/// single-key missing values assigned the sentinel bucket after all non-null
+/// keys) and then reorders by `rev = np.empty(len(left)); rev[left_sorter] = np.arange(len(left))`
+/// whenever `len(left_indexer) == len(left)` (br-frankenpandas-ml0az).
+fn permute_inner_merge_equal_left_len_positions(
+    left_key_columns: &[&Column],
+    left_positions: &mut [usize],
+    right_positions: &mut [usize],
+) {
+    let Some(first_col) = left_key_columns.first() else {
+        return;
+    };
+    let left_len = first_col.len();
+    if left_len < 2
+        || left_positions.len() != left_len
+        || right_positions.len() != left_len
+        || !left_positions.iter().enumerate().any(|(i, &l)| l != i)
+    {
+        return;
+    }
+
+    let left_codes: Vec<usize> = if left_key_columns.len() == 1 {
+        let keys = collect_single_join_keys(first_col);
+        let mut code_map = FxHashMap::<JoinKeyComponent, usize>::with_capacity_and_hasher(
+            left_len,
+            Default::default(),
+        );
+        let mut next_code = 0usize;
+        keys.into_iter()
+            .map(|key| {
+                if matches!(key, JoinKeyComponent::Missing) {
+                    usize::MAX
+                } else {
+                    *code_map.entry(key).or_insert_with(|| {
+                        let code = next_code;
+                        next_code += 1;
+                        code
+                    })
+                }
+            })
+            .collect()
+    } else {
+        let keys = collect_composite_keys(left_key_columns);
+        let mut code_map = FxHashMap::<CompositeJoinKey, usize>::with_capacity_and_hasher(
+            left_len,
+            Default::default(),
+        );
+        let mut next_code = 0usize;
+        keys.into_iter()
+            .map(|key| {
+                *code_map.entry(key).or_insert_with(|| {
+                    let code = next_code;
+                    next_code += 1;
+                    code
+                })
+            })
+            .collect()
+    };
+
+    let mut left_sorter: Vec<usize> = (0..left_len).collect();
+    left_sorter.sort_by_key(|&r| left_codes[r]);
+
+    let mut rev = vec![0usize; left_len];
+    for (sorted_pos, orig_row) in left_sorter.into_iter().enumerate() {
+        rev[orig_row] = sorted_pos;
+    }
+
+    let mut grouped: Vec<(usize, usize)> = left_positions
+        .iter()
+        .copied()
+        .zip(right_positions.iter().copied())
+        .collect();
+    grouped.sort_by_key(|&(l_pos, _)| left_codes[l_pos]);
+
+    for (out_idx, &sorted_idx) in rev.iter().enumerate() {
+        let (l_pos, r_pos) = grouped[sorted_idx];
+        left_positions[out_idx] = l_pos;
+        right_positions[out_idx] = r_pos;
+    }
+}
+
 fn push_merge_row_key(out_row_keys: &mut Option<Vec<CompositeJoinKey>>, key: &CompositeJoinKey) {
     if let Some(out_row_keys) = out_row_keys {
         out_row_keys.push(key.clone());
@@ -4122,11 +4208,13 @@ fn build_single_key_dense_i64_inner_merge_output(
     }
 
     let mut output_len = 0usize;
+    let mut all_left_matched_once = true;
     for &v in left_keys {
         if v < min || v > max {
             if options.require_all_left_keys_matched {
                 return Ok(None);
             }
+            all_left_matched_once = false;
             continue;
         }
         let bucket = (v - min) as usize;
@@ -4135,12 +4223,27 @@ fn build_single_key_dense_i64_inner_merge_output(
             if options.require_all_left_keys_matched {
                 return Ok(None);
             }
+            all_left_matched_once = false;
             continue;
+        }
+        if bucket_len != 1 {
+            all_left_matched_once = false;
         }
         let Some(new_output_len) = output_len.checked_add(bucket_len) else {
             return Ok(None);
         };
         output_len = new_output_len;
+    }
+    // When `output_len == left_keys.len()` via duplicate matches + unmatched
+    // left rows, pandas `libjoin.inner_join(..., sort=False)` applies its
+    // `len(left_indexer) == len(left)` rev[left_sorter] permutation; hand off
+    // to the position-based inner merge path so `permute_inner_merge_equal_left_len_positions`
+    // orders the rows identically (br-frankenpandas-ml0az).
+    if !options.require_all_left_keys_matched
+        && output_len == left_keys.len()
+        && !all_left_matched_once
+    {
+        return Ok(None);
     }
 
     let output_plan = DenseI64InnerOutputPlan {
@@ -6607,6 +6710,29 @@ fn build_single_key_inner_merge_output(
     right_positions: &[usize],
     suffixes: &ResolvedMergeSuffixes,
 ) -> Result<MergedDataFrame, JoinError> {
+    if left_on.len() == 1
+        && left_positions.len() == left.len()
+        && left.len() >= 2
+        && left_positions.iter().enumerate().any(|(i, &l)| l != i)
+        && let Some(left_key_col) = left.column(left_on[0])
+    {
+        let mut left_perm = left_positions.to_vec();
+        let mut right_perm = right_positions.to_vec();
+        permute_inner_merge_equal_left_len_positions(
+            &[left_key_col],
+            &mut left_perm,
+            &mut right_perm,
+        );
+        return build_single_key_inner_merge_output_with_selections(
+            left,
+            right,
+            left_on,
+            right_on,
+            PositionSelection::Positions(&left_perm),
+            PositionSelection::Positions(&right_perm),
+            suffixes,
+        );
+    }
     build_single_key_inner_merge_output_with_selections(
         left,
         right,
@@ -10396,14 +10522,17 @@ fn merge_dataframes_on_with_options_storage(
         ) && left_positions.iter().all(Option::is_some)
             && right_positions.iter().all(Option::is_some));
     let all_present_take_positions = all_positions_present.then(|| {
-        let left = left_positions
+        let mut left = left_positions
             .iter()
             .map(|position| position.expect("all-present join emits left positions for every row"))
             .collect::<Vec<_>>();
-        let right = right_positions
+        let mut right = right_positions
             .iter()
             .map(|position| position.expect("all-present join emits right positions for every row"))
             .collect::<Vec<_>>();
+        if matches!(join_type, JoinType::Inner) && !sort {
+            permute_inner_merge_equal_left_len_positions(&left_key_columns, &mut left, &mut right);
+        }
         (left, right)
     });
     let all_present_left_positions = all_present_take_positions
@@ -22084,8 +22213,8 @@ mod typed_validate_cardinality_uza04 {
     use fp_types::{NullKind, Scalar};
 
     use super::{
-        JoinType, MergeExecutionOptions, MergeValidateMode, merge_dataframes_on_with_options,
-        typed_single_int64_key_has_duplicates,
+        JoinType, MergeExecutionOptions, MergeValidateMode, merge_dataframes_on_with,
+        merge_dataframes_on_with_options, typed_single_int64_key_has_duplicates,
     };
 
     fn int_frame(name: &str, keys: Vec<i64>, payload: Vec<i64>) -> DataFrame {
@@ -22437,6 +22566,78 @@ mod typed_validate_cardinality_uza04 {
         assert!(
             format!("{err_r}").contains("duplicate columns {'val_R'}"),
             "expected duplicate columns error, got: {err_r}"
+        );
+    }
+
+    #[test]
+    fn inner_merge_equal_left_len_with_duplicates_matches_pandas_ml0az() {
+        let left = fp_frame::DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "k",
+                    vec![
+                        Scalar::Int64(2),
+                        Scalar::Int64(1),
+                        Scalar::Int64(9),
+                        Scalar::Int64(2),
+                    ],
+                ),
+                (
+                    "lv",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(30),
+                        Scalar::Int64(40),
+                    ],
+                ),
+            ],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict_with_index(
+            vec![
+                (
+                    "k",
+                    vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "rv",
+                    vec![Scalar::Int64(100), Scalar::Int64(200), Scalar::Int64(300)],
+                ),
+            ],
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+        )
+        .unwrap();
+
+        let merged =
+            merge_dataframes_on_with(&left, &right, &["k"], &["k"], JoinType::Inner).unwrap();
+        assert_eq!(
+            merged.columns.get("k").unwrap().values(),
+            &[
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(2),
+            ]
+        );
+        assert_eq!(
+            merged.columns.get("lv").unwrap().values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(20),
+                Scalar::Int64(40),
+            ]
+        );
+        assert_eq!(
+            merged.columns.get("rv").unwrap().values(),
+            &[
+                Scalar::Int64(300),
+                Scalar::Int64(100),
+                Scalar::Int64(200),
+                Scalar::Int64(300),
+            ]
         );
     }
 }

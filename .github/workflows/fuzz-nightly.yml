@@ -22,6 +22,12 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
+      - name: Provision pinned pandas live oracle (.venv-oracle)
+        run: |
+          python3 -m venv .venv-oracle
+          .venv-oracle/bin/pip install --upgrade pip
+          .venv-oracle/bin/pip install -r crates/fp-conformance/oracle/requirements.txt
+
       - name: Nightly corpus expansion
         working-directory: fuzz
         # Every target runs even after another crashes. Under `set -e` the first

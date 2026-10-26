@@ -139,7 +139,13 @@ use thiserror::Error;
 
 mod fuzz;
 
-pub use fuzz::{fuzz_format_cross_round_trip_bytes, fuzz_index_align_bytes};
+pub use fuzz::{
+    DifferentialChainStep, DifferentialComparatorMode, DifferentialFaultInjection,
+    DifferentialFuzzCampaignReport, DifferentialFuzzCase, DifferentialReproPacket,
+    DifferentialSwarmConfig, execute_differential_fuzz_case, fuzz_differential_vs_pandas_bytes,
+    fuzz_format_cross_round_trip_bytes, fuzz_index_align_bytes, project_differential_fuzz_case,
+    run_differential_fuzz_campaign, shrink_differential_fuzz_input,
+};
 
 #[derive(Debug, Clone)]
 pub struct HarnessConfig {

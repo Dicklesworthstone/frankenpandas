@@ -5821,9 +5821,10 @@ fn apply_csv_parse_dates(
     na_set: &HashSet<&str>,
     true_set: &HashSet<&str>,
     false_set: &HashSet<&str>,
-) -> Result<(), IoError> {
+) -> Result<Vec<bool>, IoError> {
+    let mut rewritten = vec![false; headers.len()];
     if parse_dates.is_empty() {
-        return Ok(());
+        return Ok(rewritten);
     }
 
     validate_parse_dates(headers, parse_dates)?;
@@ -5863,10 +5864,11 @@ fn apply_csv_parse_dates(
 
         if let Some(parsed) = parsed {
             columns[column_idx] = parsed;
+            rewritten[column_idx] = true;
         }
     }
 
-    Ok(())
+    Ok(rewritten)
 }
 
 /// `read_csv(parse_dates=[...], dtype={...})` with every other option at its
@@ -7084,7 +7086,7 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
         apply_parse_date_combinations_named(&mut headers, &mut columns, named)?;
     }
 
-    if let Some(ref parse_dates) = options.parse_dates {
+    let date_rewritten = if let Some(ref parse_dates) = options.parse_dates {
         apply_csv_parse_dates(
             &headers,
             &mut columns,
@@ -7095,8 +7097,10 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
             &na_set,
             &true_set,
             &false_set,
-        )?;
-    }
+        )?
+    } else {
+        vec![false; headers.len()]
+    };
 
     apply_pandas_csv_numeric_promotions(&mut columns);
 
@@ -7109,20 +7113,21 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     // verbatim cell from `raw_columns` instead, which is exactly what it is kept for.
     //
     // Guarded on the same condition as the object-fallback text below: a parse-date
-    // transform can rewrite or add columns and desync `raw_columns` from `columns`, and
-    // the per-column length check keeps the indexing honest even so.
-    let raw_text_is_aligned = options.parse_dates.is_none()
-        && options.parse_date_combinations.is_none()
+    // combination can rewrite or add columns and desync `raw_columns` from `columns`,
+    // while `parse_dates` only rewrites the columns marked in `date_rewritten`
+    // (br-frankenpandas-7tort).
+    let raw_text_is_aligned = options.parse_date_combinations.is_none()
         && options.parse_date_combinations_named.is_none()
         && raw_columns.len() == columns.len();
     if let Some(ref dtype_map) = options.dtype {
         for (i, name) in headers.iter().enumerate() {
             if let Some(target_dt) = dtype_map.get(name) {
-                let raw_column = if raw_text_is_aligned {
-                    raw_columns.get(i)
-                } else {
-                    None
-                };
+                let raw_column =
+                    if raw_text_is_aligned && !date_rewritten.get(i).copied().unwrap_or(false) {
+                        raw_columns.get(i)
+                    } else {
+                        None
+                    };
                 if *target_dt == DType::Utf8
                     && raw_column.is_some_and(|raw| raw.len() == columns[i].len())
                 {
@@ -7152,12 +7157,11 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
     let header_count = headers.len();
 
     // Object-fallback columns should keep verbatim source text (pandas parity,
-    // see build_csv_object_aware_column). Only safe when no parse-date transform
-    // rewrote/added columns (which would desync raw_columns from columns); a
-    // per-column dtype override is also excluded so explicit astype wins.
-    let preserve_object_text = options.parse_dates.is_none()
-        && options.parse_date_combinations.is_none()
-        && options.parse_date_combinations_named.is_none();
+    // see build_csv_object_aware_column). Safe whenever no parse-date combination
+    // added/removed columns (`raw_text_is_aligned`) and the column itself was not
+    // rewritten by `parse_dates` (`!date_rewritten[col]`, br-frankenpandas-7tort);
+    // a per-column dtype override is also excluded so explicit astype wins.
+    let preserve_object_text = raw_text_is_aligned;
     let dtype_forced = |name: &str| -> bool {
         options
             .dtype
@@ -7255,7 +7259,10 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 csv_float_cells_column(&columns[col_idx]).filter(|_| !dtype_forced(&name))
             {
                 column
-            } else if preserve_object_text && !dtype_forced(&name) {
+            } else if preserve_object_text
+                && !date_rewritten.get(orig_idx).copied().unwrap_or(false)
+                && !dtype_forced(&name)
+            {
                 let (rb, ro) = strings_to_contiguous_raw(&raw_columns[orig_idx]);
                 build_csv_object_aware_column(columns[col_idx].clone(), &rb, &ro)?
             } else {
@@ -7283,7 +7290,10 @@ pub fn read_csv_with_options(input: &str, options: &CsvReadOptions) -> Result<Da
                 csv_float_cells_column(&values).filter(|_| !dtype_forced(&name))
             {
                 column
-            } else if preserve_object_text && !dtype_forced(&name) {
+            } else if preserve_object_text
+                && !date_rewritten.get(idx).copied().unwrap_or(false)
+                && !dtype_forced(&name)
+            {
                 let (rb, ro) = strings_to_contiguous_raw(&raw_columns[idx]);
                 build_csv_object_aware_column(values, &rb, &ro)?
             } else {
@@ -42967,7 +42977,7 @@ mod sas_real_file_differential_j0lg5_8 {
         xport::{XportMetadata, XportSchema, XportValue, XportVariable, XportWriter},
     };
 
-    use super::{IoError, read_sas};
+    use super::{CsvReadOptions, IoError, read_csv_with_options, read_sas};
 
     fn write_test_xpt(df: &DataFrame, path: &Path) {
         let mut schema_builder = XportSchema::builder();
@@ -43284,7 +43294,7 @@ print(json.dumps({"columns": cols, "rows": rows}))
         } else {
             for path in &all_files {
                 let df = read_sas(path).expect("read_sas fallback");
-                assert!(df.len() >= 1);
+                assert!(!df.is_empty());
             }
         }
     }
@@ -43318,5 +43328,45 @@ print(json.dumps({"columns": cols, "rows": rows}))
         )
         .expect("write truncated xpt");
         assert!(matches!(read_sas(&bad_xpt_path), Err(IoError::Sas(_))));
+    }
+
+    #[test]
+    fn test_read_csv_parse_dates_fallback_keeps_object_text_7tort() {
+        let csv_text = "date,mixed,num\n\
+            2022-01-01 00:00:05+01:00,a,10\n\
+            2022-01-02 00:00:05+01:00,1,20\n\
+            2022-01-03 00:00:05+01:00,2.5,30\n\
+            2022-01-04 00:00:05+01:00,,40\n";
+        let options = CsvReadOptions {
+            parse_dates: Some(vec!["date".to_owned()]),
+            ..CsvReadOptions::default()
+        };
+        let df = read_csv_with_options(csv_text, &options)
+            .expect("read_csv_with_options should succeed");
+        let mixed = df.column("mixed").expect("mixed column");
+        assert_eq!(mixed.dtype(), DType::Utf8);
+        assert_eq!(
+            mixed.values(),
+            &[
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("1".to_owned()),
+                Scalar::Utf8("2.5".to_owned()),
+                Scalar::Null(NullKind::NaN),
+            ]
+        );
+        // NEGATIVE: numeric column remains Int64, zoned date column remains Datetime64
+        let num = df.column("num").expect("num column");
+        assert_eq!(num.dtype(), DType::Int64);
+        assert_eq!(
+            num.values(),
+            &[
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+            ]
+        );
+        let date = df.column("date").expect("date column");
+        assert!(date.dtype().is_datetime());
     }
 }

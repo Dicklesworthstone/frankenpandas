@@ -4171,14 +4171,31 @@ fn last_pair_per_key(
     )
 }
 
+fn exact_i64_from_f64(value: f64) -> Option<i64> {
+    if value.is_finite()
+        && value.fract() == 0.0
+        && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&value)
+    {
+        Some(value as i64)
+    } else {
+        None
+    }
+}
+
 fn scalar_key_allow_missing(value: &Scalar) -> ScalarKey<'_> {
     match value {
         Scalar::Null(kind) => ScalarKey::Null(*kind),
-        Scalar::Bool(v) => ScalarKey::Bool(*v),
+        // In an object / mixed column (and bijectively within any typed Bool
+        // or Float64 column), Python hash / == treats Bool(true) == Int64(1)
+        // == Float64(1.0) and Bool(false) == Int64(0) == Float64(0.0), keeping
+        // the first-seen Scalar as the label (br-frankenpandas-bz15u).
+        Scalar::Bool(v) => ScalarKey::Int64(i64::from(*v)),
         Scalar::Int64(v) => ScalarKey::Int64(*v),
         Scalar::Float64(v) => {
             if v.is_nan() {
                 ScalarKey::Null(NullKind::NaN)
+            } else if let Some(int_key) = exact_i64_from_f64(*v) {
+                ScalarKey::Int64(int_key)
             } else {
                 let normalized = if *v == 0.0 { 0.0 } else { *v };
                 ScalarKey::FloatBits(normalized.to_bits())
@@ -4212,6 +4229,20 @@ fn scalar_key_allow_missing(value: &Scalar) -> ScalarKey<'_> {
             interval.closed,
         ),
         Scalar::Object(object) => ScalarKey::Object(object),
+    }
+}
+
+/// Variant-preserving key for `Series::map` / `Series::replace` on typed
+/// non-object columns (where `Bool(true)` does not match `Int64(1)`) and
+/// strict cross-type total ordering in [`scalar_key_cmp`].
+fn raw_scalar_key_allow_missing(value: &Scalar) -> ScalarKey<'_> {
+    match value {
+        Scalar::Bool(v) => ScalarKey::Bool(*v),
+        Scalar::Float64(v) if !v.is_nan() => {
+            let normalized = if *v == 0.0 { 0.0 } else { *v };
+            ScalarKey::FloatBits(normalized.to_bits())
+        }
+        _ => scalar_key_allow_missing(value),
     }
 }
 
@@ -4455,7 +4486,7 @@ fn try_build_mapping_index(
     let mut index: FxHashMap<ScalarKey<'_>, &Scalar> =
         FxHashMap::with_capacity_and_hasher(mapping.len(), Default::default());
     for (k, v) in mapping {
-        let key = scalar_key_allow_missing(k);
+        let key = raw_scalar_key_allow_missing(k);
         // First-occurrence wins, matching the prior linear-scan behavior
         // (Vec::iter().find() returns the first match).
         index.entry(key).or_insert(v);
@@ -5409,7 +5440,10 @@ pub fn sample_seed(random_state: Option<u64>) -> u64 {
 #[doc(hidden)]
 #[must_use]
 pub fn pivot_axis_scalar_cmp(a: &Scalar, b: &Scalar) -> Ordering {
-    scalar_key_cmp(&scalar_key_allow_missing(a), &scalar_key_allow_missing(b))
+    scalar_key_cmp(
+        &raw_scalar_key_allow_missing(a),
+        &raw_scalar_key_allow_missing(b),
+    )
 }
 
 fn scalar_key_cmp(a: &ScalarKey<'_>, b: &ScalarKey<'_>) -> Ordering {
@@ -9150,11 +9184,12 @@ fn is_unicode_numeric(ch: char) -> bool {
 
 /// Duplicate-aware outer alignment for Series arithmetic.
 ///
-/// Mirrors pandas non-unique join behavior for `Series.align(join="outer")`
-/// with `sort=False`:
-/// - preserve left order, then append right-only labels in right order
-/// - shared labels materialize cartesian matches (lc * rc rows)
-/// - left-only and right-only labels keep their original multiplicity
+/// Mirrors pandas non-unique outer join behavior (`Index.join(other, how="outer")`
+/// used by `Series` / `DataFrame` arithmetic, `align(join="outer")`, and `combine_first`
+/// when `left != right`):
+/// - distinct union labels are emitted in sorted order
+/// - shared labels materialize cartesian matches (`lc * rc` rows, left-major)
+/// - left-only and right-only labels keep their original multiplicity and appearance order
 fn align_union_duplicate_aware(
     left: &Index,
     right: &Index,
@@ -9162,32 +9197,45 @@ fn align_union_duplicate_aware(
     let left_groups = index_position_groups(left);
     let right_groups = index_position_groups(right);
 
+    let union_labels: BTreeSet<IndexLabel> = left
+        .labels()
+        .iter()
+        .chain(right.labels())
+        .cloned()
+        .collect();
+
     let mut out_labels = Vec::new();
     let mut left_positions = Vec::new();
     let mut right_positions = Vec::new();
 
-    for (left_pos, label) in left.labels().iter().enumerate() {
-        match right_groups.get(label) {
-            Some(right_hits) if !right_hits.is_empty() => {
-                for &right_pos in right_hits {
+    for label in union_labels {
+        let left_hits = left_groups.get(&label).map_or(&[][..], Vec::as_slice);
+        let right_hits = right_groups.get(&label).map_or(&[][..], Vec::as_slice);
+        match (!left_hits.is_empty(), !right_hits.is_empty()) {
+            (true, true) => {
+                for &left_pos in left_hits {
+                    for &right_pos in right_hits {
+                        out_labels.push(label.clone());
+                        left_positions.push(Some(left_pos));
+                        right_positions.push(Some(right_pos));
+                    }
+                }
+            }
+            (true, false) => {
+                for &left_pos in left_hits {
                     out_labels.push(label.clone());
                     left_positions.push(Some(left_pos));
+                    right_positions.push(None);
+                }
+            }
+            (false, true) => {
+                for &right_pos in right_hits {
+                    out_labels.push(label.clone());
+                    left_positions.push(None);
                     right_positions.push(Some(right_pos));
                 }
             }
-            _ => {
-                out_labels.push(label.clone());
-                left_positions.push(Some(left_pos));
-                right_positions.push(None);
-            }
-        }
-    }
-
-    for (right_pos, label) in right.labels().iter().enumerate() {
-        if !left_groups.contains_key(label) {
-            out_labels.push(label.clone());
-            left_positions.push(None);
-            right_positions.push(Some(right_pos));
+            (false, false) => {}
         }
     }
 
@@ -17924,6 +17972,44 @@ impl Series {
             }
         }
         let na_first = na_position == "first";
+        if let Some(multi) = self.index.row_multiindex() {
+            let mut order = (0..self.len()).collect::<Vec<_>>();
+            order.sort_by(|&left, &right| {
+                let lt = multi.get_tuple(left).unwrap_or_default();
+                let rt = multi.get_tuple(right).unwrap_or_default();
+                for (l_lbl, r_lbl) in lt.into_iter().zip(rt) {
+                    let ord = match (l_lbl.is_missing(), r_lbl.is_missing()) {
+                        (true, true) => std::cmp::Ordering::Equal,
+                        (true, false) => {
+                            if na_first {
+                                std::cmp::Ordering::Less
+                            } else {
+                                std::cmp::Ordering::Greater
+                            }
+                        }
+                        (false, true) => {
+                            if na_first {
+                                std::cmp::Ordering::Greater
+                            } else {
+                                std::cmp::Ordering::Less
+                            }
+                        }
+                        (false, false) => {
+                            if ascending {
+                                l_lbl.cmp(r_lbl)
+                            } else {
+                                r_lbl.cmp(l_lbl)
+                            }
+                        }
+                    };
+                    if ord != std::cmp::Ordering::Equal {
+                        return ord;
+                    }
+                }
+                std::cmp::Ordering::Equal
+            });
+            return self.sorted_index_by_positions(&order);
+        }
         let ranks = category_ranks(&self.index);
         // A strictly ordered int index is already sorted one way or the
         // other: s.sort_index(ascending=False) of a RangeIndex radix-sorted
@@ -20962,50 +21048,6 @@ impl Series {
             }
         }
 
-        // br-frankenpandas-rh1od: an OBJECT bucket holding only numeric
-        // scalars (the bool+numeric constructor mix) dedups under PYTHON
-        // numeric equality — True == 1 == 1.0 collapse to ONE entry.
-        // MEASURED live pandas 2.2.3: pd.Series([True, 1, 1.0]).nunique()
-        // -> 1. ScalarKey's typed variants would count 3. Key on canonical
-        // f64 bits (-0.0 -> +0.0); ints beyond 2^53 lose exactness here,
-        // which no corpus fixture exercises (noted deliberately).
-        if self.column.dtype() == DType::Utf8
-            && self.column.values().iter().all(|value| {
-                value.is_missing()
-                    || matches!(
-                        value,
-                        Scalar::Bool(_) | Scalar::Int64(_) | Scalar::Float64(_)
-                    )
-            })
-        {
-            let mut seen: FxHashSet<u64> =
-                FxHashSet::with_capacity_and_hasher(self.len().min(1 << 18), Default::default());
-            // Under dropna=False each missing kind (None / nan / NaT) is one
-            // more value, as pandas counts them. A missing value panicked
-            // here ("bucket pre-checked all-numeric"; fvsao.66).
-            let mut missing_kinds: Vec<NullKind> = Vec::new();
-            for value in self.column.values() {
-                let numeric = match value {
-                    Scalar::Bool(b) => f64::from(*b),
-                    #[allow(clippy::cast_precision_loss)]
-                    Scalar::Int64(v) => *v as f64,
-                    Scalar::Float64(v) if !v.is_nan() => *v,
-                    _ => {
-                        let kind = match value {
-                            Scalar::Null(kind) => *kind,
-                            _ => NullKind::NaN,
-                        };
-                        if !dropna && !missing_kinds.contains(&kind) {
-                            missing_kinds.push(kind);
-                        }
-                        continue;
-                    }
-                };
-                seen.insert(if numeric == 0.0 { 0 } else { numeric.to_bits() });
-            }
-            return seen.len() + missing_kinds.len();
-        }
-
         let mut seen_keys: FxHashMap<ScalarKey<'_>, ()> = FxHashMap::default();
         for value in self.column.values() {
             if value.is_missing() && dropna {
@@ -21471,7 +21513,7 @@ impl Series {
                 continue;
             }
             let mapped = if let Some(idx) = &index {
-                let key = scalar_key_allow_missing(val);
+                let key = raw_scalar_key_allow_missing(val);
                 idx.get(&key).map(|v| (*v).clone())
             } else {
                 mapping
@@ -21560,7 +21602,7 @@ impl Series {
                 continue;
             }
             let mapped = if let Some(idx) = &index {
-                let key = scalar_key_allow_missing(val);
+                let key = raw_scalar_key_allow_missing(val);
                 idx.get(&key).map(|v| (*v).clone())
             } else {
                 mapping
@@ -22336,7 +22378,7 @@ impl Series {
         let mut out = Vec::with_capacity(self.len());
         for val in self.column.values() {
             let replaced = if let Some(idx) = &index {
-                let key = scalar_key_allow_missing(val);
+                let key = raw_scalar_key_allow_missing(val);
                 idx.get(&key).map(|v| (*v).clone())
             } else {
                 replacements
@@ -35444,7 +35486,7 @@ impl Series {
                 continue;
             }
             let mapped = if let Some(idx) = &index {
-                let key = scalar_key_allow_missing(val);
+                let key = raw_scalar_key_allow_missing(val);
                 idx.get(&key).map(|v| (*v).clone())
             } else {
                 mapping
@@ -40556,7 +40598,7 @@ impl Rolling<'_> {
         }
 
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: self.series.index().clone(),
             column_multiindex: None,
@@ -42235,7 +42277,7 @@ impl Expanding<'_> {
         }
 
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: self.series.index().clone(),
             column_multiindex: None,
@@ -43071,7 +43113,7 @@ impl Ewm<'_> {
             col_order.push(func.to_string());
         }
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: self.series.index().clone(),
             column_multiindex: None,
@@ -46846,7 +46888,7 @@ impl Resample<'_> {
             }
             let index = self.bucket_index(labels);
             return Ok(DataFrame {
-                columns: result_cols.into(),
+                columns: ordered_column_store(result_cols, &col_order),
                 column_order: col_order.into(),
                 index,
                 column_multiindex: None,
@@ -46872,7 +46914,7 @@ impl Resample<'_> {
         // source axis name on the bucket-index.
         let index = self.bucket_index(labels);
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index,
             column_multiindex: None,
@@ -59747,7 +59789,7 @@ impl SeriesGroupBy<'_> {
                 };
                 let index = Index::new(order).rename_index(idx_name);
                 return Ok(DataFrame {
-                    columns: result_cols.into(),
+                    columns: ordered_column_store(result_cols, &col_order),
                     column_order: col_order.into(),
                     index,
                     column_multiindex: None,
@@ -59850,7 +59892,7 @@ impl SeriesGroupBy<'_> {
         };
         let index = Index::new(order).rename_index(idx_name);
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index,
             column_multiindex: None,
@@ -65068,7 +65110,7 @@ impl StringAccessor<'_> {
         }
 
         Ok(DataFrame {
-            columns: columns.into(),
+            columns: ordered_column_store(columns, &column_order),
             column_order: column_order.into(),
             index,
             column_multiindex: None,
@@ -80898,6 +80940,16 @@ impl From<BTreeMap<String, Column>> for ColumnStore {
     }
 }
 
+#[allow(clippy::useless_conversion)]
+fn ordered_column_store(
+    columns: impl Into<ColumnStore>,
+    order: &[String],
+) -> DataFrameColumnsStore {
+    let mut store: ColumnStore = columns.into();
+    store.reorder(order);
+    store.into()
+}
+
 impl From<ColumnStore> for BTreeMap<String, Column> {
     fn from(store: ColumnStore) -> Self {
         let mut map = BTreeMap::new();
@@ -90643,16 +90695,22 @@ impl DataFrame {
             match value {
                 Scalar::Null(_) => mix_digest(state, 0),
                 Scalar::Bool(value) => {
-                    mix_digest(state, 1);
-                    mix_digest(state, u64::from(*value));
+                    mix_digest(state, 2);
+                    mix_digest(state, i64::from(*value) as u64);
                 }
                 Scalar::Int64(value) => {
                     mix_digest(state, 2);
                     mix_digest(state, *value as u64);
                 }
                 Scalar::Float64(value) => {
-                    mix_digest(state, 3);
-                    mix_digest(state, value.to_bits());
+                    if let Some(int_key) = exact_i64_from_f64(*value) {
+                        mix_digest(state, 2);
+                        mix_digest(state, int_key as u64);
+                    } else {
+                        mix_digest(state, 3);
+                        let normalized = if *value == 0.0 { 0.0 } else { *value };
+                        mix_digest(state, normalized.to_bits());
+                    }
                 }
                 Scalar::Utf8(value) => {
                     mix_digest(state, 4);
@@ -90744,9 +90802,12 @@ impl DataFrame {
                     }
                 })
             } else {
-                selected_column_refs
-                    .iter()
-                    .all(|col| col.values()[left].semantic_eq(&col.values()[right]))
+                selected_column_refs.iter().all(|col| {
+                    let lval = &col.values()[left];
+                    let rval = &col.values()[right];
+                    scalar_key_allow_missing(lval) == scalar_key_allow_missing(rval)
+                        || lval.semantic_eq(rval)
+                })
             }
         };
 
@@ -92197,6 +92258,44 @@ impl DataFrame {
             }
         }
         let na_first = na_position == "first";
+        if let Some(multi) = self.row_multiindex() {
+            let mut order = (0..self.len()).collect::<Vec<_>>();
+            order.sort_by(|&left, &right| {
+                let lt = multi.get_tuple(left).unwrap_or_default();
+                let rt = multi.get_tuple(right).unwrap_or_default();
+                for (l_lbl, r_lbl) in lt.into_iter().zip(rt) {
+                    let ord = match (l_lbl.is_missing(), r_lbl.is_missing()) {
+                        (true, true) => std::cmp::Ordering::Equal,
+                        (true, false) => {
+                            if na_first {
+                                std::cmp::Ordering::Less
+                            } else {
+                                std::cmp::Ordering::Greater
+                            }
+                        }
+                        (false, true) => {
+                            if na_first {
+                                std::cmp::Ordering::Greater
+                            } else {
+                                std::cmp::Ordering::Less
+                            }
+                        }
+                        (false, false) => {
+                            if ascending {
+                                l_lbl.cmp(r_lbl)
+                            } else {
+                                r_lbl.cmp(l_lbl)
+                            }
+                        }
+                    };
+                    if ord != std::cmp::Ordering::Equal {
+                        return ord;
+                    }
+                }
+                std::cmp::Ordering::Equal
+            });
+            return self.sorted_rows_by_positions(order);
+        }
         // A categorical index sorts by its categories (cld41).
         let ranks = category_ranks(&self.index);
         if !na_first && ranks.is_none() {
@@ -97738,7 +97837,7 @@ impl DataFrame {
 
         // The id columns keep their typed labels.
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: new_index,
             column_multiindex: None,
@@ -97825,7 +97924,7 @@ impl DataFrame {
                 )
             };
             return Ok(Self {
-                columns: result_cols.into(),
+                columns: ordered_column_store(result_cols, &result_col_order),
                 column_order: result_col_order.into(),
                 index: Index::new(idx_labels)
                     .rename_index(Some(self.column_series_name(index_col))),
@@ -98024,7 +98123,7 @@ impl DataFrame {
             }
 
             return Ok(Self {
-                columns: result_cols.into(),
+                columns: ordered_column_store(result_cols, &result_col_order),
                 column_order: result_col_order.into(),
                 index: Index::new(idx_labels)
                     .rename_index(Some(self.column_series_name(index_col))),
@@ -98125,7 +98224,7 @@ impl DataFrame {
         // Per br-frankenpandas-15kfm: pandas pivot_table sets index name
         // to the pivot index column name. Sister to br-xb0ra (pivot).
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &result_col_order),
             column_order: result_col_order.into(),
             index: Index::new(new_labels).rename_index(Some(self.column_series_name(index_col))),
             column_multiindex: None,
@@ -98224,7 +98323,7 @@ impl DataFrame {
         }
 
         Ok(Self {
-            columns: combined_cols.into(),
+            columns: ordered_column_store(combined_cols, &combined_order),
             column_order: combined_order.into(),
             index: shared_index.unwrap_or_else(|| Index::new(Vec::new())),
             column_multiindex: None,
@@ -98298,7 +98397,7 @@ impl DataFrame {
         }
 
         Ok(Self {
-            columns: combined_cols.into(),
+            columns: ordered_column_store(combined_cols, &combined_order),
             column_order: combined_order.into(),
             index: shared_index.unwrap_or_else(|| Index::new(Vec::new())),
             column_multiindex: None,
@@ -98431,7 +98530,7 @@ impl DataFrame {
         let mut new_labels = base.index.labels().to_vec();
         new_labels.push(IndexLabel::Utf8(margins_name.to_owned()));
         Ok(Self {
-            columns: new_cols.into(),
+            columns: ordered_column_store(new_cols, &new_col_order),
             column_order: new_col_order,
             index: Index::new(new_labels).rename_index(base.index.name()),
             column_multiindex: None,
@@ -98547,7 +98646,7 @@ impl DataFrame {
         // Per br-frankenpandas-jhrer: pandas pivot_table with margins
         // preserves the base index axis name.
         Ok(Self {
-            columns: new_cols.into(),
+            columns: ordered_column_store(new_cols, &new_col_order),
             column_order: new_col_order,
             index: Index::new(new_labels).rename_index(base.index.name()),
             column_multiindex: None,
@@ -98656,7 +98755,7 @@ impl DataFrame {
             .collect();
 
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: Index::new(labels),
             column_multiindex: None,
@@ -98781,7 +98880,7 @@ impl DataFrame {
         }
 
         Ok(Self {
-            columns: combined_cols.into(),
+            columns: ordered_column_store(combined_cols, &combined_order),
             column_order: combined_order.into(),
             index: first.index.clone(),
             column_multiindex: None,
@@ -101915,7 +102014,7 @@ impl DataFrame {
             "reindex",
         )?;
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &self.column_order),
             column_order: self.column_order.clone(),
             index,
             column_multiindex: self.column_multiindex.clone(),
@@ -101969,7 +102068,7 @@ impl DataFrame {
                 // new labels, leaving any prior column MultiIndex
                 // size-mismatched.
                 Ok(Self {
-                    columns: result_cols.into(),
+                    columns: ordered_column_store(result_cols, &col_order),
                     column_order: col_order.into(),
                     index: self.index.clone(),
                     column_multiindex: None,
@@ -102029,7 +102128,7 @@ impl DataFrame {
             "reindex",
         )?;
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &self.column_order),
             column_order: self.column_order.clone(),
             index,
             column_multiindex: self.column_multiindex.clone(),
@@ -102087,7 +102186,7 @@ impl DataFrame {
             "reindex",
         )?;
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &self.column_order),
             column_order: self.column_order.clone(),
             index: new_index,
             column_multiindex: self.column_multiindex.clone(),
@@ -102172,7 +102271,7 @@ impl DataFrame {
             "reindex",
         )?;
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &self.column_order),
             column_order: self.column_order.clone(),
             index: new_index,
             column_multiindex: self.column_multiindex.clone(),
@@ -102308,7 +102407,7 @@ impl DataFrame {
                 result_cols.insert(name.clone(), column);
             }
             return Ok(Self {
-                columns: result_cols.into(),
+                columns: ordered_column_store(result_cols, &self.column_order),
                 column_order: self.column_order.clone(),
                 index: self.index.clone(),
                 column_multiindex: self.column_multiindex.clone(),
@@ -102369,7 +102468,7 @@ impl DataFrame {
         }
 
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &self.column_order),
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
@@ -102797,7 +102896,7 @@ impl DataFrame {
         }
 
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order,
             index: plan.union_index,
             column_multiindex: None,
@@ -102888,7 +102987,7 @@ impl DataFrame {
 
         Ok(Self {
             index: union_index,
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &union_cols),
             column_order: union_cols.into(),
             column_multiindex: None,
             row_multiindex: None,
@@ -105411,7 +105510,7 @@ impl DataFrame {
         // Per br-frankenpandas-omjaw: pandas preserves the index name
         // through sample. Was lost via Index::new without rename_index.
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &self.column_order),
             column_order: self.column_order.clone(),
             index: self.index.relabeled(new_labels),
             column_multiindex: self.column_multiindex.clone(),
@@ -105976,7 +106075,7 @@ impl DataFrame {
 
         // Per br-frankenpandas-yh08x: preserve source index name through unstack.
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: Index::new(new_labels).rename_index(self.index.name()),
             column_multiindex: None,
@@ -106087,7 +106186,7 @@ impl DataFrame {
                     col_order.push(col_name);
                 }
                 Ok(Self {
-                    columns: cols.into(),
+                    columns: ordered_column_store(cols, &col_order),
                     column_order: col_order.into(),
                     index: self.index.clone(),
                     column_multiindex: None,
@@ -106132,7 +106231,7 @@ impl DataFrame {
                     cols.insert(col_name.clone(), Column::from_values(values)?);
                 }
                 Ok(Self {
-                    columns: cols.into(),
+                    columns: ordered_column_store(cols, &self.column_order),
                     column_order: self.column_order.clone(),
                     index: self.index.clone(),
                     column_multiindex: self.column_multiindex.clone(),
@@ -106423,8 +106522,8 @@ impl DataFrame {
         let index = Index::new(row_labels).rename_index(Some(self.column_series_name(index_col)));
         let frame = Self {
             index,
+            columns: ordered_column_store(columns, &column_order),
             column_order: column_order.into(),
-            columns: columns.into(),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,
@@ -106562,8 +106661,8 @@ impl DataFrame {
         let index = Index::new(row_labels).rename_index(Some(self.column_series_name(index_col)));
         Ok(Self {
             index,
+            columns: ordered_column_store(columns, &column_order),
             column_order: column_order.into(),
-            columns: columns.into(),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,
@@ -106735,46 +106834,6 @@ impl DataFrame {
                     .map(|bounds| &bytes[bounds[0]..bounds[1]])
                     .collect();
                 return Ok(Scalar::Int64(distinct.len() as i64));
-            }
-            // br-frankenpandas-rh1od: an OBJECT bucket holding only numeric
-            // scalars (the bool+numeric constructor mix) dedups under PYTHON
-            // numeric equality — True ≡ 1 ≡ 1.0 collapse to one entry.
-            // MEASURED live 2.2.3: pd.DataFrame({'a': [True, 1, 1.0, False]})
-            // .nunique() -> 2 for that column. Same canonical-f64-bits keying
-            // as the Series::nunique arm; ints beyond 2^53 lose exactness by
-            // documented design note.
-            if col.dtype() == DType::Utf8
-                && col.values().iter().all(|value| {
-                    value.is_missing()
-                        || matches!(
-                            value,
-                            Scalar::Bool(_) | Scalar::Int64(_) | Scalar::Float64(_)
-                        )
-                })
-            {
-                let mut seen_num: FxHashSet<u64> =
-                    FxHashSet::with_capacity_and_hasher(col.len().min(1 << 18), Default::default());
-                let mut obj_missing = false;
-                for value in col.values() {
-                    if value.is_missing() {
-                        if !dropna {
-                            obj_missing = true;
-                        }
-                        continue;
-                    }
-                    let numeric = match value {
-                        Scalar::Bool(b) => f64::from(*b),
-                        #[allow(clippy::cast_precision_loss)]
-                        Scalar::Int64(v) => *v as f64,
-                        Scalar::Float64(v) => *v,
-                        _ => unreachable!("bucket pre-checked all-numeric"),
-                    };
-                    let normalized = if numeric == 0.0 { 0.0 } else { numeric };
-                    seen_num.insert(normalized.to_bits());
-                }
-                return Ok(Scalar::Int64(
-                    (seen_num.len() + usize::from(obj_missing)) as i64,
-                ));
             }
             let mut seen: FxHashMap<ScalarKey<'_>, ()> = FxHashMap::default();
             let mut missing_seen = false;
@@ -112358,7 +112417,7 @@ impl DataFrame {
             }
             fp_runtime::emit_materialized(op_label, union_index.len(), self.column_order.len());
             return Ok(Self {
-                columns: result_cols.into(),
+                columns: ordered_column_store(result_cols, &self.column_order),
                 column_order: self.column_order.clone(),
                 index: union_index,
                 column_multiindex: self.column_multiindex.clone(),
@@ -112405,7 +112464,7 @@ impl DataFrame {
         }
 
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &left.column_order),
             column_order: left.column_order.clone(),
             index: left.index.clone(),
             column_multiindex: left.column_multiindex.clone(),
@@ -112648,7 +112707,7 @@ impl DataFrame {
             }
         }
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &left.column_order),
             column_order: left.column_order.clone(),
             index: left.index.clone(),
             column_multiindex: left.column_multiindex.clone(),
@@ -112842,7 +112901,7 @@ impl DataFrame {
         }
 
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &left.column_order),
             column_order: left.column_order.clone(),
             index: left.index.clone(),
             column_multiindex: left.column_multiindex.clone(),
@@ -113321,7 +113380,7 @@ impl DataFrame {
         col_order.extend(encoded_order);
 
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: self.index.clone(),
             column_multiindex: None,
@@ -113956,7 +114015,7 @@ impl DataFrame {
         Ok(Self {
             index: self.index.clone(),
             column_order: self.column_order.clone(),
-            columns: out_columns.into(),
+            columns: ordered_column_store(out_columns, &self.column_order),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
             allows_duplicate_labels: self.allows_duplicate_labels,
@@ -114040,7 +114099,7 @@ impl DataFrame {
         Ok(Self {
             index: self.index.clone(),
             column_order: self.column_order.clone(),
-            columns: out_columns.into(),
+            columns: ordered_column_store(out_columns, &self.column_order),
             column_multiindex: self.column_multiindex.clone(),
             row_multiindex: self.row_multiindex.clone(),
             allows_duplicate_labels: self.allows_duplicate_labels,
@@ -114119,7 +114178,7 @@ impl DataFrame {
             );
         }
         Ok(Self {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &self.column_order),
             column_order: self.column_order.clone(),
             index: self.index.clone(),
             column_multiindex: self.column_multiindex.clone(),
@@ -114247,8 +114306,8 @@ impl DataFrame {
 
         Ok(Self {
             index,
+            columns: ordered_column_store(result_cols, &all_cols),
             column_order: all_cols.into(),
-            columns: result_cols.into(),
             column_multiindex: None,
             row_multiindex: None,
             allows_duplicate_labels: self.allows_duplicate_labels,
@@ -116135,7 +116194,7 @@ impl DataFrame {
                         if n.is_empty() { None } else { Some(n) }
                     };
                     return Ok(DataFrame {
-                        columns: result_cols.into(),
+                        columns: ordered_column_store(result_cols, &col_order),
                         column_order: col_order.into(),
                         index: Index::new(index_labels).rename_index(idx_name),
                         column_multiindex: None,
@@ -116280,7 +116339,7 @@ impl DataFrame {
             if n.is_empty() { None } else { Some(n) }
         };
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: Index::new(index_labels).rename_index(idx_name),
             column_multiindex: None,
@@ -116333,7 +116392,7 @@ impl DataFrame {
             if nm.is_empty() { None } else { Some(nm) }
         };
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: Index::new(index_labels).rename_index(idx_name),
             column_multiindex: None,
@@ -116405,7 +116464,7 @@ impl DataFrame {
                     result_cols.insert(name.clone(), Column::from_values(vals)?);
                 }
                 Ok(Self {
-                    columns: result_cols.into(),
+                    columns: ordered_column_store(result_cols, &ct.column_order),
                     column_order: ct.column_order,
                     index: ct.index,
                     column_multiindex: ct.column_multiindex,
@@ -116439,7 +116498,7 @@ impl DataFrame {
                     result_cols.insert(name.clone(), Column::from_values(vals)?);
                 }
                 Ok(Self {
-                    columns: result_cols.into(),
+                    columns: ordered_column_store(result_cols, &ct.column_order),
                     column_order: ct.column_order,
                     index: ct.index,
                     column_multiindex: ct.column_multiindex,
@@ -116527,7 +116586,7 @@ impl DataFrame {
         // Per br-frankenpandas-imdlv: pandas explode preserves the original
         // row-index name (the new repeated labels keep the source axis name).
         let out = DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: self.index.relabeled(new_indices),
             column_multiindex: self.column_multiindex.clone(),
@@ -118253,7 +118312,7 @@ impl DataFrameGroupBy<'_> {
             }
 
             Ok(DataFrame {
-                columns: full_cols.into(),
+                columns: ordered_column_store(full_cols, &full_order),
                 column_order: full_order.into(),
                 index: Index::default_range(n_groups),
                 column_multiindex: None,
@@ -118796,7 +118855,7 @@ impl DataFrameGroupBy<'_> {
                 }
                 if col_order.len() == value_cols.len() {
                     return Ok(DataFrame {
-                        columns: result_cols.into(),
+                        columns: ordered_column_store(result_cols, &col_order),
                         column_order: col_order.into(),
                         index: typed.index.clone(),
                         column_multiindex: typed.column_multiindex.clone(),
@@ -119574,7 +119633,15 @@ impl DataFrameGroupBy<'_> {
                         .find(|v| !v.is_missing())
                         .cloned()
                         .unwrap_or_else(|| no_value.clone()),
-                    "nunique" => fp_types::nannunique(&group_vals),
+                    "nunique" => {
+                        let mut seen: FxHashSet<ScalarKey<'_>> = FxHashSet::default();
+                        for v in &group_vals {
+                            if let Some(key) = scalar_key_skip_missing(v) {
+                                seen.insert(key);
+                            }
+                        }
+                        Scalar::Int64(seen.len() as i64)
+                    }
                     "prod" => nanprod_preserving_int(&group_vals),
                     "any" => fp_types::nanany(&group_vals),
                     "all" => fp_types::nanall(&group_vals),
@@ -123684,7 +123751,7 @@ impl DataFrameGroupBy<'_> {
                     // Several keys keep their row MultiIndex (it was dropped:
                     // the rows were the flat 'n|feb' labels).
                     return Ok(DataFrame {
-                        columns: result_cols.into(),
+                        columns: ordered_column_store(result_cols, &col_order),
                         column_order: col_order.into(),
                         index: typed.index.clone(),
                         column_multiindex: None,
@@ -123937,7 +124004,7 @@ impl DataFrameGroupBy<'_> {
         let index = first_df.index.clone();
         let row_multiindex = first_df.row_multiindex.clone();
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index,
             column_multiindex: None,
@@ -124916,7 +124983,15 @@ impl DataFrameGroupBy<'_> {
                 .find(|v| !v.is_missing())
                 .cloned()
                 .unwrap_or(Scalar::Null(NullKind::NaN))),
-            "nunique" => Ok(fp_types::nannunique(group_vals)),
+            "nunique" => {
+                let mut seen: FxHashSet<ScalarKey<'_>> = FxHashSet::default();
+                for v in group_vals {
+                    if let Some(key) = scalar_key_skip_missing(v) {
+                        seen.insert(key);
+                    }
+                }
+                Ok(Scalar::Int64(seen.len() as i64))
+            }
             "prod" => Ok(fp_types::nanprod(group_vals)),
             // Statistical moments (br-frankenpandas-zge5s); skew is pandas'
             // online group_skew (br-frankenpandas-vjfq9).
@@ -125822,7 +125897,7 @@ impl DataFrameGroupBy<'_> {
         }
 
         Some(Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: self.df.index.clone(),
             column_multiindex: None,
@@ -126077,7 +126152,7 @@ impl DataFrameGroupBy<'_> {
         }
 
         Some(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: self.df.index.clone(),
             column_multiindex: None,
@@ -126158,7 +126233,7 @@ impl DataFrameGroupBy<'_> {
             col_order.push(name.clone());
         }
         Some(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: self.df.index.clone(),
             column_multiindex: None,
@@ -126468,7 +126543,7 @@ impl DataFrameGroupBy<'_> {
         }
 
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: self.df.index.clone(),
             column_multiindex: None,
@@ -126529,7 +126604,7 @@ impl DataFrameGroupBy<'_> {
         }
 
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: self.df.index.clone(),
             column_multiindex: None,
@@ -126602,7 +126677,7 @@ impl DataFrameGroupBy<'_> {
         }
 
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: self.df.index.clone(),
             column_multiindex: None,
@@ -126764,7 +126839,7 @@ impl DataFrameGroupBy<'_> {
             }
 
             let group_df = DataFrame {
-                columns: group_cols.into(),
+                columns: ordered_column_store(group_cols, &group_col_order),
                 column_order: group_col_order.into(),
                 index: Index::new(group_labels),
                 column_multiindex: None,
@@ -126799,7 +126874,7 @@ impl DataFrameGroupBy<'_> {
         // Per br-frankenpandas-tisw7: pandas groupby.filter preserves source
         // row-axis name.
         Ok(DataFrame {
-            columns: out_cols.into(),
+            columns: ordered_column_store(out_cols, &self.df.column_order),
             column_order: self.df.column_order.clone(),
             index: Index::new(out_labels).rename_index(self.df.index.name()),
             column_multiindex: self.df.column_multiindex.clone(),
@@ -126853,7 +126928,7 @@ impl DataFrameGroupBy<'_> {
         }
 
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: self.df.index.clone(),
             column_multiindex: None,
@@ -126909,7 +126984,7 @@ impl DataFrameGroupBy<'_> {
         }
 
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: self.df.index.clone(),
             column_multiindex: None,
@@ -127409,7 +127484,7 @@ impl DataFrameGroupBy<'_> {
         }
 
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: self.df.index.clone(),
             column_multiindex: None,
@@ -127616,7 +127691,7 @@ impl DataFrameGroupBy<'_> {
         // Per br-frankenpandas-9rwkk: pandas groupby.nth preserves source
         // row-axis name.
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: self
                 .df
@@ -128153,7 +128228,7 @@ impl DataFrameGroupBy<'_> {
             None
         };
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: Index::new(out_labels).rename_index(by_name),
             column_multiindex: None,
@@ -128529,7 +128604,7 @@ impl DataFrameGroupBy<'_> {
             }
         }
         Ok(Some(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: typed.index.clone(),
             column_multiindex: None,
@@ -128600,7 +128675,7 @@ impl DataFrameGroupBy<'_> {
             None
         };
         float_moment_frame(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: Index::new(out_labels).rename_index(by_name),
             column_multiindex: None,
@@ -128690,7 +128765,7 @@ impl DataFrameGroupBy<'_> {
             None
         };
         float_moment_frame(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: Index::new(out_labels).rename_index(by_name),
             column_multiindex: None,
@@ -128759,7 +128834,7 @@ impl DataFrameGroupBy<'_> {
             None
         };
         float_moment_frame(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &col_order),
             column_order: col_order.into(),
             index: Index::new(out_labels).rename_index(by_name),
             column_multiindex: None,
@@ -129033,7 +129108,7 @@ impl DataFrameGroupBy<'_> {
             result_cols.insert(col_name.clone(), col.take_positions(&source));
         }
         Ok(Some(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &value_cols),
             column_order: value_cols.into(),
             index: self.df.index.clone(),
             column_multiindex: None,
@@ -129085,7 +129160,7 @@ impl DataFrameGroupBy<'_> {
         }
 
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &value_cols),
             column_order: value_cols.into(),
             index: self.df.index.clone(),
             column_multiindex: None,
@@ -129141,7 +129216,7 @@ impl DataFrameGroupBy<'_> {
         }
 
         Ok(DataFrame {
-            columns: result_cols.into(),
+            columns: ordered_column_store(result_cols, &value_cols),
             column_order: value_cols.into(),
             index: self.df.index.clone(),
             column_multiindex: None,
@@ -129432,7 +129507,7 @@ impl GroupByRolling<'_> {
         }
 
         Ok(DataFrame {
-            columns: cols.into(),
+            columns: ordered_column_store(cols, &col_order),
             column_order: col_order.into(),
             // Inner labels in group-visit order. rename_index keeps the axis name,
             // per br-frankenpandas-43269's rule for every take-like path.
@@ -129661,7 +129736,7 @@ impl GroupByExpanding<'_> {
         }
 
         Ok(DataFrame {
-            columns: cols.into(),
+            columns: ordered_column_store(cols, &col_order),
             column_order: col_order.into(),
             index: self.groupby.df.index.clone(),
             column_multiindex: None,
@@ -129875,7 +129950,7 @@ impl GroupByEwm<'_> {
         }
 
         Ok(DataFrame {
-            columns: cols.into(),
+            columns: ordered_column_store(cols, &col_order),
             column_order: col_order.into(),
             index: self.groupby.df.index.clone(),
             column_multiindex: None,
@@ -130173,7 +130248,7 @@ impl GroupByResample<'_> {
         // the source date-axis name (within the MultiIndex level corresponding
         // to the resampled timestamps).
         Ok(DataFrame {
-            columns: cols.into(),
+            columns: ordered_column_store(cols, &col_order),
             column_order: col_order.into(),
             index: Index::new(all_labels).rename_index(self.groupby.df.index.name()),
             column_multiindex: None,
@@ -243571,10 +243646,50 @@ mod tests {
             .agg_dict_list(&[("x".to_owned(), vec!["sum".to_owned(), "max".to_owned()])])
             .unwrap();
         assert_eq!(aggregated.columns_multiindex().map(|m| m.len()), Some(2));
+        // br-frankenpandas-uq7x7: every builder now keeps the ColumnStore in
+        // column_order (`x_sum` before `x_max`, not BTreeMap's `x_max` first).
+        assert_eq!(aggregated.columns().name_at(0), Some("x_sum"));
+        assert_eq!(aggregated.columns().name_at(1), Some("x_max"));
         // reset_index puts the key in front as ('g', ''), as pandas; it was
         // refused (the axis passed through one entry short).
         let reset = aggregated.reset_index(false).unwrap();
         assert_eq!(reset.column_names(), vec!["g", "x_sum", "x_max"]);
+        assert_eq!(reset.columns().name_at(0), Some("g"));
+        assert_eq!(reset.columns().name_at(1), Some("x_sum"));
+        assert_eq!(reset.columns().name_at(2), Some("x_max"));
+
+        // br-frankenpandas-uq7x7: groupby reductions, as_index=false, cumsum,
+        // transform, and ffill over non-alphabetical columns ["g", "z", "a"]
+        // keep `columns().name_at(...)` aligned with `column_order`.
+        let gza = DataFrame::from_dict(
+            &["g", "z", "a"],
+            vec![
+                ("g", ["k", "m", "k"].map(text_scalar).to_vec()),
+                ("z", [1.0, 2.0, 3.0].map(Scalar::Float64).to_vec()),
+                ("a", [10.0, 20.0, 30.0].map(Scalar::Float64).to_vec()),
+            ],
+        )
+        .unwrap();
+        let gb_sum = gza.groupby(&["g"]).unwrap().sum().unwrap();
+        assert_eq!(gb_sum.columns().name_at(0), Some("z"));
+        assert_eq!(gb_sum.columns().name_at(1), Some("a"));
+        let gb_no_idx = gza
+            .groupby_full_options(&["g"], false, true, true)
+            .unwrap()
+            .sum()
+            .unwrap();
+        assert_eq!(gb_no_idx.columns().name_at(0), Some("g"));
+        assert_eq!(gb_no_idx.columns().name_at(1), Some("z"));
+        assert_eq!(gb_no_idx.columns().name_at(2), Some("a"));
+        let gb_cum = gza.groupby(&["g"]).unwrap().cumsum().unwrap();
+        assert_eq!(gb_cum.columns().name_at(0), Some("z"));
+        assert_eq!(gb_cum.columns().name_at(1), Some("a"));
+        let gb_tf = gza.groupby(&["g"]).unwrap().transform("sum").unwrap();
+        assert_eq!(gb_tf.columns().name_at(0), Some("z"));
+        assert_eq!(gb_tf.columns().name_at(1), Some("a"));
+        let gb_ff = gza.groupby(&["g"]).unwrap().ffill(None).unwrap();
+        assert_eq!(gb_ff.columns().name_at(0), Some("z"));
+        assert_eq!(gb_ff.columns().name_at(1), Some("a"));
         let reset_axis = reset.columns_multiindex().unwrap();
         assert_eq!(
             reset_axis.get_tuple(0).unwrap(),
@@ -265069,6 +265184,123 @@ mod test_top_level_and_reshaping {
         assert_eq!(
             localized.values(),
             &[Scalar::Utf8("2024-01-01 12:34:56+00:00".to_owned())]
+        );
+    }
+
+    #[test]
+    fn object_column_merges_one_one_float_and_true_bz15u() {
+        // br-frankenpandas-bz15u: Python hashes 1, 1.0, and True to the same bucket
+        // (`1 == 1.0 == True` and `hash(1) == hash(1.0) == hash(True)`), so pandas'
+        // object-dtype hashtable treats them as one value and keeps the first-seen
+        // representative across value_counts, unique, drop_duplicates, duplicated,
+        // nunique, and groupby.
+        let index = Index::from_i64(vec![0, 1, 2, 3, 4]);
+        let col = Column::from_values(vec![
+            Scalar::Int64(1),
+            Scalar::Float64(1.0),
+            Scalar::Utf8("a".to_owned()),
+            Scalar::Bool(true),
+            Scalar::Int64(2),
+        ])
+        .expect("object column");
+        let s = Series::new("o", index.clone(), col.clone()).expect("series");
+
+        assert_eq!(s.nunique(), 3);
+        let uniq = s.unique();
+        assert_eq!(
+            uniq.as_slice(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Int64(2),
+            ]
+        );
+        let dedup_first = s.drop_duplicates().expect("drop_duplicates first");
+        assert_eq!(
+            dedup_first.index().labels(),
+            &[
+                IndexLabel::Int64(0),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(4)
+            ]
+        );
+        let dedup_last = s
+            .drop_duplicates_keep(DuplicateKeep::Last)
+            .expect("drop_duplicates last");
+        assert_eq!(
+            dedup_last.index().labels(),
+            &[
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(3),
+                IndexLabel::Int64(4)
+            ]
+        );
+        assert_eq!(
+            dedup_last.values(),
+            &[
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Bool(true),
+                Scalar::Int64(2),
+            ]
+        );
+
+        let vc = s
+            .value_counts_with_options(false, false, false, true)
+            .expect("value_counts");
+        assert_eq!(
+            vc.index().labels(),
+            &[
+                IndexLabel::Int64(1),
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Int64(2),
+            ]
+        );
+        assert_eq!(
+            vc.values(),
+            &[Scalar::Int64(3), Scalar::Int64(1), Scalar::Int64(1)]
+        );
+
+        let mut cols = BTreeMap::new();
+        cols.insert(
+            "g".to_owned(),
+            Column::from_values(vec![
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("x".to_owned()),
+                Scalar::Utf8("y".to_owned()),
+                Scalar::Utf8("y".to_owned()),
+            ])
+            .expect("g"),
+        );
+        cols.insert("o".to_owned(), col);
+        let df =
+            DataFrame::new_with_column_order(index, cols, vec!["g".to_owned(), "o".to_owned()])
+                .expect("df");
+
+        let df_nunique = df.nunique_with_dropna(true).expect("df nunique");
+        assert_eq!(df_nunique.values(), &[Scalar::Int64(2), Scalar::Int64(3)]);
+
+        let subset = vec!["o".to_owned()];
+        let df_dedup = df
+            .drop_duplicates(Some(&subset), DuplicateKeep::First, false)
+            .expect("df drop_duplicates");
+        assert_eq!(df_dedup.len(), 3);
+
+        let gb_vc = df
+            .groupby(&["g"])
+            .expect("groupby g")
+            .value_counts()
+            .expect("groupby value_counts");
+        // In group 'x': 1, 1.0, 'a' -> count(1)=2, count('a')=1
+        // In group 'y': True, 2 -> count(True)=1, count(2)=1
+        assert_eq!(
+            gb_vc.column("count").expect("count col").values(),
+            &[
+                Scalar::Int64(2),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+                Scalar::Int64(1),
+            ]
         );
     }
 }
