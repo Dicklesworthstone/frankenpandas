@@ -131209,7 +131209,10 @@ mod tests {
                 .collect();
             let out = super::to_datetime_values_with_options(
                 &values,
-                super::ToDatetimeOptions::default(),
+                super::ToDatetimeOptions {
+                    errors: super::DatetimeErrors::Coerce,
+                    ..super::ToDatetimeOptions::default()
+                },
             )
             .expect("to_datetime");
             // true == parsed to a real timestamp, false == NaT/missing
@@ -143761,17 +143764,35 @@ mod tests {
         )
         .unwrap();
 
-        let mask = Series::from_values(
+        let mask_with_extra = Series::from_values(
+            "mask",
+            vec![
+                IndexLabel::from("a"),
+                IndexLabel::from("b"),
+                IndexLabel::from("c"),
+            ],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        )
+        .unwrap();
+
+        let out = s.filter(&mask_with_extra).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out.index().labels(), &[IndexLabel::from("a")]);
+        assert_eq!(out.values(), &[Scalar::Int64(1)]);
+
+        // Missing label "b" in mask must raise IndexingError (br-frankenpandas-747ax).
+        let unalignable_mask = Series::from_values(
             "mask",
             vec![IndexLabel::from("a"), IndexLabel::from("c")],
             vec![Scalar::Bool(true), Scalar::Bool(true)],
         )
         .unwrap();
-
-        let out = s.filter(&mask).unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out.index().labels(), &[IndexLabel::from("a")]);
-        assert_eq!(out.values(), &[Scalar::Int64(1)]);
+        assert!(
+            s.filter(&unalignable_mask)
+                .unwrap_err()
+                .to_string()
+                .contains("Unalignable boolean Series provided as indexer")
+        );
     }
 
     // ---- DataFrame filter_rows/fillna/dropna/head/tail/column-mutation tests ----
@@ -143820,17 +143841,35 @@ mod tests {
         )
         .unwrap();
 
-        let mask = Series::from_values(
+        let mask_with_extra = Series::from_values(
+            "mask",
+            vec![
+                IndexLabel::from(0_i64),
+                IndexLabel::from(1_i64),
+                IndexLabel::from(2_i64),
+            ],
+            vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+        )
+        .unwrap();
+
+        let result = df.filter_rows(&mask_with_extra).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.index().labels(), &[IndexLabel::from(0_i64)]);
+        assert_eq!(result.column("a").unwrap().values(), &[Scalar::Int64(1)]);
+
+        // Missing label 1 in mask must raise IndexingError (br-frankenpandas-747ax).
+        let unalignable_mask = Series::from_values(
             "mask",
             vec![IndexLabel::from(0_i64), IndexLabel::from(2_i64)],
             vec![Scalar::Bool(true), Scalar::Bool(true)],
         )
         .unwrap();
-
-        let result = df.filter_rows(&mask).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.index().labels(), &[IndexLabel::from(0_i64)]);
-        assert_eq!(result.column("a").unwrap().values(), &[Scalar::Int64(1)]);
+        assert!(
+            df.filter_rows(&unalignable_mask)
+                .unwrap_err()
+                .to_string()
+                .contains("Unalignable boolean Series provided as indexer")
+        );
     }
 
     #[test]
@@ -219363,6 +219402,7 @@ mod tests {
             &s,
             super::ToDatetimeOptions {
                 utc: true,
+                errors: super::DatetimeErrors::Coerce,
                 ..super::ToDatetimeOptions::default()
             },
         )
@@ -219454,7 +219494,15 @@ mod tests {
             "{err}"
         );
         // Coerced: NaT, still a datetime64 column (it inferred object).
-        let coerced = super::to_datetime_with_unit(&s, "s").unwrap();
+        let coerced = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                unit: Some("s"),
+                errors: super::DatetimeErrors::Coerce,
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
         assert!(coerced.values()[0].is_missing());
         assert!(matches!(
             coerced.column().dtype(),
@@ -219553,7 +219601,16 @@ mod tests {
             ],
         )
         .unwrap();
-        let result = super::to_datetime_with_unit(&s, "s").unwrap();
+        assert!(super::to_datetime_with_unit(&s, "s").is_err());
+        let result = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                unit: Some("s"),
+                errors: super::DatetimeErrors::Coerce,
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
         assert_eq!(result.values()[0], datetime64_scalar("1970-01-01 00:00:01"));
         assert_eq!(
             result.values()[1],
@@ -219883,6 +219940,7 @@ mod tests {
             &s,
             super::ToDatetimeOptions {
                 utc: true,
+                errors: super::DatetimeErrors::Coerce,
                 ..super::ToDatetimeOptions::default()
             },
         )
@@ -219912,6 +219970,7 @@ mod tests {
             &s,
             super::ToDatetimeOptions {
                 utc: true,
+                errors: super::DatetimeErrors::Coerce,
                 ..super::ToDatetimeOptions::default()
             },
         )
@@ -219941,6 +220000,7 @@ mod tests {
             &s,
             super::ToDatetimeOptions {
                 utc: true,
+                errors: super::DatetimeErrors::Coerce,
                 ..super::ToDatetimeOptions::default()
             },
         )
