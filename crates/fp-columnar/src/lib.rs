@@ -31326,6 +31326,17 @@ impl Column {
                 return Ok(Self::from_i64_values_owned(out));
             }
         }
+        // Casting a column with missing values to non-nullable DType::Int64 raises
+        // IntCastingNaN (matching pandas' IntCastingNaNError / ValueError on
+        // astype('int64') of NA/NaN; temporal dtypes map NaT to i64::MIN below,
+        // br-frankenpandas-hvt7o).
+        if target == DType::Int64
+            && !self.dtype.is_datetime()
+            && self.dtype != DType::Timedelta64
+            && self.has_nulls()
+        {
+            return Err(ColumnError::IntCastingNaN);
+        }
         // Utf8 -> Float64: parse each field's bytes straight from the contiguous
         // buffer into a typed Vec<f64>, skipping the per-cell Scalar map +
         // cast_scalar dispatch + Self::new revalidation the generic tail pays
@@ -75491,11 +75502,16 @@ mod numeric_width_columns_fvsao23 {
             vec![Scalar::Float64(1.0), Scalar::Null(fp_types::NullKind::NaN)],
         )
         .unwrap();
-        // astype('int32') of [1.0, NaN] raises IntCastingNaNError ...
+        // astype('int32') and astype('int64') of [1.0, NaN] raise IntCastingNaNError ...
         assert_eq!(
             with_missing.cast_to_width(NumericWidth::Int32, false),
             Err(ColumnError::IntCastingNaN)
         );
+        assert_eq!(
+            with_missing.astype(DType::Int64),
+            Err(ColumnError::IntCastingNaN)
+        );
+        assert!(with_missing.astype(DType::Int64Nullable).is_ok());
         let infinite = Column::from_f64_values(vec![f64::INFINITY]);
         assert_eq!(
             infinite.cast_to_width(NumericWidth::Int16, false),
