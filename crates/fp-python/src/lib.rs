@@ -4731,7 +4731,11 @@ impl PyTimedelta {
         if self.nanos == Timedelta::NAT {
             return duration_object(py, Timedelta::NAT);
         }
-        duration_object_with_unit(py, float_nanos(self.nanos as f64 / divisor.as_f64())?, self.unit)
+        duration_object_with_unit(
+            py,
+            float_nanos(self.nanos as f64 / divisor.as_f64())?,
+            self.unit,
+        )
     }
 
     fn __rtruediv__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
@@ -21793,7 +21797,12 @@ impl PyMultiIndex {
                     let vals: Vec<Scalar> = level_idx_obj
                         .labels()
                         .iter()
-                        .map(index_label_to_scalar)
+                        .map(|label| match label {
+                            // pandas MultiIndex.to_frame maps a missing level
+                            // label to NaN (not None; br-frankenpandas-b6dj0).
+                            IndexLabel::Null(_) => Scalar::Null(NullKind::NaN),
+                            other => index_label_to_scalar(other),
+                        })
                         .collect();
                     let col = Column::from_values(vals).map_err(|e| {
                         PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())
@@ -43592,7 +43601,11 @@ impl PySeries {
                 series: self.inner.clone(),
             }
             .into_py_any(py),
-            DType::Datetime64 { .. } | DType::Timedelta64 => PySeriesDatetimeAccessor {
+            DType::Datetime64 { .. } => PySeriesDatetimeAccessor {
+                series: self.inner.clone(),
+            }
+            .into_py_any(py),
+            DType::Timedelta64 => PySeriesTimedeltaAccessor {
                 series: self.inner.clone(),
             }
             .into_py_any(py),
@@ -69531,30 +69544,6 @@ pub struct PySeriesDatetimeAccessor {
 
 #[pymethods]
 impl PySeriesDatetimeAccessor {
-    /// pandas' `TimedeltaProperties.components`: a frame of each value's
-    /// days .. nanoseconds, over the Series' index (it was missing; k56su).
-    #[getter]
-    fn components(&self) -> PyResult<PyDataFrame> {
-        if self.series.column().dtype() != DType::Timedelta64 {
-            return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
-                "'DatetimeProperties' object has no attribute 'components'",
-            ));
-        }
-        let values: Vec<i64> = self
-            .series
-            .values()
-            .iter()
-            .map(|value| match value {
-                Scalar::Timedelta64(nanos) => *nanos,
-                _ => Timedelta::NAT,
-            })
-            .collect();
-        let inner = timedelta_components(&values)?
-            .with_index(self.series.index().clone())
-            .map_err(frame_error_to_py)?;
-        Ok(PyDataFrame { inner })
-    }
-
     #[getter]
     fn year(&self) -> PyResult<PySeries> {
         let s = self.series.dt().year().map_err(frame_error_to_py)?;
@@ -69644,6 +69633,8 @@ impl PySeriesDatetimeAccessor {
     // `.dt.strftime(...)`, `.dt.day_name()`, `.dt.floor('D')` and
     // `.dt.total_seconds()` raised AttributeError
     // (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
+    // Timedelta-only members live on `PySeriesTimedeltaAccessor`
+    // (`TimedeltaProperties`; br-frankenpandas-fwga7).
     #[getter]
     fn weekday(&self) -> PyResult<PySeries> {
         self.wrap(|dt| dt.weekday())
@@ -69680,22 +69671,6 @@ impl PySeriesDatetimeAccessor {
     fn daysinmonth(&self) -> PyResult<PySeries> {
         self.wrap(|dt| dt.daysinmonth())
     }
-    #[getter]
-    fn days(&self) -> PyResult<PySeries> {
-        self.wrap(|dt| dt.days())
-    }
-    #[getter]
-    fn seconds(&self) -> PyResult<PySeries> {
-        self.wrap(|dt| dt.seconds())
-    }
-    #[getter]
-    fn microseconds(&self) -> PyResult<PySeries> {
-        self.wrap(|dt| dt.microseconds())
-    }
-    #[getter]
-    fn nanoseconds(&self) -> PyResult<PySeries> {
-        self.wrap(|dt| dt.nanoseconds())
-    }
 
     #[pyo3(signature = (locale=None))]
     fn month_name(&self, locale: Option<&str>) -> PyResult<PySeries> {
@@ -69709,9 +69684,6 @@ impl PySeriesDatetimeAccessor {
     }
     fn strftime(&self, date_format: &str) -> PyResult<PySeries> {
         self.wrap(|dt| dt.strftime(date_format))
-    }
-    fn total_seconds(&self) -> PyResult<PySeries> {
-        self.wrap(|dt| dt.total_seconds())
     }
     fn normalize(&self) -> PyResult<PySeries> {
         self.wrap(|dt| dt.normalize())
@@ -69759,11 +69731,6 @@ impl PySeriesDatetimeAccessor {
             1,
         )?;
         self.python_objects(py, "to_pydatetime")
-    }
-    /// pandas' `.dt.to_pytimedelta()`: an object ndarray of
-    /// datetime.timedelta, NaT kept.
-    fn to_pytimedelta<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        self.python_objects(py, "to_pytimedelta")
     }
     /// pandas' `.dt.isocalendar()`: the ISO year, week and weekday (Monday
     /// 1) of each instant under its row label, <NA> at NaT (it was an
@@ -70109,6 +70076,133 @@ impl PySeriesDatetimeAccessor {
             check_ambiguous_mask(&options, self.series.len())?;
         }
         Ok(options)
+    }
+}
+
+/// pandas' `TimedeltaProperties` for `.dt` on a `timedelta64` Series
+/// (`DatetimeProperties`-only members raise `AttributeError` on `TimedeltaProperties`
+/// and vice versa; br-frankenpandas-fwga7).
+#[pyclass(name = "TimedeltaProperties", from_py_object)]
+#[derive(Clone)]
+pub struct PySeriesTimedeltaAccessor {
+    series: Series,
+}
+
+#[pymethods]
+impl PySeriesTimedeltaAccessor {
+    #[getter]
+    fn components(&self) -> PyResult<PyDataFrame> {
+        let values: Vec<i64> = self
+            .series
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Timedelta64(nanos) => *nanos,
+                _ => Timedelta::NAT,
+            })
+            .collect();
+        let inner = timedelta_components(&values)?
+            .with_index(self.series.index().clone())
+            .map_err(frame_error_to_py)?;
+        Ok(PyDataFrame { inner })
+    }
+
+    #[getter]
+    fn days(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().days().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[getter]
+    fn seconds(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().seconds().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[getter]
+    fn microseconds(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().microseconds().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    #[getter]
+    fn nanoseconds(&self) -> PyResult<PySeries> {
+        let s = self.series.dt().nanoseconds().map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    fn total_seconds(&self) -> PyResult<PySeries> {
+        let s = self
+            .series
+            .dt()
+            .total_seconds()
+            .map_err(frame_error_to_py)?;
+        Ok(PySeries { inner: s })
+    }
+
+    fn to_pytimedelta<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.dt().python_objects(py, "to_pytimedelta")
+    }
+
+    #[getter]
+    fn unit(&self) -> &'static str {
+        "ns"
+    }
+
+    fn as_unit(&self, unit: &str) -> PyResult<PySeries> {
+        self.dt().as_unit(unit)
+    }
+
+    #[getter]
+    fn freq(&self) -> Option<String> {
+        let nanos: Option<Vec<i64>> = self
+            .series
+            .values()
+            .iter()
+            .map(|value| match value {
+                Scalar::Timedelta64(nanos) if *nanos != Timedelta::NAT => Some(*nanos),
+                _ => None,
+            })
+            .collect();
+        fp_index::infer_freq_from_nanos(&nanos?).ok().flatten()
+    }
+
+    #[pyo3(signature = (freq, ambiguous=None, nonexistent=None))]
+    fn floor(
+        &self,
+        freq: &str,
+        ambiguous: Option<&Bound<'_, PyAny>>,
+        nonexistent: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.dt().floor(freq, ambiguous, nonexistent)
+    }
+
+    #[pyo3(signature = (freq, ambiguous=None, nonexistent=None))]
+    fn ceil(
+        &self,
+        freq: &str,
+        ambiguous: Option<&Bound<'_, PyAny>>,
+        nonexistent: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.dt().ceil(freq, ambiguous, nonexistent)
+    }
+
+    #[pyo3(signature = (freq, ambiguous=None, nonexistent=None))]
+    fn round(
+        &self,
+        freq: &str,
+        ambiguous: Option<&Bound<'_, PyAny>>,
+        nonexistent: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PySeries> {
+        self.dt().round(freq, ambiguous, nonexistent)
+    }
+}
+
+impl PySeriesTimedeltaAccessor {
+    fn dt(&self) -> PySeriesDatetimeAccessor {
+        PySeriesDatetimeAccessor {
+            series: self.series.clone(),
+        }
     }
 }
 
@@ -70941,6 +71035,9 @@ fn func_columns(frame: DataFrame, source: &DataFrame, funcs: &[&str]) -> PyResul
 pub struct PyRolling {
     series: Option<Series>,
     dataframe: Option<DataFrame>,
+    /// The original DataFrame before column selection (`df.rolling(2)['b'].obj`
+    /// is `df`; br-frankenpandas-yre6v).
+    source: Option<DataFrame>,
     window: usize,
     min_periods: Option<usize>,
     center: bool,
@@ -71060,6 +71157,7 @@ fn rolling_of(
     Ok(PyRolling {
         series,
         dataframe,
+        source: None,
         window,
         min_periods,
         center,
@@ -71668,6 +71766,7 @@ fn expanding_of(
     Ok(PyExpanding {
         series,
         dataframe,
+        source: None,
         min_periods,
         across,
     })
@@ -71785,6 +71884,7 @@ impl PyRolling {
         Self {
             series: None,
             dataframe: Some(dataframe),
+            source: self.source.clone(),
             window: self.window,
             min_periods: self.min_periods,
             center: self.center,
@@ -71810,6 +71910,7 @@ impl PyRolling {
             ));
         };
         let mut window = self.with_frame(df.clone());
+        window.source = self.source.clone().or_else(|| Some(df.clone()));
         match self.on.as_deref() {
             None => match window_selection_target(df, &select)? {
                 ResampleTarget::Series(series) => {
@@ -72678,6 +72779,7 @@ impl WestVar {
 pub struct PyWindow {
     series: Option<Series>,
     dataframe: Option<DataFrame>,
+    source: Option<DataFrame>,
     window: usize,
     min_periods: Option<usize>,
     center: bool,
@@ -72748,6 +72850,7 @@ fn window_of(
     Ok(PyWindow {
         series: rolling.series,
         dataframe: rolling.dataframe,
+        source: None,
         window: rolling.window,
         min_periods: rolling.min_periods,
         center: rolling.center,
@@ -72868,6 +72971,7 @@ impl PyWindow {
         Ok(Self {
             series,
             dataframe,
+            source: self.source.clone().or_else(|| Some(df.clone())),
             window: self.window,
             min_periods: self.min_periods,
             center: self.center,
@@ -72882,7 +72986,13 @@ impl PyWindow {
     /// pandas' `.obj` (see [`window_obj`]).
     #[getter]
     fn obj(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        window_obj(py, self.series.as_ref(), self.dataframe.as_ref())
+        window_obj(
+            py,
+            self.series.as_ref(),
+            self.dataframe.as_ref(),
+            self.source.as_ref(),
+            false,
+        )
     }
 
     fn __repr__(&self) -> String {
@@ -73049,29 +73159,33 @@ impl PyWindow {
     }
 }
 
-/// pandas' `.obj` of a window: the Series or DataFrame its windows run over
+/// pandas' `.obj` of a window: the Series or DataFrame its windows run over,
+/// or the source DataFrame when columns were selected from a frame window
 /// (it was missing; br-frankenpandas-yre6v).
 fn window_obj(
     py: Python<'_>,
     series: Option<&Series>,
     frame: Option<&DataFrame>,
+    source: Option<&DataFrame>,
+    across: bool,
 ) -> PyResult<Py<PyAny>> {
-    match (series, frame) {
-        (Some(series), _) => Ok(Py::new(
+    if let Some(frame) = source.or(frame) {
+        let inner = if across {
+            across_answer(frame)?
+        } else {
+            frame.clone()
+        };
+        return Ok(Py::new(py, PyDataFrame { inner })?.into_any());
+    }
+    match series {
+        Some(series) => Ok(Py::new(
             py,
             PySeries {
                 inner: series.clone(),
             },
         )?
         .into_any()),
-        (None, Some(frame)) => Ok(Py::new(
-            py,
-            PyDataFrame {
-                inner: frame.clone(),
-            },
-        )?
-        .into_any()),
-        (None, None) => Ok(py.None()),
+        None => Ok(py.None()),
     }
 }
 
@@ -73080,7 +73194,13 @@ impl PyRolling {
     /// pandas' `.obj` (see [`window_obj`]).
     #[getter]
     fn obj(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        window_obj(py, self.series.as_ref(), self.dataframe.as_ref())
+        window_obj(
+            py,
+            self.series.as_ref(),
+            self.dataframe.as_ref(),
+            self.source.as_ref(),
+            self.across,
+        )
     }
 
     /// pandas' column selection: `df.rolling(2)['w']` / `[['w', 'v']]`
@@ -73530,6 +73650,7 @@ impl PyRolling {
 pub struct PyExpanding {
     series: Option<Series>,
     dataframe: Option<DataFrame>,
+    source: Option<DataFrame>,
     min_periods: Option<usize>,
     /// pandas' axis=1, as [`PyRolling`]'s.
     across: bool,
@@ -73548,6 +73669,7 @@ impl PyExpanding {
                 PyExpanding {
                     series: None,
                     dataframe: Some(sub),
+                    source: self.source.clone(),
                     min_periods: self.min_periods,
                     across: false,
                 }
@@ -73717,7 +73839,13 @@ impl PyExpanding {
     /// pandas' `.obj` (see [`window_obj`]).
     #[getter]
     fn obj(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        window_obj(py, self.series.as_ref(), self.dataframe.as_ref())
+        window_obj(
+            py,
+            self.series.as_ref(),
+            self.dataframe.as_ref(),
+            self.source.as_ref(),
+            self.across,
+        )
     }
 
     /// pandas' column selection, as Rolling's (br-frankenpandas-cdqwd).
@@ -73738,6 +73866,7 @@ impl PyExpanding {
         Ok(Self {
             series,
             dataframe,
+            source: self.source.clone().or_else(|| self.dataframe.clone()),
             min_periods: self.min_periods,
             across: self.across,
         })
@@ -74154,6 +74283,7 @@ impl PyExpanding {
 pub struct PyExponentialMovingWindow {
     series: Option<Series>,
     dataframe: Option<DataFrame>,
+    source: Option<DataFrame>,
     span: Option<f64>,
     alpha: Option<f64>,
     /// pandas' `adjust` and `min_periods` (br-frankenpandas-n57tz: the
@@ -74249,6 +74379,7 @@ impl PyExponentialMovingWindow {
         Self {
             series: None,
             dataframe: Some(dataframe),
+            source: self.source.clone(),
             span: self.span,
             alpha: self.alpha,
             adjust: self.adjust,
@@ -74330,7 +74461,13 @@ impl PyExponentialMovingWindow {
     /// pandas' `.obj` (see [`window_obj`]).
     #[getter]
     fn obj(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        window_obj(py, self.series.as_ref(), self.dataframe.as_ref())
+        window_obj(
+            py,
+            self.series.as_ref(),
+            self.dataframe.as_ref(),
+            self.source.as_ref(),
+            false,
+        )
     }
 
     #[getter]
@@ -74356,6 +74493,7 @@ impl PyExponentialMovingWindow {
         Ok(Self {
             series,
             dataframe,
+            source: self.source.clone().or_else(|| self.dataframe.clone()),
             span: self.span,
             alpha: self.alpha,
             adjust: self.adjust,
@@ -74498,6 +74636,7 @@ impl PyExponentialMovingWindow {
         Ok(PyExponentialMovingWindow {
             series: self.series.clone(),
             dataframe: self.dataframe.clone(),
+            source: self.source.clone(),
             span: self.span,
             alpha: self.alpha,
             adjust: self.adjust,
@@ -79504,20 +79643,6 @@ impl PyGroupBy {
         self.out(result)
     }
 
-    fn kurt(&self) -> PyResult<PyDataFrame> {
-        self.observed_only("kurt")?;
-        let result = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .kurtosis()
-            .map_err(frame_error_to_py)?;
-        self.out(result)
-    }
-
-    fn kurtosis(&self) -> PyResult<PyDataFrame> {
-        self.kurt()
-    }
-
     /// pandas' `DataFrameGroupBy.rank(method, ascending, na_option, pct,
     /// axis)`: the deprecated axis ([`groupby_axis`]; it was unexpected -
     /// br-frankenpandas-n57tz).
@@ -79635,6 +79760,11 @@ impl PyGroupBy {
             // as pandas' agg dispatches a string (agg('mean',
             // numeric_only=True); it was refused, br-frankenpandas-2ahoa).
             if let Some(name) = func.and_then(|func| func.extract::<String>().ok()) {
+                if matches!(name.as_str(), "kurt" | "kurtosis") {
+                    return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                        format!("'{name}' is not a valid function for 'DataFrameGroupBy' object"),
+                    ));
+                }
                 return Ok(Bound::new(py, self.clone())?
                     .call_method(name.as_str(), args.clone(), named)?
                     .unbind());
@@ -79687,6 +79817,13 @@ impl PyGroupBy {
                 result.setattr("columns", PyList::new(py, names)?)?;
                 return Ok(result.unbind());
             }
+            for (_, _, function) in &specs {
+                if matches!(function.as_str(), "kurt" | "kurtosis") {
+                    return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                        format!("'SeriesGroupBy' object has no attribute '{function}'"),
+                    ));
+                }
+            }
             let spec_refs: Vec<(&str, &str, &str)> = specs
                 .iter()
                 .map(|(out, column, function)| (out.as_str(), column.as_str(), function.as_str()))
@@ -79720,6 +79857,11 @@ impl PyGroupBy {
                 "cummin" => self.cummin(py, Passed(None), false)?,
                 "cummax" => self.cummax(py, Passed(None), false)?,
                 "ohlc" => self.ohlc()?,
+                "kurt" | "kurtosis" => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                        format!("'{name}' is not a valid function for 'DataFrameGroupBy' object"),
+                    ));
+                }
                 _ => {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                         "unsupported groupby aggregation '{name}'"
@@ -79772,6 +79914,16 @@ impl PyGroupBy {
                 "Column(s) [{}] do not exist",
                 missing.join(", ")
             )));
+        }
+        // pandas 2.2.3 has no SeriesGroupBy.kurt / kurtosis (br-frankenpandas-f1k0f).
+        for (_, funcs) in &specs {
+            for function in funcs {
+                if matches!(function.as_str(), "kurt" | "kurtosis") {
+                    return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                        format!("'SeriesGroupBy' object has no attribute '{function}'"),
+                    ));
+                }
+            }
         }
         let grouped = self.grouped().map_err(frame_error_to_py)?;
         let res = if two_level {
@@ -80887,6 +81039,11 @@ impl PyGroupBy {
             };
             if let Some(kernel) = kernel {
                 return Ok(Py::new(py, kernel)?.into_any());
+            }
+            if matches!(func_str.as_str(), "kurt" | "kurtosis") {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "'{func_str}' is not a valid function name for transform(name)"
+                )));
             }
             let res = gb.transform(&func_str).map_err(frame_error_to_py)?;
             return Ok(Py::new(py, self.out(res)?)?.into_any());
@@ -82501,15 +82658,6 @@ impl PySeriesGroupBy {
         self.wrap_result("skew", res)
     }
 
-    fn kurt(&self) -> PyResult<Py<PyAny>> {
-        let res = self.grouped()?.kurtosis().map_err(frame_error_to_py)?;
-        self.wrap_result("kurt", res)
-    }
-
-    fn kurtosis(&self) -> PyResult<Py<PyAny>> {
-        self.kurt()
-    }
-
     /// pandas' `SeriesGroupBy.rank(method, ascending, na_option, pct,
     /// axis)`: the deprecated axis ([`groupby_axis`]; it was unexpected -
     /// br-frankenpandas-n57tz).
@@ -83388,6 +83536,11 @@ impl PySeriesGroupBy {
             if !args.is_empty() || kwargs.is_some_and(|k| !k.is_empty()) {
                 return Err(not_implemented(&format!(
                     "SeriesGroupBy.transform('{func_str}') with arguments"
+                )));
+            }
+            if matches!(func_str.as_str(), "kurt" | "kurtosis") {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "'{func_str}' is not a valid function name for transform(name)"
                 )));
             }
             let res = gb.transform(&func_str).map_err(frame_error_to_py)?;
@@ -103920,6 +104073,7 @@ fn exponential_window(
     Ok(PyExponentialMovingWindow {
         series,
         dataframe,
+        source: None,
         span: None,
         alpha: Some(alpha),
         adjust,
@@ -107822,6 +107976,7 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDataFrameAt>()?;
     m.add_class::<PySeriesStringAccessor>()?;
     m.add_class::<PySeriesDatetimeAccessor>()?;
+    m.add_class::<PySeriesTimedeltaAccessor>()?;
     m.add_class::<PySeriesPeriodAccessor>()?;
     m.add_class::<PySeriesPeriodMethod>()?;
     m.add_class::<PySeriesCategoricalAccessor>()?;
@@ -112085,6 +112240,140 @@ mod tests {
                 .as_f64_slice_with_validity()
                 .expect("float answers"); // ubs:ignore — test assertion
             assert_eq!(values, &[5.75, 8.0, 0.0][..]);
+        });
+    }
+
+    #[test]
+    fn dt_accessor_split_window_obj_multiindex_and_groupby_kurt() {
+        Python::initialize();
+        Python::attach(|py| {
+            // fwga7: DatetimeProperties on datetime64 vs TimedeltaProperties on timedelta64.
+            let dt_series = PySeries {
+                inner: Series::new(
+                    "d",
+                    fp_index::Index::from_i64_values(vec![0, 1]),
+                    fp_columnar::Column::new(
+                        DType::datetime64_naive(),
+                        vec![
+                            Scalar::Datetime64(0),
+                            Scalar::Datetime64(86_400_000_000_000),
+                        ],
+                    )
+                    .expect("dt col"), // ubs:ignore — test fixture
+                )
+                .expect("dt series"), // ubs:ignore — test fixture
+            };
+            let td_series = PySeries {
+                inner: Series::new(
+                    "t",
+                    fp_index::Index::from_i64_values(vec![0, 1]),
+                    fp_columnar::Column::new(
+                        DType::Timedelta64,
+                        vec![
+                            Scalar::Timedelta64(0),
+                            Scalar::Timedelta64(86_400_000_000_000),
+                        ],
+                    )
+                    .expect("td col"), // ubs:ignore — test fixture
+                )
+                .expect("td series"), // ubs:ignore — test fixture
+            };
+            let dt_acc = dt_series.dt(py).expect("dt accessor"); // ubs:ignore — test assertion
+            assert_eq!(
+                dt_acc
+                    .bind(py)
+                    .get_type()
+                    .name()
+                    .expect("type name") // ubs:ignore — test assertion
+                    .to_string(),
+                "DatetimeProperties"
+            );
+            assert!(dt_acc.bind(py).getattr("year").is_ok());
+            assert!(dt_acc.bind(py).getattr("days").is_err());
+
+            let td_acc = td_series.dt(py).expect("td accessor"); // ubs:ignore — test assertion
+            assert_eq!(
+                td_acc
+                    .bind(py)
+                    .get_type()
+                    .name()
+                    .expect("type name") // ubs:ignore — test assertion
+                    .to_string(),
+                "TimedeltaProperties"
+            );
+            assert!(td_acc.bind(py).getattr("days").is_ok());
+            assert!(td_acc.bind(py).getattr("year").is_err());
+
+            // yre6v: selected window (`df.rolling(2)['a'].obj`) retains parent DataFrame.
+            let col_a = fp_columnar::Column::new(
+                DType::Int64,
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            )
+            .expect("col a"); // ubs:ignore — test fixture
+            let col_b = fp_columnar::Column::new(
+                DType::Int64,
+                vec![Scalar::Int64(4), Scalar::Int64(5), Scalar::Int64(6)],
+            )
+            .expect("col b"); // ubs:ignore — test fixture
+            let df = PyDataFrame {
+                inner: DataFrame::from_dict(
+                    &["a", "b"],
+                    vec![
+                        ("a", col_a.values().to_vec()),
+                        ("b", col_b.values().to_vec()),
+                    ],
+                )
+                .expect("df"), // ubs:ignore — test fixture
+            };
+            let rolling = PyRolling {
+                series: None,
+                dataframe: Some(df.inner.clone()),
+                source: None,
+                window: 2,
+                min_periods: None,
+                center: false,
+                offset: None,
+                closed: None,
+                step: None,
+                on: None,
+                table: false,
+                select: None,
+                across: false,
+            };
+            let key = "a".into_pyobject(py).expect("key").into_any(); // ubs:ignore — test fixture
+            let sub = rolling.__getitem__(&key).expect("selected rolling"); // ubs:ignore — test assertion
+            let obj = sub.obj(py).expect("obj"); // ubs:ignore — test assertion
+            let obj_df = obj
+                .bind(py)
+                .extract::<PyDataFrame>()
+                .expect("parent DataFrame"); // ubs:ignore — test assertion
+            assert_eq!(obj_df.inner.column_names(), &["a", "b"]);
+
+            // f1k0f: GroupBy.agg("kurt") and GroupBy.transform("kurt") raise AttributeError.
+            let gb = PyGroupBy {
+                df: df.inner.clone(),
+                by: vec!["a".to_owned()],
+                key_names: vec![Some("a".into())],
+                as_index: true,
+                sort: true,
+                dropna: true,
+                group_keys: true,
+                unused: Vec::new(),
+                all_categories: false,
+                selection: None,
+                repeated: None,
+                layout: Arc::default(),
+            };
+            let kurt_str = "kurt".into_pyobject(py).expect("kurt").into_any(); // ubs:ignore — test fixture
+            let empty_args = PyTuple::empty(py);
+            let err = gb
+                .agg(py, Some(&kurt_str), &empty_args, None)
+                .expect_err("agg('kurt') must fail"); // ubs:ignore — test assertion
+            assert!(err.is_instance_of::<pyo3::exceptions::PyAttributeError>(py));
+            let err_t = gb
+                .transform(py, &kurt_str, &empty_args, None)
+                .expect_err("transform('kurt') must fail"); // ubs:ignore — test assertion
+            assert!(err_t.is_instance_of::<pyo3::exceptions::PyValueError>(py));
         });
     }
 }

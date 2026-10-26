@@ -87888,17 +87888,6 @@ impl DataFrame {
             return Self::new(Index::new(Vec::new()), BTreeMap::new());
         }
 
-        let materialized_series = series_list
-            .into_iter()
-            .map(|series| {
-                if let Some(cat) = series.cat() {
-                    cat.to_values()
-                } else {
-                    Ok(series)
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
         // pandas DataFrame(dict-of-series) keeps the LAST series for a repeated
         // name and does NOT union the dropped series' index — so a duplicate
         // column name collapses to a single column with only the surviving
@@ -87907,7 +87896,7 @@ impl DataFrame {
         let materialized_series = {
             let mut name_order: Vec<String> = Vec::new();
             let mut by_name: BTreeMap<String, Series> = BTreeMap::new();
-            for series in materialized_series {
+            for series in series_list {
                 if !by_name.contains_key(series.name.as_str()) {
                     name_order.push(series.name.to_string());
                 }
@@ -87968,18 +87957,33 @@ impl DataFrame {
             // Since union_index already contains all labels, the union_index in
             // this plan equals our pre-computed union. We use right_positions to
             // locate each series's values within the union.
-            let aligned_column = series.column.reindex_by_positions(&plan.right_positions)?;
-            // pandas promotes a non-nullable int column to Float64 when alignment
-            // introduces missing values (np.int64 cannot hold NaN), e.g. building
-            // a frame from series with differing indexes. Mirrors the
-            // arithmetic-alignment promotion above. Bool promotes to object in
-            // pandas (left as-is here). (br-frankenpandas-33d1h)
-            let aligned_column = if plan.right_positions.iter().any(Option::is_none)
-                && aligned_column.dtype() == DType::Int64
-            {
-                aligned_column.astype(DType::Float64)?
+            // pandas DataFrame(dict-of-series) preserves a categorical Series'
+            // dtype, categories, order, and codes (a gap on the union index is
+            // code -1; br-frankenpandas-2dgax).
+            let aligned_column = if let (Some(codes), Some(meta)) = (
+                series.column.categorical_codes(),
+                series.column.categorical(),
+            ) {
+                let taken: Vec<i32> = plan
+                    .right_positions
+                    .iter()
+                    .map(|pos| pos.and_then(|idx| codes.get(idx).copied()).unwrap_or(-1))
+                    .collect();
+                Column::from_categorical_codes(taken, meta.clone())
             } else {
-                aligned_column
+                let aligned_column = series.column.reindex_by_positions(&plan.right_positions)?;
+                // pandas promotes a non-nullable int column to Float64 when alignment
+                // introduces missing values (np.int64 cannot hold NaN), e.g. building
+                // a frame from series with differing indexes. Mirrors the
+                // arithmetic-alignment promotion above. Bool promotes to object in
+                // pandas (left as-is here). (br-frankenpandas-33d1h)
+                if plan.right_positions.iter().any(Option::is_none)
+                    && aligned_column.dtype() == DType::Int64
+                {
+                    aligned_column.astype(DType::Float64)?
+                } else {
+                    aligned_column
+                }
             };
             labels.push(series.name.label());
             column_order.push(series.name.to_string());
@@ -131864,7 +131868,7 @@ mod tests {
     }
 
     #[test]
-    fn dataframe_from_series_materializes_categorical_values() {
+    fn dataframe_from_series_preserves_categorical_column_2dgax() {
         let key = Series::from_categorical_codes(
             "key",
             vec![0, 0, 1],
@@ -131873,7 +131877,7 @@ mod tests {
                 Scalar::Utf8("b".into()),
                 Scalar::Utf8("unused".into()),
             ],
-            false,
+            true,
         )
         .unwrap();
         let value = Series::from_values(
@@ -131883,15 +131887,44 @@ mod tests {
         )
         .unwrap();
 
-        let df = DataFrame::from_series(vec![key, value]).unwrap();
+        let df = DataFrame::from_series(vec![key.clone(), value]).unwrap();
+        let col = df.column("key").unwrap();
+        assert_eq!(col.dtype(), DType::Categorical);
+        assert_eq!(col.categorical_codes(), Some(&[0_i32, 0, 1][..]));
+        let meta = col.categorical().unwrap();
+        assert!(meta.ordered);
         assert_eq!(
-            df.column("key").unwrap().values(),
+            meta.categories.as_slice(),
             &[
                 Scalar::Utf8("a".into()),
-                Scalar::Utf8("a".into()),
-                Scalar::Utf8("b".into())
+                Scalar::Utf8("b".into()),
+                Scalar::Utf8("unused".into()),
             ]
         );
+        // NEGATIVE: non-categorical Series is unchanged.
+        assert_eq!(df.column("value").unwrap().dtype(), DType::Int64);
+        assert_eq!(
+            df.column("value").unwrap().values(),
+            &[Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]
+        );
+
+        // Union-index gap introduces code -1 while preserving CategoricalMeta.
+        let longer = Series::from_values(
+            "value",
+            vec![0_i64.into(), 1_i64.into(), 2_i64.into(), 3_i64.into()],
+            vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+                Scalar::Int64(40),
+            ],
+        )
+        .unwrap();
+        let df_gap = DataFrame::from_series(vec![key, longer]).unwrap();
+        let gap_col = df_gap.column("key").unwrap();
+        assert_eq!(gap_col.dtype(), DType::Categorical);
+        assert_eq!(gap_col.categorical_codes(), Some(&[0_i32, 0, 1, -1][..]));
+        assert!(gap_col.categorical().unwrap().ordered);
     }
 
     #[test]

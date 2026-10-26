@@ -43747,12 +43747,7 @@ _WXRTU_CASES = {
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.parametrize(
-    "case",
-    _more9_params(
-        _WXRTU_CASES, {"missing label (NEGATIVE)": "br-frankenpandas-b6dj0: a missing label is None, pandas NaN"}
-    ),
-)
+@pytest.mark.parametrize("case", list(_WXRTU_CASES))
 def test_multiindex_to_frame_like_pandas_wxrtu(case: str) -> None:
     # MultiIndex.to_frame makes int and text levels' typed columns (a
     # Scalar a row: 0.23x pandas; br-frankenpandas-wxrtu).
@@ -44476,13 +44471,7 @@ _YRE6V_CASES = {
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.parametrize(
-    "case",
-    _more9_params(
-        _YRE6V_CASES,
-        {"rolling selected obj": "br-frankenpandas-yre6v: a selection's .obj is the column, pandas the whole frame"},
-    ),
-)
+@pytest.mark.parametrize("case", list(_YRE6V_CASES))
 def test_window_obj_like_pandas_yre6v(case: str) -> None:
     # A window's .obj is the Series / DataFrame it runs over (it was missing;
     # br-frankenpandas-yre6v).
@@ -45872,6 +45861,59 @@ def test_timedelta_unit_like_pandas_0wnui(case: str) -> None:
     # construction, as_unit, asm8/to_timedelta64/to_numpy, and arithmetic
     # (br-frankenpandas-0wnui).
     _more9_check(_0WNUI_TIMEDELTA_CASES, case)
+
+
+_FWGA7_DT_CASES = {
+    "dt class names": lambda m: (
+        type(m.Series(m.date_range("2024-01-01", periods=2)).dt).__name__,
+        type(m.Series(m.to_timedelta(["1D", "2D"])).dt).__name__,
+    ),
+    "datetime total_seconds raises": lambda m: m.Series(m.date_range("2024-01-01", periods=2)).dt.total_seconds(),
+    "datetime days raises": lambda m: m.Series(m.date_range("2024-01-01", periods=2)).dt.days,
+    "datetime components raises": lambda m: m.Series(m.date_range("2024-01-01", periods=2)).dt.components,
+    "timedelta year raises": lambda m: m.Series(m.to_timedelta(["1D", "2D"])).dt.year,
+    "timedelta strftime raises": lambda m: m.Series(m.to_timedelta(["1D", "2D"])).dt.strftime("%Y"),
+    "shared floor works (NEGATIVE)": lambda m: (
+        m.Series(m.date_range("2024-01-01 01:30", periods=2, freq="h")).dt.floor("D"),
+        m.Series(m.to_timedelta(["1 days 02:00:00", "2 days 03:00:00"])).dt.floor("D"),
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_FWGA7_DT_CASES))
+def test_dt_accessor_split_like_pandas_fwga7(case: str) -> None:
+    # DatetimeProperties and TimedeltaProperties expose only their own members
+    # plus shared floor/ceil/round/unit/as_unit/freq (br-frankenpandas-fwga7).
+    _more9_check(_FWGA7_DT_CASES, case)
+
+
+def _f1k0f_df(m: Any) -> Any:
+    return m.DataFrame({"k": ["a", "a", "a", "a", "b", "b", "b", "b"], "v": [1.0, 2.0, 4.0, 8.0, 1.0, 3.0, 9.0, 27.0]})
+
+
+_F1K0F_GROUPBY_KURT_CASES = {
+    "sg.kurt attr raises": lambda m: _f1k0f_df(m).groupby("k")["v"].kurt,
+    "dg.kurt attr raises": lambda m: _f1k0f_df(m).groupby("k").kurt,
+    "sg.agg('kurt') raises": lambda m: _f1k0f_df(m).groupby("k")["v"].agg("kurt"),
+    "sg.agg(['kurt']) raises": lambda m: _f1k0f_df(m).groupby("k")["v"].agg(["kurt"]),
+    "dg.agg('kurt') raises": lambda m: _f1k0f_df(m).groupby("k").agg("kurt"),
+    "dg.agg(['kurt']) raises": lambda m: _f1k0f_df(m).groupby("k").agg(["kurt"]),
+    "dg.agg({'v': 'kurt'}) raises": lambda m: _f1k0f_df(m).groupby("k").agg({"v": "kurt"}),
+    "dg.agg(x=('v', 'kurt')) raises": lambda m: _f1k0f_df(m).groupby("k").agg(x=("v", "kurt")),
+    "sg.transform('kurt') raises": lambda m: _f1k0f_df(m).groupby("k")["v"].transform("kurt"),
+    "dg.transform('kurt') raises": lambda m: _f1k0f_df(m).groupby("k").transform("kurt"),
+    "lambda kurt works (NEGATIVE)": lambda m: _f1k0f_df(m).groupby("k")["v"].agg(lambda s: s.kurt()),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_F1K0F_GROUPBY_KURT_CASES))
+def test_groupby_no_kurt_like_pandas_f1k0f(case: str) -> None:
+    # SeriesGroupBy and DataFrameGroupBy have no kurt / kurtosis in pandas 2.2.3
+    # (br-frankenpandas-f1k0f).
+    _more9_check(_F1K0F_GROUPBY_KURT_CASES, case)
+
 
 
 
