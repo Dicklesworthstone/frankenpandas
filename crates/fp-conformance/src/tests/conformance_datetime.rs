@@ -400,7 +400,14 @@ res = {
     "month_name": [str(x) for x in s.dt.month_name()],
     "day_name": [str(x) for x in s.dt.day_name()],
     "date": [str(x) for x in s.dt.date],
+    "time": [str(x) for x in s.dt.time],
     "time_whole": [str(x) for x in pd.Series(pd.to_datetime(["2024-01-01 00:00:00", "2024-02-29 13:45:30", "2023-12-31 23:59:59"])).dt.time],
+    "tz_pos_date": [str(x) for x in s_tz_pos.dt.date],
+    "tz_pos_time": [str(x) for x in s_tz_pos.dt.time],
+    "tz_pos_timetz": [str(x) for x in s_tz_pos.dt.timetz],
+    "tz_neg_date": [str(x) for x in s_tz_neg.dt.date],
+    "tz_neg_time": [str(x) for x in s_tz_neg.dt.time],
+    "tz_neg_timetz": [str(x) for x in s_tz_neg.dt.timetz],
     "strftime": [str(x) for x in s.dt.strftime("%Y/%m/%d %H:%M")],
     "to_period_m": [str(x) for x in s.dt.to_period("M")],
     "iso_year": [int(x) for x in iso["year"]],
@@ -600,8 +607,9 @@ print(json.dumps(res))
         parse_str(&oracle["day_name"])
     );
     assert_eq!(ser_str(&s.dt().date().unwrap()), parse_str(&oracle["date"]));
+    assert_eq!(ser_str(&s.dt().time().unwrap()), parse_str(&oracle["time"]));
     assert_eq!(
-        ser_str(&s.dt().time().unwrap()),
+        ser_str(&s.dt().as_unit("s").unwrap().dt().time().unwrap()),
         parse_str(&oracle["time_whole"])
     );
     assert_eq!(
@@ -643,10 +651,14 @@ print(json.dumps(res))
         parse_i64(&oracle["normalize_ns"])
     );
 
-    // unit / as_unit / freq in oracle (filed br-frankenpandas-ucy81 for DatetimeAccessor)
-    assert_eq!(oracle["unit"].as_str(), Some("ns"));
+    // unit / as_unit / freq in DatetimeAccessor (br-frankenpandas-ucy81)
+    assert_eq!(s.dt().unit().unwrap(), oracle["unit"].as_str().unwrap());
+    assert_eq!(s.dt().as_unit("s").unwrap().dt().unit().unwrap(), "ns");
     assert_eq!(oracle["as_unit_s_unit"].as_str(), Some("s"));
-    assert_eq!(oracle["freq_none"].as_bool(), Some(true));
+    assert_eq!(
+        s.dt().freq().unwrap().is_none(),
+        oracle["freq_none"].as_bool().unwrap()
+    );
 
     // NaT handling: numeric components widen to Float64 with NaN; boolean is_* returns false; isocalendar preserves nullable int
     let s_nat = Series::new(
@@ -780,7 +792,47 @@ print(json.dumps(res))
         ]
     );
 
-    // String-backed timetz and to_pydatetime (typed Datetime64 missing branch filed in br-frankenpandas-tkdxy)
+    // Typed Datetime64 date, time, timetz, and to_pydatetime (br-frankenpandas-tkdxy)
+    assert_eq!(
+        ser_str(&s_tz_pos.dt().date().unwrap()),
+        parse_str(&oracle["tz_pos_date"])
+    );
+    assert_eq!(
+        ser_str(&s_tz_pos.dt().time().unwrap()),
+        parse_str(&oracle["tz_pos_time"])
+    );
+    assert_eq!(
+        ser_str(&s_tz_pos.dt().timetz().unwrap()),
+        parse_str(&oracle["tz_pos_timetz"])
+    );
+    assert_eq!(
+        ser_str(&s_tz_neg.dt().date().unwrap()),
+        parse_str(&oracle["tz_neg_date"])
+    );
+    assert_eq!(
+        ser_str(&s_tz_neg.dt().time().unwrap()),
+        parse_str(&oracle["tz_neg_time"])
+    );
+    assert_eq!(
+        ser_str(&s_tz_neg.dt().timetz().unwrap()),
+        parse_str(&oracle["tz_neg_timetz"])
+    );
+    let s_typed_pydt = Series::new(
+        "ts",
+        idx2.clone(),
+        Column::from_temporal_nanos(
+            DType::datetime64_naive(),
+            vec![
+                1_704_067_200_000_000_000, // 2024-01-01 00:00:00
+                1_709_214_330_000_500_009, // 2024-02-29 13:45:30.000500009
+            ],
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        ser_str(&s_typed_pydt.dt().to_pydatetime().unwrap()),
+        parse_str(&oracle["pydt_str"])
+    );
     let s_str_tz = Series::new(
         "ts",
         idx2.clone(),

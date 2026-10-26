@@ -462,7 +462,7 @@ print(json.dumps(res))
     assert_eq!(cats_str(&s_set), parse_str(&oracle["set_cats"]));
     assert_eq!(codes_i64(&s_set), parse_i64(&oracle["set_codes"]));
 
-    // Negative / error paths (remove_categories unknown category filed in br-frankenpandas-lu478)
+    // Negative / error paths + ordered/rename options (br-frankenpandas-lu478)
     assert!(
         cat.rename_categories(vec![Scalar::Utf8("only_one".to_string())])
             .is_err()
@@ -473,6 +473,38 @@ print(json.dumps(res))
             Scalar::Utf8("high".to_string()),
         ])
         .is_err()
+    );
+    assert!(
+        cat.remove_categories(&[Scalar::Utf8("not_a_cat".to_string())])
+            .is_err()
+    );
+    let s_reord_ord = cat
+        .reorder_categories_with_options(
+            vec![
+                Scalar::Utf8("high".to_string()),
+                Scalar::Utf8("low".to_string()),
+                Scalar::Utf8("unused".to_string()),
+            ],
+            Some(true),
+        )
+        .unwrap();
+    assert!(s_reord_ord.cat().unwrap().ordered());
+    let s_set_rename = cat
+        .set_categories_with_options(
+            vec![
+                Scalar::Utf8("L".to_string()),
+                Scalar::Utf8("U".to_string()),
+                Scalar::Utf8("H".to_string()),
+            ],
+            Some(true),
+            true,
+        )
+        .unwrap();
+    assert!(s_set_rename.cat().unwrap().ordered());
+    assert_eq!(cats_str(&s_set_rename), parse_str(&oracle["renamed_cats"]));
+    assert_eq!(
+        codes_i64(&s_set_rename),
+        parse_i64(&oracle["renamed_codes"])
     );
     assert_eq!(oracle["rename_mismatch_err"].as_str(), Some("ValueError"));
     assert_eq!(oracle["reorder_mismatch_err"].as_str(), Some("ValueError"));
@@ -765,10 +797,33 @@ print(json.dumps(res))
         parse_opt_str(&oracle["replace_icase"])
     );
 
-    // Negative / error paths for Series.str
+    // Negative / error paths for Series.str (br-frankenpandas-wtgnl)
     assert!(s.str().index("not_present").is_err());
     assert!(s.str().rindex("not_present").is_err());
+    assert!(s.str().partition("").is_err());
+    assert!(s.str().rpartition("").is_err());
     assert!(s.str().contains_regex("[unclosed").is_err());
+    let s_idx_null = Series::new(
+        "txt",
+        idx.clone(),
+        Column::from_values(vec![
+            Scalar::Utf8("abc".to_string()),
+            Scalar::Null(NullKind::Null),
+            Scalar::Utf8("abbc".to_string()),
+        ])
+        .unwrap(),
+    )
+    .unwrap();
+    let idx_res = s_idx_null.str().index("b").unwrap();
+    let ridx_res = s_idx_null.str().rindex("b").unwrap();
+    assert_eq!(idx_res.dtype(), DType::Float64);
+    assert_eq!(ridx_res.dtype(), DType::Float64);
+    assert_eq!(ser_opt_f64(&idx_res), vec![Some(1.0), None, Some(1.0)]);
+    assert_eq!(ser_opt_f64(&ridx_res), vec![Some(1.0), None, Some(2.0)]);
+    assert_eq!(
+        s_null.str().cat_with_na_rep("|", Some("NA")).unwrap(),
+        "Abc|NA|123"
+    );
     assert_eq!(oracle["index_err"].as_str(), Some("ValueError"));
     assert_eq!(oracle["rindex_err"].as_str(), Some("ValueError"));
     assert_eq!(oracle["part_empty_err"].as_str(), Some("ValueError"));
@@ -811,7 +866,29 @@ print(json.dumps(res))
         ser_opt_f64(&sp_acc.to_dense()),
         parse_opt_f64(&oracle["sp_dense"])
     );
-    // Empty sparse density in pandas 2.2.3 raises ZeroDivisionError (0/0), filed br-frankenpandas-s97pu
+    let sp_empty = Series::from_sparse_dense(
+        "sp",
+        Vec::new(),
+        Vec::new(),
+        DType::Float64,
+        Scalar::Float64(0.0),
+    )
+    .unwrap();
+    assert!(sp_empty.sparse().unwrap().density().is_nan());
+    let sp_coo = fp_frame::SparseAccessor::from_coo(
+        "coo",
+        vec![Scalar::Float64(2.5), Scalar::Float64(-4.0)],
+        &[0, 1],
+        &[1, 0],
+        (2, 2),
+        DType::Float64,
+        false,
+    )
+    .unwrap();
+    let (coo_vals, coo_rows, coo_cols, _, _) = sp_coo.sparse().unwrap().to_coo(true).unwrap();
+    assert_eq!(coo_vals, vec![Scalar::Float64(2.5), Scalar::Float64(-4.0)]);
+    assert_eq!(coo_rows, vec![0, 1]);
+    assert_eq!(coo_cols, vec![1, 0]);
     assert_eq!(
         oracle["sp_empty_density_err"].as_str(),
         Some("ZeroDivisionError")
@@ -891,5 +968,9 @@ print(json.dumps(res))
             Scalar::Utf8("y".to_string()),
         ]
     );
+    let exploded = s_struct.r#struct().explode().unwrap();
+    assert_eq!(exploded.column_names(), &["a", "b"]);
+    let st_dtypes = s_struct.r#struct().dtypes().unwrap();
+    assert_eq!(st_dtypes.len(), 2);
     assert!(s_bad_list.r#struct().field("a").is_err());
 }

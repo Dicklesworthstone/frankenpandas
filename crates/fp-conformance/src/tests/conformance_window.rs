@@ -837,15 +837,21 @@ print(json.dumps(res))
         "bfill_1",
     );
     assert_opt_f64_close(
-        &series_opt_f64(&r.fillna(&Scalar::Float64(-99.0)).unwrap()),
-        &parse_opt_f64(&oracle["fillna"]),
-        "fillna",
-    );
-    assert_opt_f64_close(
-        &series_opt_f64(&r.ffill(None).unwrap()),
+        &series_opt_f64(&r.fillna("ffill", None).unwrap()),
         &parse_opt_f64(&oracle["fillna_ffill"]),
         "fillna_ffill",
     );
+    assert_opt_f64_close(
+        &series_opt_f64(&r.fillna("bfill", Some(1)).unwrap()),
+        &parse_opt_f64(&oracle["bfill_1"]),
+        "fillna_bfill_1",
+    );
+    assert_opt_f64_close(
+        &series_opt_f64(&r.fillna("nearest", None).unwrap()),
+        &parse_opt_f64(&oracle["nearest"]),
+        "fillna_nearest",
+    );
+    assert!(r.fillna("-99.0", None).is_err());
     assert_eq!(oracle["fillna_scalar_err"].as_str(), Some("ValueError"));
     assert_opt_f64_close(
         &series_opt_f64(&r.nearest(None).unwrap()),
@@ -872,16 +878,10 @@ print(json.dumps(res))
         &parse_opt_f64(&oracle["interpolate_single"]),
         "interpolate_single",
     );
-    // Note: Resample::interpolate currently calls self.mean()?.interpolate() instead of self.asfreq()?.interpolate() (filed br-frankenpandas-47w70)
     assert_opt_f64_close(
         &series_opt_f64(&r.interpolate().unwrap()),
-        &[Some(20.0), Some(40.0), Some(60.0)],
-        "interpolate_multi_fp",
-    );
-    assert_opt_f64_close(
         &parse_opt_f64(&oracle["interpolate_multi"]),
-        &[Some(10.0), Some(30.0), Some(50.0)],
-        "interpolate_multi_oracle",
+        "interpolate_multi",
     );
 
     assert_eq!(
@@ -966,8 +966,21 @@ print(json.dumps(res))
         &parse_opt_f64(&oracle["nearest"]),
         "df_resample_nearest",
     );
+    assert_opt_f64_close(
+        &col_opt_f64(&dfr.fillna("ffill", None).unwrap(), "v"),
+        &parse_opt_f64(&oracle["fillna_ffill"]),
+        "df_resample_fillna_ffill",
+    );
+    assert_opt_f64_close(
+        &col_opt_f64(&dfr.interpolate().unwrap(), "v"),
+        &parse_opt_f64(&oracle["interpolate_multi"]),
+        "df_resample_interpolate_multi",
+    );
+    let dfr_agg = dfr.agg(&["sum", "mean"]).unwrap();
+    assert!(dfr_agg.columns_multiindex().is_some());
+    assert_eq!(dfr_agg.columns_multiindex().unwrap().nlevels(), 2);
 
-    // Both signs of UTC offsets (+02:00 and -05:00) for tz-aware resampling (filed br-frankenpandas-qrija)
+    // Both signs of UTC offsets (+02:00 and -05:00) for tz-aware resampling (br-frankenpandas-qrija)
     let dti_naive = DatetimeIndex::new(vec![
         1_704_150_000_000_000_000, // 2024-01-01 23:00:00
         1_704_157_200_000_000_000, // 2024-01-02 01:00:00
@@ -987,25 +1000,19 @@ print(json.dumps(res))
         Column::from_f64_values(vec![10.0, 20.0, 30.0]),
     )
     .unwrap();
+    let res_tz_pos = s_tz_pos.resample("D").sum().unwrap();
+    let res_tz_neg = s_tz_neg.resample("D").sum().unwrap();
+    assert_eq!(res_tz_pos.index().tz(), Some("+02:00"));
+    assert_eq!(res_tz_neg.index().tz(), Some("-05:00"));
     assert_opt_f64_close(
+        &series_opt_f64(&res_tz_pos),
         &parse_opt_f64(&oracle["tz_pos_sum"]),
-        &[Some(10.0), Some(50.0)],
-        "tz_pos_oracle",
+        "tz_pos_sum",
     );
     assert_opt_f64_close(
+        &series_opt_f64(&res_tz_neg),
         &parse_opt_f64(&oracle["tz_neg_sum"]),
-        &[Some(10.0), Some(50.0)],
-        "tz_neg_oracle",
-    );
-    assert_opt_f64_close(
-        &series_opt_f64(&s_tz_pos.resample("D").sum().unwrap()),
-        &[Some(30.0), Some(30.0)],
-        "tz_pos_fp_utc_buckets",
-    );
-    assert_opt_f64_close(
-        &series_opt_f64(&s_tz_neg.resample("D").sum().unwrap()),
-        &[Some(30.0), Some(30.0)],
-        "tz_neg_fp_utc_buckets",
+        "tz_neg_sum",
     );
 
     // Negative / error paths
@@ -1301,6 +1308,16 @@ print(json.dumps(res))
         &parse_opt_f64(&oracle["def_mean"]),
         "online_def_mean",
     );
+    let mut online_igna = e_igna.online().unwrap();
+    let mut online_igna_out = Vec::new();
+    for x in [1.0, f64::NAN, 3.0, 5.0] {
+        online_igna_out.push(online_igna.update(x));
+    }
+    assert_opt_f64_close(
+        &online_igna_out,
+        &parse_opt_f64(&oracle["igna_mean"]),
+        "online_igna_mean",
+    );
 
     let agg_df = e_def.agg(&["mean", "sum", "std", "var"]).unwrap();
     let aggr_df = e_def.aggregate(&["mean", "sum"]).unwrap();
@@ -1362,6 +1379,27 @@ print(json.dumps(res))
         &col_opt_f64(&df_ewm.sum().unwrap(), "v"),
         &parse_opt_f64(&oracle["def_sum"]),
         "df_ewm_sum",
+    );
+    assert_opt_f64_close(
+        &col_opt_f64(&df_ewm.cov_with(&other).unwrap(), "v"),
+        &parse_opt_f64(&oracle["def_cov"]),
+        "df_ewm_cov_with",
+    );
+    assert_opt_f64_close(
+        &col_opt_f64(&df_ewm.corr_with(&other).unwrap(), "v"),
+        &parse_opt_f64(&oracle["def_corr"]),
+        "df_ewm_corr_with",
+    );
+    assert_eq!(df_ewm.cov().unwrap().column_names(), &["v__v"]);
+    assert_eq!(df_ewm.corr().unwrap().column_names(), &["v__v"]);
+    let mut df_ewm_on = df_ewm.online().unwrap();
+    assert_eq!(df_ewm_on.update(10.0), Some(10.0));
+    assert!(
+        df_ewm
+            .agg(&["mean", "sum"])
+            .unwrap()
+            .columns_multiindex()
+            .is_some()
     );
 
     // Negative / error paths
@@ -1481,6 +1519,7 @@ for pfx, w in [("rol", rol), ("exp", exp)]:
     res[f"{pfx}_corr"] = opt_list(w.corr(other))
     res[f"{pfx}_cov"] = opt_list(w.cov(other))
     res[f"{pfx}_rank_avg"] = opt_list(w.rank(method="average", ascending=True))
+    res[f"{pfx}_rank_avg_pct"] = opt_list(w.rank(method="average", ascending=True, pct=True))
     res[f"{pfx}_rank_min_desc"] = opt_list(w.rank(method="min", ascending=False))
     res[f"{pfx}_rank_max"] = opt_list(w.rank(method="max", ascending=True))
     res[f"{pfx}_apply_span"] = opt_list(w.apply(lambda x: float(np.max(x) - np.min(x)), raw=True))
@@ -1495,6 +1534,12 @@ res["rol_left_sum"] = opt_list(rol_left.sum())
 res["rol_both_sum"] = opt_list(rol_both.sum())
 res["rol_neither_sum"] = opt_list(rol_neither.sum())
 res["rol_2d_sum"] = opt_list(rol_2d.sum())
+res["rol_first"] = opt_list(rol.apply(lambda x: x[0], raw=True))
+res["rol_last"] = opt_list(rol.apply(lambda x: x[-1], raw=True))
+res["rol_prod"] = opt_list(rol.apply(np.prod, raw=True))
+res["exp_first"] = opt_list(exp.apply(lambda x: x[0], raw=True))
+res["exp_last"] = opt_list(exp.apply(lambda x: x[-1], raw=True))
+res["exp_prod"] = opt_list(exp.apply(np.prod, raw=True))
 res["bad_mp_err"] = err_type(lambda: s.rolling(2, min_periods=3))
 res["bad_quantile_err"] = err_type(lambda: rol.quantile(1.5))
 res["bad_rank_err"] = err_type(lambda: rol.rank(method="dense"))
@@ -1634,6 +1679,26 @@ print(json.dumps(res))
         &series_opt_f64(&rol.rank("average", true, "keep").unwrap()),
         &parse_opt_f64(&oracle["rol_rank_avg"]),
         "rol_rank_avg",
+    );
+    assert_opt_f64_close(
+        &series_opt_f64(&rol.rank_with_pct("average", true, true).unwrap()),
+        &parse_opt_f64(&oracle["rol_rank_avg_pct"]),
+        "rol_rank_avg_pct",
+    );
+    assert_opt_f64_close(
+        &series_opt_f64(&rol.first().unwrap()),
+        &parse_opt_f64(&oracle["rol_first"]),
+        "rol_first",
+    );
+    assert_opt_f64_close(
+        &series_opt_f64(&rol.last().unwrap()),
+        &parse_opt_f64(&oracle["rol_last"]),
+        "rol_last",
+    );
+    assert_opt_f64_close(
+        &series_opt_f64(&rol.prod().unwrap()),
+        &parse_opt_f64(&oracle["rol_prod"]),
+        "rol_prod",
     );
     assert_opt_f64_close(
         &series_opt_f64(&rol.rank("min", false, "keep").unwrap()),
@@ -1829,6 +1894,26 @@ print(json.dumps(res))
         "exp_rank_avg",
     );
     assert_opt_f64_close(
+        &series_opt_f64(&exp.rank_with_pct("average", true, true).unwrap()),
+        &parse_opt_f64(&oracle["exp_rank_avg_pct"]),
+        "exp_rank_avg_pct",
+    );
+    assert_opt_f64_close(
+        &series_opt_f64(&exp.first().unwrap()),
+        &parse_opt_f64(&oracle["exp_first"]),
+        "exp_first",
+    );
+    assert_opt_f64_close(
+        &series_opt_f64(&exp.last().unwrap()),
+        &parse_opt_f64(&oracle["exp_last"]),
+        "exp_last",
+    );
+    assert_opt_f64_close(
+        &series_opt_f64(&exp.prod().unwrap()),
+        &parse_opt_f64(&oracle["exp_prod"]),
+        "exp_prod",
+    );
+    assert_opt_f64_close(
         &series_opt_f64(&exp.rank("min", false, "keep").unwrap()),
         &parse_opt_f64(&oracle["exp_rank_min_desc"]),
         "exp_rank_min_desc",
@@ -1893,6 +1978,47 @@ print(json.dumps(res))
         &parse_opt_f64(&oracle["exp_sum"]),
         "df_exp_sum",
     );
+    assert_opt_f64_close(
+        &col_opt_f64(&df_exp.first().unwrap(), "v"),
+        &parse_opt_f64(&oracle["exp_first"]),
+        "df_exp_first",
+    );
+    assert_opt_f64_close(
+        &col_opt_f64(&df_exp.last().unwrap(), "v"),
+        &parse_opt_f64(&oracle["exp_last"]),
+        "df_exp_last",
+    );
+    assert_opt_f64_close(
+        &col_opt_f64(&df_exp.prod().unwrap(), "v"),
+        &parse_opt_f64(&oracle["exp_prod"]),
+        "df_exp_prod",
+    );
+    assert_opt_f64_close(
+        &col_opt_f64(&df_exp.corr_with(&other).unwrap(), "v"),
+        &parse_opt_f64(&oracle["exp_corr"]),
+        "df_exp_corr_with",
+    );
+    assert_opt_f64_close(
+        &col_opt_f64(&df_exp.cov_with(&other).unwrap(), "v"),
+        &parse_opt_f64(&oracle["exp_cov"]),
+        "df_exp_cov_with",
+    );
+    assert_eq!(df_exp.corr().unwrap().column_names(), &["v__v"]);
+    assert_eq!(df_exp.cov().unwrap().column_names(), &["v__v"]);
+    assert!(
+        df_rol
+            .agg(&["sum", "mean"])
+            .unwrap()
+            .columns_multiindex()
+            .is_some()
+    );
+    assert!(
+        df_exp
+            .agg(&["sum", "mean"])
+            .unwrap()
+            .columns_multiindex()
+            .is_some()
+    );
 
     // Negative / error paths
     assert!(
@@ -1902,7 +2028,11 @@ print(json.dumps(res))
     assert!(rol.quantile(1.5).is_err());
     assert!(exp.quantile(-0.1).is_err());
     assert!(rol.rank("not_a_method", true, "keep").is_err());
+    assert!(rol.rank("first", true, "keep").is_err());
+    assert!(rol.rank("dense", true, "keep").is_err());
     assert!(exp.rank("not_a_method", true, "keep").is_err());
+    assert!(exp.rank("first", true, "keep").is_err());
+    assert!(exp.rank("dense", true, "keep").is_err());
     assert!(rol.agg(&["not_a_func"]).is_err());
     assert!(exp.agg(&["not_a_func"]).is_err());
     assert_eq!(oracle["bad_mp_err"].as_str(), Some("ValueError"));

@@ -70475,12 +70475,8 @@ impl PySeriesCategoricalAccessor {
         ordered: Option<bool>,
         rename: bool,
     ) -> PyResult<PySeries> {
-        if rename {
-            return Err(not_implemented("cat.set_categories(rename=True)"));
-        }
         let categories = py_categories(py, new_categories)?;
-        let out = self.apply(|cat| cat.set_categories(categories))?;
-        self.with_ordered(out, ordered)
+        self.apply(|cat| cat.set_categories_with_options(categories, ordered, rename))
     }
 
     fn as_ordered(&self) -> PyResult<PySeries> {
@@ -73194,32 +73190,21 @@ impl PyRolling {
     ) -> PyResult<Py<PyAny>> {
         self.require_index_window("rank")?;
         let m = method.unwrap_or("average");
-        // pandas' rolling rank takes only these three (fp-frame also ranks
-        // 'first' and 'dense').
-        if !matches!(m, "average" | "min" | "max") {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "Method '{m}' is not supported"
-            )));
-        }
         let asc = ascending.unwrap_or(true);
         if let Some(ref s) = self.series {
             let s = window_series_input(s, "Rolling", "rank", numeric_only, false)?;
             let windows = self.series_window(&s)?;
-            let mut res = windows.rank(m, asc, "keep").map_err(frame_error_to_py)?;
-            if pct {
-                let count = windows.count().map_err(frame_error_to_py)?;
-                res = res.div(&count).map_err(frame_error_to_py)?;
-            }
+            let res = windows
+                .rank_with_pct(m, asc, pct)
+                .map_err(frame_error_to_py)?;
             return self.series_out(py, res);
         }
         if let Some(ref df) = self.dataframe {
             let df = window_frame_input(df, self.on.as_deref(), numeric_only, false)?;
             let windows = self.frame_window(&df)?;
-            let mut res = windows.rank(m, asc, "keep").map_err(frame_error_to_py)?;
-            if pct {
-                let count = windows.count().map_err(frame_error_to_py)?;
-                res = res.div_df(&count).map_err(frame_error_to_py)?;
-            }
+            let res = windows
+                .rank_with_pct(m, asc, pct)
+                .map_err(frame_error_to_py)?;
             return self.frame_out(py, res);
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -73820,21 +73805,17 @@ impl PyExpanding {
         if let Some(ref s) = self.series {
             let s = window_series_input(s, "Expanding", "rank", numeric_only, false)?;
             let windows = s.expanding(self.min_periods);
-            let mut res = windows.rank(m, asc, "keep").map_err(frame_error_to_py)?;
-            if pct {
-                let count = windows.count().map_err(frame_error_to_py)?;
-                res = res.div(&count).map_err(frame_error_to_py)?;
-            }
+            let res = windows
+                .rank_with_pct(m, asc, pct)
+                .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: res })?.into_any());
         }
         if let Some(ref df) = self.dataframe {
             let df = window_frame_input(df, None, numeric_only, false)?;
             let windows = df.expanding(self.min_periods);
-            let mut res = windows.rank(m, asc, "keep").map_err(frame_error_to_py)?;
-            if pct {
-                let count = windows.count().map_err(frame_error_to_py)?;
-                res = res.div_df(&count).map_err(frame_error_to_py)?;
-            }
+            let res = windows
+                .rank_with_pct(m, asc, pct)
+                .map_err(frame_error_to_py)?;
             return self.frame_out(py, res);
         }
         Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
