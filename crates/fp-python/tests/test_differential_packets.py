@@ -45026,16 +45026,7 @@ _GOAL5_CASES = {
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.parametrize(
-    "case",
-    _more9_params(
-        _GOAL5_CASES,
-        {
-            "from_breaks uint8 left": "unsigned interval subtype (br-frankenpandas-n7qbg)",
-            "one break": "an empty from_breaks' subtype: float breaks float64 in pandas (br-frankenpandas-n7qbg)",
-        },
-    ),
-)
+@pytest.mark.parametrize("case", _more9_params(_GOAL5_CASES, {}))
 def test_interval_constructors_like_pandas_goal5(case: str) -> None:
     # A numpy array's breaks read off its column (a Python float a break:
     # 0.10x pandas; br-frankenpandas-goal5).
@@ -45138,17 +45129,7 @@ _FZBXV_CASES = {
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-@pytest.mark.parametrize(
-    "case",
-    _more9_params(
-        _FZBXV_CASES,
-        {
-            "frame loc unique": "br-frankenpandas-13bjo: the row's name holds Python scalars, pandas' the index's numpy ones",
-            "from_arrays text with None": "br-frankenpandas-ffrkp: a None label stays None, pandas' nan",
-            "from_arrays mixed object": "br-frankenpandas-ffrkp: 1 and 1.0 stay two level values",
-        },
-    ),
-)
+@pytest.mark.parametrize("case", _more9_params(_FZBXV_CASES, {}))
 def test_multiindex_tuple_lookup_like_pandas_fzbxv(case: str) -> None:
     # A full tuple's rows read off a lookup engine built once for the index
     # (every row's labels were compared a lookup: (7, x) in mi 0.03x pandas;
@@ -45913,6 +45894,104 @@ def test_groupby_no_kurt_like_pandas_f1k0f(case: str) -> None:
     # SeriesGroupBy and DataFrameGroupBy have no kurt / kurtosis in pandas 2.2.3
     # (br-frankenpandas-f1k0f).
     _more9_check(_F1K0F_GROUPBY_KURT_CASES, case)
+
+
+def _13bjo_frame(m: Any) -> Any:
+    mi = m.MultiIndex.from_arrays(
+        [np.array([1, 2], dtype=np.int32), ["a", "b"]],
+        names=["i", "s"],
+    )
+    return m.DataFrame({"v": [10, 20]}, index=mi)
+
+
+_13BJO_CASES = {
+    "mi[0] types": lambda m: [type(x).__name__ for x in _13bjo_frame(m).index[0]],
+    "list(mi) types": lambda m: [[type(x).__name__ for x in t] for t in list(_13bjo_frame(m).index)],
+    "mi.tolist() types": lambda m: [[type(x).__name__ for x in t] for t in _13bjo_frame(m).index.tolist()],
+    "df.loc[key].name types": lambda m: [type(x).__name__ for x in _13bjo_frame(m).loc[(1, "a")].name],
+    "df.iloc[0].name types": lambda m: [type(x).__name__ for x in _13bjo_frame(m).iloc[0].name],
+    "df.iterrows() types": lambda m: [
+        ([type(x).__name__ for x in k], [type(x).__name__ for x in row.name])
+        for k, row in _13bjo_frame(m).iterrows()
+    ],
+    "df.apply(axis=1) types": lambda m: _13bjo_frame(m).apply(lambda r: str([type(x).__name__ for x in r.name]), axis=1),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_13BJO_CASES))
+def test_multiindex_row_tuple_scalar_types_like_pandas_13bjo(case: str) -> None:
+    # mi[i], df.loc[key].name, df.iloc[i].name hold the level's numpy scalar
+    # types; list(mi), df.iterrows(), df.apply(axis=1) hold Python scalars
+    # (br-frankenpandas-13bjo).
+    _more9_check(_13BJO_CASES, case)
+
+
+_Z8JNB_CASES = {
+    "s_f32 ** 0.3": lambda m: repr(m.Series([1.5, 2.5, 3.5], dtype="float32") ** 0.3),
+    "s_f32 ** 2": lambda m: repr(m.Series([1.5, 2.5, 3.5], dtype="float32") ** 2),
+    "0.3 ** s_f32": lambda m: repr(0.3 ** m.Series([1.5, 2.5, 3.5], dtype="float32")),
+    "s_f32 ** s_f32": lambda m: repr(
+        m.Series([1.5, 2.5, 3.5], dtype="float32")
+        ** m.Series([0.3, 2.0, -0.7], dtype="float32")
+    ),
+    "df_f32 ** 0.3": lambda m: repr(m.DataFrame({"a": m.Series([1.5, 2.5, 3.5], dtype="float32")}) ** 0.3),
+    "df_f32 ** df_f32": lambda m: repr(
+        m.DataFrame({"a": m.Series([1.5, 2.5, 3.5], dtype="float32")})
+        ** m.DataFrame({"a": m.Series([0.3, 2.0, -0.7], dtype="float32")})
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_Z8JNB_CASES))
+def test_float32_pow_like_pandas_z8jnb(case: str) -> None:
+    # float32 ** number and float32 ** float32 compute in f32::powf as numpy's
+    # float32 power ufunc does (br-frankenpandas-z8jnb).
+    _more9_check(_Z8JNB_CASES, case)
+
+
+_MM8DH_CASES = {
+    "s.floordiv(list with 0)": lambda m: m.Series([7, -7, 0]).floordiv([2, 0, 0]),
+    "s.mod(list with 0)": lambda m: m.Series([7, -7, 0]).mod([2, 0, 0]),
+    "s.rfloordiv(list with 0)": lambda m: m.Series([2, 0, 0]).rfloordiv([7, -7, 0]),
+    "s.rmod(list with 0)": lambda m: m.Series([2, 0, 0]).rmod([7, -7, 0]),
+    "s.divmod(Series with 0)": lambda m: m.Series([7, -7, 0]).divmod(m.Series([2, 0, 0])),
+    "s.rdivmod(Series with 0)": lambda m: m.Series([2, 0, 0]).rdivmod(m.Series([7, -7, 0])),
+    "int8.floordiv(int8 with 0)": lambda m: m.Series([7, -7, 0], dtype="int8").floordiv(m.Series([2, 0, 0], dtype="int8")),
+    "bool.floordiv(bool with False)": lambda m: m.Series([True, False, True]).floordiv(m.Series([True, False, False])),
+    "s // list with 0 stays float64 (NEGATIVE)": lambda m: m.Series([7, -7, 0]) // [2, 0, 0],
+    "s.floordiv(0) scalar stays float64 (NEGATIVE)": lambda m: m.Series([7, -7, 0]).floordiv(0),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_MM8DH_CASES))
+def test_flex_floordiv_mod_zero_array_like_pandas_mm8dh(case: str) -> None:
+    # Series.floordiv / mod / rfloordiv / rmod / divmod / rdivmod with an
+    # integer array-like holding 0 divisor fill 0 and keep the integer dtype
+    # (br-frankenpandas-mm8dh).
+    _more9_check(_MM8DH_CASES, case)
+
+
+_NDEMB_VALS = [1.0, -2.5, 3.25, np.nan, 0.0, 100.5, -50.125, 7.75, 7.75, -0.001, 42.0]
+
+_NDEMB_CASES = {
+    "series expanding skew": lambda m: repr(m.Series(_NDEMB_VALS).expanding(min_periods=3).skew().tolist()),
+    "frame expanding skew": lambda m: repr(m.DataFrame({"a": _NDEMB_VALS}).expanding(min_periods=3).skew()["a"].tolist()),
+    "series expanding agg skew": lambda m: repr(m.Series(_NDEMB_VALS).expanding(min_periods=3).agg(["mean", "skew"])["skew"].tolist()),
+    "frame expanding agg skew": lambda m: repr(m.DataFrame({"a": _NDEMB_VALS}).expanding(min_periods=3).agg(["mean", "skew"])[("a", "skew")].tolist()),
+    "constant expanding skew": lambda m: repr(m.Series([5.0, 5.0, 5.0, 5.0]).expanding().skew().tolist()),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_NDEMB_CASES))
+def test_expanding_skew_kahan_parity_like_pandas_ndemb(case: str) -> None:
+    # expanding().skew() matches pandas' add-only Kahan-compensated roll_skew
+    # bit-for-bit (br-frankenpandas-ndemb).
+    _more9_check(_NDEMB_CASES, case)
+
 
 
 

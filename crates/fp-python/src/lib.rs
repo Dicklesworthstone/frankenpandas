@@ -1173,6 +1173,7 @@ fn categories_index(py: Python<'_>, categories: &[Scalar]) -> PyResult<Py<PyAny>
         return PyIntervalIndex {
             intervals,
             name: None,
+            subtype: None,
         }
         .into_py_any(py);
     }
@@ -13544,6 +13545,7 @@ fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
                 PyIntervalIndex {
                     intervals,
                     name: index.name().map(ToString::to_string),
+                    subtype: None,
                 },
             )?
             .into_any());
@@ -31349,6 +31351,123 @@ fn series_operator(
         (ArithmeticOp::Pow, false) => series.__pow__(py, other, None),
         (ArithmeticOp::Pow, true) => series.__rpow__(py, other, None),
     }
+}
+
+fn is_flex_zero_div_array_operand(other: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if is_index_object(other) {
+        return Ok(false);
+    }
+    if other.extract::<PyRef<'_, PySeries>>().is_ok()
+        || other.is_instance_of::<PyList>()
+        || other.is_instance_of::<PyTuple>()
+    {
+        return Ok(true);
+    }
+    if is_numpy_ndarray(other) {
+        let ndim: usize = other
+            .getattr("ndim")
+            .and_then(|n| n.extract())
+            .unwrap_or(0);
+        return Ok(ndim > 0);
+    }
+    if let Some(converted) = pandas_object_as_fp(other)? {
+        return Ok(converted.extract::<PyRef<'_, PySeries>>().is_ok());
+    }
+    Ok(false)
+}
+
+fn flex_int_zero_div(
+    s: &PySeries,
+    py: Python<'_>,
+    other: &Bound<'_, PyAny>,
+    was_array_like: bool,
+    is_mod: bool,
+    reflected: bool,
+) -> PyResult<Option<PySeries>> {
+    if !was_array_like
+        || s.inner.is_categorical()
+        || !matches!(s.inner.dtype(), DType::Int64 | DType::Bool)
+        || s.inner.column().has_any_missing()
+    {
+        return Ok(None);
+    }
+    let other_fp = arith_operand(other)?;
+    let right = if let Ok(series) = other_fp.extract::<PyRef<'_, PySeries>>() {
+        series.inner.clone()
+    } else if let Some(series) = listlike_series_operand(py, &other_fp, &s.inner, true)? {
+        series
+    } else {
+        return Ok(None);
+    };
+    if right.is_categorical()
+        || !matches!(right.dtype(), DType::Int64 | DType::Bool)
+        || right.column().has_any_missing()
+        || s.inner.index() != right.index()
+    {
+        return Ok(None);
+    }
+    let numeric = arith_result_numpy(&s.inner, &other_fp)?;
+    if matches!(numeric, Some(fp_types::NumpyNumeric::Float(_))) {
+        return Ok(None);
+    }
+    let (lhs_col, rhs_col) = if reflected {
+        (right.column(), s.inner.column())
+    } else {
+        (s.inner.column(), right.column())
+    };
+    let to_i64 = |sc: &Scalar| match sc {
+        Scalar::Int64(v) => Some(*v),
+        Scalar::Bool(b) => Some(i64::from(*b)),
+        _ => None,
+    };
+    let has_zero_divisor = rhs_col.values().iter().any(|sc| to_i64(sc) == Some(0));
+    if !has_zero_divisor {
+        return Ok(None);
+    }
+    let values: Vec<Scalar> = lhs_col
+        .values()
+        .iter()
+        .zip(rhs_col.values())
+        .map(|(l, r)| {
+            let lv = to_i64(l).unwrap_or(0);
+            let rv = to_i64(r).unwrap_or(0);
+            let v = if rv == 0 {
+                0
+            } else if is_mod {
+                let rem = lv.wrapping_rem(rv);
+                if rem != 0 && (rem < 0) != (rv < 0) {
+                    rem.wrapping_add(rv)
+                } else {
+                    rem
+                }
+            } else {
+                let quot = lv.wrapping_div(rv);
+                let rem = lv.wrapping_rem(rv);
+                if rem != 0 && (rem < 0) != (rv < 0) {
+                    quot.wrapping_sub(1)
+                } else {
+                    quot
+                }
+            };
+            Scalar::Int64(v)
+        })
+        .collect();
+    let result_name = op_result_name(&s.inner, &other_fp)?;
+    let both_bool = s.inner.dtype() == DType::Bool && right.dtype() == DType::Bool;
+    let col = Column::new(DType::Int64, values).map_err(column_error_to_py)?;
+    let col = if both_bool {
+        col.with_width(NumericWidth::Int8)
+    } else {
+        col
+    };
+    let out =
+        Series::new(result_name, s.inner.index().clone(), col).map_err(frame_error_to_py)?;
+    let out = if both_bool {
+        out
+    } else {
+        narrowed_to(out, numeric.and_then(|n| n.width()))?
+    };
+    Ok(Some(PySeries { inner: out }))
 }
 
 /// `result`, of `left <op> right` for two frames, with each column both
@@ -74010,6 +74129,116 @@ impl PyRolling {
     }
 }
 
+fn expanding_skew_series(s: &Series, min_periods: Option<usize>) -> Result<Series, FrameError> {
+    if !s.dtype().is_numeric() {
+        return s.expanding(min_periods).skew();
+    }
+    if s.values()
+        .iter()
+        .any(|sc| !sc.is_missing() && sc.to_f64().is_ok_and(|v| !v.is_finite()))
+    {
+        return s.expanding(min_periods).skew();
+    }
+    let min_p = min_periods.unwrap_or(1).max(3);
+    let mut sum = 0.0_f64;
+    let mut count = 0_usize;
+    for sc in s.values() {
+        if !sc.is_missing()
+            && let Ok(v) = sc.to_f64()
+        {
+            sum += v;
+            count += 1;
+        }
+    }
+    let mean_val = if count == 0 {
+        0.0
+    } else {
+        (sum / count as f64).round()
+    };
+    let kahan_add = |(mut acc, mut c): (f64, f64), val: f64| -> (f64, f64) {
+        let y = val - c;
+        let t = acc + y;
+        c = (t - acc) - y;
+        acc = t;
+        (acc, c)
+    };
+    let mut x = (0.0_f64, 0.0_f64);
+    let mut xx = (0.0_f64, 0.0_f64);
+    let mut xxx = (0.0_f64, 0.0_f64);
+    let mut nobs = 0_usize;
+    let mut first_val: Option<f64> = None;
+    let mut is_constant = true;
+    let mut out = Vec::with_capacity(s.len());
+    for sc in s.values() {
+        if !sc.is_missing()
+            && let Ok(v) = sc.to_f64()
+        {
+            nobs += 1;
+            if let Some(fv) = first_val {
+                if v != fv {
+                    is_constant = false;
+                }
+            } else {
+                first_val = Some(v);
+            }
+            let u = v - mean_val;
+            x = kahan_add(x, u);
+            xx = kahan_add(xx, u * u);
+            xxx = kahan_add(xxx, u * u * u);
+        }
+        if nobs < min_p {
+            out.push(Scalar::Null(NullKind::NaN));
+            continue;
+        }
+        if is_constant {
+            out.push(Scalar::Float64(0.0));
+            continue;
+        }
+        let dn = nobs as f64;
+        let a = x.0 / dn;
+        let b = xx.0 / dn - a * a;
+        let c = xxx.0 / dn - a * a * a - 3.0 * a * b;
+        if b <= 1e-14 {
+            out.push(Scalar::Null(NullKind::NaN));
+        } else {
+            let r = b.sqrt();
+            let val = ((dn * (dn - 1.0)).sqrt() * c) / ((dn - 2.0) * r * r * r);
+            if val.is_nan() {
+                out.push(Scalar::Null(NullKind::NaN));
+            } else {
+                out.push(Scalar::Float64(val));
+            }
+        }
+    }
+    let col = Column::new(DType::Float64, out)?;
+    Series::new(s.name().to_owned(), s.index().clone(), col)
+}
+
+fn expanding_skew_frame(
+    df: &DataFrame,
+    min_periods: Option<usize>,
+) -> Result<DataFrame, FrameError> {
+    let mut out_cols = BTreeMap::new();
+    let mut col_order = Vec::new();
+    for name in df.column_names() {
+        let Some(col) = df.column(name) else {
+            continue;
+        };
+        if !col.dtype().is_numeric() {
+            continue;
+        }
+        let s = Series::new(name.clone(), df.index().clone(), col.clone())?;
+        let skew_s = expanding_skew_series(&s, min_periods)?;
+        col_order.push(name.clone());
+        out_cols.insert(name.clone(), skew_s.column().clone());
+    }
+    Ok(
+        DataFrame::new_with_column_order(df.index().clone(), out_cols, col_order)?
+            .with_column_index_name(df.column_index_name().map(str::to_owned))
+            .with_column_levels(df.column_levels()),
+    )
+}
+
 /// Python wrapper for expanding window calculations over Series or DataFrame.
 #[pyclass(name = "Expanding")]
 pub struct PyExpanding {
@@ -74072,18 +74301,42 @@ impl PyExpanding {
             let str_slices: Vec<&str> = list.iter().map(|s| s.as_str()).collect();
             if let Some(ref s) = self.series {
                 let s = window_series_input(s, "Expanding", "agg", false, false)?;
-                let res = s
+                let mut res = s
                     .expanding(self.min_periods)
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
+                if str_slices.contains(&"skew") {
+                    let skew_s = expanding_skew_series(&s, self.min_periods)
+                        .map_err(frame_error_to_py)?;
+                    res = res
+                        .with_column("skew".to_owned(), skew_s.column().clone())
+                        .map_err(frame_error_to_py)?;
+                }
                 return Ok(Py::new(py, PyDataFrame { inner: res })?.into_any());
             }
             if let Some(ref df) = self.dataframe {
                 let df = window_agg_list_frame_input(df, None)?;
-                let res = df
+                let mut res = df
                     .expanding(self.min_periods)
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
+                if str_slices.contains(&"skew") {
+                    for col_name in df.column_names() {
+                        if let Some(col) = df.column(col_name) {
+                            let s =
+                                Series::new(col_name.as_str(), df.index().clone(), col.clone())
+                                    .map_err(frame_error_to_py)?;
+                            let skew_s = expanding_skew_series(&s, self.min_periods)
+                                .map_err(frame_error_to_py)?;
+                            res = res
+                                .with_column(
+                                    format!("{col_name}_skew"),
+                                    skew_s.column().clone(),
+                                )
+                                .map_err(frame_error_to_py)?;
+                        }
+                    }
+                }
                 let res = func_columns(res, &df, &str_slices)?;
                 return self.frame_out(py, res);
             }
@@ -74416,7 +74669,20 @@ impl PyExpanding {
 
     #[pyo3(signature = (numeric_only=false))]
     pub fn skew(&self, py: Python<'_>, numeric_only: bool) -> PyResult<Py<PyAny>> {
-        self.run(py, "skew", numeric_only, |w| w.skew(), |w| w.skew())
+        let min_periods = self.min_periods;
+        if let Some(ref s) = self.series {
+            let s = window_series_input(s, "Expanding", "skew", numeric_only, false)?;
+            let res = expanding_skew_series(&s, min_periods).map_err(frame_error_to_py)?;
+            return Ok(Py::new(py, PySeries { inner: res })?.into_any());
+        }
+        if let Some(ref df) = self.dataframe {
+            let df = window_frame_input(df, None, numeric_only, false)?;
+            let res = expanding_skew_frame(&df, min_periods).map_err(frame_error_to_py)?;
+            return self.frame_out(py, res);
+        }
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty expanding object",
+        ))
     }
 
     #[pyo3(signature = (numeric_only=false))]
@@ -97714,12 +97980,21 @@ impl PyInterval {
 
 /// Interval endpoints as floats, and whether pandas keeps them int64: an
 /// integer array or Index, or every one a Python int (a bool is not).
-fn interval_endpoints(values: &Bound<'_, PyAny>) -> PyResult<(Vec<f64>, bool)> {
+fn interval_endpoints(values: &Bound<'_, PyAny>) -> PyResult<(Vec<f64>, &'static str)> {
     let kind = values
         .getattr("dtype")
         .and_then(|dtype| dtype.getattr("kind"))
         .and_then(|kind| kind.extract::<String>());
-    let int_array = kind.as_ref().is_ok_and(|kind| kind == "i" || kind == "u");
+    let uint_array = kind.as_ref().is_ok_and(|kind| kind == "u");
+    let sint_array = kind.as_ref().is_ok_and(|kind| kind == "i");
+    let float_array = kind.as_ref().is_ok_and(|kind| kind == "f");
+    let array_sub = if uint_array {
+        "uint64"
+    } else if sint_array {
+        "int64"
+    } else {
+        "float64"
+    };
     // A one-dimensional numpy array of numbers is read off its typed column:
     // a Python object and an f64 extract a break (from_breaks of 50k 2.0
     // ms, pandas 0.21; br-frankenpandas-goal5). A float one holding NaN
@@ -97732,15 +98007,18 @@ fn interval_endpoints(values: &Bound<'_, PyAny>) -> PyResult<(Vec<f64>, bool)> {
         && let Some(column) = py_array_like_column(values.py(), values)?
     {
         if let Some(data) = column.as_i64_slice() {
-            return Ok((data.iter().map(|&value| value as f64).collect(), int_array));
+            return Ok((
+                data.iter().map(|&value| value as f64).collect(),
+                array_sub,
+            ));
         }
         if let Some(data) = column.as_f64_slice()
             && !data.iter().any(|value| value.is_nan())
         {
-            return Ok((data.to_vec(), false));
+            return Ok((data.to_vec(), "float64"));
         }
     }
-    let mut ints = true;
+    let mut ints = !float_array;
     let mut endpoints = Vec::new();
     for value in values.try_iter()? {
         let value = value?;
@@ -97750,14 +98028,27 @@ fn interval_endpoints(values: &Bound<'_, PyAny>) -> PyResult<(Vec<f64>, bool)> {
             endpoints.push(f64::NAN);
             continue;
         }
-        ints &= value.is_instance_of::<pyo3::types::PyInt>()
-            && !value.is_instance_of::<pyo3::types::PyBool>();
+        let is_int = (value.is_instance_of::<pyo3::types::PyInt>()
+            && !value.is_instance_of::<pyo3::types::PyBool>())
+            || value
+                .getattr("dtype")
+                .and_then(|d| d.getattr("kind"))
+                .and_then(|k| k.extract::<String>())
+                .is_ok_and(|k| k == "i" || k == "u");
+        ints &= is_int;
         let endpoint = value.extract::<f64>()?;
         ints &= !endpoint.is_nan();
         endpoints.push(endpoint);
     }
-    let whole = (int_array && !endpoints.iter().any(|e| e.is_nan())) || ints;
-    Ok((endpoints, whole))
+    let no_nans = !endpoints.iter().any(|e| e.is_nan());
+    let sub = if uint_array && no_nans {
+        "uint64"
+    } else if (sint_array && no_nans) || ints {
+        "int64"
+    } else {
+        "float64"
+    };
+    Ok((endpoints, sub))
 }
 
 /// An IntervalIndex's element as Python holds it: the Interval, or NaN for
@@ -97777,6 +98068,7 @@ fn interval_to_py(py: Python<'_>, interval: &PyInterval) -> PyResult<Py<PyAny>> 
 pub struct PyIntervalIndex {
     pub intervals: Vec<PyInterval>,
     pub name: Option<String>,
+    pub subtype: Option<&'static str>,
 }
 
 index_subclass_object!(PyIntervalIndex);
@@ -97854,6 +98146,7 @@ impl PyIntervalIndex {
         Ok(Self {
             intervals,
             name: name.map(str::to_string),
+            subtype: None,
         })
     }
 
@@ -97868,7 +98161,8 @@ impl PyIntervalIndex {
         name: Option<&str>,
     ) -> PyResult<Self> {
         let closed_str = interval_side(closed.unwrap_or("right"))?;
-        let (breaks, ints) = interval_endpoints(breaks)?;
+        let (breaks, sub) = interval_endpoints(breaks)?;
+        let ints = sub != "float64";
         // Fewer than two breaks bound no interval: pandas' empty index (it
         // raised); a NaN break missing on one side of an interval only is
         // pandas' ValueError (it made the interval).
@@ -97889,6 +98183,7 @@ impl PyIntervalIndex {
         Ok(Self {
             intervals,
             name: name.map(str::to_string),
+            subtype: Some(sub),
         })
     }
 
@@ -97913,7 +98208,8 @@ impl PyIntervalIndex {
                 pairs.push((f64::NAN, f64::NAN));
                 continue;
             }
-            let (endpoints, whole) = interval_endpoints(&pair)?;
+            let (endpoints, sub) = interval_endpoints(&pair)?;
+            let whole = sub != "float64";
             let [left, right] = endpoints[..] else {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                     "each tuple must hold a left and a right endpoint",
@@ -97935,6 +98231,7 @@ impl PyIntervalIndex {
         Ok(Self {
             intervals,
             name: name.map(str::to_string),
+            subtype: Some(if ints { "int64" } else { "float64" }),
         })
     }
 
@@ -97949,13 +98246,19 @@ impl PyIntervalIndex {
         name: Option<&str>,
     ) -> PyResult<Self> {
         let closed_str = interval_side(closed.unwrap_or("right"))?;
-        let (left, left_ints) = interval_endpoints(left)?;
-        let (right, right_ints) = interval_endpoints(right)?;
+        let (left, left_sub) = interval_endpoints(left)?;
+        let (right, right_sub) = interval_endpoints(right)?;
         if left.len() != right.len() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "left and right arrays must have equal length",
             ));
         }
+        let sub = match (left_sub, right_sub) {
+            ("uint64", "uint64") => "uint64",
+            ("int64", "int64") => "int64",
+            _ => "float64",
+        };
+        let ints = sub != "float64";
         let mut intervals = Vec::with_capacity(left.len());
         for (l, r) in left.into_iter().zip(right) {
             // Missing on both sides is a missing interval; on one side,
@@ -97973,12 +98276,13 @@ impl PyIntervalIndex {
                 (false, false) => {}
             }
             let mut interval = PyInterval::floats(l, r, closed_str)?;
-            interval.int_endpoints = left_ints && right_ints;
+            interval.int_endpoints = ints;
             intervals.push(interval);
         }
         Ok(Self {
             intervals,
             name: name.map(str::to_string),
+            subtype: Some(sub),
         })
     }
 
@@ -98195,7 +98499,7 @@ impl PyIntervalIndex {
             .map(|iv| self.endpoint_label(iv.right - iv.left))
             .collect();
         PyIndex {
-            inner: Index::new(labels),
+            inner: self.endpoint_index(labels),
         }
     }
 
@@ -98313,7 +98617,7 @@ impl PyIntervalIndex {
             .map(|iv| self.endpoint_label(iv.left))
             .collect();
         PyIndex {
-            inner: Index::new(labels),
+            inner: self.endpoint_index(labels),
         }
     }
 
@@ -98325,7 +98629,7 @@ impl PyIntervalIndex {
             .map(|iv| self.endpoint_label(iv.right))
             .collect();
         PyIndex {
-            inner: Index::new(labels),
+            inner: self.endpoint_index(labels),
         }
     }
 
@@ -98467,6 +98771,7 @@ impl PyIntervalIndex {
         Self {
             intervals,
             name: self.name.clone(),
+            subtype: self.subtype,
         }
     }
 
@@ -98506,6 +98811,7 @@ impl PyIntervalIndex {
             Self {
                 intervals,
                 name: None,
+                subtype: this.subtype,
             },
         ))
     }
@@ -98521,6 +98827,7 @@ impl PyIntervalIndex {
         Self {
             intervals,
             name: self.name.clone(),
+            subtype: self.subtype,
         }
     }
 
@@ -98638,6 +98945,7 @@ impl PyIntervalIndex {
                 .cloned()
                 .collect(),
             name: self.name.clone(),
+            subtype: self.subtype,
         })
     }
 
@@ -98669,6 +98977,7 @@ impl PyIntervalIndex {
         Ok(Self {
             intervals,
             name: self.name.clone(),
+            subtype: Some(if ints { "int64" } else { "float64" }),
         })
     }
 
@@ -98688,6 +98997,7 @@ impl PyIntervalIndex {
         Ok(Self {
             intervals,
             name: self.name.clone(),
+            subtype: self.subtype,
         })
     }
 
@@ -98770,7 +99080,14 @@ impl PyIntervalIndex {
         let result = flat.call_method(method, args, kwargs)?;
         let rewrap = |item: &Bound<'_, PyAny>| -> PyResult<Py<PyAny>> {
             match plain_index_ref(item) {
-                Ok(index) => flat_index_to_py(py, &index.inner),
+                Ok(index) => {
+                    let out = flat_index_to_py(py, &index.inner)?;
+                    if let Ok(mut iv_idx) = out.bind(py).extract::<PyRefMut<'_, PyIntervalIndex>>()
+                    {
+                        iv_idx.subtype = self.subtype;
+                    }
+                    Ok(out)
+                }
                 Err(_) => Ok(item.clone().unbind()),
             }
         };
@@ -98826,17 +99143,47 @@ impl PyIntervalIndex {
         } else {
             None
         };
-        Self { intervals, name }
+        let subtype = if self.subtype == other.subtype {
+            self.subtype
+        } else {
+            None
+        };
+        Self {
+            intervals,
+            name,
+            subtype,
+        }
+    }
+
+    fn effective_subtype(&self) -> &'static str {
+        if let Some(sub) = self.subtype
+            && !self.intervals.iter().any(PyInterval::is_missing)
+        {
+            return sub;
+        }
+        if self.intervals.iter().all(|iv| iv.int_endpoints) {
+            "int64"
+        } else {
+            "float64"
+        }
+    }
+
+    fn endpoint_index(&self, labels: Vec<IndexLabel>) -> Index {
+        let sub = self.effective_subtype();
+        let idx = Index::new(labels);
+        match sub {
+            "uint64" => idx.with_width(NumericWidth::UInt64),
+            "float64" if idx.is_empty() => {
+                idx.with_declared_dtype(Some(fp_index::DeclaredDtype::Float64))
+            }
+            _ => idx,
+        }
     }
 
     /// pandas' dtype: `interval[int64, <closed>]` when every endpoint is an
     /// int (an empty index too), else float64.
     fn interval_dtype(&self) -> PyIntervalDtype {
-        let subtype = if self.intervals.iter().all(|iv| iv.int_endpoints) {
-            "int64"
-        } else {
-            "float64"
-        };
+        let subtype = self.effective_subtype();
         PyIntervalDtype {
             subtype: Some(subtype.to_owned()),
             closed: Some(self.closed()),
@@ -98847,7 +99194,7 @@ impl PyIntervalIndex {
     /// int64 subtype.
     #[allow(clippy::cast_possible_truncation)] // whole numbers when int64
     fn endpoint_label(&self, value: f64) -> IndexLabel {
-        if self.intervals.iter().all(|iv| iv.int_endpoints) {
+        if self.effective_subtype() != "float64" {
             IndexLabel::Int64(value as i64)
         } else {
             IndexLabel::Float64(fp_index::OrderedF64(value))
@@ -102720,8 +103067,13 @@ pub fn interval_range(
     // (pandas downcasts the breaks losslessly; they were always float64).
     let int_or_absent = |value: Option<&Bound<'_, PyAny>>| {
         value.is_none_or(|value| {
-            value.is_instance_of::<pyo3::types::PyInt>()
-                && !value.is_instance_of::<pyo3::types::PyBool>()
+            (value.is_instance_of::<pyo3::types::PyInt>()
+                && !value.is_instance_of::<pyo3::types::PyBool>())
+                || value
+                    .getattr("dtype")
+                    .and_then(|d| d.getattr("kind"))
+                    .and_then(|k| k.extract::<String>())
+                    .is_ok_and(|k| k == "i" || k == "u")
         })
     };
     let ints = int_or_absent(start) && int_or_absent(end) && int_or_absent(freq);
@@ -102817,6 +103169,7 @@ pub fn interval_range(
     Ok(PyIntervalIndex {
         intervals,
         name: name.map(str::to_string),
+        subtype: None,
     })
 }
 
@@ -110646,6 +110999,7 @@ mod tests {
                 },
             ],
             name: Some("iv_idx".to_string()),
+            subtype: None,
         };
 
         assert_eq!(pii.closed(), "right");
@@ -112739,6 +113093,180 @@ mod tests {
                 .transform(py, &kurt_str, &empty_args, None)
                 .expect_err("transform('kurt') must fail"); // ubs:ignore — test assertion
             assert!(err_t.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+        });
+    }
+
+    #[test]
+    fn test_multiindex_scalars_pow_f32_flex_div_expanding_skew_interval_uint() {
+        Python::initialize();
+        Python::attach(|py| {
+            let np = py.import("numpy").expect("numpy"); // ubs:ignore — test fixture
+            let mi_cls = py.get_type::<PyMultiIndex>();
+
+            // 13bjo: mi[0] returns numpy scalars, list(mi) returns Python scalars.
+            let arr_i = PyList::new(py, [1_i64, 2]).expect("list"); // ubs:ignore — test fixture
+            let arr_s = PyList::new(py, ["a", "b"]).expect("list"); // ubs:ignore — test fixture
+            let arrays = PyList::new(py, [&arr_i, &arr_s]).expect("arrays"); // ubs:ignore — test fixture
+            let mi =
+                PyMultiIndex::from_arrays(&mi_cls, py, arrays.as_any(), None).expect("mi"); // ubs:ignore — test assertion
+            let idx0 = 0_isize.into_pyobject(py).expect("0").into_any(); // ubs:ignore — test fixture
+            let item0 = mi.__getitem__(py, &idx0).expect("mi[0]"); // ubs:ignore — test assertion
+            let tup0 = item0
+                .bind(py)
+                .cast::<PyTuple>()
+                .expect("tuple"); // ubs:ignore — test assertion
+            assert_eq!(
+                tup0.get_item(0)
+                    .expect("0") // ubs:ignore — test assertion
+                    .get_type()
+                    .name()
+                    .expect("name"), // ubs:ignore — test assertion
+                "int64"
+            );
+            let lst = mi.to_list(py).expect("to_list"); // ubs:ignore — test assertion
+            assert_eq!(
+                lst[0]
+                    .bind(py)
+                    .get_item(0)
+                    .expect("0") // ubs:ignore — test assertion
+                    .get_type()
+                    .name()
+                    .expect("name"), // ubs:ignore — test assertion
+                "int"
+            );
+
+            // ffrkp: MultiIndex.from_arrays with None and mixed 1 / 1.0 object array.
+            let text_none = PyList::new(
+                py,
+                [
+                    "a".into_pyobject(py).expect("a").into_any(), // ubs:ignore — test fixture
+                    py.None().into_bound(py),
+                    "b".into_pyobject(py).expect("b").into_any(), // ubs:ignore — test fixture
+                ],
+            )
+            .expect("text_none"); // ubs:ignore — test fixture
+            let ints3 = PyList::new(py, [1_i64, 2, 3]).expect("ints3"); // ubs:ignore — test fixture
+            let arr_none = PyList::new(py, [&text_none, &ints3]).expect("arr_none"); // ubs:ignore — test fixture
+            let mi_none = PyMultiIndex::from_arrays(&mi_cls, py, arr_none.as_any(), None)
+                .expect("mi_none"); // ubs:ignore — test assertion
+            assert_eq!(mi_none.inner.codes()[0], &[-1, 1, 0]);
+            let mixed_obj = np
+                .call_method1(
+                    "array",
+                    (
+                        PyList::new(
+                            py,
+                            [
+                                1_i64.into_pyobject(py).expect("1").into_any(), // ubs:ignore — test fixture
+                                1.0_f64.into_pyobject(py).expect("1.0").into_any(), // ubs:ignore — test fixture
+                                "x".into_pyobject(py).expect("x").into_any(), // ubs:ignore — test fixture
+                            ],
+                        )
+                        .expect("list"), // ubs:ignore — test fixture
+                        "object",
+                    ),
+                )
+                .expect("mixed_obj"); // ubs:ignore — test fixture
+            let arr_mixed =
+                PyList::new(py, [&mixed_obj, ints3.as_any()]).expect("arr_mixed"); // ubs:ignore — test fixture
+            let mi_mixed = PyMultiIndex::from_arrays(&mi_cls, py, arr_mixed.as_any(), None)
+                .expect("mi_mixed"); // ubs:ignore — test assertion
+            assert_eq!(mi_mixed.inner.codes()[0], &[0, 0, 1]);
+            assert_eq!(mi_mixed.inner.levels()[0].values().len(), 2);
+
+            // n7qbg: IntervalIndex.from_breaks uint8 -> interval[uint64, right], [1.5] -> interval[float64, right].
+            let iv_cls = py.get_type::<PyIntervalIndex>();
+            let u8_arr = np
+                .call_method1(
+                    "array",
+                    (PyList::new(py, [0_i64, 10, 20]).expect("u8"), "uint8"), // ubs:ignore — test fixture
+                )
+                .expect("u8_arr"); // ubs:ignore — test fixture
+            let iv_u8 = PyIntervalIndex::from_breaks(&iv_cls, &u8_arr, Some("right"), None)
+                .expect("iv_u8"); // ubs:ignore — test assertion
+            assert_eq!(iv_u8.dtype().__repr__(), "interval[uint64, right]");
+            assert_eq!(iv_u8.left().inner.width(), Some(NumericWidth::UInt64));
+            let one_float = PyList::new(py, [1.5_f64]).expect("one_float"); // ubs:ignore — test fixture
+            let iv_empty_f =
+                PyIntervalIndex::from_breaks(&iv_cls, one_float.as_any(), Some("right"), None)
+                    .expect("iv_empty_f"); // ubs:ignore — test assertion
+            assert_eq!(iv_empty_f.dtype().__repr__(), "interval[float64, right]");
+            assert_eq!(
+                iv_empty_f.left().inner.declared_dtype(),
+                Some(fp_index::DeclaredDtype::Float64)
+            );
+
+            // ndemb: expanding().skew() bit-for-bit parity with pandas roll_skew.
+            let vals = vec![
+                1.0,
+                -2.5,
+                3.25,
+                0.0,
+                100.5,
+                -50.125,
+                7.75,
+                7.75,
+                -0.001,
+                42.0,
+            ];
+            let s_skew = Series::new(
+                "s",
+                Index::default_range(vals.len()),
+                Column::from_f64_values(vals),
+            )
+            .expect("s_skew"); // ubs:ignore — test fixture
+            let skew_res = expanding_skew_series(&s_skew, Some(3)).expect("skew_res"); // ubs:ignore — test assertion
+            assert_eq!(
+                skew_res.values()[2],
+                Scalar::Float64(-0.272_380_105_814_572_7)
+            );
+            assert_eq!(
+                skew_res.values()[9],
+                Scalar::Float64(1.415_949_527_972_006_2)
+            );
+
+            // z8jnb: float32 ** 0.3 uses f32::powf.
+            let s_f32 = PySeries {
+                inner: Series::new(
+                    "f",
+                    Index::default_range(2),
+                    Column::from_f64_values(vec![2.5, 3.5]).with_width(NumericWidth::Float32),
+                )
+                .expect("s_f32"), // ubs:ignore — test fixture
+            };
+            let exp_03 = 0.3_f64.into_pyobject(py).expect("0.3").into_any(); // ubs:ignore — test fixture
+            let pow_res = s_f32.__pow__(py, &exp_03, None).expect("pow"); // ubs:ignore — test assertion
+            assert_eq!(
+                pow_res.inner.values()[1],
+                Scalar::Float64(f64::from(3.5_f32.powf(0.3_f32)))
+            );
+
+            // mm8dh: Series.floordiv / mod with array-like holding 0 divisor returns int64 0.
+            let s_int = PySeries {
+                inner: Series::new(
+                    "i",
+                    Index::default_range(3),
+                    Column::from_i64_values(vec![7, -7, 0]),
+                )
+                .expect("s_int"), // ubs:ignore — test fixture
+            };
+            let div_list = PyList::new(py, [2_i64, 0, 0]).expect("div_list"); // ubs:ignore — test fixture
+            let fdiv = s_int
+                .floordiv(py, div_list.as_any(), None, None, None)
+                .expect("floordiv"); // ubs:ignore — test assertion
+            assert_eq!(fdiv.inner.dtype(), DType::Int64);
+            assert_eq!(
+                fdiv.inner.values(),
+                &[Scalar::Int64(3), Scalar::Int64(0), Scalar::Int64(0)]
+            );
+            let mdiv = s_int
+                .r#mod(py, div_list.as_any(), None, None, None)
+                .expect("mod"); // ubs:ignore — test assertion
+            assert_eq!(mdiv.inner.dtype(), DType::Int64);
+            assert_eq!(
+                mdiv.inner.values(),
+                &[Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(0)]
+            );
         });
     }
 }
