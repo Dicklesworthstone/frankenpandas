@@ -4248,6 +4248,10 @@ impl PyTimedeltaComponents {
 #[derive(Clone, Debug)]
 pub struct PyTimedelta {
     pub(crate) nanos: i64,
+    /// pandas' resolution, `Timedelta.unit` (`datetime.timedelta` -> `'us'`,
+    /// `np.timedelta64` -> its unit, strings / numbers / keywords -> `'ns'`;
+    /// br-frankenpandas-0wnui).
+    pub(crate) unit: StampUnit,
 }
 
 #[pymethods]
@@ -4258,7 +4262,8 @@ impl PyTimedelta {
         &self,
         py: Python<'py>,
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
-        restore_call(py, "Timedelta", self.nanos.into_bound_py_any(py)?)
+        let payload = (self.nanos, self.unit.name()).into_bound_py_any(py)?;
+        restore_call(py, "Timedelta", payload)
     }
 
     /// pandas' `Timedelta(value, unit=, **components)`: a string, int or
@@ -4275,11 +4280,11 @@ impl PyTimedelta {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let made = |nanos: i64| -> PyResult<Py<PyAny>> {
+        let made = |nanos: i64, unit: StampUnit| -> PyResult<Py<PyAny>> {
             if nanos == Timedelta::NAT {
                 return nat_object(py);
             }
-            Ok(Py::new(py, PyTimedelta { nanos })?.into_any())
+            Ok(Py::new(py, PyTimedelta { nanos, unit })?.into_any())
         };
         // pandas' Timedelta(value, unit=None, **kwargs): the unit may come
         // second, positionally (Timedelta(10, 's') was 10 nanoseconds;
@@ -4344,7 +4349,7 @@ impl PyTimedelta {
                 };
                 total = duration_sum(total, nanos)?;
             }
-            return made(total);
+            return made(total, StampUnit::Ns);
         };
         if value.is_none() {
             return nat_object(py);
@@ -4357,10 +4362,10 @@ impl PyTimedelta {
             }
             let nanos = Timedelta::parse(&text)
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            return made(nanos);
+            return made(nanos, StampUnit::Ns);
         }
         if let Some(nanos) = duration_operand(&value)? {
-            return made(nanos);
+            return made(nanos, duration_unit(&value)?);
         }
         let scale = match unit.as_deref() {
             Some("W" | "w" | "weeks" | "week") => 7 * 86_400_000_000_000_i64,
@@ -4378,10 +4383,13 @@ impl PyTimedelta {
             }
         };
         match number_operand(&value) {
-            Some(Number::Int(count)) => {
-                made(count.checked_mul(scale).ok_or_else(duration_overflow)?)
+            Some(Number::Int(count)) => made(
+                count.checked_mul(scale).ok_or_else(duration_overflow)?,
+                StampUnit::Ns,
+            ),
+            Some(Number::Float(count)) => {
+                made(float_nanos((count * scale as f64).round())?, StampUnit::Ns)
             }
-            Some(Number::Float(count)) => made(float_nanos((count * scale as f64).round())?),
             None => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Value must be Timedelta, string, integer, float, timedelta or convertible, not {}",
                 value.get_type().name()?
@@ -4394,10 +4402,41 @@ impl PyTimedelta {
         self.nanos
     }
 
-    /// pandas' resolution of a Timedelta: nanoseconds (it was missing).
+    /// pandas' resolution of a Timedelta (see [`StampUnit`]; br-frankenpandas-0wnui).
     #[getter]
     fn unit(&self) -> &'static str {
-        "ns"
+        self.unit.name()
+    }
+
+    /// This Timedelta in `unit` ('s', 'ms', 'us', 'ns'): a finer duration is
+    /// floored to it, as pandas' `as_unit`; with `round_ok=False` a lossy one
+    /// is pandas' ValueError (br-frankenpandas-0wnui).
+    #[pyo3(signature = (unit, round_ok=true))]
+    fn as_unit(&self, unit: &str, round_ok: bool) -> PyResult<Self> {
+        let target = match unit {
+            "s" | "ms" | "us" | "ns" => StampUnit::of_unit(unit),
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                    "Only resolutions 's', 'ms', 'us', 'ns' are supported.",
+                ));
+            }
+        };
+        let tick = target.nanos();
+        let nanos = self.nanos;
+        let floored = nanos.div_euclid(tick) * tick;
+        if floored != nanos && !round_ok {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Cannot losslessly convert units",
+            ));
+        }
+        Ok(Self {
+            nanos: if nanos == Timedelta::NAT {
+                nanos
+            } else {
+                floored
+            },
+            unit: target,
+        })
     }
 
     #[getter]
@@ -4448,13 +4487,17 @@ impl PyTimedelta {
 
     #[classattr]
     fn max() -> Self {
-        PyTimedelta { nanos: i64::MAX }
+        PyTimedelta {
+            nanos: i64::MAX,
+            unit: StampUnit::Ns,
+        }
     }
 
     #[classattr]
     fn min() -> Self {
         PyTimedelta {
             nanos: i64::MIN + 1,
+            unit: StampUnit::Ns,
         }
     }
 
@@ -4575,25 +4618,31 @@ impl PyTimedelta {
     /// `datetime.timedelta` / datetime was refused.
     fn __add__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
         if let Some(nanos) = duration_operand(other)? {
-            return duration_object(py, duration_sum(self.nanos, nanos)?);
+            return duration_object_with_unit(
+                py,
+                duration_sum(self.nanos, nanos)?,
+                self.unit.max(duration_unit(other)?),
+            );
         }
-        let instant = if let Ok(ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
-            ts.inner.clone()
+        let (instant, other_unit) = if let Ok(ts) = other.extract::<PyRef<'_, PyTimestamp>>() {
+            (ts.inner.clone(), ts.unit)
         } else if let Ok(dt) = other.cast::<PyDateTime>() {
-            Timestamp {
-                nanos: py_datetime_nanos(dt)?,
-                tz: py_datetime_zone(dt)?,
-            }
+            (
+                Timestamp {
+                    nanos: py_datetime_nanos(dt)?,
+                    tz: py_datetime_zone(dt)?,
+                },
+                StampUnit::Us,
+            )
         } else {
             return Ok(py.NotImplemented());
         };
         if self.nanos == Timedelta::NAT || instant.is_nat() {
             return nat_object(py);
         }
-        // A Timedelta is nanoseconds, so the sum is.
         PyTimestamp {
             inner: instant.add_timedelta(self.nanos),
-            unit: StampUnit::Ns,
+            unit: self.unit.max(other_unit),
         }
         .into_py_any(py)
     }
@@ -4602,7 +4651,11 @@ impl PyTimedelta {
     /// is a `datetime.datetime` as pandas' (the nanoseconds dropped).
     fn __radd__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
         if let Some(nanos) = duration_operand(other)? {
-            return duration_object(py, duration_sum(nanos, self.nanos)?);
+            return duration_object_with_unit(
+                py,
+                duration_sum(nanos, self.nanos)?,
+                self.unit.max(duration_unit(other)?),
+            );
         }
         match other.cast::<PyDateTime>() {
             Ok(dt) => self.shift_datetime(py, dt, 1),
@@ -4612,7 +4665,11 @@ impl PyTimedelta {
 
     fn __sub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
         match duration_operand(other)? {
-            Some(nanos) => duration_object(py, duration_sum(self.nanos, duration_neg(nanos)?)?),
+            Some(nanos) => duration_object_with_unit(
+                py,
+                duration_sum(self.nanos, duration_neg(nanos)?)?,
+                self.unit.max(duration_unit(other)?),
+            ),
             None => Ok(py.NotImplemented()),
         }
     }
@@ -4621,7 +4678,11 @@ impl PyTimedelta {
     /// `datetime.datetime`, as pandas').
     fn __rsub__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
         if let Some(nanos) = duration_operand(other)? {
-            return duration_object(py, duration_sum(nanos, duration_neg(self.nanos)?)?);
+            return duration_object_with_unit(
+                py,
+                duration_sum(nanos, duration_neg(self.nanos)?)?,
+                self.unit.max(duration_unit(other)?),
+            );
         }
         match other.cast::<PyDateTime>() {
             Ok(dt) => self.shift_datetime(py, dt, -1),
@@ -4645,7 +4706,7 @@ impl PyTimedelta {
                 .ok_or_else(duration_overflow)?,
             Number::Float(factor) => float_nanos(self.nanos as f64 * factor)?,
         };
-        duration_object(py, nanos)
+        duration_object_with_unit(py, nanos, self.unit)
     }
 
     fn __rmul__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
@@ -4670,7 +4731,7 @@ impl PyTimedelta {
         if self.nanos == Timedelta::NAT {
             return duration_object(py, Timedelta::NAT);
         }
-        duration_object(py, float_nanos(self.nanos as f64 / divisor.as_f64())?)
+        duration_object_with_unit(py, float_nanos(self.nanos as f64 / divisor.as_f64())?, self.unit)
     }
 
     fn __rtruediv__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
@@ -4705,7 +4766,7 @@ impl PyTimedelta {
             Number::Int(divisor) => floor_div(self.nanos, divisor),
             Number::Float(divisor) => float_nanos((self.nanos as f64 / divisor).floor())?,
         };
-        duration_object(py, nanos)
+        duration_object_with_unit(py, nanos, self.unit)
     }
 
     fn __rfloordiv__<'py>(
@@ -4725,10 +4786,10 @@ impl PyTimedelta {
     /// `%` a duration or an int: Python's floored remainder, as a
     /// Timedelta. It was missing.
     fn __mod__<'py>(&self, py: Python<'py>, other: &Bound<'py, PyAny>) -> PyResult<Py<PyAny>> {
-        let divisor = match duration_operand(other)? {
-            Some(nanos) => nanos,
+        let (divisor, out_unit) = match duration_operand(other)? {
+            Some(nanos) => (nanos, self.unit.max(duration_unit(other)?)),
             None => match number_operand(other) {
-                Some(Number::Int(divisor)) => divisor,
+                Some(Number::Int(divisor)) => (divisor, self.unit),
                 _ => return Ok(py.NotImplemented()),
             },
         };
@@ -4740,7 +4801,11 @@ impl PyTimedelta {
         if self.nanos == Timedelta::NAT || divisor == Timedelta::NAT {
             return duration_object(py, Timedelta::NAT);
         }
-        duration_object(py, self.nanos - floor_div(self.nanos, divisor) * divisor)
+        duration_object_with_unit(
+            py,
+            self.nanos - floor_div(self.nanos, divisor) * divisor,
+            out_unit,
+        )
     }
 
     /// `divmod(Timedelta, duration)`: the floored count and the remainder.
@@ -4754,18 +4819,18 @@ impl PyTimedelta {
     }
 
     fn __neg__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        duration_object(py, duration_neg(self.nanos)?)
+        duration_object_with_unit(py, duration_neg(self.nanos)?, self.unit)
     }
 
     fn __pos__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        duration_object(py, self.nanos)
+        duration_object_with_unit(py, self.nanos, self.unit)
     }
 
     fn __abs__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if self.nanos < 0 {
-            return duration_object(py, duration_neg(self.nanos)?);
+            return duration_object_with_unit(py, duration_neg(self.nanos)?, self.unit);
         }
-        duration_object(py, self.nanos)
+        duration_object_with_unit(py, self.nanos, self.unit)
     }
 
     fn __bool__(&self) -> bool {
@@ -4788,18 +4853,39 @@ impl PyTimedelta {
         py_delta_of_micros(py, micros).map(|delta| delta.into_any().unbind())
     }
 
-    /// numpy's `timedelta64[ns]` of this duration (it was missing).
+    /// numpy's `timedelta64` of this duration in its unit (it was always `[ns]`;
+    /// br-frankenpandas-0wnui).
     fn to_timedelta64(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
         if self.nanos == Timedelta::NAT {
             return Ok(numpy.call_method1("timedelta64", ("NaT", "ns"))?.unbind());
         }
+        let ticks = self.nanos.div_euclid(self.unit.nanos());
         Ok(numpy
-            .call_method1("timedelta64", (self.nanos, "ns"))?
+            .call_method1("timedelta64", (ticks, self.unit.name()))?
             .unbind())
     }
 
-    fn to_numpy(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    /// pandas' `asm8`, [`Self::to_timedelta64`] (br-frankenpandas-0wnui).
+    #[getter]
+    fn asm8(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.to_timedelta64(py)
+    }
+
+    /// pandas' `to_numpy`, [`Self::to_timedelta64`]; a dtype or copy is
+    /// pandas' ValueError (br-frankenpandas-0wnui).
+    #[pyo3(signature = (dtype=None, copy=false))]
+    fn to_numpy(
+        &self,
+        py: Python<'_>,
+        dtype: Option<&Bound<'_, PyAny>>,
+        copy: bool,
+    ) -> PyResult<Py<PyAny>> {
+        if dtype.is_some_and(|dtype| !dtype.is_none()) || copy {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Timedelta.to_numpy dtype and copy arguments are ignored",
+            ));
+        }
         self.to_timedelta64(py)
     }
 
@@ -4819,9 +4905,10 @@ impl PyTimedelta {
             std::cmp::Ordering::Less => false,
         };
         let multiple = if up { low + 1 } else { low };
-        duration_object(
+        duration_object_with_unit(
             py,
             multiple.checked_mul(step).ok_or_else(duration_overflow)?,
+            self.unit,
         )
     }
 
@@ -4830,7 +4917,7 @@ impl PyTimedelta {
         if self.nanos == Timedelta::NAT {
             return duration_object(py, Timedelta::NAT);
         }
-        duration_object(py, floor_div(self.nanos, step) * step)
+        duration_object_with_unit(py, floor_div(self.nanos, step) * step, self.unit)
     }
 
     fn ceil(&self, py: Python<'_>, freq: &str) -> PyResult<Py<PyAny>> {
@@ -4839,9 +4926,10 @@ impl PyTimedelta {
             return duration_object(py, Timedelta::NAT);
         }
         let multiple = -floor_div(-self.nanos, step);
-        duration_object(
+        duration_object_with_unit(
             py,
             multiple.checked_mul(step).ok_or_else(duration_overflow)?,
+            self.unit,
         )
     }
 }
@@ -4950,9 +5038,12 @@ fn duration_operand(other: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
 }
 
 /// The resolution of a [`duration_operand`], which a Timestamp moved by it
-/// takes when finer: a Timedelta is nanoseconds, a `datetime.timedelta`
-/// microseconds, a numpy timedelta64 its own unit.
+/// takes when finer: a Timedelta is its own `unit`, a `datetime.timedelta`
+/// microseconds, a numpy timedelta64 its own unit (br-frankenpandas-0wnui).
 fn duration_unit(other: &Bound<'_, PyAny>) -> PyResult<StampUnit> {
+    if let Ok(td) = other.extract::<PyRef<'_, PyTimedelta>>() {
+        return Ok(td.unit);
+    }
     if other.cast::<PyDelta>().is_ok() {
         return Ok(StampUnit::Us);
     }
@@ -5003,10 +5094,14 @@ fn number_operand(other: &Bound<'_, PyAny>) -> Option<Number> {
 
 /// A duration result as pandas returns it: NaT for a missing one.
 fn duration_object(py: Python<'_>, nanos: i64) -> PyResult<Py<PyAny>> {
+    duration_object_with_unit(py, nanos, StampUnit::Ns)
+}
+
+fn duration_object_with_unit(py: Python<'_>, nanos: i64, unit: StampUnit) -> PyResult<Py<PyAny>> {
     if nanos == Timedelta::NAT {
         return nat_object(py);
     }
-    PyTimedelta { nanos }.into_py_any(py)
+    PyTimedelta { nanos, unit }.into_py_any(py)
 }
 
 fn duration_overflow() -> PyErr {
@@ -6532,11 +6627,19 @@ impl PyTimestamp {
                 return duration_object(py, Timedelta::NAT);
             }
             let diff_nanos = self.inner.sub_timestamp(&other_ts.inner);
-            PyTimedelta { nanos: diff_nanos }.into_py_any(py)
+            PyTimedelta {
+                nanos: diff_nanos,
+                unit: self.unit.max(other_ts.unit),
+            }
+            .into_py_any(py)
         } else if let Ok(dt) = other.cast::<PyDateTime>() {
             self.require_same_awareness(py_datetime_zone(dt)?.as_deref(), false)?;
             let other = Timestamp::from_nanos(py_datetime_nanos(dt)?);
-            duration_object(py, self.inner.sub_timestamp(&other))
+            duration_object_with_unit(
+                py,
+                self.inner.sub_timestamp(&other),
+                self.unit.max(StampUnit::Us),
+            )
         } else {
             Ok(py.NotImplemented())
         }
@@ -6548,10 +6651,11 @@ impl PyTimestamp {
             Ok(dt) => {
                 self.require_same_awareness(py_datetime_zone(dt)?.as_deref(), false)?;
                 let other = Timestamp::from_nanos(py_datetime_nanos(dt)?);
-                PyTimedelta {
-                    nanos: other.sub_timestamp(&self.inner),
-                }
-                .into_py_any(py)
+                duration_object_with_unit(
+                    py,
+                    other.sub_timestamp(&self.inner),
+                    self.unit.max(StampUnit::Us),
+                )
             }
             Err(_) => Ok(py.NotImplemented()),
         }
@@ -8355,7 +8459,11 @@ fn scalar_to_py(py: Python<'_>, scalar: &Scalar) -> PyResult<Py<PyAny>> {
             if *ns == Timedelta::NAT {
                 nat_object(py)
             } else {
-                PyTimedelta { nanos: *ns }.into_py_any(py)
+                PyTimedelta {
+                    nanos: *ns,
+                    unit: StampUnit::Ns,
+                }
+                .into_py_any(py)
             }
         }
         // A NaT period is pandas' NaT (it was Period('NaT', 'M');
@@ -12546,7 +12654,11 @@ fn index_label_to_py(py: Python<'_>, label: &IndexLabel) -> PyResult<Py<PyAny>> 
             if *ns == Timedelta::NAT {
                 nat_object(py)
             } else {
-                PyTimedelta { nanos: *ns }.into_py_any(py)
+                PyTimedelta {
+                    nanos: *ns,
+                    unit: StampUnit::Ns,
+                }
+                .into_py_any(py)
             }
         }
         IndexLabel::Datetime64(ns) => {
@@ -36441,13 +36553,25 @@ impl PySeries {
         }
         if let Ok(idx) = plain_index_ref(key) {
             let labels = idx.inner.labels().to_vec();
-            let s = self
-                .inner
-                .loc(&labels)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?;
+            let s = if labels.is_empty() {
+                self.inner.iloc(&[]).map_err(frame_error_to_py)?
+            } else {
+                self.inner
+                    .loc(&labels)
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyKeyError, _>(e.to_string()))?
+            };
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
         if let Ok(series_mask) = key.extract::<PyRef<'_, PySeries>>() {
+            if series_mask.inner.is_empty()
+                && !matches!(
+                    series_mask.inner.column().dtype(),
+                    DType::Bool | DType::BoolNullable
+                )
+            {
+                let s = self.inner.iloc(&[]).map_err(frame_error_to_py)?;
+                return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+            }
             refuse_nan_mask(&series_mask.inner)?;
             let s = self
                 .inner
@@ -36560,7 +36684,21 @@ impl PySeries {
         // Any other list of labels (floats, intervals, timestamps) reads as
         // `.loc` does, as pandas' (it was this TypeError; l0cqv).
         if let Some(labels) = loc_label_list(key) {
-            let wanted = loc_list_labels(self.inner.index().labels(), labels?);
+            let labels = labels?;
+            if labels.is_empty() && key.cast::<PyList>().is_err() {
+                if key
+                    .getattr("dtype")
+                    .and_then(|dtype| dtype.getattr("kind"))
+                    .and_then(|kind| kind.extract::<String>())
+                    .is_ok_and(|kind| matches!(kind.as_str(), "i" | "u"))
+                    && int_keys_are_positions(self.inner.index())
+                {
+                    warn_positional_keys(py, false)?;
+                }
+                let s = self.inner.iloc(&[]).map_err(frame_error_to_py)?;
+                return Ok(Py::new(py, PySeries { inner: s })?.into_any());
+            }
+            let wanted = loc_list_labels(self.inner.index().labels(), labels);
             if let Some(missing) = loc_missing_labels_error(self.inner.index(), &wanted, key)? {
                 return Err(missing);
             }
@@ -45401,7 +45539,11 @@ impl PySeriesLoc {
             );
         }
         if let Some(labels) = loc_label_list(key) {
-            let wanted = loc_list_labels(self.inner.index().labels(), labels?);
+            let labels = labels?;
+            if labels.is_empty() && key.cast::<PyList>().is_err() {
+                return series(self.inner.iloc(&[]).map_err(frame_error_to_py)?);
+            }
+            let wanted = loc_list_labels(self.inner.index().labels(), labels);
             if let Some(missing) = loc_missing_labels_error(self.inner.index(), &wanted, key)? {
                 return Err(missing);
             }
@@ -64225,7 +64367,11 @@ fn resolve_loc_rows(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<LocRows>
         }
     }
     if let Some(labels) = loc_label_list(key) {
-        let wanted = loc_list_labels(df.index().labels(), labels?);
+        let labels = labels?;
+        if labels.is_empty() && key.cast::<PyList>().is_err() {
+            return df.iloc(&[]).map(LocRows::frame).map_err(frame_error_to_py);
+        }
+        let wanted = loc_list_labels(df.index().labels(), labels);
         if let Some(missing) = loc_missing_labels_error(df.index(), &wanted, key)? {
             return Err(missing);
         }
@@ -96567,7 +96713,14 @@ impl IntervalTemporal {
                 },
             )?
             .into_bound_py_any(py),
-            None => Py::new(py, PyTimedelta { nanos })?.into_bound_py_any(py),
+            None => Py::new(
+                py,
+                PyTimedelta {
+                    nanos,
+                    unit: StampUnit::Ns,
+                },
+            )?
+            .into_bound_py_any(py),
         }
     }
 
@@ -96860,7 +97013,14 @@ impl PyInterval {
     fn length<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         if let Some(temporal) = &self.temporal {
             let nanos = temporal.right.saturating_sub(temporal.left);
-            return Py::new(py, PyTimedelta { nanos })?.into_bound_py_any(py);
+            return Py::new(
+                py,
+                PyTimedelta {
+                    nanos,
+                    unit: StampUnit::Ns,
+                },
+            )?
+            .into_bound_py_any(py);
         }
         self.endpoint(py, self.right - self.left)
     }
@@ -107534,10 +107694,13 @@ fn restore(py: Python<'_>, kind: &str, payload: &Bound<'_, PyAny>) -> PyResult<P
             }
             .into_py_any(py)
         }
-        "Timedelta" => PyTimedelta {
-            nanos: payload.extract()?,
+        "Timedelta" => {
+            let (nanos, unit) = match payload.extract::<(i64, String)>() {
+                Ok((nanos, unit)) => (nanos, StampUnit::of_unit(&unit)),
+                Err(_) => (payload.extract::<i64>()?, StampUnit::Ns),
+            };
+            PyTimedelta { nanos, unit }.into_py_any(py)
         }
-        .into_py_any(py),
         "NaT" | "NA" => Ok(module.getattr(kind)?.unbind()),
         "DateOffset" => PyDateOffset::restored(payload)?.into_py_any(py),
         "DatetimeIndex" => {
@@ -109915,7 +110078,10 @@ mod tests {
 
         let td = PyTimedelta {
             nanos: 90_061_000_000_000_i64, // 1 day, 1 hour, 1 minute, 1 second
+            unit: StampUnit::Ns,
         };
+        assert_eq!(td.unit(), "ns");
+        assert_eq!(td.as_unit("s", true).unwrap().unit(), "s");
         assert_eq!(td.days(), 1);
         assert_eq!(td.seconds(), 3661);
         let comp = td.components();

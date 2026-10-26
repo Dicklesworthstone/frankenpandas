@@ -12761,18 +12761,7 @@ pub fn codes_against_categories(values: &[Scalar], categories: &[Scalar]) -> Vec
 /// exactly and a float are one number (1 == 1.0 == True); anything else
 /// keys as itself.
 fn category_key(category: &Scalar) -> ScalarKey<'_> {
-    let number = match category {
-        Scalar::Bool(flag) => Some(f64::from(u8::from(*flag))),
-        Scalar::Int64(value) => {
-            let float = *value as f64;
-            (float as i128 == i128::from(*value)).then_some(float)
-        }
-        _ => None,
-    };
-    number.map_or_else(
-        || scalar_key_allow_missing(category),
-        |float| ScalarKey::FloatBits(if float == 0.0 { 0.0_f64 } else { float }.to_bits()),
-    )
+    scalar_key_allow_missing(category)
 }
 
 /// The order of what is left of an unordered categorical's categories after
@@ -22988,13 +22977,21 @@ impl Series {
             return Ok(self.clone());
         }
         // Bools no bound moves stay bools, as pandas' clip (its `where`
-        // replaces nothing; they were float64; br-frankenpandas-wwbb1).
-        if let Some(flags) = self.column.as_bool_slice() {
-            let moved = |flag: &bool| {
-                let value = f64::from(u8::from(*flag));
+        // replaces nothing; they were float64; br-frankenpandas-wwbb1 / lfjb4).
+        if matches!(self.column.dtype(), DType::Bool | DType::BoolNullable) {
+            let moved_flag = |flag: bool| {
+                let value = f64::from(u8::from(flag));
                 lower.is_some_and(|lower| lower > value) || upper.is_some_and(|upper| upper < value)
             };
-            if !flags.iter().any(moved) {
+            let any_moved = if let Some(flags) = self.column.as_bool_slice() {
+                flags.iter().copied().any(moved_flag)
+            } else {
+                self.column
+                    .values()
+                    .iter()
+                    .any(|v| matches!(v, Scalar::Bool(flag) if moved_flag(*flag)))
+            };
+            if !any_moved {
                 return Ok(self.clone());
             }
         }
@@ -23670,11 +23667,56 @@ impl Series {
         self.abs()
     }
 
+    /// Coerce a boolean column to `Float64` (`false -> 0.0`, `true -> 1.0`) so
+    /// numpy's floating-point math ufuncs apply instead of raising
+    /// `NonNumericValue` (numpy uses `float16`, represented here as `Float64`;
+    /// br-frankenpandas-lfjb4).
+    fn bool_as_float64_column(&self) -> Result<std::borrow::Cow<'_, Column>, FrameError> {
+        if self.column.dtype() == DType::Bool {
+            let values: Vec<Scalar> = self
+                .column
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Bool(b) => Scalar::Float64(f64::from(u8::from(*b))),
+                    other => other.clone(),
+                })
+                .collect();
+            return Ok(std::borrow::Cow::Owned(Column::new(
+                DType::Float64,
+                values,
+            )?));
+        }
+        Ok(std::borrow::Cow::Borrowed(&self.column))
+    }
+
+    /// Coerce a boolean column to `int8` (`false -> 0`, `true -> 1`) for
+    /// `reciprocal` and `square`, matching numpy's `int8` output on `bool`
+    /// (`1 // 1 == 1`, `1 // 0 == 0` in numpy int8; br-frankenpandas-lfjb4).
+    fn bool_as_int8_series(&self) -> Result<Option<Self>, FrameError> {
+        if self.column.dtype() == DType::Bool {
+            let values: Vec<Scalar> = self
+                .column
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Bool(b) => Scalar::Int64(i64::from(*b)),
+                    other => other.clone(),
+                })
+                .collect();
+            let column =
+                Column::new(DType::Int64, values)?.cast_to_width(NumericWidth::Int8, false)?;
+            return Self::new(self.name.clone(), self.index.clone(), column).map(Some);
+        }
+        Ok(None)
+    }
+
     /// Absolute value of floating-point elements.
     ///
     /// Matches `np.fabs(series)`. Same as `abs()` but explicitly for floats.
     pub fn fabs(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.fabs()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.fabs()?)
     }
 
     /// Round each element to `decimals` decimal places.
@@ -23686,7 +23728,11 @@ impl Series {
         // TypeError, a boolean one became float64; br-frankenpandas-wwbb1).
         if matches!(
             self.column.dtype(),
-            DType::Utf8 | DType::Datetime64 { .. } | DType::Timedelta64 | DType::BoolNullable
+            DType::Utf8
+                | DType::Datetime64 { .. }
+                | DType::Timedelta64
+                | DType::Bool
+                | DType::BoolNullable
         ) {
             return Ok(self.clone());
         }
@@ -23706,6 +23752,9 @@ impl Series {
     ///
     /// Matches `np.floor(series)`. NaN values pass through.
     pub fn floor(&self) -> Result<Self, FrameError> {
+        if self.column.dtype() == DType::Bool {
+            return Ok(self.clone());
+        }
         Self::new(self.name.clone(), self.index.clone(), self.column.floor()?)
     }
 
@@ -23713,6 +23762,9 @@ impl Series {
     ///
     /// Matches `np.ceil(series)`. NaN values pass through.
     pub fn ceil(&self) -> Result<Self, FrameError> {
+        if self.column.dtype() == DType::Bool {
+            return Ok(self.clone());
+        }
         Self::new(self.name.clone(), self.index.clone(), self.column.ceil()?)
     }
 
@@ -23720,6 +23772,9 @@ impl Series {
     ///
     /// Matches `np.trunc(series)`. NaN values pass through.
     pub fn trunc(&self) -> Result<Self, FrameError> {
+        if self.column.dtype() == DType::Bool {
+            return Ok(self.clone());
+        }
         Self::new(self.name.clone(), self.index.clone(), self.column.trunc()?)
     }
 
@@ -23727,131 +23782,136 @@ impl Series {
     ///
     /// Matches `np.sqrt(series)`. NaN values pass through.
     pub fn sqrt(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.sqrt()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.sqrt()?)
     }
 
     /// Element-wise exponential (e^x).
     ///
     /// Matches `np.exp(series)`. NaN values pass through.
     pub fn exp(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.exp()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.exp()?)
     }
 
     /// Element-wise natural logarithm.
     ///
     /// Matches `np.log(series)`. NaN values pass through.
     pub fn log(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.log()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.log()?)
     }
 
     /// Element-wise base-10 logarithm.
     ///
     /// Matches `np.log10(series)`. NaN values pass through.
     pub fn log10(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.log10()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.log10()?)
     }
 
     /// Element-wise base-2 logarithm.
     ///
     /// Matches `np.log2(series)`. NaN values pass through.
     pub fn log2(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.log2()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.log2()?)
     }
 
     /// Element-wise sine.
     ///
     /// Matches `np.sin(series)`. NaN values pass through.
     pub fn sin(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.sin()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.sin()?)
     }
 
     /// Element-wise cosine.
     ///
     /// Matches `np.cos(series)`. NaN values pass through.
     pub fn cos(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.cos()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.cos()?)
     }
 
     /// Element-wise tangent.
     ///
     /// Matches `np.tan(series)`. NaN values pass through.
     pub fn tan(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.tan()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.tan()?)
     }
 
     /// Element-wise hyperbolic sine.
     ///
     /// Matches `np.sinh(series)`. NaN values pass through.
     pub fn sinh(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.sinh()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.sinh()?)
     }
 
     /// Element-wise hyperbolic cosine.
     ///
     /// Matches `np.cosh(series)`. NaN values pass through.
     pub fn cosh(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.cosh()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.cosh()?)
     }
 
     /// Element-wise hyperbolic tangent.
     ///
     /// Matches `np.tanh(series)`. NaN values pass through.
     pub fn tanh(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.tanh()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.tanh()?)
     }
 
     /// Element-wise inverse sine.
     ///
     /// Matches `np.arcsin(series)`. NaN values pass through.
     pub fn arcsin(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.arcsin()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.arcsin()?)
     }
 
     /// Element-wise inverse cosine.
     ///
     /// Matches `np.arccos(series)`. NaN values pass through.
     pub fn arccos(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.arccos()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.arccos()?)
     }
 
     /// Element-wise inverse tangent.
     ///
     /// Matches `np.arctan(series)`. NaN values pass through.
     pub fn arctan(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.arctan()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.arctan()?)
     }
 
     /// Element-wise inverse hyperbolic sine.
     ///
     /// Matches `np.arcsinh(series)`. NaN values pass through.
     pub fn arcsinh(&self) -> Result<Self, FrameError> {
-        Self::new(
-            self.name.clone(),
-            self.index.clone(),
-            self.column.arcsinh()?,
-        )
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.arcsinh()?)
     }
 
     /// Element-wise inverse hyperbolic cosine.
     ///
     /// Matches `np.arccosh(series)`. NaN values pass through.
     pub fn arccosh(&self) -> Result<Self, FrameError> {
-        Self::new(
-            self.name.clone(),
-            self.index.clone(),
-            self.column.arccosh()?,
-        )
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.arccosh()?)
     }
 
     /// Element-wise inverse hyperbolic tangent.
     ///
     /// Matches `np.arctanh(series)`. NaN values pass through.
     pub fn arctanh(&self) -> Result<Self, FrameError> {
-        Self::new(
-            self.name.clone(),
-            self.index.clone(),
-            self.column.arctanh()?,
-        )
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.arctanh()?)
     }
 
     /// Alias for `arcsin`. Matches Rust/math convention.
@@ -23888,27 +23948,46 @@ impl Series {
     ///
     /// Matches `np.expm1(series)`. NaN values pass through.
     pub fn expm1(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.expm1()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.expm1()?)
     }
 
     /// Element-wise log(1 + x) with improved precision for small x.
     ///
     /// Matches `np.log1p(series)`. NaN values pass through.
     pub fn log1p(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.log1p()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.log1p()?)
     }
 
     /// Element-wise cube root.
     ///
     /// Matches `np.cbrt(series)`. NaN values pass through.
     pub fn cbrt(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.cbrt()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.cbrt()?)
     }
 
     /// Element-wise sign (-1, 0, or 1).
     ///
     /// Matches `np.sign(series)`. NaN values pass through.
     pub fn sign(&self) -> Result<Self, FrameError> {
+        if self.column.dtype() == DType::Timedelta64 {
+            let values: Vec<Scalar> = self
+                .column
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Timedelta64(ns) => Scalar::Timedelta64(ns.signum()),
+                    _ => Scalar::Timedelta64(-1),
+                })
+                .collect();
+            return Self::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::new(DType::Timedelta64, values)?,
+            );
+        }
         Self::new(self.name.clone(), self.index.clone(), self.column.sign()?)
     }
 
@@ -23916,6 +23995,29 @@ impl Series {
     ///
     /// Matches `np.signbit(series)`. NaN values pass through.
     pub fn signbit(&self) -> Result<Self, FrameError> {
+        if self.column.dtype() == DType::Bool {
+            return Self::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::from_bool_values(vec![false; self.len()]),
+            );
+        }
+        if self.column.dtype() == DType::BoolNullable {
+            let values: Vec<Scalar> = self
+                .column
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Bool(_) => Scalar::Bool(false),
+                    other => other.clone(),
+                })
+                .collect();
+            return Self::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::new(DType::BoolNullable, values)?,
+            );
+        }
         Self::new(
             self.name.clone(),
             self.index.clone(),
@@ -23927,11 +24029,8 @@ impl Series {
     ///
     /// Matches `np.radians(series)` / `np.deg2rad(series)`.
     pub fn radians(&self) -> Result<Self, FrameError> {
-        Self::new(
-            self.name.clone(),
-            self.index.clone(),
-            self.column.radians()?,
-        )
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.radians()?)
     }
 
     /// Alias for radians(). Matches `np.deg2rad(series)`.
@@ -23943,11 +24042,8 @@ impl Series {
     ///
     /// Matches `np.degrees(series)` / `np.rad2deg(series)`.
     pub fn degrees(&self) -> Result<Self, FrameError> {
-        Self::new(
-            self.name.clone(),
-            self.index.clone(),
-            self.column.degrees()?,
-        )
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.degrees()?)
     }
 
     /// Alias for degrees(). Matches `np.rad2deg(series)`.
@@ -23959,6 +24055,9 @@ impl Series {
     ///
     /// Matches `np.reciprocal(series)`. NaN values pass through.
     pub fn reciprocal(&self) -> Result<Self, FrameError> {
+        if let Some(int8_series) = self.bool_as_int8_series()? {
+            return Ok(int8_series);
+        }
         Self::new(
             self.name.clone(),
             self.index.clone(),
@@ -23970,6 +24069,9 @@ impl Series {
     ///
     /// Matches `np.square(series)`. NaN values pass through.
     pub fn square(&self) -> Result<Self, FrameError> {
+        if let Some(int8_series) = self.bool_as_int8_series()? {
+            return Ok(int8_series);
+        }
         Self::new(self.name.clone(), self.index.clone(), self.column.square()?)
     }
 
@@ -23977,13 +24079,17 @@ impl Series {
     ///
     /// Matches `np.rint(series)`. NaN values pass through.
     pub fn rint(&self) -> Result<Self, FrameError> {
-        Self::new(self.name.clone(), self.index.clone(), self.column.rint()?)
+        let col = self.bool_as_float64_column()?;
+        Self::new(self.name.clone(), self.index.clone(), col.rint()?)
     }
 
     /// Round toward zero (alias for trunc).
     ///
     /// Matches `np.fix(series)`. NaN values pass through.
     pub fn fix(&self) -> Result<Self, FrameError> {
+        if self.column.dtype() == DType::Bool {
+            return Ok(self.clone());
+        }
         Self::new(self.name.clone(), self.index.clone(), self.column.fix()?)
     }
 
@@ -23996,6 +24102,25 @@ impl Series {
                 "ufunc '{ufunc}' not supported for the input types, and the inputs could \
                  not be safely coerced to any supported types according to the casting \
                  rule ''safe''"
+            )));
+        }
+        Ok(())
+    }
+
+    /// `np.isneginf` / `np.isposinf` refuse datetime, timedelta, and masked
+    /// extension columns with `TypeError` (br-frankenpandas-lfjb4).
+    fn reject_signed_inf_ufunc(&self, ufunc: &str) -> Result<(), FrameError> {
+        self.reject_object_ufunc(ufunc)?;
+        if matches!(
+            self.column.dtype(),
+            DType::Datetime64 { .. }
+                | DType::Timedelta64
+                | DType::Float64Nullable
+                | DType::Int64Nullable
+                | DType::BoolNullable
+        ) {
+            return Err(FrameError::CompatibilityRejected(format!(
+                "ufunc '{ufunc}' not supported for the input types"
             )));
         }
         Ok(())
@@ -24033,7 +24158,7 @@ impl Series {
     ///
     /// Matches `np.isneginf(series)`. Returns boolean Series.
     pub fn isneginf(&self) -> Result<Self, FrameError> {
-        self.reject_object_ufunc("isneginf")?;
+        self.reject_signed_inf_ufunc("isneginf")?;
         Self::new(
             self.name.clone(),
             self.index.clone(),
@@ -24045,7 +24170,7 @@ impl Series {
     ///
     /// Matches `np.isposinf(series)`. Returns boolean Series.
     pub fn isposinf(&self) -> Result<Self, FrameError> {
-        self.reject_object_ufunc("isposinf")?;
+        self.reject_signed_inf_ufunc("isposinf")?;
         Self::new(
             self.name.clone(),
             self.index.clone(),
@@ -24057,6 +24182,16 @@ impl Series {
     ///
     /// Matches `np.nan_to_num(series)`.
     pub fn nan_to_num(&self) -> Result<Self, FrameError> {
+        if matches!(
+            self.column.dtype(),
+            DType::Utf8
+                | DType::Datetime64 { .. }
+                | DType::Timedelta64
+                | DType::Bool
+                | DType::BoolNullable
+        ) {
+            return Ok(self.clone());
+        }
         Self::new(
             self.name.clone(),
             self.index.clone(),
@@ -24068,6 +24203,22 @@ impl Series {
     ///
     /// Matches `np.negative(series)` / `-series`.
     pub fn neg(&self) -> Result<Self, FrameError> {
+        if matches!(self.column.dtype(), DType::Bool | DType::BoolNullable) {
+            let values: Vec<Scalar> = self
+                .column
+                .values()
+                .iter()
+                .map(|v| match v {
+                    Scalar::Bool(b) => Scalar::Bool(!b),
+                    other => other.clone(),
+                })
+                .collect();
+            return Self::new(
+                self.name.clone(),
+                self.index.clone(),
+                Column::new(self.column.dtype(), values)?,
+            );
+        }
         Self::new(self.name.clone(), self.index.clone(), self.column.neg()?)
     }
 
@@ -24080,6 +24231,9 @@ impl Series {
     ///
     /// Matches `np.positive(series)` / `+series`.
     pub fn positive(&self) -> Result<Self, FrameError> {
+        if matches!(self.column.dtype(), DType::Bool | DType::BoolNullable) {
+            return Ok(self.clone());
+        }
         Self::new(
             self.name.clone(),
             self.index.clone(),
@@ -27636,7 +27790,7 @@ impl Series {
             }
             _ => {}
         }
-        self.cumsum_storage()
+        self.masked_cumulative(self.cumsum_storage()?, true)
     }
 
     /// A float32 column's running sum or product (`step` from `start`), each
@@ -28054,6 +28208,10 @@ impl Series {
         if let Some(empty) = self.empty_cumulative("cumprod") {
             return empty;
         }
+        self.masked_cumulative(self.cumprod_storage()?, true)
+    }
+
+    fn cumprod_storage(&self) -> Result<Self, FrameError> {
         // A float32 column multiplies in float32, each partial product
         // rounded, as cumsum adds (it was float64; br-frankenpandas-wwbb1).
         if self.column.width() == Some(NumericWidth::Float32) {
@@ -28238,7 +28396,7 @@ impl Series {
         if let Some(empty) = self.empty_cumulative("cummin") {
             return empty;
         }
-        self.keeping_width(self.cummin_storage(), false)
+        self.masked_cumulative(self.keeping_width(self.cummin_storage(), false)?, false)
     }
 
     fn cummin_storage(&self) -> Result<Self, FrameError> {
@@ -28474,7 +28632,7 @@ impl Series {
         if let Some(empty) = self.empty_cumulative("cummax") {
             return empty;
         }
-        self.keeping_width(self.cummax_storage(), false)
+        self.masked_cumulative(self.keeping_width(self.cummax_storage(), false)?, false)
     }
 
     fn cummax_storage(&self) -> Result<Self, FrameError> {
@@ -187978,6 +188136,7 @@ mod tests {
                 Scalar::Float64(-2.5),
             ],
         );
+        let bools = one(DType::Bool, vec![Scalar::Bool(true), Scalar::Bool(false)]);
         let cases: Vec<(&str, Op, &DataFrame, char)> = vec![
             ("abs", |d| d.abs(), &object, 'R'),
             ("abs", |d| d.abs(), &datetime, 'R'),
@@ -187987,13 +188146,59 @@ mod tests {
             ("log", |d| d.log(), &timedelta, 'R'),
             ("exp", |d| d.exp(), &nullable, 'A'),
             ("clip", |d| d.clip(Some(0.0), Some(1.0)), &object, 'R'),
+            ("clip", |d| d.clip(Some(0.0), Some(1.0)), &bools, 'S'),
             ("cumprod", |d| d.cumprod(), &object, 'R'),
             ("cumprod", |d| d.cumprod(), &nullable, 'A'),
             ("cummax", |d| d.cummax(), &timedelta, 'A'),
+            ("cummin", |d| d.cummin(), &nullable, 'S'),
             ("pct_change", |d| d.pct_change(1), &object, 'R'),
             ("pct_change", |d| d.pct_change(1), &datetime, 'R'),
             ("isnan", |d| d.isnan(), &object, 'R'),
             ("isfinite", |d| d.isfinite(), &datetime, 'A'),
+            ("isneginf", |d| d.isneginf(), &datetime, 'R'),
+            ("isneginf", |d| d.isneginf(), &timedelta, 'R'),
+            ("isneginf", |d| d.isneginf(), &nullable, 'R'),
+            ("isposinf", |d| d.isposinf(), &datetime, 'R'),
+            ("isposinf", |d| d.isposinf(), &timedelta, 'R'),
+            ("isposinf", |d| d.isposinf(), &nullable, 'R'),
+            ("nan_to_num", |d| d.nan_to_num(), &object, 'S'),
+            ("nan_to_num", |d| d.nan_to_num(), &datetime, 'S'),
+            ("nan_to_num", |d| d.nan_to_num(), &timedelta, 'S'),
+            ("nan_to_num", |d| d.nan_to_num(), &bools, 'S'),
+            ("sign", |d| d.sign(), &timedelta, 'A'),
+            ("sign", |d| d.sign(), &bools, 'R'),
+            ("signbit", |d| d.signbit(), &bools, 'A'),
+            ("sqrt", |d| d.sqrt(), &bools, 'A'),
+            ("exp", |d| d.exp(), &bools, 'A'),
+            ("log", |d| d.log(), &bools, 'A'),
+            ("log10", |d| d.log10(), &bools, 'A'),
+            ("log2", |d| d.log2(), &bools, 'A'),
+            ("sin", |d| d.sin(), &bools, 'A'),
+            ("cos", |d| d.cos(), &bools, 'A'),
+            ("tan", |d| d.tan(), &bools, 'A'),
+            ("sinh", |d| d.sinh(), &bools, 'A'),
+            ("cosh", |d| d.cosh(), &bools, 'A'),
+            ("tanh", |d| d.tanh(), &bools, 'A'),
+            ("arcsin", |d| d.arcsin(), &bools, 'A'),
+            ("arccos", |d| d.arccos(), &bools, 'A'),
+            ("arctan", |d| d.arctan(), &bools, 'A'),
+            ("arcsinh", |d| d.arcsinh(), &bools, 'A'),
+            ("arccosh", |d| d.arccosh(), &bools, 'A'),
+            ("arctanh", |d| d.arctanh(), &bools, 'A'),
+            ("expm1", |d| d.expm1(), &bools, 'A'),
+            ("log1p", |d| d.log1p(), &bools, 'A'),
+            ("cbrt", |d| d.cbrt(), &bools, 'A'),
+            ("radians", |d| d.radians(), &bools, 'A'),
+            ("degrees", |d| d.degrees(), &bools, 'A'),
+            ("rint", |d| d.rint(), &bools, 'A'),
+            ("reciprocal", |d| d.reciprocal(), &bools, 'A'),
+            ("square", |d| d.square(), &bools, 'A'),
+            ("neg", |d| d.neg(), &bools, 'A'),
+            ("positive", |d| d.positive(), &bools, 'S'),
+            ("floor", |d| d.floor(), &bools, 'S'),
+            ("ceil", |d| d.ceil(), &bools, 'S'),
+            ("trunc", |d| d.trunc(), &bools, 'S'),
+            ("fix", |d| d.fix(), &bools, 'S'),
             ("interpolate", |d| d.interpolate(), &object, 'R'),
             ("round", |d| d.round(0), &object, 'S'),
             ("round", |d| d.round(0), &datetime, 'S'),
@@ -188019,6 +188224,33 @@ mod tests {
         assert_eq!(
             abs.column("c").expect("c").values()[2],
             Scalar::Float64(2.5)
+        );
+        // Nullable Float64 cumulative ops preserve Float64Nullable with <NA>
+        // (br-frankenpandas-lfjb4).
+        for cum_out in [
+            nullable.cumsum().expect("cumsum"),
+            nullable.cumprod().expect("cumprod"),
+            nullable.cummin().expect("cummin"),
+            nullable.cummax().expect("cummax"),
+        ] {
+            let col = cum_out.column("c").expect("c");
+            assert_eq!(col.dtype(), DType::Float64Nullable);
+            assert_eq!(col.values()[1], Scalar::Null(NullKind::Null));
+        }
+        // reciprocal / square on bool return int8 [1, 0]; neg flips to [false, true].
+        let recip = bools.reciprocal().expect("reciprocal");
+        assert_eq!(
+            recip.column("c").expect("c").width(),
+            Some(super::NumericWidth::Int8)
+        );
+        assert_eq!(
+            recip.column("c").expect("c").values(),
+            &[Scalar::Int64(1), Scalar::Int64(0)]
+        );
+        let neg_bools = bools.neg().expect("neg");
+        assert_eq!(
+            neg_bools.column("c").expect("c").values(),
+            &[Scalar::Bool(false), Scalar::Bool(true)]
         );
     }
 

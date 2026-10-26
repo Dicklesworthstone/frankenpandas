@@ -28125,6 +28125,10 @@ _0L1NU_CASES = {
     "s.loc[[]]": lambda s, d: s.loc[[]],
     "s[[]]": lambda s, d: s[[]],
     "s.iloc[np int []]": lambda s, d: s.iloc[np.array([], dtype=np.int64)],
+    "s.loc[np int []]": lambda s, d: s.loc[np.array([], dtype=np.int64)],
+    "s[np int []]": lambda s, d: s[np.array([], dtype=np.int64)],
+    "s.loc[np float []]": lambda s, d: s.loc[np.array([], dtype=np.float64)],
+    "s[np float []]": lambda s, d: s[np.array([], dtype=np.float64)],
     "d.iloc[[]]": lambda s, d: d.iloc[[]],
     "d.loc[[]] (int64 index)": lambda s, d: d.loc[[]],
     "d.loc[[], 'a']": lambda s, d: d.loc[[], "a"],
@@ -45787,5 +45791,87 @@ def test_object_column_one_float_true_dedup_like_pandas_bz15u(case: str) -> None
     # Python hashes 1, 1.0, and True to the same bucket in object columns
     # (br-frankenpandas-bz15u).
     _more9_check(_BZ15U_OBJECT_CASES, case)
+
+
+_0WNUI_TIMEDELTA_CASES = {
+    "default s unit": lambda m: (
+        m.Timedelta(seconds=5).unit,
+        str(m.Timedelta(seconds=5).asm8.dtype),
+        int(m.Timedelta(seconds=5).asm8.view("int64")),
+        str(m.Timedelta(seconds=5).to_timedelta64().dtype),
+        str(m.Timedelta(seconds=5).to_numpy().dtype),
+    ),
+    "unit=ms": lambda m: (
+        m.Timedelta(500, unit="ms").unit,
+        str(m.Timedelta(500, unit="ms").asm8.dtype),
+        int(m.Timedelta(500, unit="ms").asm8.view("int64")),
+    ),
+    "unit=W -> s": lambda m: (
+        m.Timedelta(2, unit="W").unit,
+        str(m.Timedelta(2, unit="W").asm8.dtype),
+        int(m.Timedelta(2, unit="W").asm8.view("int64")),
+    ),
+    "unit=us": lambda m: (
+        m.Timedelta(7, unit="us").unit,
+        str(m.Timedelta(7, unit="us").asm8.dtype),
+        int(m.Timedelta(7, unit="us").asm8.view("int64")),
+    ),
+    "unit=ns": lambda m: (
+        m.Timedelta(7, unit="ns").unit,
+        str(m.Timedelta(7, unit="ns").asm8.dtype),
+        int(m.Timedelta(7, unit="ns").asm8.view("int64")),
+    ),
+    "stdlib timedelta -> us": lambda m: (
+        m.Timedelta(datetime.timedelta(days=1, seconds=2)).unit,
+        str(m.Timedelta(datetime.timedelta(days=1, seconds=2)).asm8.dtype),
+    ),
+    "np.timedelta64(3, 's') -> s": lambda m: (
+        m.Timedelta(np.timedelta64(3, "s")).unit,
+        str(m.Timedelta(np.timedelta64(3, "s")).asm8.dtype),
+    ),
+    "np.timedelta64(2, 'D') -> s": lambda m: (
+        m.Timedelta(np.timedelta64(2, "D")).unit,
+        str(m.Timedelta(np.timedelta64(2, "D")).asm8.dtype),
+    ),
+    "string '1 days' -> ns": lambda m: (
+        m.Timedelta("1 days").unit,
+        str(m.Timedelta("1 days").asm8.dtype),
+    ),
+    "string '1 days 00:00:00.123' -> ms": lambda m: (
+        m.Timedelta("1 days 00:00:00.123").unit,
+        str(m.Timedelta("1 days 00:00:00.123").asm8.dtype),
+    ),
+    "as_unit ms": lambda m: (
+        m.Timedelta(seconds=5).as_unit("ms").unit,
+        str(m.Timedelta(seconds=5).as_unit("ms").asm8.dtype),
+        int(m.Timedelta(seconds=5).as_unit("ms").asm8.view("int64")),
+    ),
+    "add s + ms -> ms": lambda m: (
+        (m.Timedelta(seconds=1) + m.Timedelta(milliseconds=500)).unit,
+        str((m.Timedelta(seconds=1) + m.Timedelta(milliseconds=500)).asm8.dtype),
+    ),
+    "timestamp diff s - us -> us": lambda m: (
+        (
+            m.Timestamp("2024-01-02").as_unit("s")
+            - m.Timestamp("2024-01-01").as_unit("us")
+        ).unit,
+        str(
+            (
+                m.Timestamp("2024-01-02").as_unit("s")
+                - m.Timestamp("2024-01-01").as_unit("us")
+            ).asm8.dtype
+        ),
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_0WNUI_TIMEDELTA_CASES))
+def test_timedelta_unit_like_pandas_0wnui(case: str) -> None:
+    # Timedelta tracks its resolution unit ('s', 'ms', 'us', 'ns') across
+    # construction, as_unit, asm8/to_timedelta64/to_numpy, and arithmetic
+    # (br-frankenpandas-0wnui).
+    _more9_check(_0WNUI_TIMEDELTA_CASES, case)
+
 
 
