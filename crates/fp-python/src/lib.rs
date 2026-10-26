@@ -12971,7 +12971,9 @@ fn factorize_multiindex_level_labels(
                 l.is_missing()
                     || matches!(
                         l,
-                        IndexLabel::Datetime64(_) | IndexLabel::Timedelta64(_) | IndexLabel::Period(_)
+                        IndexLabel::Datetime64(_)
+                            | IndexLabel::Timedelta64(_)
+                            | IndexLabel::Period(_)
                     )
             });
         let replacement = if temporal {
@@ -13074,12 +13076,12 @@ fn multiindex_scalar_tuple_to_py<'py>(
             }
             let level_labels = multi.level_labels(level).unwrap_or_default();
             let width = multi.level_width(level);
-            let non_missing: Vec<&IndexLabel> = level_labels
-                .iter()
-                .filter(|l| !l.is_missing())
-                .collect();
+            let non_missing: Vec<&IndexLabel> =
+                level_labels.iter().filter(|l| !l.is_missing()).collect();
             if !non_missing.is_empty()
-                && non_missing.iter().all(|l| matches!(l, IndexLabel::Int64(_)))
+                && non_missing
+                    .iter()
+                    .all(|l| matches!(l, IndexLabel::Int64(_)))
                 && let IndexLabel::Int64(v) = label
             {
                 return numpy_scalar_of(py, &Scalar::Int64(*v), width);
@@ -31364,10 +31366,7 @@ fn is_flex_zero_div_array_operand(other: &Bound<'_, PyAny>) -> PyResult<bool> {
         return Ok(true);
     }
     if is_numpy_ndarray(other) {
-        let ndim: usize = other
-            .getattr("ndim")
-            .and_then(|n| n.extract())
-            .unwrap_or(0);
+        let ndim: usize = other.getattr("ndim").and_then(|n| n.extract()).unwrap_or(0);
         return Ok(ndim > 0);
     }
     if let Some(converted) = pandas_object_as_fp(other)? {
@@ -31460,8 +31459,7 @@ fn flex_int_zero_div(
     } else {
         col
     };
-    let out =
-        Series::new(result_name, s.inner.index().clone(), col).map_err(frame_error_to_py)?;
+    let out = Series::new(result_name, s.inner.index().clone(), col).map_err(frame_error_to_py)?;
     let out = if both_bool {
         out
     } else {
@@ -68161,9 +68159,8 @@ fn frame_multiindex_loc(
             let row = zoned_row(py, frame, frame.loc_row(&flat).map_err(loc_key_error)?)?;
             // The row is named by its key, a tuple of the levels' scalars, as
             // pandas' (it was the tuple's text, then Python scalars; 13bjo).
-            let name = py_series_name(
-                multiindex_scalar_tuple_to_py(py, multi, positions[0])?.as_any(),
-            )?;
+            let name =
+                py_series_name(multiindex_scalar_tuple_to_py(py, multi, positions[0])?.as_any())?;
             let row = Series::new(name, row.index().clone(), row.column().clone())
                 .map_err(frame_error_to_py)?;
             return Ok(Some(MultiLoc::Row(row)));
@@ -74306,8 +74303,8 @@ impl PyExpanding {
                     .agg(&str_slices)
                     .map_err(frame_error_to_py)?;
                 if str_slices.contains(&"skew") {
-                    let skew_s = expanding_skew_series(&s, self.min_periods)
-                        .map_err(frame_error_to_py)?;
+                    let skew_s =
+                        expanding_skew_series(&s, self.min_periods).map_err(frame_error_to_py)?;
                     res = res
                         .with_column("skew".to_owned(), skew_s.column().clone())
                         .map_err(frame_error_to_py)?;
@@ -74323,16 +74320,12 @@ impl PyExpanding {
                 if str_slices.contains(&"skew") {
                     for col_name in df.column_names() {
                         if let Some(col) = df.column(col_name) {
-                            let s =
-                                Series::new(col_name.as_str(), df.index().clone(), col.clone())
-                                    .map_err(frame_error_to_py)?;
+                            let s = Series::new(col_name.as_str(), df.index().clone(), col.clone())
+                                .map_err(frame_error_to_py)?;
                             let skew_s = expanding_skew_series(&s, self.min_periods)
                                 .map_err(frame_error_to_py)?;
                             res = res
-                                .with_column(
-                                    format!("{col_name}_skew"),
-                                    skew_s.column().clone(),
-                                )
+                                .with_column(format!("{col_name}_skew"), skew_s.column().clone())
                                 .map_err(frame_error_to_py)?;
                         }
                     }
@@ -98007,10 +98000,7 @@ fn interval_endpoints(values: &Bound<'_, PyAny>) -> PyResult<(Vec<f64>, &'static
         && let Some(column) = py_array_like_column(values.py(), values)?
     {
         if let Some(data) = column.as_i64_slice() {
-            return Ok((
-                data.iter().map(|&value| value as f64).collect(),
-                array_sub,
-            ));
+            return Ok((data.iter().map(|&value| value as f64).collect(), array_sub));
         }
         if let Some(data) = column.as_f64_slice()
             && !data.iter().any(|value| value.is_nan())
@@ -113107,14 +113097,10 @@ mod tests {
             let arr_i = PyList::new(py, [1_i64, 2]).expect("list"); // ubs:ignore — test fixture
             let arr_s = PyList::new(py, ["a", "b"]).expect("list"); // ubs:ignore — test fixture
             let arrays = PyList::new(py, [&arr_i, &arr_s]).expect("arrays"); // ubs:ignore — test fixture
-            let mi =
-                PyMultiIndex::from_arrays(&mi_cls, py, arrays.as_any(), None).expect("mi"); // ubs:ignore — test assertion
+            let mi = PyMultiIndex::from_arrays(&mi_cls, py, arrays.as_any(), None).expect("mi"); // ubs:ignore — test assertion
             let idx0 = 0_isize.into_pyobject(py).expect("0").into_any(); // ubs:ignore — test fixture
             let item0 = mi.__getitem__(py, &idx0).expect("mi[0]"); // ubs:ignore — test assertion
-            let tup0 = item0
-                .bind(py)
-                .cast::<PyTuple>()
-                .expect("tuple"); // ubs:ignore — test assertion
+            let tup0 = item0.bind(py).cast::<PyTuple>().expect("tuple"); // ubs:ignore — test assertion
             assert_eq!(
                 tup0.get_item(0)
                     .expect("0") // ubs:ignore — test assertion
@@ -113147,8 +113133,8 @@ mod tests {
             .expect("text_none"); // ubs:ignore — test fixture
             let ints3 = PyList::new(py, [1_i64, 2, 3]).expect("ints3"); // ubs:ignore — test fixture
             let arr_none = PyList::new(py, [&text_none, &ints3]).expect("arr_none"); // ubs:ignore — test fixture
-            let mi_none = PyMultiIndex::from_arrays(&mi_cls, py, arr_none.as_any(), None)
-                .expect("mi_none"); // ubs:ignore — test assertion
+            let mi_none =
+                PyMultiIndex::from_arrays(&mi_cls, py, arr_none.as_any(), None).expect("mi_none"); // ubs:ignore — test assertion
             assert_eq!(mi_none.inner.codes()[0], &[-1, 1, 0]);
             let mixed_obj = np
                 .call_method1(
@@ -113167,10 +113153,9 @@ mod tests {
                     ),
                 )
                 .expect("mixed_obj"); // ubs:ignore — test fixture
-            let arr_mixed =
-                PyList::new(py, [&mixed_obj, ints3.as_any()]).expect("arr_mixed"); // ubs:ignore — test fixture
-            let mi_mixed = PyMultiIndex::from_arrays(&mi_cls, py, arr_mixed.as_any(), None)
-                .expect("mi_mixed"); // ubs:ignore — test assertion
+            let arr_mixed = PyList::new(py, [&mixed_obj, ints3.as_any()]).expect("arr_mixed"); // ubs:ignore — test fixture
+            let mi_mixed =
+                PyMultiIndex::from_arrays(&mi_cls, py, arr_mixed.as_any(), None).expect("mi_mixed"); // ubs:ignore — test assertion
             assert_eq!(mi_mixed.inner.codes()[0], &[0, 0, 1]);
             assert_eq!(mi_mixed.inner.levels()[0].values().len(), 2);
 
@@ -113182,8 +113167,8 @@ mod tests {
                     (PyList::new(py, [0_i64, 10, 20]).expect("u8"), "uint8"), // ubs:ignore — test fixture
                 )
                 .expect("u8_arr"); // ubs:ignore — test fixture
-            let iv_u8 = PyIntervalIndex::from_breaks(&iv_cls, &u8_arr, Some("right"), None)
-                .expect("iv_u8"); // ubs:ignore — test assertion
+            let iv_u8 =
+                PyIntervalIndex::from_breaks(&iv_cls, &u8_arr, Some("right"), None).expect("iv_u8"); // ubs:ignore — test assertion
             assert_eq!(iv_u8.dtype().__repr__(), "interval[uint64, right]");
             assert_eq!(iv_u8.left().inner.width(), Some(NumericWidth::UInt64));
             let one_float = PyList::new(py, [1.5_f64]).expect("one_float"); // ubs:ignore — test fixture
@@ -113198,16 +113183,7 @@ mod tests {
 
             // ndemb: expanding().skew() bit-for-bit parity with pandas roll_skew.
             let vals = vec![
-                1.0,
-                -2.5,
-                3.25,
-                0.0,
-                100.5,
-                -50.125,
-                7.75,
-                7.75,
-                -0.001,
-                42.0,
+                1.0, -2.5, 3.25, 0.0, 100.5, -50.125, 7.75, 7.75, -0.001, 42.0,
             ];
             let s_skew = Series::new(
                 "s",

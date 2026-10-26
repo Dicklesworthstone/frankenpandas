@@ -92044,18 +92044,14 @@ impl DataFrame {
             .map(|&c| self.columns.get(c).and_then(Column::width))
             .collect();
         let finish = |multiindex: fp_index::MultiIndex| {
-            zones
-                .iter()
-                .zip(&widths)
-                .enumerate()
-                .fold(
-                    multiindex.set_names(names),
-                    |multiindex, (level, (zone, &width))| {
-                        multiindex
-                            .with_level_zone(level, zone.as_deref())
-                            .with_level_width(level, width)
-                    },
-                )
+            zones.iter().zip(&widths).enumerate().fold(
+                multiindex.set_names(names),
+                |multiindex, (level, (zone, &width))| {
+                    multiindex
+                        .with_level_zone(level, zone.as_deref())
+                        .with_level_width(level, width)
+                },
+            )
         };
         // Every key an all-valid text or int64 column: coded levels, no
         // label made - each row's label was cloned out of its column, then
