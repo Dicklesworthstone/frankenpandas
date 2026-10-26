@@ -27914,13 +27914,22 @@ fn classify_frame_error(err: &fp_frame::FrameError) -> (PyErrorKind, String) {
                 || msg == "Categorical categories must be unique"
                 || msg == "Categorical categories cannot be null"
                 // pandas' refusal of a tz_localize shift onto a DST gap (br-frankenpandas-6pqf3).
-                || msg.starts_with("The provided timedelta will relocalize on a nonexistent time: ");
+                || msg.starts_with("The provided timedelta will relocalize on a nonexistent time: ")
+                || msg == "iLocation based boolean indexing on an integer type is not available"
+                || msg == "iLocation based boolean indexing cannot use an indexable as a mask"
+                || msg == "No objects to concatenate"
+                || msg.starts_with("Unalignable boolean Series provided as indexer");
             let text = if pandas_verbatim {
                 msg.clone()
             } else {
                 format!("compatibility gate rejected operation: {msg}")
             };
-            if lower.contains("not implemented") || lower.contains("unimplemented") {
+            if lower.contains("not implemented")
+                || lower.contains("unimplemented")
+                || lower.contains(
+                    "ilocation based boolean indexing on an integer type is not available",
+                )
+            {
                 (PyErrorKind::NotImplemented, text)
             } else if (lower.contains("column") && lower.contains("not found"))
                 || lower.contains("key not found")
@@ -28007,6 +28016,14 @@ fn frame_error_to_py(err: fp_frame::FrameError) -> PyErr {
         && msg == "Reindexing only valid with uniquely valued Index objects"
     {
         return InvalidIndexError::new_err(msg.clone());
+    }
+    if let fp_frame::FrameError::CompatibilityRejected(msg) = &err
+        && msg.starts_with("Unalignable boolean Series provided as indexer")
+    {
+        return IndexingError::new_err(msg.clone());
+    }
+    if let fp_frame::FrameError::Column(fp_columnar::ColumnError::IntCastingNaN) = &err {
+        return IntCastingNaNError::new_err(err.to_string());
     }
     let (kind, msg) = classify_frame_error(&err);
     match kind {
@@ -36430,7 +36447,7 @@ impl PySeries {
             let s = self
                 .inner
                 .loc_bool_series(&series_mask.inner)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+                .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
         // An empty list is no mask but no labels (gzune).
@@ -45297,7 +45314,7 @@ impl PySeriesILoc {
             let s = self
                 .inner
                 .iloc_bool_series(&series_mask.inner)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?;
+                .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PySeries { inner: s })?.into_any());
         }
         if let Some(mask) = bool_mask_key(key) {
@@ -45365,7 +45382,7 @@ impl PySeriesLoc {
             return series(
                 self.inner
                     .loc_bool_series(&mask.inner)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()))?,
+                    .map_err(frame_error_to_py)?,
             );
         }
         // An empty list is no mask but no labels (gzune).
@@ -51776,7 +51793,7 @@ impl PyDataFrame {
             let frame = self
                 .inner
                 .filter_rows(&mask.inner)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
         }
         // `df['b':'d']` -> rows by label (see slice_is_positional)
@@ -63387,9 +63404,7 @@ impl PyDataFrameILoc {
                 } else if let Ok(series_mask) = row_key.extract::<PyRef<'_, PySeries>>() {
                     let sub = col_series
                         .iloc_bool_series(&series_mask.inner)
-                        .map_err(|e| {
-                            PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string())
-                        })?;
+                        .map_err(frame_error_to_py)?;
                     return Ok(Py::new(py, PySeries { inner: sub })?.into_any());
                 }
             }
@@ -63490,7 +63505,7 @@ impl PyDataFrameILoc {
             let frame = self
                 .inner
                 .iloc_bool_series(&series_mask.inner)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                .map_err(frame_error_to_py)?;
             return Ok(Py::new(py, PyDataFrame { inner: frame })?.into_any());
         }
 
@@ -64194,7 +64209,7 @@ fn resolve_loc_rows(df: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<LocRows>
         return df
             .loc_bool_series(&mask.inner)
             .map(LocRows::frame)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIndexError, _>(e.to_string()));
+            .map_err(frame_error_to_py);
     }
     if key.cast::<PyList>().is_ok() || key.getattr("tolist").is_ok() {
         if let Some(mask) = bool_mask_key(key) {

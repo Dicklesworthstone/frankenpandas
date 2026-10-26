@@ -561,11 +561,7 @@ print(json.dumps(out))
         vec![Scalar::Float64(1.0), Scalar::Null(NullKind::NaN)],
     )
     .unwrap();
-    let (c, cls) = classify_frame_error_category(
-        &s_nan
-            .astype_width(fp_types::NumericWidth::Int32, false)
-            .unwrap_err(),
-    );
+    let (c, cls) = classify_frame_error_category(&s_nan.astype(DType::Int64).unwrap_err());
     assert_case("series_astype_nan_to_int64", c, cls);
     let s_bad_dt = Series::from_values(
         "s",
@@ -573,16 +569,7 @@ print(json.dumps(out))
         vec![Scalar::Utf8("not-a-date".into())],
     )
     .unwrap();
-    let (c, cls) = classify_frame_error_category(
-        &fp_frame::to_datetime_with_options(
-            &s_bad_dt,
-            fp_frame::ToDatetimeOptions {
-                errors: fp_frame::DatetimeErrors::Raise,
-                ..fp_frame::ToDatetimeOptions::default()
-            },
-        )
-        .unwrap_err(),
-    );
+    let (c, cls) = classify_frame_error_category(&fp_frame::to_datetime(&s_bad_dt).unwrap_err());
     assert_case("to_datetime_invalid_str_raise", c, cls);
     let s_bad_td = Series::from_values(
         "s",
@@ -624,8 +611,7 @@ print(json.dumps(out))
     let (c, cls) =
         classify_frame_error_category(&s_dt_utc.dt().tz_localize(Some("UTC")).unwrap_err());
     assert_case("series_dt_tz_localize_already_aware", c, cls);
-    // Document known parity gap for s_str.mean() returning Ok(NaN) instead of TypeError, and verify s_str.median()/var()/std()
-    let (c, cls) = classify_frame_error_category(&s_str.median().unwrap_err());
+    let (c, cls) = classify_frame_error_category(&s_str.mean().unwrap_err());
     assert_case("series_mean_utf8", c, cls);
     let (c, cls) = classify_frame_error_category(&s_str.var().unwrap_err());
     assert_case("series_var_utf8", c, cls);
@@ -675,18 +661,40 @@ print(json.dumps(out))
     .unwrap();
     let (c, cls) = classify_frame_error_category(&s_3.iloc_bool(&[true, false]).unwrap_err());
     assert_case("series_bool_mask_wrong_length", c, cls);
-    // Verify pandas IndexingError classification & document known parity gaps (br-frankenpandas-747ax, br-frankenpandas-qs8b6)
-    assert_case(
-        "series_bool_series_unalignable",
-        Cat::Index,
-        "IndexingError",
-    );
-    assert_case("df_bool_series_unalignable", Cat::Index, "IndexingError");
-    assert_case(
-        "series_iloc_bool_series_int_index",
-        Cat::Unsupported,
-        "NotImplementedError",
-    );
+    let s_abc = Series::from_values(
+        "s",
+        vec!["a".into(), "b".into(), "c".into()],
+        vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+    )
+    .unwrap();
+    let df_abc = DataFrame::new_with_column_order(
+        Index::new(vec!["a".into(), "b".into(), "c".into()]),
+        BTreeMap::from([(
+            "a".to_owned(),
+            Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)])
+                .unwrap(),
+        )]),
+        vec!["a".to_owned()],
+    )
+    .unwrap();
+    let mask_az = Series::from_values(
+        "m",
+        vec!["a".into(), "z".into()],
+        vec![Scalar::Bool(true), Scalar::Bool(false)],
+    )
+    .unwrap();
+    let (c, cls) = classify_frame_error_category(&s_abc.filter(&mask_az).unwrap_err());
+    assert_case("series_bool_series_unalignable", c, cls);
+    let (c, cls) = classify_frame_error_category(&df_abc.loc_bool_series(&mask_az).unwrap_err());
+    assert_case("df_bool_series_unalignable", c, cls);
+    let mask_3 = Series::from_values(
+        "m",
+        vec![0_i64.into(), 1_i64.into(), 2_i64.into()],
+        vec![Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(true)],
+    )
+    .unwrap();
+    let (c, cls) = classify_frame_error_category(&s_3.iloc_bool_series(&mask_3).unwrap_err());
+    assert_case("series_iloc_bool_series_int_index", c, cls);
 
     // Family 4: Merge validate & join errors (MergeError / ValueError)
     let df_dup_l = DataFrame::from_dict(
@@ -921,12 +929,18 @@ print(json.dumps(out))
     assert_case("df_empty_idxmin", c, cls);
     let (c, cls) = classify_frame_error_category(&df_empty.idxmax().unwrap_err());
     assert_case("df_empty_idxmax", c, cls);
-    // Document known parity gaps for concat_series(&[]) / concat_dataframes(&[]) and s.agg(&[]) -> ValueError('No objects to concatenate') (br-frankenpandas-pv3ll)
-    let (c, cls) = classify_frame_error_category(
-        &fp_frame::concat_dataframes_with_keys(&[&df_ab], &[]).unwrap_err(),
-    );
+    let (c, cls) = classify_frame_error_category(&fp_frame::concat_series(&[]).unwrap_err());
     assert_case("concat_empty_list", c, cls);
-    assert_case("series_agg_empty_list", Cat::Value, "ValueError");
+    let (c, cls) = classify_frame_error_category(&fp_frame::concat_dataframes(&[]).unwrap_err());
+    assert_case("concat_empty_list", c, cls);
+    let (c, cls) = classify_frame_error_category(&s_3.agg(&[]).unwrap_err());
+    assert_case("series_agg_empty_list", c, cls);
+    let (c, cls) = classify_frame_error_category(
+        &df_ab
+            .agg(&std::collections::HashMap::new())
+            .unwrap_err(),
+    );
+    assert_case("series_agg_empty_list", c, cls);
 
     // Family 8: read_csv / IO malformed input & missing files (ParserError / FileNotFoundError / ValueError)
     let (c, cls) = classify_io_error_category(&read_csv_str("a,b\n1,2\n1,2,3\n").unwrap_err());

@@ -4402,6 +4402,7 @@ pub fn classify_error_message_category(msg: &str) -> (ExpectedErrorCategory, &'s
     }
     if lower.contains("not implemented")
         || lower.contains("unimplemented")
+        || lower.contains("ilocation based boolean indexing on an integer type is not available")
         || (lower.contains("not supported") && lower.contains("pivot_table"))
     {
         return (ExpectedErrorCategory::Unsupported, "NotImplementedError");

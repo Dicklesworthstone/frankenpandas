@@ -97740,6 +97740,11 @@ impl DataFrame {
         &self,
         funcs: &std::collections::HashMap<String, Vec<String>>,
     ) -> Result<Self, FrameError> {
+        if funcs.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "No objects to concatenate".to_owned(),
+            ));
+        }
         // Collect all unique function names in insertion order
         let mut all_funcs: Vec<String> = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -97749,6 +97754,11 @@ impl DataFrame {
                     all_funcs.push(f.clone());
                 }
             }
+        }
+        if all_funcs.is_empty() {
+            return Err(FrameError::CompatibilityRejected(
+                "No objects to concatenate".to_owned(),
+            ));
         }
 
         let mut result_cols = BTreeMap::new();
@@ -130526,9 +130536,11 @@ mod tests {
     #[test]
     fn concat_series_empty_input() {
         use super::concat_series;
-        let result = concat_series(&[]).expect("empty concat");
-        assert_eq!(result.len(), 0);
-        assert!(result.is_empty());
+        let err = concat_series(&[]).expect_err("empty concat must raise");
+        assert!(
+            err.to_string().contains("No objects to concatenate"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -135198,9 +135210,11 @@ mod tests {
 
     #[test]
     fn concat_dataframes_empty_list() {
-        let result = concat_dataframes(&[]).unwrap();
-        assert!(result.is_empty());
-        assert_eq!(result.num_columns(), 0);
+        let err = concat_dataframes(&[]).expect_err("empty concat must raise");
+        assert!(
+            err.to_string().contains("No objects to concatenate"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -142384,7 +142398,8 @@ mod tests {
 
     #[test]
     fn series_loc_bool_series_partial_mask_alignment() {
-        // Mask has different labels - alignment should handle mismatches
+        // Mask is missing label "b" from s - pandas raises IndexingError
+        // ("Unalignable boolean Series provided as indexer") (br-frankenpandas-747ax).
         let s = Series::from_values(
             "vals",
             vec![
@@ -142396,7 +142411,6 @@ mod tests {
         )
         .unwrap();
 
-        // Mask has "a" and "c" but not "b" - "b" should be treated as False
         let mask = Series::from_values(
             "mask",
             vec![IndexLabel::from("a"), IndexLabel::from("c")],
@@ -142404,8 +142418,12 @@ mod tests {
         )
         .unwrap();
 
-        let out = s.loc_bool_series(&mask).unwrap();
-        assert_eq!(out.len(), 2);
+        let err = s.loc_bool_series(&mask).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Unalignable boolean Series provided as indexer"),
+            "unexpected error: {err}"
+        );
     }
 
     // -------- DataFrame loc_bool_series / iloc_bool_series tests --------
@@ -219031,7 +219049,14 @@ mod tests {
             ],
         )
         .unwrap();
-        let result = super::to_datetime(&s).unwrap();
+        let result = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                errors: super::DatetimeErrors::Coerce,
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
         assert_eq!(result.values()[0], datetime64_scalar("2024-01-15 10:30:00"));
         assert!(result.values()[1].is_missing());
         assert_eq!(result.values()[2], datetime64_scalar("2024-01-16 11:45:00"));
@@ -219101,14 +219126,26 @@ mod tests {
             );
         }
 
-        // Non-dates must still fall through to NaT (no over-eager matching).
+        // Non-dates must raise under default errors="raise" and fall through to
+        // NaT under errors="coerce" (no over-eager matching).
         for bad in ["20241332", "not a date", "10:30"] {
             let s = Series::from_values("d", vec![0_i64.into()], vec![Scalar::Utf8(bad.into())])
                 .unwrap();
-            let result = super::to_datetime(&s).unwrap();
+            assert!(
+                super::to_datetime(&s).is_err(),
+                "to_datetime({bad:?}) must raise under default errors=Raise"
+            );
+            let result = super::to_datetime_with_options(
+                &s,
+                super::ToDatetimeOptions {
+                    errors: super::DatetimeErrors::Coerce,
+                    ..super::ToDatetimeOptions::default()
+                },
+            )
+            .unwrap();
             assert!(
                 result.values()[0].is_missing(),
-                "to_datetime({bad:?}) should be NaT, got {:?}",
+                "to_datetime({bad:?}, errors=Coerce) should be NaT, got {:?}",
                 result.values()[0]
             );
         }
@@ -219936,7 +219973,15 @@ mod tests {
             vec![Scalar::Utf8("not a date".into())],
         )
         .unwrap();
-        let result = super::to_datetime(&s).unwrap();
+        assert!(super::to_datetime(&s).is_err());
+        let result = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                errors: super::DatetimeErrors::Coerce,
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
         assert!(result.values()[0].is_missing());
     }
 
@@ -219970,7 +220015,16 @@ mod tests {
         let ints = |n: usize| (0..n as i64).map(IndexLabel::Int64).collect::<Vec<_>>();
         let run = |vals: Vec<Scalar>| {
             let s = Series::from_values("ts", ints(vals.len()), vals).unwrap();
-            super::to_datetime(&s).unwrap().values().to_vec()
+            super::to_datetime_with_options(
+                &s,
+                super::ToDatetimeOptions {
+                    errors: super::DatetimeErrors::Coerce,
+                    ..super::ToDatetimeOptions::default()
+                },
+            )
+            .unwrap()
+            .values()
+            .to_vec()
         };
         let utf8 = |s: &str| Scalar::Utf8(s.to_owned());
 
@@ -220136,7 +220190,15 @@ mod tests {
             ],
         )
         .unwrap();
-        let result = super::to_datetime(&s).unwrap();
+        assert!(super::to_datetime(&s).is_err());
+        let result = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                errors: super::DatetimeErrors::Coerce,
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
         assert_eq!(result.values()[0], datetime64_scalar("2024-01-01 00:00:00"));
         assert!(result.values()[1].is_missing());
         assert!(result.values()[2].is_missing());
@@ -220169,7 +220231,11 @@ mod tests {
             ],
         )
         .unwrap();
-        let result = super::to_datetime(&s).unwrap();
+        let coerce = super::ToDatetimeOptions {
+            errors: super::DatetimeErrors::Coerce,
+            ..super::ToDatetimeOptions::default()
+        };
+        let result = super::to_datetime_with_options(&s, coerce).unwrap();
 
         assert!(
             !result.values()[0].is_missing(),
@@ -220203,7 +220269,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let flipped_result = super::to_datetime(&flipped).unwrap();
+        let flipped_result = super::to_datetime_with_options(&flipped, coerce).unwrap();
         assert!(
             !flipped_result.values()[0].is_missing(),
             "the date-only value is now element 0 and defines the format"
@@ -220247,7 +220313,14 @@ mod tests {
             ],
         )
         .unwrap();
-        let result = super::to_datetime(&s).unwrap();
+        let result = super::to_datetime_with_options(
+            &s,
+            super::ToDatetimeOptions {
+                errors: super::DatetimeErrors::Coerce,
+                ..super::ToDatetimeOptions::default()
+            },
+        )
+        .unwrap();
         assert_eq!(result.values()[0], datetime64_scalar("2024-01-15 10:30:00"));
         assert!(result.values()[1].is_missing());
     }
