@@ -671,8 +671,12 @@ print(json.dumps(out))
         Index::new(vec!["a".into(), "b".into(), "c".into()]),
         BTreeMap::from([(
             "a".to_owned(),
-            Column::from_values(vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)])
-                .unwrap(),
+            Column::from_values(vec![
+                Scalar::Int64(10),
+                Scalar::Int64(20),
+                Scalar::Int64(30),
+            ])
+            .unwrap(),
         )]),
         vec!["a".to_owned()],
     )
@@ -935,11 +939,8 @@ print(json.dumps(out))
     assert_case("concat_empty_list", c, cls);
     let (c, cls) = classify_frame_error_category(&s_3.agg(&[]).unwrap_err());
     assert_case("series_agg_empty_list", c, cls);
-    let (c, cls) = classify_frame_error_category(
-        &df_ab
-            .agg(&std::collections::HashMap::new())
-            .unwrap_err(),
-    );
+    let (c, cls) =
+        classify_frame_error_category(&df_ab.agg(&std::collections::HashMap::new()).unwrap_err());
     assert_case("series_agg_empty_list", c, cls);
 
     // Family 8: read_csv / IO malformed input & missing files (ParserError / FileNotFoundError / ValueError)
