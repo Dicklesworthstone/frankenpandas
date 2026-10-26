@@ -21817,7 +21817,7 @@ impl PyMultiIndex {
     fn fillna(&self, value: &Bound<'_, PyAny>) -> PyResult<Self> {
         let label = py_to_index_label(value)?;
         Ok(Self {
-            inner: self.inner.fillna(&label),
+            inner: self.inner.fillna(&label).map_err(index_error_to_py)?,
         })
     }
 
@@ -27999,6 +27999,11 @@ fn index_error_to_py(err: fp_index::IndexError) -> PyErr {
         }
         fp_index::IndexError::KeyError(msg) => PyErr::new::<pyo3::exceptions::PyKeyError, _>(msg),
         fp_index::IndexError::TypeError(msg) => PyErr::new::<pyo3::exceptions::PyTypeError, _>(msg),
+        fp_index::IndexError::InvalidArgument(msg)
+            if msg == "isna is not defined for MultiIndex" =>
+        {
+            PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(msg)
+        }
         other => PyErr::new::<pyo3::exceptions::PyValueError, _>(other.to_string()),
     }
 }
