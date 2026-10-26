@@ -548,6 +548,8 @@ res = {
     "factorize_uniques": [[str(a), int(b)] for a, b in uniques_f.tolist()],
     "vc": [[[str(k[0]), int(k[1])], int(v)] for k, v in vc.items()],
     "dropna_any": [[str(a), float(b)] for a, b in mi_nan.dropna(how="any").tolist()],
+    "to_flat_index": [[str(a), int(b)] for a, b in mi.to_flat_index().tolist()],
+    "to_flat_index_dtype": str(mi.to_flat_index().dtype),
 }
 print(json.dumps(res))
 "#;
@@ -839,7 +841,34 @@ print(json.dumps(res))
     assert_eq!(mi.to_frame(), mi.to_list());
     assert_eq!(mi.to_series().len(), 4);
     assert_eq!(mi.format().len(), 4);
-    // Flat string projection (tracked vs tuple-Index in br-frankenpandas-9frxo)
+    // 9frxo: MultiIndex::to_flat_index(()) / to_tuple_index() returns object Index of tuples matching pandas
+    let flat_tuples = mi.to_flat_index(());
+    assert_eq!(flat_tuples, mi.to_tuple_index());
+    assert_eq!(
+        flat_tuples.dtype(),
+        oracle["to_flat_index_dtype"].as_str().unwrap()
+    );
+    let got_flat_tuples: Vec<(String, i64)> = flat_tuples
+        .labels()
+        .iter()
+        .map(|l| {
+            let tup = l.as_tuple().expect("tuple label");
+            let s = match &tup[0] {
+                IndexLabel::Utf8(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let n = match &tup[1] {
+                IndexLabel::Int64(v) => *v,
+                other => panic!("expected Int64 in tuple, got {other:?}"),
+            };
+            (s, n)
+        })
+        .collect();
+    assert_eq!(
+        got_flat_tuples,
+        parse_tuples_str_i64(&oracle["to_flat_index"])
+    );
+    // Flat string projection with explicit separator still supported
     assert_eq!(
         mi.to_flat_index("|").labels(),
         &[
@@ -1086,6 +1115,7 @@ sl_mi, sl_ord = mi_unsorted.sortlevel()
 nu_indexer, nu_missing = mi_dup.get_indexer_non_unique(target)
 re_mi, re_pos = mi.reindex(target)
 gb = pd.Series(range(len(mi_dup)), index=mi_dup).groupby(level=[0, 1]).apply(list)
+gb_vals = mi_dup.groupby([10, 20, 10, 20])
 
 res = {
     "min": [str(mi_unsorted.min()[0]), int(mi_unsorted.min()[1])],
@@ -1124,16 +1154,24 @@ res = {
     "truncate": [[str(a), int(b)] for a, b in mi.truncate(before="a", after="a").tolist()],
     "searchsorted_left": [int(x) for x in mi.searchsorted(pd.MultiIndex.from_tuples([("a", 2), ("b", 1)])._values, side="left")],
     "searchsorted_right": [int(x) for x in mi.searchsorted(pd.MultiIndex.from_tuples([("a", 2), ("b", 1)])._values, side="right")],
-    "union": [[str(a), int(b)] for a, b in mi.union(mi_other, sort=False).tolist()],
+    "union": [[str(a), int(b)] for a, b in mi.union(mi_other).tolist()],
+    "union_unsorted_default": [[str(a), int(b)] for a, b in mi_unsorted.union(mi_other).tolist()],
+    "union_unsorted_false": [[str(a), int(b)] for a, b in mi_unsorted.union(mi_other, sort=False).tolist()],
     "intersection": [[str(a), int(b)] for a, b in mi.intersection(mi_other, sort=False).tolist()],
-    "difference": [[str(a), int(b)] for a, b in mi.difference(mi_other, sort=False).tolist()],
-    "symdiff": [[str(a), int(b)] for a, b in mi.symmetric_difference(mi_other, sort=False).tolist()],
+    "difference": [[str(a), int(b)] for a, b in mi.difference(mi_other).tolist()],
+    "diff_unsorted_default": [[str(a), int(b)] for a, b in mi_unsorted.difference(mi_other).tolist()],
+    "diff_unsorted_false": [[str(a), int(b)] for a, b in mi_unsorted.difference(mi_other, sort=False).tolist()],
+    "symdiff": [[str(a), int(b)] for a, b in mi.symmetric_difference(mi_other).tolist()],
+    "symdiff_unsorted_default": [[str(a), int(b)] for a, b in mi_unsorted.symmetric_difference(mi_other).tolist()],
+    "symdiff_unsorted_false": [[str(a), int(b)] for a, b in mi_unsorted.symmetric_difference(mi_other, sort=False).tolist()],
     "join_inner": [[str(a), int(b)] for a, b in mi.join(mi_other, how="inner").tolist()],
     "join_outer": [[str(a), int(b)] for a, b in mi.join(mi_other, how="outer").tolist()],
     "join_left": [[str(a), int(b)] for a, b in mi.join(mi_other, how="left").tolist()],
     "join_right": [[str(a), int(b)] for a, b in mi.join(mi_other, how="right").tolist()],
     "gb_b2": [int(x) for x in gb[("b", 2)]],
     "gb_a1": [int(x) for x in gb[("a", 1)]],
+    "gb_vals_10": [[str(a), int(b)] for a, b in gb_vals[10].tolist()],
+    "gb_vals_20": [[str(a), int(b)] for a, b in gb_vals[20].tolist()],
 }
 print(json.dumps(res, default=int))
 "#;
@@ -1427,6 +1465,39 @@ print(json.dumps(res, default=int))
         tuples_str_i64(&mi.symmetric_difference(&mi_other).unwrap()),
         parse_tuples_str_i64(&oracle["symdiff"])
     );
+    // 9cj5a: MultiIndex union, difference, symmetric_difference default to sort=None (sorted) vs sort=Some(false)
+    assert_eq!(
+        tuples_str_i64(&mi_unsorted.union(&mi_other).unwrap()),
+        parse_tuples_str_i64(&oracle["union_unsorted_default"])
+    );
+    assert_eq!(
+        tuples_str_i64(&mi_unsorted.union_sorted(&mi_other, Some(false)).unwrap()),
+        parse_tuples_str_i64(&oracle["union_unsorted_false"])
+    );
+    assert_eq!(
+        tuples_str_i64(&mi_unsorted.difference(&mi_other).unwrap()),
+        parse_tuples_str_i64(&oracle["diff_unsorted_default"])
+    );
+    assert_eq!(
+        tuples_str_i64(
+            &mi_unsorted
+                .difference_sorted(&mi_other, Some(false))
+                .unwrap()
+        ),
+        parse_tuples_str_i64(&oracle["diff_unsorted_false"])
+    );
+    assert_eq!(
+        tuples_str_i64(&mi_unsorted.symmetric_difference(&mi_other).unwrap()),
+        parse_tuples_str_i64(&oracle["symdiff_unsorted_default"])
+    );
+    assert_eq!(
+        tuples_str_i64(
+            &mi_unsorted
+                .symmetric_difference_sorted(&mi_other, Some(false))
+                .unwrap()
+        ),
+        parse_tuples_str_i64(&oracle["symdiff_unsorted_false"])
+    );
     assert_eq!(
         tuples_str_i64(&mi.join(&mi_other, "inner").unwrap()),
         parse_tuples_str_i64(&oracle["join_inner"])
@@ -1444,7 +1515,7 @@ print(json.dumps(res, default=int))
         parse_tuples_str_i64(&oracle["join_right"])
     );
 
-    let gb = mi_dup.groupby();
+    let gb = mi_dup.groupby_positions();
     assert_eq!(
         gb[&vec![IndexLabel::Utf8("b".to_owned()), IndexLabel::Int64(2)]],
         parse_usize_vec(&oracle["gb_b2"])
@@ -1452,6 +1523,23 @@ print(json.dumps(res, default=int))
     assert_eq!(
         gb[&vec![IndexLabel::Utf8("a".to_owned()), IndexLabel::Int64(1)]],
         parse_usize_vec(&oracle["gb_a1"])
+    );
+    // jiuhh: MultiIndex::groupby(&values) groups self tuples by external values array
+    let gb_vals = mi_dup
+        .groupby(&[
+            IndexLabel::Int64(10),
+            IndexLabel::Int64(20),
+            IndexLabel::Int64(10),
+            IndexLabel::Int64(20),
+        ])
+        .unwrap();
+    assert_eq!(
+        tuples_str_i64(&gb_vals[&IndexLabel::Int64(10)]),
+        parse_tuples_str_i64(&oracle["gb_vals_10"])
+    );
+    assert_eq!(
+        tuples_str_i64(&gb_vals[&IndexLabel::Int64(20)]),
+        parse_tuples_str_i64(&oracle["gb_vals_20"])
     );
 
     // Negative error paths matching pandas MultiIndex exceptions

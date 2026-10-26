@@ -1932,7 +1932,14 @@ print(json.dumps(out))
     assert!(sorted.all());
     assert_eq!(sorted.get_level_values(0).expect("level 0").len(), 4);
     assert!(sorted.droplevel(0).is_err());
-    assert_eq!(sorted.groupby().len(), 4);
+    assert_eq!(sorted.groupby_positions().len(), 4);
+    assert_eq!(
+        sorted
+            .groupby(sorted.to_flat_index().labels())
+            .expect("groupby")
+            .len(),
+        4
+    );
     assert_eq!(sorted.map(|lbl| lbl.clone()).len(), 4);
     assert_eq!(sorted.astype("string").expect("astype").len(), 4);
     assert_eq!(
@@ -2426,7 +2433,14 @@ print(json.dumps(out))
     assert!(regular.all());
     assert_eq!(regular.get_level_values(0).expect("lvl").len(), 4);
     assert!(regular.droplevel(0).is_err());
-    assert_eq!(regular.groupby().len(), 4);
+    assert_eq!(regular.groupby_positions().len(), 4);
+    assert_eq!(
+        regular
+            .groupby(regular.to_flat_index().labels())
+            .expect("groupby")
+            .len(),
+        4
+    );
     assert_eq!(regular.map(|l| l.clone()).len(), 4);
     assert_eq!(regular.astype("string").expect("astype").len(), 4);
     assert_eq!(
@@ -2954,7 +2968,13 @@ print(json.dumps(out))
     assert!(pi.all());
     assert_eq!(pi.get_level_values(0).expect("lvl").len(), 4);
     assert!(pi.droplevel(0).is_err());
-    assert_eq!(pi.groupby().len(), 4);
+    assert_eq!(pi.groupby_positions().len(), 4);
+    assert_eq!(
+        pi.groupby(pi.to_flat_index().labels())
+            .expect("groupby")
+            .len(),
+        4
+    );
     assert_eq!(pi.map(|l| l.clone()).len(), 4);
     assert_eq!(pi.astype("string").expect("astype").len(), 4);
     assert_eq!(

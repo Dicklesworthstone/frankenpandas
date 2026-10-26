@@ -16578,7 +16578,7 @@ impl PyIndex {
     fn union(&self, other: IndexArg, sort: Option<bool>) -> Self {
         let other = other.named_like(self.inner.name());
         let dtype = index_common_dtype(self.inner.dtype(), other.inner.dtype());
-        let result = index_in_dtype(self.inner.union(&other.inner), dtype);
+        let result = index_in_dtype(self.inner.union_with(&other.inner), dtype);
         PyIndex {
             inner: setop_sorted(result, &self.inner, &other.inner, sort),
         }
@@ -16589,7 +16589,7 @@ impl PyIndex {
         let other = other.named_like(self.inner.name());
         PyIndex {
             inner: setop_sorted(
-                self.inner.difference(&other.inner),
+                self.inner.difference_sorted(&other.inner, Some(false)),
                 &self.inner,
                 &other.inner,
                 sort,
@@ -17359,7 +17359,11 @@ impl PyIndex {
     ) -> PyResult<Self> {
         let other = other.named_like(self.inner.name());
         let dtype = index_common_dtype(self.inner.dtype(), other.inner.dtype());
-        let inner = index_in_dtype(self.inner.symmetric_difference(&other.inner), dtype);
+        let inner = index_in_dtype(
+            self.inner
+                .symmetric_difference_sorted(&other.inner, Some(false)),
+            dtype,
+        );
         let inner = setop_sorted(inner, &self.inner, &other.inner, sort);
         Ok(PyIndex {
             inner: match result_name.filter(|name| !name.is_none()) {
@@ -17393,14 +17397,14 @@ impl PyIndex {
         }
         let tolerance =
             reindex_fill_options(&self.inner, target.inner.len(), method, limit, tolerance)?;
+        if self.inner.has_duplicates() {
+            return Err(InvalidIndexError::new_err(
+                "Reindexing only valid with uniquely valued Index objects",
+            ));
+        }
         let positions = match method {
             None => self.inner.get_indexer(&target.inner),
             Some(method) => {
-                if self.inner.has_duplicates() {
-                    return Err(InvalidIndexError::new_err(
-                        "Reindexing only valid with uniquely valued Index objects",
-                    ));
-                }
                 if !(self.inner.is_monotonic_increasing() || self.inner.is_monotonic_decreasing()) {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                         "index must be monotonic increasing or decreasing",
@@ -19503,7 +19507,10 @@ impl PyDatetimeIndex {
             return Ok(Py::new(py, Self { inner })?.into_any());
         }
         let other = other.extract::<IndexArg>()?.named_like(self.inner.name());
-        let mut inner = self.inner.as_index().symmetric_difference(&other.inner);
+        let mut inner = self
+            .inner
+            .as_index()
+            .symmetric_difference_sorted(&other.inner, sort);
         if let Some(name) = result_name {
             inner = inner.set_name(name);
         }
@@ -21520,17 +21527,8 @@ impl PyMultiIndex {
     /// the left one's order; br-frankenpandas-upecu).
     #[pyo3(signature = (other, sort=None))]
     fn union(&self, other: &PyMultiIndex, sort: Option<bool>) -> PyResult<Self> {
-        let union = self.inner.union(&other.inner).map_err(index_error_to_py)?;
-        let unsorted = sort == Some(false)
-            || self.inner.is_empty()
-            || other.inner.is_empty()
-            || self.inner.equals(&other.inner);
-        if unsorted {
-            return Ok(Self { inner: union });
-        }
-        let order = union.argsort();
-        union
-            .take(&order)
+        self.inner
+            .union_sorted(&other.inner, sort)
             .map(|inner| Self { inner })
             .map_err(index_error_to_py)
     }

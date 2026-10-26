@@ -67,12 +67,12 @@ fn datetime64_setops_match_oracle() {
             "dt inter {a:?} {b:?}"
         );
         assert_eq!(
-            ia.difference(&ib).labels(),
+            ia.difference_sorted(&ib, Some(false)).labels(),
             dt(&oracle_difference(&a, &b)).as_slice(),
             "dt diff {a:?} {b:?}"
         );
         assert_eq!(
-            ia.symmetric_difference(&ib).labels(),
+            ia.symmetric_difference_sorted(&ib, Some(false)).labels(),
             dt(&oracle_symdiff(&a, &b)).as_slice(),
             "dt symdiff {a:?} {b:?}"
         );
@@ -97,17 +97,17 @@ fn timedelta64_setops_match_oracle() {
             "td inter {a:?} {b:?}"
         );
         assert_eq!(
-            ia.difference(&ib).labels(),
+            ia.difference_sorted(&ib, Some(false)).labels(),
             td(&oracle_difference(&a, &b)).as_slice(),
             "td diff {a:?} {b:?}"
         );
         assert_eq!(
-            ia.symmetric_difference(&ib).labels(),
+            ia.symmetric_difference_sorted(&ib, Some(false)).labels(),
             td(&oracle_symdiff(&a, &b)).as_slice(),
             "td symdiff {a:?} {b:?}"
         );
         assert!(
-            ia.difference(&ib)
+            ia.difference_sorted(&ib, Some(false))
                 .labels()
                 .iter()
                 .all(|l| matches!(l, IndexLabel::Timedelta64(_)))

@@ -76,7 +76,8 @@ fn cases() -> Vec<(Vec<i64>, Vec<i64>)> {
 #[test]
 fn datetime64_union_matches_first_occurrence_oracle() {
     for (a, b) in cases() {
-        let got = Index::from_datetime64(a.clone()).union(&Index::from_datetime64(b.clone()));
+        let got = Index::from_datetime64(a.clone())
+            .union_sorted(&Index::from_datetime64(b.clone()), Some(false));
         let want = oracle_union_ns(&a, &b);
         assert_eq!(
             got.labels(),
@@ -95,7 +96,8 @@ fn datetime64_union_matches_first_occurrence_oracle() {
 #[test]
 fn timedelta64_union_matches_first_occurrence_oracle() {
     for (a, b) in cases() {
-        let got = Index::from_timedelta64(a.clone()).union(&Index::from_timedelta64(b.clone()));
+        let got = Index::from_timedelta64(a.clone())
+            .union_sorted(&Index::from_timedelta64(b.clone()), Some(false));
         let want = oracle_union_ns(&a, &b);
         assert_eq!(
             got.labels(),

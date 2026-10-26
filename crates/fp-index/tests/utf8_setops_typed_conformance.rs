@@ -109,7 +109,7 @@ fn cases() -> Vec<(Vec<&'static str>, Vec<&'static str>)> {
 fn union_typed_matches_oracle() {
     for (a, b) in cases() {
         assert_eq!(
-            labels(&idx(&a).union(&idx(&b))),
+            labels(&idx(&a).union_sorted(&idx(&b), Some(false))),
             oracle_union(&a, &b),
             "union {a:?} {b:?}"
         );
@@ -120,7 +120,7 @@ fn union_typed_matches_oracle() {
 fn difference_typed_matches_oracle() {
     for (a, b) in cases() {
         assert_eq!(
-            labels(&idx(&a).difference(&idx(&b))),
+            labels(&idx(&a).difference_sorted(&idx(&b), Some(false))),
             oracle_difference(&a, &b),
             "difference {a:?} {b:?}"
         );
@@ -131,7 +131,7 @@ fn difference_typed_matches_oracle() {
 fn symmetric_difference_typed_matches_oracle() {
     for (a, b) in cases() {
         assert_eq!(
-            labels(&idx(&a).symmetric_difference(&idx(&b))),
+            labels(&idx(&a).symmetric_difference_sorted(&idx(&b), Some(false))),
             oracle_symdiff(&a, &b),
             "symdiff {a:?} {b:?}"
         );
@@ -144,13 +144,16 @@ fn larger_shuffled_all_three() {
     let b: Vec<String> = (0..500).map(|i| format!("k{}", i * 2)).collect();
     let ar: Vec<&str> = a.iter().map(|s| s.as_str()).collect();
     let br: Vec<&str> = b.iter().map(|s| s.as_str()).collect();
-    assert_eq!(labels(&idx(&ar).union(&idx(&br))), oracle_union(&ar, &br));
     assert_eq!(
-        labels(&idx(&ar).difference(&idx(&br))),
+        labels(&idx(&ar).union_sorted(&idx(&br), Some(false))),
+        oracle_union(&ar, &br)
+    );
+    assert_eq!(
+        labels(&idx(&ar).difference_sorted(&idx(&br), Some(false))),
         oracle_difference(&ar, &br)
     );
     assert_eq!(
-        labels(&idx(&ar).symmetric_difference(&idx(&br))),
+        labels(&idx(&ar).symmetric_difference_sorted(&idx(&br), Some(false))),
         oracle_symdiff(&ar, &br)
     );
 }

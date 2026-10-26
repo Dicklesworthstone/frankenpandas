@@ -1605,6 +1605,7 @@ re_idx, re_pos = i_asc.reindex([20, 99, 10])
 where_idx = pd.Index([5, 10, 25, 40, 55])
 asof_locs = i_asc.asof_locs(where_idx, np.array([True, True, True, True], dtype=bool))
 gb = pd.Series(range(len(i_unsorted)), index=i_unsorted).groupby(level=0).apply(list)
+gb_vals = i_unsorted.groupby(["x", "y", "x", "y"])
 
 res = {
     "min": int(i_unsorted.min()),
@@ -1644,9 +1645,15 @@ res = {
     "slice_locs": list(i_asc.slice_locs(20, 30)),
     "slice_indexer": [int(i_asc.slice_indexer(20, 30).start), int(i_asc.slice_indexer(20, 30).stop)],
     "union": [int(x) for x in i_asc.union(i_other)],
+    "union_unsorted_default": [int(x) for x in i_unsorted.union(i_other)],
+    "union_unsorted_false": [int(x) for x in i_unsorted.union(i_other, sort=False)],
     "intersection": [int(x) for x in i_asc.intersection(i_other)],
     "difference": [int(x) for x in i_asc.difference(i_other)],
+    "diff_unsorted_default": [int(x) for x in i_unsorted.difference(i_other)],
+    "diff_unsorted_false": [int(x) for x in i_unsorted.difference(i_other, sort=False)],
     "symdiff": [int(x) for x in i_asc.symmetric_difference(i_other)],
+    "symdiff_unsorted_default": [int(x) for x in i_unsorted.symmetric_difference(i_other)],
+    "symdiff_unsorted_false": [int(x) for x in i_unsorted.symmetric_difference(i_other, sort=False)],
     "join_inner": [int(x) for x in i_asc.join(i_other, how="inner")],
     "join_outer": [int(x) for x in i_asc.join(i_other, how="outer")],
     "join_left": [int(x) for x in i_asc.join(i_other, how="left")],
@@ -1654,6 +1661,8 @@ res = {
     "gb_10": [int(x) for x in gb[10]],
     "gb_20": [int(x) for x in gb[20]],
     "gb_30": [int(x) for x in gb[30]],
+    "gb_vals_x": [int(x) for x in gb_vals["x"]],
+    "gb_vals_y": [int(x) for x in gb_vals["y"]],
     "str_lower": list(i_str.str.lower()),
     "str_upper": list(i_str.str.upper()),
     "str_contains": [bool(x) for x in i_str.str.contains("a")],
@@ -1934,6 +1943,35 @@ print(json.dumps(res))
         to_i64_vec(&i_asc.symmetric_difference(&i_other)),
         parse_i64_vec(&oracle["symdiff"])
     );
+    // 9cj5a: Index union, difference, symmetric_difference default to sort=None (sorted) vs sort=Some(false)
+    assert_eq!(
+        to_i64_vec(&i_unsorted.union(&i_other)),
+        parse_i64_vec(&oracle["union_unsorted_default"])
+    );
+    assert_eq!(
+        to_i64_vec(&i_unsorted.union_sorted(&i_other, Some(false))),
+        parse_i64_vec(&oracle["union_unsorted_false"])
+    );
+    assert_eq!(
+        to_i64_vec(&i_unsorted.difference(&i_other)),
+        parse_i64_vec(&oracle["diff_unsorted_default"])
+    );
+    assert_eq!(
+        to_i64_vec(&i_unsorted.difference_sorted(&i_other, Some(false))),
+        parse_i64_vec(&oracle["diff_unsorted_false"])
+    );
+    assert_eq!(
+        to_i64_vec(&i_unsorted.symmetric_difference(&i_other)),
+        parse_i64_vec(&oracle["symdiff_unsorted_default"])
+    );
+    assert_eq!(
+        to_i64_vec(&i_unsorted.symmetric_difference_sorted(&i_other, Some(false))),
+        parse_i64_vec(&oracle["symdiff_unsorted_false"])
+    );
+    // am2bt: try_get_indexer and try_reindex reject duplicate-bearing source Index
+    assert!(i_unsorted.try_get_indexer(&i_other).is_err());
+    assert!(i_unsorted.try_reindex(&i_other).is_err());
+    assert!(i_asc.try_get_indexer(&i_other).is_ok());
     assert_eq!(
         to_i64_vec(&i_asc.join(&i_other, "inner").unwrap()),
         parse_i64_vec(&oracle["join_inner"])
@@ -1951,7 +1989,7 @@ print(json.dumps(res))
         parse_i64_vec(&oracle["join_right"])
     );
 
-    let gb = i_unsorted.groupby();
+    let gb = i_unsorted.groupby_positions();
     assert_eq!(
         gb[&IndexLabel::Int64(10)],
         parse_usize_vec(&oracle["gb_10"])
@@ -1963,6 +2001,23 @@ print(json.dumps(res))
     assert_eq!(
         gb[&IndexLabel::Int64(30)],
         parse_usize_vec(&oracle["gb_30"])
+    );
+    // jiuhh: Index::groupby(&values) groups self labels by external values array
+    let gb_vals = i_unsorted
+        .groupby(&[
+            IndexLabel::Utf8("x".to_owned()),
+            IndexLabel::Utf8("y".to_owned()),
+            IndexLabel::Utf8("x".to_owned()),
+            IndexLabel::Utf8("y".to_owned()),
+        ])
+        .unwrap();
+    assert_eq!(
+        to_i64_vec(&gb_vals[&IndexLabel::Utf8("x".to_owned())]),
+        parse_i64_vec(&oracle["gb_vals_x"])
+    );
+    assert_eq!(
+        to_i64_vec(&gb_vals[&IndexLabel::Utf8("y".to_owned())]),
+        parse_i64_vec(&oracle["gb_vals_y"])
     );
 
     let s_acc = i_str.r#str();
@@ -2844,9 +2899,18 @@ print(json.dumps(res, default=int))
         .collect();
     assert_eq!(ts, parse_i64_vec(&oracle["to_series_vals"]));
 
-    let gb = r.groupby();
+    let gb = r.groupby_positions();
     assert_eq!(gb.get(&IndexLabel::Int64(2)), Some(&vec![0usize]));
     assert_eq!(gb.get(&IndexLabel::Int64(8)), Some(&vec![3usize]));
+    let gb_r = r.groupby(r.to_flat_index().labels()).unwrap();
+    assert_eq!(
+        idx_i64_vec(&gb_r[&IndexLabel::Int64(2)]),
+        parse_i64_vec(&oracle["groupby"]["2"])
+    );
+    assert_eq!(
+        idx_i64_vec(&gb_r[&IndexLabel::Int64(8)]),
+        parse_i64_vec(&oracle["groupby"]["8"])
+    );
 
     assert_eq!(
         idx_i64_vec(&r.join(&r_other.to_flat_index(), "inner").unwrap()),
@@ -3905,10 +3969,23 @@ print(json.dumps(res, default=int))
         .collect();
     assert_eq!(ts, parse_str_vec(&oracle["to_series"]));
 
-    let gb = ci.groupby();
+    let gb = ci.groupby_positions();
     assert_eq!(
         gb.get(&IndexLabel::Utf8("b".to_owned())),
         Some(&vec![0usize, 2usize])
+    );
+    let gb_ci = ci.groupby(ci.labels()).unwrap();
+    assert_eq!(
+        idx_str_vec(&gb_ci[&IndexLabel::Utf8("b".to_owned())].to_flat_index()),
+        parse_str_vec(&oracle["groupby"]["b"])
+    );
+    assert!(
+        ci.try_get_indexer(&[IndexLabel::Utf8("b".to_owned())])
+            .is_err()
+    );
+    assert_eq!(
+        ci.get_indexer_for(&[IndexLabel::Utf8("b".to_owned())]),
+        vec![0, 2]
     );
 
     let joined = ci_sorted
@@ -4868,10 +4945,27 @@ print(json.dumps(res, default=int))
         .map(|(_, v)| v.to_string())
         .collect();
     assert_eq!(ts, parse_str_vec(&oracle["to_series"]));
-    let gb = ii_idx.groupby();
+    let gb = ii_idx.groupby_positions();
     assert_eq!(
         gb.get(&IndexLabel::Utf8("(0.0, 1.5]".to_owned())),
         Some(&vec![0usize])
+    );
+    let gb_ii = ii
+        .groupby(&[
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(1),
+        ])
+        .unwrap();
+    assert_eq!(gb_ii[&IndexLabel::Int64(1)].len(), 2);
+    assert!(
+        ii.groupby(&[
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+            IndexLabel::Int64(1),
+            IndexLabel::Int64(2),
+        ])
+        .is_err()
     );
 
     assert_eq!(

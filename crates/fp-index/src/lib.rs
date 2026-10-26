@@ -258,6 +258,155 @@ impl IndexLabel {
             Self::Null(_) => 8,
         }
     }
+
+    /// Construct a tuple `IndexLabel` (stored as an `Object` label), matching
+    /// the tuple elements of `pd.MultiIndex.to_flat_index()`.
+    #[must_use]
+    pub fn tuple(items: Vec<Self>) -> Self {
+        Self::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(
+            IndexTuple(items),
+        )))
+    }
+
+    /// Borrow the tuple elements if this label is an [`IndexTuple`].
+    #[must_use]
+    pub fn as_tuple(&self) -> Option<&[Self]> {
+        match self {
+            Self::Object(fp_types::ObjectValue::Host(host)) => host
+                .object()
+                .as_any()
+                .downcast_ref::<IndexTuple>()
+                .map(|t| t.0.as_slice()),
+            _ => None,
+        }
+    }
+}
+
+/// A composite tuple label stored inside `IndexLabel::Object`, matching the
+/// Python tuple elements of `pd.MultiIndex.to_flat_index()`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct IndexTuple(pub Vec<IndexLabel>);
+
+fn format_index_label_python_repr(label: &IndexLabel) -> String {
+    match label {
+        IndexLabel::Int64(v) => v.to_string(),
+        IndexLabel::Float64(v) => v.0.to_string(),
+        IndexLabel::Bool(b) => if *b { "True" } else { "False" }.to_owned(),
+        IndexLabel::Utf8(s) => format!("{s:?}").replace('"', "'"),
+        IndexLabel::Timedelta64(ns) => format!("Timedelta({ns})"),
+        IndexLabel::Datetime64(ns) => format!("Timestamp({ns})"),
+        IndexLabel::Object(obj) => obj.repr(),
+        IndexLabel::Period(p) => p.to_string(),
+        IndexLabel::Interval(iv) => iv.to_string(),
+        IndexLabel::Null(fp_types::NullKind::NaN) => "nan".to_owned(),
+        IndexLabel::Null(fp_types::NullKind::NaT) => "NaT".to_owned(),
+        IndexLabel::Null(_) => "None".to_owned(),
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn index_labels_python_cmp(a: &IndexLabel, b: &IndexLabel) -> Option<std::cmp::Ordering> {
+    let number = |l: &IndexLabel| match l {
+        IndexLabel::Bool(flag) => Some(f64::from(u8::from(*flag))),
+        IndexLabel::Int64(v) => Some(*v as f64),
+        IndexLabel::Float64(v) => Some(v.0),
+        _ => None,
+    };
+    if let (Some(na), Some(nb)) = (number(a), number(b)) {
+        return na.partial_cmp(&nb);
+    }
+    if LabelKinds::of(a) == LabelKinds::of(b) && !a.is_missing() && !b.is_missing() {
+        return match (a, b) {
+            (IndexLabel::Object(oa), IndexLabel::Object(ob)) => oa.python_cmp(ob),
+            _ => Some(a.cmp(b)),
+        };
+    }
+    None
+}
+
+impl fp_types::HostObject for IndexTuple {
+    fn host_eq(&self, other: &dyn fp_types::HostObject) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .is_some_and(|rhs| self.0 == rhs.0)
+    }
+
+    fn host_repr(&self) -> String {
+        let parts: Vec<String> = self.0.iter().map(format_index_label_python_repr).collect();
+        if parts.len() == 1 {
+            format!("({},)", parts[0])
+        } else {
+            format!("({})", parts.join(", "))
+        }
+    }
+
+    fn host_str(&self) -> String {
+        self.host_repr()
+    }
+
+    fn host_pprint(&self) -> String {
+        self.host_repr()
+    }
+
+    fn host_hash(&self) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = rustc_hash::FxHasher::default();
+        self.0.hash(&mut hasher);
+        Some(hasher.finish())
+    }
+
+    fn host_cmp(&self, other: &dyn fp_types::HostObject) -> Option<std::cmp::Ordering> {
+        let rhs = other.as_any().downcast_ref::<Self>()?;
+        for (a, b) in self.0.iter().zip(&rhs.0) {
+            if a != b {
+                let ord = index_labels_python_cmp(a, b)?;
+                if ord.is_ne() {
+                    return Some(ord);
+                }
+            }
+        }
+        Some(self.0.len().cmp(&rhs.0.len()))
+    }
+
+    fn host_type_name(&self) -> String {
+        "tuple".to_owned()
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// Argument mode for [`MultiIndex::to_flat_index`]:
+/// - [`FlatIndexArg::Tuples`] (`()` or `None`) returns an object `Index` of [`IndexTuple`] labels,
+///   matching `pd.MultiIndex.to_flat_index()`.
+/// - [`FlatIndexArg::Sep`] (`"_"` or `Some("_")`) joins level labels with a string separator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlatIndexArg<'a> {
+    Tuples,
+    Sep(&'a str),
+}
+
+impl From<()> for FlatIndexArg<'_> {
+    fn from((): ()) -> Self {
+        Self::Tuples
+    }
+}
+
+impl<'a> From<&'a str> for FlatIndexArg<'a> {
+    fn from(sep: &'a str) -> Self {
+        Self::Sep(sep)
+    }
+}
+
+impl<'a> From<Option<&'a str>> for FlatIndexArg<'a> {
+    fn from(opt: Option<&'a str>) -> Self {
+        match opt {
+            None => Self::Tuples,
+            Some(sep) => Self::Sep(sep),
+        }
+    }
 }
 
 impl PartialEq for IndexLabel {
@@ -442,14 +591,37 @@ fn index_label_is_truthy(label: &IndexLabel) -> bool {
         IndexLabel::Utf8(s) => !s.is_empty(),
         IndexLabel::Timedelta64(v) => *v != 0,
         IndexLabel::Datetime64(v) => *v != 0,
-        // Python truth: an empty list is false, any other object true.
-        IndexLabel::Object(object) => object.as_list().is_none_or(|items| !items.is_empty()),
+        // Python truth: an empty list or tuple is false, any other object true.
+        IndexLabel::Object(object) => {
+            if let Some(items) = label.as_tuple() {
+                !items.is_empty()
+            } else {
+                object.as_list().is_none_or(|items| !items.is_empty())
+            }
+        }
         // A Period object is true (its NaT was missing above), an Interval
         // object too.
         IndexLabel::Period(_) | IndexLabel::Interval(_) => true,
         // Unreachable: is_missing() returned true above for every Null.
         IndexLabel::Null(_) => false,
     }
+}
+
+fn groupby_value_positions(
+    values: &[IndexLabel],
+    length: usize,
+) -> Result<std::collections::BTreeMap<IndexLabel, Vec<usize>>, IndexError> {
+    let mut groups = std::collections::BTreeMap::<IndexLabel, Vec<usize>>::new();
+    for (position, label) in values.iter().enumerate() {
+        if label.is_missing() {
+            continue;
+        }
+        if position >= length {
+            return Err(IndexError::OutOfBounds { position, length });
+        }
+        groups.entry(label.clone()).or_default().push(position);
+    }
+    Ok(groups)
 }
 
 /// Hand-rolled decimal itoa straight into a byte buffer, bit-identical to
@@ -5038,6 +5210,18 @@ impl Index {
         self.position(label).is_some()
     }
 
+    /// Compute a positional indexer, rejecting duplicate-bearing source indexes
+    /// with `InvalidArgument` (matching `pd.Index.get_indexer` raising
+    /// `InvalidIndexError: Reindexing only valid with uniquely valued Index objects`).
+    pub fn try_get_indexer(&self, target: &Index) -> Result<Vec<Option<usize>>, IndexError> {
+        if self.has_duplicates() {
+            return Err(IndexError::InvalidArgument(
+                "Reindexing only valid with uniquely valued Index objects".to_owned(),
+            ));
+        }
+        Ok(self.get_indexer(target))
+    }
+
     #[must_use]
     pub fn get_indexer(&self, target: &Index) -> Vec<Option<usize>> {
         // An affine Int64 source can answer every lookup from its arithmetic
@@ -6034,11 +6218,23 @@ impl Index {
 
     /// The labels of this index `other` lacks, named for both - their
     /// shared name, else none, as pandas names an Index's difference (this
-    /// index's name was kept; br-frankenpandas-ff5ik).
+    /// index's name was kept; br-frankenpandas-ff5ik). Uses pandas' default
+    /// `sort=None` ordering; see [`Self::difference_sorted`].
     #[must_use]
     pub fn difference(&self, other: &Self) -> Self {
-        self.difference_labels(other)
-            .rename_index(self.shared_name(other))
+        self.difference_sorted(other, None)
+    }
+
+    /// `pd.Index.difference(other, sort=)`: sorts when `sort` is `Some(true)`
+    /// or `None` (unless `other.is_empty()` or `self.equals(other)` or labels
+    /// are incomparable), and preserves first-seen order when `sort` is
+    /// `Some(false)`.
+    #[must_use]
+    pub fn difference_sorted(&self, other: &Self, sort: Option<bool>) -> Self {
+        let result = self
+            .difference_labels(other)
+            .rename_index(self.shared_name(other));
+        Self::sort_setop_result(result, !(other.is_empty() || self.equals(other)), sort)
     }
 
     fn difference_labels(&self, other: &Self) -> Self {
@@ -6117,8 +6313,25 @@ impl Index {
         self.propagate_name(Self::new(labels))
     }
 
+    /// `pd.Index.symmetric_difference(other)` using pandas' default
+    /// `sort=None` ordering; see [`Self::symmetric_difference_sorted`].
     #[must_use]
     pub fn symmetric_difference(&self, other: &Self) -> Self {
+        self.symmetric_difference_sorted(other, None)
+    }
+
+    /// `pd.Index.symmetric_difference(other, sort=)`: sorts when `sort` is
+    /// `Some(true)` or `None` (unless `self.equals(other)` or labels are
+    /// incomparable), and preserves first-seen order when `sort` is
+    /// `Some(false)`.
+    #[must_use]
+    pub fn symmetric_difference_sorted(&self, other: &Self, sort: Option<bool>) -> Self {
+        let result = self.symmetric_difference_unsorted(other);
+        Self::sort_setop_result(result, !self.equals(other), sort)
+    }
+
+    #[must_use]
+    fn symmetric_difference_unsorted(&self, other: &Self) -> Self {
         // Typed all-Int64 fast path: the two halves (self-not-in-other,
         // other-not-in-self) are disjoint by construction, so the original
         // shared `seen` only ever dedups WITHIN a half — exactly what two
@@ -8110,10 +8323,87 @@ impl Index {
         ))
     }
 
-    /// Alias for `union_with`, matching `pd.Index.union`.
+    /// `pd.Index.union(other)` using pandas' default `sort=None` ordering;
+    /// see [`Self::union_sorted`] and [`Self::union_with`].
     #[must_use]
     pub fn union(&self, other: &Self) -> Self {
-        self.union_with(other)
+        self.union_sorted(other, None)
+    }
+
+    /// `pd.Index.union(other, sort=)`: sorts when `sort` is `Some(true)` or
+    /// `None` (unless either input is empty, the two are equal, or labels are
+    /// incomparable), and preserves first-seen order when `sort` is
+    /// `Some(false)`.
+    #[must_use]
+    pub fn union_sorted(&self, other: &Self, sort: Option<bool>) -> Self {
+        let sort_default = !(self.is_empty() || other.is_empty() || self.equals(other));
+        if sort.unwrap_or(sort_default)
+            && let Some(sorted) = self.sorted_union_increasing_i64(other)
+        {
+            return sorted;
+        }
+        let result = self.union_with(other);
+        Self::sort_setop_result(result, sort_default, sort)
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn sort_setop_result(result: Self, sort_default: bool, sort: Option<bool>) -> Self {
+        if result.labels.int64_view().is_some() {
+            let sorts = sort.unwrap_or(sort_default);
+            return if sorts { result.sort_values() } else { result };
+        }
+        let number = |label: &IndexLabel| match label {
+            IndexLabel::Bool(flag) => Some(f64::from(u8::from(*flag))),
+            IndexLabel::Int64(value) => Some(*value as f64),
+            IndexLabel::Float64(value) => Some(value.0),
+            _ => None,
+        };
+        let labels = result.labels();
+        let numbers: Option<Vec<f64>> = labels.iter().map(number).collect();
+        let present: Vec<usize> = (0..labels.len())
+            .filter(|&at| !labels[at].is_missing())
+            .collect();
+        let gaps = present.len() < labels.len();
+        let one_kind = present.first().is_some_and(|&first| {
+            let kind = LabelKinds::of(&labels[first]);
+            present
+                .iter()
+                .all(|&at| LabelKinds::of(&labels[at]) == kind)
+        });
+        let objects_orderable = one_kind
+            && present
+                .first()
+                .is_some_and(|&first| matches!(labels[first], IndexLabel::Object(_)))
+            && present.windows(2).all(|pair| {
+                matches!(
+                    (&labels[pair[0]], &labels[pair[1]]),
+                    (IndexLabel::Object(a), IndexLabel::Object(b)) if a.python_cmp(b).is_some()
+                )
+            });
+        let mixed = matches!(
+            result.inferred_type(),
+            "mixed" | "mixed-integer" | "mixed-integer-float"
+        ) && !(gaps && one_kind)
+            && !objects_orderable;
+        let sorts = match sort {
+            Some(s) => s,
+            None => sort_default && !(mixed && numbers.is_none()),
+        };
+        match numbers {
+            Some(numbers) if sorts && mixed => {
+                let mut order: Vec<usize> = (0..numbers.len()).collect();
+                order.sort_by(|&a, &b| numbers[a].total_cmp(&numbers[b]));
+                result.take(&order)
+            }
+            _ if sorts && gaps && one_kind => {
+                let mut order = present;
+                order.sort_by(|&a, &b| labels[a].cmp(&labels[b]));
+                order.extend((0..labels.len()).filter(|&at| labels[at].is_missing()));
+                result.take(&order)
+            }
+            _ if sorts => result.sort_values(),
+            _ => result,
+        }
     }
 
     /// The sorted union of two indexes whose int64 labels are each strictly
@@ -8901,6 +9191,12 @@ impl Index {
         (target.clone(), self.get_indexer(target))
     }
 
+    /// Reindex to a target index, rejecting duplicate-bearing source indexes
+    /// with `InvalidArgument` (matching `pd.Index.reindex`).
+    pub fn try_reindex(&self, target: &Self) -> Result<(Self, Vec<Option<usize>>), IndexError> {
+        Ok((target.clone(), self.try_get_indexer(target)?))
+    }
+
     /// Flat-index `droplevel` is invalid because it would remove the only
     /// level.
     pub fn droplevel(&self, level: usize) -> Result<Self, IndexError> {
@@ -8946,9 +9242,25 @@ impl Index {
         IndexStringAccessor::borrowed(self)
     }
 
-    /// Group label positions by label value, matching `pd.Index.groupby`.
+    /// Group index labels by an external `values` array, matching
+    /// `pd.Index.groupby(values)`: missing values in `values` are skipped,
+    /// non-missing positions `>= self.len()` fail with `OutOfBounds`, and
+    /// each distinct key maps to `self.take(&positions)`.
+    pub fn groupby(
+        &self,
+        values: &[IndexLabel],
+    ) -> Result<std::collections::BTreeMap<IndexLabel, Self>, IndexError> {
+        let groups = groupby_value_positions(values, self.len())?;
+        Ok(groups
+            .into_iter()
+            .map(|(k, positions)| (k, self.take(&positions)))
+            .collect())
+    }
+
+    /// Group label positions by label value (`0`-based position buckets per
+    /// distinct label in `self`).
     #[must_use]
-    pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
+    pub fn groupby_positions(&self) -> HashMap<IndexLabel, Vec<usize>> {
         let mut groups = HashMap::<IndexLabel, Vec<usize>>::new();
         if self.labels.has_lazy_int64_backing()
             && let Some(values) = self.labels.int64_view()
@@ -12557,11 +12869,26 @@ impl DatetimeIndex {
         (positions, missing)
     }
 
-    /// Alias for [`get_indexer`](Self::get_indexer), matching
-    /// `pd.DatetimeIndex.get_indexer_for(targets)`.
+    /// Compute a positional indexer, expanding duplicate source matches,
+    /// matching `pd.DatetimeIndex.get_indexer_for(targets)`.
     #[must_use]
     pub fn get_indexer_for(&self, targets: &[i64]) -> Vec<isize> {
-        self.get_indexer(targets)
+        if self.has_duplicates() {
+            self.get_indexer_non_unique(targets).0
+        } else {
+            self.get_indexer(targets)
+        }
+    }
+
+    /// Locate each label in `targets`, rejecting duplicate-bearing source
+    /// indexes with `InvalidArgument` (matching `pd.DatetimeIndex.get_indexer`).
+    pub fn try_get_indexer(&self, targets: &[i64]) -> Result<Vec<isize>, IndexError> {
+        if self.has_duplicates() {
+            return Err(IndexError::InvalidArgument(
+                "Reindexing only valid with uniquely valued Index objects".to_owned(),
+            ));
+        }
+        Ok(self.get_indexer(targets))
     }
 
     /// Locate each label in `targets`, matching
@@ -12665,10 +12992,24 @@ impl DatetimeIndex {
         self.to_flat_index().droplevel(level)
     }
 
+    /// Group datetime labels by an external `values` array, matching
+    /// `pd.DatetimeIndex.groupby(values)`.
+    pub fn groupby(
+        &self,
+        values: &[IndexLabel],
+    ) -> Result<std::collections::BTreeMap<IndexLabel, Self>, IndexError> {
+        let groups = groupby_value_positions(values, self.len())?;
+        let mut out = std::collections::BTreeMap::new();
+        for (k, positions) in groups {
+            out.insert(k, self.take(&positions)?);
+        }
+        Ok(out)
+    }
+
     /// Group equal datetime labels into position buckets.
     #[must_use]
-    pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
-        self.to_flat_index().groupby()
+    pub fn groupby_positions(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        self.to_flat_index().groupby_positions()
     }
 
     /// Apply a function to each datetime label, returning a flat Index.
@@ -13950,11 +14291,26 @@ impl TimedeltaIndex {
         (positions, missing)
     }
 
-    /// Alias for [`get_indexer`](Self::get_indexer), matching
-    /// `pd.TimedeltaIndex.get_indexer_for(targets)`.
+    /// Compute a positional indexer, expanding duplicate source matches,
+    /// matching `pd.TimedeltaIndex.get_indexer_for(targets)`.
     #[must_use]
     pub fn get_indexer_for(&self, targets: &[i64]) -> Vec<isize> {
-        self.get_indexer(targets)
+        if self.has_duplicates() {
+            self.get_indexer_non_unique(targets).0
+        } else {
+            self.get_indexer(targets)
+        }
+    }
+
+    /// Locate each label in `targets`, rejecting duplicate-bearing source
+    /// indexes with `InvalidArgument` (matching `pd.TimedeltaIndex.get_indexer`).
+    pub fn try_get_indexer(&self, targets: &[i64]) -> Result<Vec<isize>, IndexError> {
+        if self.has_duplicates() {
+            return Err(IndexError::InvalidArgument(
+                "Reindexing only valid with uniquely valued Index objects".to_owned(),
+            ));
+        }
+        Ok(self.get_indexer(targets))
     }
 
     /// Locate each label in `targets`, matching
@@ -14055,10 +14411,24 @@ impl TimedeltaIndex {
         self.to_flat_index().droplevel(level)
     }
 
+    /// Group timedelta labels by an external `values` array, matching
+    /// `pd.TimedeltaIndex.groupby(values)`.
+    pub fn groupby(
+        &self,
+        values: &[IndexLabel],
+    ) -> Result<std::collections::BTreeMap<IndexLabel, Self>, IndexError> {
+        let groups = groupby_value_positions(values, self.len())?;
+        let mut out = std::collections::BTreeMap::new();
+        for (k, positions) in groups {
+            out.insert(k, self.take(&positions)?);
+        }
+        Ok(out)
+    }
+
     /// Group equal timedelta labels into position buckets.
     #[must_use]
-    pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
-        self.to_flat_index().groupby()
+    pub fn groupby_positions(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        self.to_flat_index().groupby_positions()
     }
 
     /// Apply a function to each timedelta label, returning a flat Index.
@@ -15922,11 +16292,26 @@ impl PeriodIndex {
         (positions, missing)
     }
 
-    /// Alias for [`get_indexer`](Self::get_indexer), matching
-    /// `pd.PeriodIndex.get_indexer_for(targets)`.
+    /// Compute a positional indexer, expanding duplicate source matches,
+    /// matching `pd.PeriodIndex.get_indexer_for(targets)`.
     #[must_use]
     pub fn get_indexer_for(&self, targets: &[Period]) -> Vec<isize> {
-        self.get_indexer(targets)
+        if self.has_duplicates() {
+            self.get_indexer_non_unique(targets).0
+        } else {
+            self.get_indexer(targets)
+        }
+    }
+
+    /// Locate each target period in the index, rejecting duplicate-bearing
+    /// source indexes with `InvalidArgument` (matching `pd.PeriodIndex.get_indexer`).
+    pub fn try_get_indexer(&self, targets: &[Period]) -> Result<Vec<isize>, IndexError> {
+        if self.has_duplicates() {
+            return Err(IndexError::InvalidArgument(
+                "Reindexing only valid with uniquely valued Index objects".to_owned(),
+            ));
+        }
+        Ok(self.get_indexer(targets))
     }
 
     /// Locate each target period in the index, matching
@@ -16144,10 +16529,24 @@ impl PeriodIndex {
         self.to_flat_index().droplevel(level)
     }
 
+    /// Group period labels by an external `values` array, matching
+    /// `pd.PeriodIndex.groupby(values)`.
+    pub fn groupby(
+        &self,
+        values: &[IndexLabel],
+    ) -> Result<std::collections::BTreeMap<IndexLabel, Self>, IndexError> {
+        let groups = groupby_value_positions(values, self.len())?;
+        let mut out = std::collections::BTreeMap::new();
+        for (k, positions) in groups {
+            out.insert(k, self.take(&positions)?);
+        }
+        Ok(out)
+    }
+
     /// Group equal period labels into position buckets.
     #[must_use]
-    pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
-        self.to_flat_index().groupby()
+    pub fn groupby_positions(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        self.to_flat_index().groupby_positions()
     }
 
     /// Apply a function to each period label, returning a flat Index.
@@ -17649,9 +18048,23 @@ impl RangeIndex {
         }
     }
 
+    /// Group range labels by an external `values` array, matching
+    /// `pd.RangeIndex.groupby(values)` (returns `BTreeMap<IndexLabel, Index>`).
+    pub fn groupby(
+        &self,
+        values: &[IndexLabel],
+    ) -> Result<std::collections::BTreeMap<IndexLabel, Index>, IndexError> {
+        let groups = groupby_value_positions(values, self.len())?;
+        let mut out = std::collections::BTreeMap::new();
+        for (k, positions) in groups {
+            out.insert(k, self.take(&positions)?);
+        }
+        Ok(out)
+    }
+
     /// Group equal range labels into position buckets.
     #[must_use]
-    pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
+    pub fn groupby_positions(&self) -> HashMap<IndexLabel, Vec<usize>> {
         let mut groups = HashMap::with_capacity(self.len());
         for position in 0..self.len() {
             groups.insert(IndexLabel::Int64(self.value_at(position)), vec![position]);
@@ -20351,10 +20764,24 @@ impl CategoricalIndex {
         self.to_flat_index().droplevel(level)
     }
 
+    /// Group category labels by an external `values` array, matching
+    /// `pd.CategoricalIndex.groupby(values)`.
+    pub fn groupby(
+        &self,
+        values: &[IndexLabel],
+    ) -> Result<std::collections::BTreeMap<IndexLabel, Self>, IndexError> {
+        let groups = groupby_value_positions(values, self.len())?;
+        let mut out = std::collections::BTreeMap::new();
+        for (k, positions) in groups {
+            out.insert(k, self.take(&positions)?);
+        }
+        Ok(out)
+    }
+
     /// Group equal category labels into position buckets.
     #[must_use]
-    pub fn groupby(&self) -> HashMap<IndexLabel, Vec<usize>> {
-        self.to_flat_index().groupby()
+    pub fn groupby_positions(&self) -> HashMap<IndexLabel, Vec<usize>> {
+        self.to_flat_index().groupby_positions()
     }
 
     /// Apply a function to each category label, returning a flat Index.
@@ -20805,6 +21232,17 @@ impl CategoricalIndex {
         (positions, missing)
     }
 
+    /// Locate each label in `targets`, rejecting duplicate-bearing source
+    /// indexes with `InvalidArgument` (matching `pd.CategoricalIndex.get_indexer`).
+    pub fn try_get_indexer(&self, targets: &[IndexLabel]) -> Result<Vec<isize>, IndexError> {
+        if self.has_duplicates() {
+            return Err(IndexError::InvalidArgument(
+                "Reindexing only valid with uniquely valued Index objects".to_owned(),
+            ));
+        }
+        Ok(self.get_indexer(targets))
+    }
+
     /// Locate each label in `targets`, matching
     /// `pd.CategoricalIndex.get_indexer(targets)`.
     #[must_use]
@@ -20821,11 +21259,15 @@ impl CategoricalIndex {
             .collect()
     }
 
-    /// Alias for [`get_indexer`](Self::get_indexer), matching
-    /// `pd.CategoricalIndex.get_indexer_for(targets)`.
+    /// Compute a positional indexer, expanding duplicate source matches,
+    /// matching `pd.CategoricalIndex.get_indexer_for(targets)`.
     #[must_use]
     pub fn get_indexer_for(&self, targets: &[IndexLabel]) -> Vec<isize> {
-        self.get_indexer(targets)
+        if self.has_duplicates() {
+            self.get_indexer_non_unique(targets).0
+        } else {
+            self.get_indexer(targets)
+        }
     }
 
     /// First position of `value`, matching
@@ -21599,6 +22041,30 @@ impl IntervalIndex {
     #[must_use]
     pub fn tolist(&self) -> Vec<Interval> {
         self.to_list()
+    }
+
+    /// Group interval labels by an external `values` array, matching
+    /// `pd.IntervalIndex.groupby(values)`.
+    pub fn groupby(
+        &self,
+        values: &[IndexLabel],
+    ) -> Result<std::collections::BTreeMap<IndexLabel, Self>, IndexError> {
+        let groups = groupby_value_positions(values, self.len())?;
+        let mut out = std::collections::BTreeMap::new();
+        for (k, positions) in groups {
+            out.insert(k, self.take(&positions)?);
+        }
+        Ok(out)
+    }
+
+    /// Group equal intervals into position buckets.
+    #[must_use]
+    pub fn groupby_positions(&self) -> HashMap<Interval, Vec<usize>> {
+        let mut groups = HashMap::<Interval, Vec<usize>>::new();
+        for (position, &interval) in self.values.iter().enumerate() {
+            groups.entry(interval).or_default().push(position);
+        }
+        groups
     }
 }
 
@@ -24672,7 +25138,7 @@ impl MultiIndex {
             });
         }
 
-        let union_index = self.union(other)?;
+        let union_index = self.union_with(other)?;
         Ok(MultiIndexOuterAlignment {
             left_positions: self
                 .get_indexer(&union_index)?
@@ -26791,8 +27257,60 @@ impl MultiIndex {
         Self::from_tuples_with_names(tuples, self.shared_names(other))
     }
 
-    /// Tuple union preserving first-seen order from `self` then `other`.
+    /// Tuple union using pandas' default `sort=None` ordering; see
+    /// [`Self::union_sorted`] and [`Self::union_with`].
     pub fn union(&self, other: &Self) -> Result<Self, IndexError> {
+        self.union_sorted(other, None)
+    }
+
+    /// `pd.MultiIndex.union(other, sort=)`: sorts when `sort` is `Some(true)`
+    /// or `None` (unless either input is empty, the two are equal, or any
+    /// level has unorderable mixed labels), and preserves first-seen order
+    /// when `sort` is `Some(false)`.
+    pub fn union_sorted(&self, other: &Self, sort: Option<bool>) -> Result<Self, IndexError> {
+        let result = self.union_with(other)?;
+        let sort_default = !(self.is_empty() || other.is_empty() || self.equals(other));
+        Ok(Self::sort_setop_result(result, sort_default, sort))
+    }
+
+    fn level_is_orderable(level: &Level) -> bool {
+        let is_number = |l: &IndexLabel| {
+            matches!(
+                l,
+                IndexLabel::Bool(_) | IndexLabel::Int64(_) | IndexLabel::Float64(_)
+            )
+        };
+        let mut present = level.iter().filter(|l| !l.is_missing()).peekable();
+        let Some(&first) = present.peek() else {
+            return true;
+        };
+        if is_number(first) {
+            return present.all(is_number);
+        }
+        let kind = LabelKinds::of(first);
+        if !present.clone().all(|l| LabelKinds::of(l) == kind) {
+            return false;
+        }
+        if let IndexLabel::Object(first_obj) = first {
+            return present.all(
+                |l| matches!(l, IndexLabel::Object(obj) if first_obj.python_cmp(obj).is_some()),
+            );
+        }
+        true
+    }
+
+    fn sort_setop_result(result: Self, sort_default: bool, sort: Option<bool>) -> Self {
+        let orderable = result.levels.iter().all(Self::level_is_orderable);
+        let sorts = match sort {
+            Some(s) => s,
+            None => sort_default && orderable,
+        };
+        if sorts { result.sort_values() } else { result }
+    }
+
+    /// Tuple union preserving first-seen order from `self` then `other`
+    /// (`sort=False` semantics).
+    pub fn union_with(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_same_nlevels(other)?;
         if let Some((self_levels, other_levels)) = self.two_utf8_level_slices(other) {
             let mut seen = FxHashSet::<(&str, &str)>::default();
@@ -26851,13 +27369,23 @@ impl MultiIndex {
         Self::from_tuples_with_names(tuples, self.shared_names(other))
     }
 
-    /// Alias for `union`, matching the flat `Index::union_with` naming.
-    pub fn union_with(&self, other: &Self) -> Result<Self, IndexError> {
-        self.union(other)
+    /// Tuple difference using pandas' default `sort=None` ordering; see
+    /// [`Self::difference_sorted`].
+    pub fn difference(&self, other: &Self) -> Result<Self, IndexError> {
+        self.difference_sorted(other, None)
     }
 
-    /// Tuple difference preserving left order and de-duplicating results.
-    pub fn difference(&self, other: &Self) -> Result<Self, IndexError> {
+    /// `pd.MultiIndex.difference(other, sort=)`: sorts when `sort` is
+    /// `Some(true)` or `None` (unless `other.is_empty()`, `self.equals(other)`,
+    /// or any level has unorderable mixed labels), and preserves first-seen
+    /// order when `sort` is `Some(false)`.
+    pub fn difference_sorted(&self, other: &Self, sort: Option<bool>) -> Result<Self, IndexError> {
+        let result = self.difference_unsorted(other)?;
+        let sort_default = !(other.is_empty() || self.equals(other));
+        Ok(Self::sort_setop_result(result, sort_default, sort))
+    }
+
+    fn difference_unsorted(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_same_nlevels(other)?;
         if let Some((self_levels, other_levels)) = self.two_utf8_level_slices(other) {
             let mut other_set = FxHashSet::<(&str, &str)>::default();
@@ -26903,8 +27431,26 @@ impl MultiIndex {
         Self::from_tuples_with_names(tuples, self.shared_names(other))
     }
 
-    /// Tuple symmetric difference preserving first-seen order.
+    /// Tuple symmetric difference using pandas' default `sort=None` ordering;
+    /// see [`Self::symmetric_difference_sorted`].
     pub fn symmetric_difference(&self, other: &Self) -> Result<Self, IndexError> {
+        self.symmetric_difference_sorted(other, None)
+    }
+
+    /// `pd.MultiIndex.symmetric_difference(other, sort=)`: sorts when `sort`
+    /// is `Some(true)` or `None` (unless `self.equals(other)` or any level has
+    /// unorderable mixed labels), and preserves first-seen order when `sort`
+    /// is `Some(false)`.
+    pub fn symmetric_difference_sorted(
+        &self,
+        other: &Self,
+        sort: Option<bool>,
+    ) -> Result<Self, IndexError> {
+        let result = self.symmetric_difference_unsorted(other)?;
+        Ok(Self::sort_setop_result(result, !self.equals(other), sort))
+    }
+
+    fn symmetric_difference_unsorted(&self, other: &Self) -> Result<Self, IndexError> {
         self.ensure_same_nlevels(other)?;
         if let Some((self_levels, other_levels)) = self.two_utf8_level_slices(other) {
             let mut self_set = FxHashSet::<(&str, &str)>::default();
@@ -26954,9 +27500,26 @@ impl MultiIndex {
         Self::from_tuples_with_names(tuples, self.shared_names(other))
     }
 
-    /// Group tuple positions by composite key, matching `pd.MultiIndex.groupby`.
+    /// Group MultiIndex tuples by an external `values` array, matching
+    /// `pd.MultiIndex.groupby(values)`: missing values in `values` are
+    /// skipped, non-missing positions `>= self.len()` fail with `OutOfBounds`,
+    /// and each distinct key maps to `self.take(&positions)`.
+    pub fn groupby(
+        &self,
+        values: &[IndexLabel],
+    ) -> Result<std::collections::BTreeMap<IndexLabel, Self>, IndexError> {
+        let groups = groupby_value_positions(values, self.len())?;
+        let mut out = std::collections::BTreeMap::new();
+        for (k, positions) in groups {
+            out.insert(k, self.take(&positions)?);
+        }
+        Ok(out)
+    }
+
+    /// Group tuple positions by composite key (`0`-based position buckets per
+    /// distinct tuple in `self`).
     #[must_use]
-    pub fn groupby(&self) -> HashMap<Vec<IndexLabel>, Vec<usize>> {
+    pub fn groupby_positions(&self) -> HashMap<Vec<IndexLabel>, Vec<usize>> {
         let mut groups = HashMap::<Vec<IndexLabel>, Vec<usize>>::new();
         for row in 0..self.len() {
             groups.entry(self.tuple_at(row)).or_default().push(row);
@@ -27307,13 +27870,29 @@ impl MultiIndex {
         flat
     }
 
-    /// Flatten this MultiIndex into a single-level Index by joining
-    /// level labels with a separator; the text is made when first read.
-    ///
-    /// Matches `pd.MultiIndex.to_flat_index()` (approximately).
+    /// Flatten this MultiIndex into a 1D `Index` of tuple labels (`IndexTuple`),
+    /// matching `pd.MultiIndex.to_flat_index()` (`Index(self._values, tupleize_cols=False)`).
     #[must_use]
-    pub fn to_flat_index(&self, sep: &str) -> Index {
-        Index::lazy_flat(self, sep)
+    pub fn to_tuple_index(&self) -> Index {
+        Index::new(
+            (0..self.len())
+                .map(|row| IndexLabel::tuple(self.tuple_at(row)))
+                .collect(),
+        )
+    }
+
+    /// Flatten this MultiIndex into a single-level [`Index`].
+    ///
+    /// - Passing `()` or `None` returns a 1D object `Index` of tuple labels
+    ///   (`IndexLabel::Object(IndexTuple)`), matching `pd.MultiIndex.to_flat_index()`.
+    /// - Passing a separator string (e.g. `"_"` or `Some("_")`) joins level labels
+    ///   with that separator into a lazy contiguous-UTF8 `Index`.
+    #[must_use]
+    pub fn to_flat_index<'a>(&self, mode: impl Into<FlatIndexArg<'a>>) -> Index {
+        match mode.into() {
+            FlatIndexArg::Tuples => self.to_tuple_index(),
+            FlatIndexArg::Sep(sep) => Index::lazy_flat(self, sep),
+        }
     }
 
     /// The flat labels' bytes and offsets (see [`Self::to_flat_index`]).
@@ -30299,7 +30878,7 @@ mod tests {
                 .cloned()
                 .collect();
             assert_eq!(
-                ia.difference(&ib).labels(),
+                ia.difference_sorted(&ib, Some(false)).labels(),
                 ref_diff.as_slice(),
                 "difference {a:?} \\ {b:?}"
             );
@@ -32509,12 +33088,12 @@ mod tests {
                 "union iter={iter} a={a:?} b={b:?}"
             );
             assert_eq!(
-                labels_i64(&ia.difference(&ib)),
+                labels_i64(&ia.difference_sorted(&ib, Some(false))),
                 difference_ref(&a, &b),
                 "difference iter={iter} a={a:?} b={b:?}"
             );
             assert_eq!(
-                labels_i64(&ia.symmetric_difference(&ib)),
+                labels_i64(&ia.symmetric_difference_sorted(&ib, Some(false))),
                 symmetric_difference_ref(&a, &b),
                 "symmetric_difference iter={iter} a={a:?} b={b:?}"
             );
@@ -36309,8 +36888,12 @@ mod tests {
             );
             let ctx = format!("iter={iter} vals={vals:?}");
 
-            // groupby (xk18v): label -> positions map must match exactly.
-            assert_eq!(lazy.groupby(), mat.groupby(), "groupby {ctx}");
+            // groupby_positions (xk18v): label -> positions map must match exactly.
+            assert_eq!(
+                lazy.groupby_positions(),
+                mat.groupby_positions(),
+                "groupby_positions {ctx}"
+            );
 
             // insert (uza04.152) at a random valid loc with an Int64 item and,
             // occasionally, a non-Int64 item to exercise the dtype transition.
@@ -37115,7 +37698,11 @@ mod tests {
         assert_eq!(order, vec![1, 2, 0]);
 
         let other = Index::from_i64(vec![2, 4]);
-        assert_eq!(idx.union(&other), idx.union_with(&other));
+        assert_eq!(idx.union(&other), Index::from_i64(vec![1, 2, 3, 4]));
+        assert_eq!(
+            idx.union_sorted(&other, Some(false)),
+            idx.union_with(&other)
+        );
         assert_eq!(
             idx.drop(&[IndexLabel::Int64(1)]),
             idx.drop_labels(&[IndexLabel::Int64(1)])
@@ -37175,9 +37762,24 @@ mod tests {
         assert!(idx.astype("object").is_ok());
         assert!(idx.astype("float64").is_err());
 
-        let grouped = Index::new(vec!["a".into(), "b".into(), "a".into()]).groupby();
+        let grouped = Index::new(vec!["a".into(), "b".into(), "a".into()]).groupby_positions();
         assert_eq!(grouped[&IndexLabel::from("a")], vec![0, 2]);
         assert_eq!(grouped[&IndexLabel::from("b")], vec![1]);
+        let grouped_by_vals = Index::new(vec!["a".into(), "b".into(), "c".into()])
+            .groupby(&[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(1),
+            ])
+            .unwrap();
+        assert_eq!(
+            grouped_by_vals[&IndexLabel::Int64(1)],
+            Index::new(vec!["a".into(), "c".into()])
+        );
+        assert_eq!(
+            grouped_by_vals[&IndexLabel::Int64(2)],
+            Index::new(vec!["b".into()])
+        );
 
         let left = Index::from_i64(vec![1, 2, 3]);
         let right = Index::from_i64(vec![2, 4]);
@@ -37254,13 +37856,13 @@ mod tests {
     fn int64_groupby_avoids_label_materialization_xk18v() {
         let idx = Index::from_i64_values(vec![2, 1, 2, 3, 1]);
         assert!(idx.labels.materialized.get().is_none());
-        let grouped = idx.groupby();
+        let grouped = idx.groupby_positions();
         assert_eq!(grouped[&IndexLabel::Int64(1)], vec![1, 4]);
         assert_eq!(grouped[&IndexLabel::Int64(2)], vec![0, 2]);
         assert_eq!(grouped[&IndexLabel::Int64(3)], vec![3]);
         assert!(
             idx.labels.materialized.get().is_none(),
-            "groupby should not materialize source Int64 labels"
+            "groupby_positions should not materialize source Int64 labels"
         );
     }
 
@@ -38190,7 +38792,7 @@ mod tests {
         ])
         .unwrap();
 
-        let groups = mi.groupby();
+        let groups = mi.groupby_positions();
         assert_eq!(
             groups[&vec![IndexLabel::Utf8("a".into()), IndexLabel::Int64(1)]],
             vec![0, 2]
@@ -38198,6 +38800,26 @@ mod tests {
         assert_eq!(
             groups[&vec![IndexLabel::Utf8("b".into()), IndexLabel::Int64(2)]],
             vec![1]
+        );
+
+        let grouped_by_values = mi
+            .groupby(&[
+                IndexLabel::Int64(10),
+                IndexLabel::Int64(20),
+                IndexLabel::Int64(10),
+            ])
+            .unwrap();
+        assert_eq!(
+            grouped_by_values[&IndexLabel::Int64(10)],
+            MultiIndex::from_tuples(vec![
+                vec!["a".into(), 1_i64.into()],
+                vec!["a".into(), 1_i64.into()],
+            ])
+            .unwrap()
+        );
+        assert_eq!(
+            grouped_by_values[&IndexLabel::Int64(20)],
+            MultiIndex::from_tuples(vec![vec!["b".into(), 2_i64.into()]]).unwrap()
         );
     }
 
@@ -38457,7 +39079,11 @@ mod tests {
                 .into_iter()
                 .filter(|t| !bset.contains(t) && seen_d.insert(t.clone()))
                 .collect();
-            assert_eq!(a.difference(&b).unwrap().to_list(), ref_diff, "diff {sa:?}");
+            assert_eq!(
+                a.difference_sorted(&b, Some(false)).unwrap().to_list(),
+                ref_diff,
+                "diff {sa:?}"
+            );
         }
     }
 
@@ -40285,10 +40911,10 @@ mod tests {
         // Categorical get_indexer also works.
         let mapped = cat.get_indexer(&[IndexLabel::from("b"), IndexLabel::from("z")]);
         assert_eq!(mapped, vec![1, -1]);
-        // get_indexer_for is an alias.
+        // get_indexer_for expands duplicates via get_indexer_non_unique.
         assert_eq!(
             cat.get_indexer_for(&[IndexLabel::from("a")]),
-            cat.get_indexer(&[IndexLabel::from("a")])
+            cat.get_indexer_non_unique(&[IndexLabel::from("a")]).0
         );
         Ok(())
     }
@@ -41833,10 +42459,16 @@ mod tests {
         const NS: i64 = 1_000_000_000;
 
         let dt = super::DatetimeIndex::new(vec![NS, 2 * NS, NS]);
-        assert_eq!(dt.groupby(), dt.to_flat_index().groupby());
+        assert_eq!(
+            dt.groupby_positions(),
+            dt.to_flat_index().groupby_positions()
+        );
 
         let td = super::TimedeltaIndex::new(vec![5, 10, 5]);
-        assert_eq!(td.groupby(), td.to_flat_index().groupby());
+        assert_eq!(
+            td.groupby_positions(),
+            td.to_flat_index().groupby_positions()
+        );
 
         use fp_types::{Period, PeriodFreq};
         let pi = super::PeriodIndex::new(vec![
@@ -41844,18 +42476,27 @@ mod tests {
             Period::new(2, PeriodFreq::Monthly),
             Period::new(1, PeriodFreq::Monthly),
         ]);
-        assert_eq!(pi.groupby(), pi.to_flat_index().groupby());
+        assert_eq!(
+            pi.groupby_positions(),
+            pi.to_flat_index().groupby_positions()
+        );
 
         let range = super::RangeIndex::new(2, 8, 2).unwrap();
-        assert_eq!(range.groupby(), range.to_flat_index().groupby());
+        assert_eq!(
+            range.groupby_positions(),
+            range.to_flat_index().groupby_positions()
+        );
 
         let cat = super::CategoricalIndex::from_values(
             vec!["a".to_owned(), "b".to_owned(), "a".to_owned()],
             false,
         );
-        assert_eq!(cat.groupby(), cat.to_flat_index().groupby());
         assert_eq!(
-            cat.groupby()
+            cat.groupby_positions(),
+            cat.to_flat_index().groupby_positions()
+        );
+        assert_eq!(
+            cat.groupby_positions()
                 .get(&super::IndexLabel::Utf8("a".to_owned()))
                 .cloned(),
             Some(vec![0, 2])
@@ -44431,7 +45072,7 @@ mod tests {
     #[test]
     fn range_index_groupby_builds_direct_buckets_wvlfh() {
         let descending = super::RangeIndex::new(8, 0, -2).unwrap();
-        let groups = descending.groupby();
+        let groups = descending.groupby_positions();
 
         assert_eq!(groups[&IndexLabel::Int64(8)], vec![0]);
         assert_eq!(groups[&IndexLabel::Int64(6)], vec![1]);
@@ -44440,7 +45081,7 @@ mod tests {
         assert_eq!(groups.len(), 4);
 
         let empty = super::RangeIndex::new(0, 0, 1).unwrap();
-        assert!(empty.groupby().is_empty());
+        assert!(empty.groupby_positions().is_empty());
     }
 
     #[test]
@@ -48595,6 +49236,212 @@ mod infer_freq_like_pandas_acelo {
                 vec![IndexLabel::Utf8("z".to_owned()), IndexLabel::Int64(9)],
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn jiuhh_9cj5a_am2bt_9frxo_index_and_multiindex_parity() {
+        // jiuhh: Index::groupby(values) and MultiIndex::groupby(values) group self labels by external values.
+        let idx = Index::new(vec![
+            IndexLabel::Utf8("a".to_owned()),
+            IndexLabel::Utf8("b".to_owned()),
+            IndexLabel::Utf8("a".to_owned()),
+        ])
+        .set_name("k");
+        let grouped = idx
+            .groupby(&[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(1),
+            ])
+            .unwrap();
+        assert_eq!(
+            grouped[&IndexLabel::Int64(1)],
+            Index::new(vec![
+                IndexLabel::Utf8("a".to_owned()),
+                IndexLabel::Utf8("a".to_owned()),
+            ])
+            .set_name("k")
+        );
+        assert_eq!(
+            grouped[&IndexLabel::Int64(2)],
+            Index::new(vec![IndexLabel::Utf8("b".to_owned())]).set_name("k")
+        );
+        // Missing values in `values` are skipped (even at positions >= len).
+        let grouped_with_missing = idx
+            .groupby(&[
+                IndexLabel::Null(fp_types::NullKind::NaN),
+                IndexLabel::Int64(10),
+                IndexLabel::Null(fp_types::NullKind::Null),
+                IndexLabel::Null(fp_types::NullKind::NaT),
+            ])
+            .unwrap();
+        assert_eq!(grouped_with_missing.len(), 1);
+        assert_eq!(
+            grouped_with_missing[&IndexLabel::Int64(10)],
+            Index::new(vec![IndexLabel::Utf8("b".to_owned())]).set_name("k")
+        );
+        // Non-missing value at position >= len raises OutOfBounds.
+        assert!(matches!(
+            idx.groupby(&[
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(2),
+                IndexLabel::Int64(1),
+                IndexLabel::Int64(3),
+            ]),
+            Err(IndexError::OutOfBounds {
+                position: 3,
+                length: 3
+            })
+        ));
+        // RangeIndex.groupby(values) returns BTreeMap<IndexLabel, Index>.
+        let ri = RangeIndex::new(0, 6, 2).unwrap();
+        let ri_grouped = ri
+            .groupby(&[
+                IndexLabel::Utf8("x".to_owned()),
+                IndexLabel::Utf8("y".to_owned()),
+                IndexLabel::Utf8("x".to_owned()),
+            ])
+            .unwrap();
+        assert_eq!(
+            ri_grouped[&IndexLabel::Utf8("x".to_owned())],
+            Index::from_i64(vec![0, 4])
+        );
+        assert_eq!(
+            ri_grouped[&IndexLabel::Utf8("y".to_owned())],
+            Index::from_i64(vec![2])
+        );
+
+        // 9cj5a: union, difference, symmetric_difference default to sort=None (sorted),
+        // while sort=Some(false) preserves first-seen order.
+        let left_i = Index::from_i64(vec![3, 1, 2]);
+        let right_i = Index::from_i64(vec![4, 1]);
+        assert_eq!(left_i.union(&right_i), Index::from_i64(vec![1, 2, 3, 4]));
+        assert_eq!(
+            left_i.union_sorted(&right_i, Some(false)),
+            Index::from_i64(vec![3, 1, 2, 4])
+        );
+        assert_eq!(left_i.difference(&right_i), Index::from_i64(vec![2, 3]));
+        assert_eq!(
+            left_i.difference_sorted(&right_i, Some(false)),
+            Index::from_i64(vec![3, 2])
+        );
+        assert_eq!(
+            left_i.symmetric_difference(&right_i),
+            Index::from_i64(vec![2, 3, 4])
+        );
+        assert_eq!(
+            left_i.symmetric_difference_sorted(&right_i, Some(false)),
+            Index::from_i64(vec![3, 2, 4])
+        );
+        // Empty other: union and difference do not sort when sort=None, symmetric_difference does sort!
+        let empty_i = Index::from_i64(vec![]);
+        assert_eq!(left_i.union(&empty_i), Index::from_i64(vec![3, 1, 2]));
+        assert_eq!(
+            left_i.union_sorted(&empty_i, Some(true)),
+            Index::from_i64(vec![1, 2, 3])
+        );
+        assert_eq!(left_i.difference(&empty_i), Index::from_i64(vec![3, 1, 2]));
+        assert_eq!(
+            left_i.difference_sorted(&empty_i, Some(true)),
+            Index::from_i64(vec![1, 2, 3])
+        );
+        assert_eq!(
+            left_i.symmetric_difference(&empty_i),
+            Index::from_i64(vec![1, 2, 3])
+        );
+
+        let mi_left = MultiIndex::from_tuples(vec![
+            vec![IndexLabel::Utf8("b".to_owned()), IndexLabel::Int64(2)],
+            vec![IndexLabel::Utf8("a".to_owned()), IndexLabel::Int64(1)],
+            vec![IndexLabel::Utf8("c".to_owned()), IndexLabel::Int64(3)],
+        ])
+        .unwrap();
+        let mi_right = MultiIndex::from_tuples(vec![
+            vec![IndexLabel::Utf8("d".to_owned()), IndexLabel::Int64(4)],
+            vec![IndexLabel::Utf8("a".to_owned()), IndexLabel::Int64(1)],
+        ])
+        .unwrap();
+        assert_eq!(
+            mi_left.union(&mi_right).unwrap().to_list(),
+            vec![
+                vec![IndexLabel::Utf8("a".to_owned()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("b".to_owned()), IndexLabel::Int64(2)],
+                vec![IndexLabel::Utf8("c".to_owned()), IndexLabel::Int64(3)],
+                vec![IndexLabel::Utf8("d".to_owned()), IndexLabel::Int64(4)],
+            ]
+        );
+        assert_eq!(
+            mi_left
+                .union_sorted(&mi_right, Some(false))
+                .unwrap()
+                .to_list(),
+            vec![
+                vec![IndexLabel::Utf8("b".to_owned()), IndexLabel::Int64(2)],
+                vec![IndexLabel::Utf8("a".to_owned()), IndexLabel::Int64(1)],
+                vec![IndexLabel::Utf8("c".to_owned()), IndexLabel::Int64(3)],
+                vec![IndexLabel::Utf8("d".to_owned()), IndexLabel::Int64(4)],
+            ]
+        );
+        assert_eq!(
+            mi_left.difference(&mi_right).unwrap().to_list(),
+            vec![
+                vec![IndexLabel::Utf8("b".to_owned()), IndexLabel::Int64(2)],
+                vec![IndexLabel::Utf8("c".to_owned()), IndexLabel::Int64(3)],
+            ]
+        );
+
+        // am2bt: try_get_indexer and try_reindex reject duplicate-bearing source Index;
+        // get_indexer_for expands duplicates.
+        let dup_idx = Index::new(vec![
+            IndexLabel::Utf8("a".to_owned()),
+            IndexLabel::Utf8("b".to_owned()),
+            IndexLabel::Utf8("a".to_owned()),
+        ]);
+        let target_idx = Index::new(vec![
+            IndexLabel::Utf8("a".to_owned()),
+            IndexLabel::Utf8("c".to_owned()),
+        ]);
+        assert!(matches!(
+            dup_idx.try_get_indexer(&target_idx),
+            Err(IndexError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            dup_idx.try_reindex(&target_idx),
+            Err(IndexError::InvalidArgument(_))
+        ));
+        assert_eq!(
+            dup_idx.get_indexer_for(&target_idx),
+            vec![Some(0), Some(2), None]
+        );
+
+        let dup_dt = DatetimeIndex::new(vec![100, 200, 100]);
+        assert!(matches!(
+            dup_dt.try_get_indexer(&[100, 300]),
+            Err(IndexError::InvalidArgument(_))
+        ));
+        assert_eq!(dup_dt.get_indexer_for(&[100, 300]), vec![0, 2, -1]);
+
+        // 9frxo: MultiIndex::to_flat_index(()) / to_tuple_index() returns object Index of IndexTuple.
+        let flat_tuples = mi_left.to_flat_index(());
+        assert_eq!(flat_tuples, mi_left.to_tuple_index());
+        assert_eq!(flat_tuples, mi_left.to_flat_index(None));
+        assert_eq!(flat_tuples.dtype(), "object");
+        assert_eq!(flat_tuples.len(), 3);
+        assert_eq!(
+            flat_tuples.labels()[0].as_tuple(),
+            Some([IndexLabel::Utf8("b".to_owned()), IndexLabel::Int64(2)].as_slice())
+        );
+        assert_eq!(flat_tuples.labels()[0].to_string(), "('b', 2)");
+        // Separator mode still produces joined Utf8 strings.
+        let flat_sep = mi_left.to_flat_index("_");
+        assert_eq!(
+            flat_sep.labels(),
+            &[
+                IndexLabel::Utf8("b_2".to_owned()),
+                IndexLabel::Utf8("a_1".to_owned()),
+                IndexLabel::Utf8("c_3".to_owned()),
+            ]
         );
     }
 }
