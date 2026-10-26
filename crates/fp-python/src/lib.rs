@@ -28603,7 +28603,49 @@ fn aligned_power(base: &Series, exponent: &Series) -> Result<Series, fp_frame::F
     if base.dtype() == DType::Bool && exponent.dtype() == DType::Bool {
         return base.power(exponent);
     }
-    base.pow(exponent)
+    let result = base.pow(exponent)?;
+    let is_f32 = fp_types::NumpyNumeric::of(&base.dtype(), base.column().width())
+        .zip(fp_types::NumpyNumeric::of(
+            &exponent.dtype(),
+            exponent.column().width(),
+        ))
+        .is_some_and(|(l, r)| l.result_type(r) == fp_types::NumpyNumeric::Float(32));
+    if !is_f32 || result.dtype() != DType::Float64 {
+        return Ok(result);
+    }
+    let (left_col, right_col) = if base.index() == exponent.index() {
+        (base.column().clone(), exponent.column().clone())
+    } else {
+        let plan = fp_index::align_union(base.index(), exponent.index());
+        (
+            base.column().reindex_by_positions(&plan.left_positions)?,
+            exponent
+                .column()
+                .reindex_by_positions(&plan.right_positions)?,
+        )
+    };
+    let values: Vec<Scalar> = left_col
+        .values()
+        .iter()
+        .zip(right_col.values())
+        .map(|(l, r)| {
+            if let (Ok(lv), Ok(rv)) = (l.to_f64(), r.to_f64())
+                && !l.is_missing()
+                && !r.is_missing()
+            {
+                let v = if rv == 0.0 || lv == 1.0 {
+                    1.0_f32
+                } else {
+                    (lv as f32).powf(rv as f32)
+                };
+                Scalar::Float64(f64::from(v))
+            } else {
+                Scalar::Null(NullKind::NaN)
+            }
+        })
+        .collect();
+    let col = Column::new(DType::Float64, values)?.with_width(NumericWidth::Float32);
+    Series::new(result.name(), result.index().clone(), col)
 }
 
 /// pandas' masked power identities in a `**` result: NA ** 0 and 1 ** NA
@@ -30868,6 +30910,57 @@ fn scalar_arith(
     scalar_left: bool,
 ) -> Option<Series> {
     let scalar = plain_number_operand(like, other)?;
+    if op == ArithmeticOp::Pow
+        && like.dtype() == DType::Float64
+        && like.column().width() == Some(NumericWidth::Float32)
+        && let Scalar::Float64(s_val) = scalar
+    {
+        let s_f32 = s_val as f32;
+        if scalar_left || !matches!(s_f32, -1.0 | 0.0 | 0.5 | 1.0 | 2.0) {
+            let values: Vec<Scalar> = like
+                .column()
+                .values()
+                .iter()
+                .map(|cell| {
+                    let (b, e) = if scalar_left {
+                        (
+                            s_f32,
+                            if cell.is_missing() {
+                                f32::NAN
+                            } else {
+                                cell.to_f64().unwrap_or(f64::NAN) as f32
+                            },
+                        )
+                    } else {
+                        (
+                            if cell.is_missing() {
+                                f32::NAN
+                            } else {
+                                cell.to_f64().unwrap_or(f64::NAN) as f32
+                            },
+                            s_f32,
+                        )
+                    };
+                    let v = if e == 0.0 || b == 1.0 {
+                        1.0_f32
+                    } else if b.is_nan() || e.is_nan() {
+                        f32::NAN
+                    } else {
+                        b.powf(e)
+                    };
+                    if v.is_nan() {
+                        Scalar::Null(NullKind::NaN)
+                    } else {
+                        Scalar::Float64(f64::from(v))
+                    }
+                })
+                .collect();
+            let col = Column::new(DType::Float64, values)
+                .ok()?
+                .with_width(NumericWidth::Float32);
+            return Series::new(like.name(), like.index().clone(), col).ok();
+        }
+    }
     let column = like.column().binary_scalar(&scalar, op, scalar_left)?;
     Series::new(like.name(), like.index().clone(), column).ok()
 }
@@ -31269,9 +31362,10 @@ fn narrowed_frame_arith(
     result: DataFrame,
     left: &DataFrame,
     right: &DataFrame,
-    true_division: bool,
+    op: ArithmeticOp,
 ) -> PyResult<DataFrame> {
     use fp_types::NumpyNumeric;
+    let true_division = op == ArithmeticOp::Div;
     if !has_narrow_column(left) && !has_narrow_column(right) {
         return Ok(result);
     }
@@ -31294,6 +31388,38 @@ fn narrowed_frame_arith(
             Some(numeric) if true_division && !numeric.is_float() => Some(NumpyNumeric::Float(64)),
             numeric => numeric,
         };
+        if op == ArithmeticOp::Pow
+            && numeric == Some(NumpyNumeric::Float(32))
+            && column.dtype() == DType::Float64
+            && left.index() == right.index()
+            && let (Some(l_col), Some(r_col)) = (left.column(name), right.column(name))
+        {
+            let values: Vec<Scalar> = l_col
+                .values()
+                .iter()
+                .zip(r_col.values())
+                .map(|(l, r)| {
+                    if let (Ok(lv), Ok(rv)) = (l.to_f64(), r.to_f64())
+                        && !l.is_missing()
+                        && !r.is_missing()
+                    {
+                        let v = if rv == 0.0 || lv == 1.0 {
+                            1.0_f32
+                        } else {
+                            (lv as f32).powf(rv as f32)
+                        };
+                        Scalar::Float64(f64::from(v))
+                    } else {
+                        Scalar::Null(NullKind::NaN)
+                    }
+                })
+                .collect();
+            let col = Column::new(DType::Float64, values)
+                .map_err(column_error_to_py)?
+                .with_width(NumericWidth::Float32);
+            columns.push(col);
+            continue;
+        }
         columns.push(match numeric {
             Some(numeric) => {
                 let series = Series::new(name.as_str(), result.index().clone(), column)
@@ -37484,7 +37610,13 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, other, level, fill_value, axis, Self::__floordiv__)
+        let was_array = is_flex_zero_div_array_operand(other)?;
+        self.flex(py, other, level, fill_value, axis, |s, py, o| {
+            if let Some(res) = flex_int_zero_div(s, py, o, was_array, false, false)? {
+                return Ok(res);
+            }
+            s.__floordiv__(py, o)
+        })
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn rfloordiv(
@@ -37495,7 +37627,13 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, other, level, fill_value, axis, Self::__rfloordiv__)
+        let was_array = is_flex_zero_div_array_operand(other)?;
+        self.flex(py, other, level, fill_value, axis, |s, py, o| {
+            if let Some(res) = flex_int_zero_div(s, py, o, was_array, false, true)? {
+                return Ok(res);
+            }
+            s.__rfloordiv__(py, o)
+        })
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn r#mod(
@@ -37506,7 +37644,13 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, other, level, fill_value, axis, Self::__mod__)
+        let was_array = is_flex_zero_div_array_operand(other)?;
+        self.flex(py, other, level, fill_value, axis, |s, py, o| {
+            if let Some(res) = flex_int_zero_div(s, py, o, was_array, true, false)? {
+                return Ok(res);
+            }
+            s.__mod__(py, o)
+        })
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn rmod(
@@ -37517,7 +37661,13 @@ impl PySeries {
         fill_value: Option<&Bound<'_, PyAny>>,
         axis: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PySeries> {
-        self.flex(py, other, level, fill_value, axis, Self::__rmod__)
+        let was_array = is_flex_zero_div_array_operand(other)?;
+        self.flex(py, other, level, fill_value, axis, |s, py, o| {
+            if let Some(res) = flex_int_zero_div(s, py, o, was_array, true, true)? {
+                return Ok(res);
+            }
+            s.__rmod__(py, o)
+        })
     }
     #[pyo3(signature = (other, level=None, fill_value=None, axis=None))]
     fn pow(
@@ -47608,7 +47758,7 @@ impl PyDataFrame {
                     frame_arith(left, right, op).map_err(frame_error_to_py)?,
                     left,
                     right,
-                    op == ArithmeticOp::Div,
+                    op,
                 )?,
             };
             // bool % bool columns are numpy's int8 (see [`BoolNumpy`]).
@@ -47793,7 +47943,7 @@ impl PyDataFrame {
         }
         .map_err(frame_error_to_py)?;
         Ok(PyDataFrame {
-            inner: narrowed_frame_arith(result, left, right, op == ArithmeticOp::Div)?,
+            inner: narrowed_frame_arith(result, left, right, op)?,
         })
     }
 
@@ -67890,13 +68040,11 @@ fn frame_multiindex_loc(
             let flat = frame.index().labels()[positions[0]].clone();
             let py = key.py();
             let row = zoned_row(py, frame, frame.loc_row(&flat).map_err(loc_key_error)?)?;
-            // The row is named by its key, a tuple, as pandas' (it was the
-            // tuple's text).
-            let items = labels
-                .iter()
-                .map(|label| index_label_to_py(py, label))
-                .collect::<PyResult<Vec<_>>>()?;
-            let name = py_series_name(PyTuple::new(py, items)?.as_any())?;
+            // The row is named by its key, a tuple of the levels' scalars, as
+            // pandas' (it was the tuple's text, then Python scalars; 13bjo).
+            let name = py_series_name(
+                multiindex_scalar_tuple_to_py(py, multi, positions[0])?.as_any(),
+            )?;
             let row = Series::new(name, row.index().clone(), row.column().clone())
                 .map_err(frame_error_to_py)?;
             return Ok(Some(MultiLoc::Row(row)));
