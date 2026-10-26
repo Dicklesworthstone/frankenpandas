@@ -24207,6 +24207,7 @@ struct Level {
     /// nanoseconds, as a zoned DatetimeIndex holds them); None for any other
     /// level. A zoned column's level was its text (br-frankenpandas-c4v57).
     zone: Option<Arc<str>>,
+    width: Option<NumericWidth>,
     /// Whether the level's catalog is its codes' uniques in their order -
     /// a stack's levels, factorized unsorted with every label kept as
     /// pandas' are - rather than its labels sorted (br-frankenpandas-33b80).
@@ -24280,6 +24281,7 @@ impl Level {
             rows: Arc::new(OnceLock::from(Arc::new(rows))),
             codes: Arc::default(),
             zone: None,
+            width: None,
             declared: false,
         }
     }
@@ -24290,6 +24292,7 @@ impl Level {
             rows: Arc::default(),
             codes: Arc::new(OnceLock::from(Some(LevelCodes { uniques, codes }))),
             zone: None,
+            width: None,
             declared: false,
         }
     }
@@ -24297,6 +24300,12 @@ impl Level {
     /// This level in `zone` (see [`Level::zone`]).
     fn zoned(mut self, zone: Option<Arc<str>>) -> Self {
         self.zone = zone;
+        self
+    }
+
+    /// This level in narrow numeric `width` (`int32`, `uint8`, `float32`, ...).
+    fn with_width(mut self, width: Option<NumericWidth>) -> Self {
+        self.width = width;
         self
     }
 
@@ -24398,6 +24407,7 @@ impl Level {
             None => Self::from_rows(take_level_labels(self.rows(), positions)),
         }
         .zoned(self.zone.clone())
+        .with_width(self.width)
         .declared(self.declared)
     }
 
@@ -24412,14 +24422,19 @@ impl Level {
             None => Self::from_rows(self.rows()[start..start + len].to_vec()),
         }
         .zoned(self.zone.clone())
+        .with_width(self.width)
         .declared(self.declared)
     }
 }
 
-/// `index` - a level's labels - in the level's zone when it has one (br-frankenpandas-c4v57).
+/// `index` - a level's labels - in the level's zone and width when it has them (br-frankenpandas-c4v57, br-frankenpandas-13bjo).
 fn zoned_level_index(index: Index, level: &Level) -> Index {
-    match level.zone.as_deref() {
+    let index = match level.zone.as_deref() {
         Some(zone) => index.clone().with_tz(Some(zone)).unwrap_or(index),
+        None => index,
+    };
+    match level.width {
+        Some(width) => index.with_width(width),
         None => index,
     }
 }
@@ -25273,6 +25288,23 @@ impl MultiIndex {
         self
     }
 
+    /// The narrow numeric width of level `level` (`int32`, `uint8`, `float32`,
+    /// ...); None for 64-bit or non-numeric levels (br-frankenpandas-13bjo).
+    #[must_use]
+    pub fn level_width(&self, level: usize) -> Option<NumericWidth> {
+        self.levels.get(level)?.width
+    }
+
+    /// `self` with level `level` holding narrow numeric `width`
+    /// (br-frankenpandas-13bjo).
+    #[must_use]
+    pub fn with_level_width(mut self, level: usize, width: Option<NumericWidth>) -> Self {
+        if let Some(target) = self.levels.get_mut(level) {
+            target.width = width;
+        }
+        self
+    }
+
     /// Integer level codes for each row, matching `pd.MultiIndex.codes`.
     ///
     /// Missing labels receive code `-1`; all other labels are encoded by their
@@ -25445,9 +25477,9 @@ impl MultiIndex {
     /// Dtype string for each level, matching `pd.MultiIndex.dtypes`.
     #[must_use]
     pub fn dtypes(&self) -> Vec<&'static str> {
-        self.levels
-            .iter()
-            .map(|level| Index::new(level.to_vec()).dtype())
+        self.levels()
+            .into_iter()
+            .map(|level| level.dtype())
             .collect()
     }
 
@@ -25907,7 +25939,8 @@ impl MultiIndex {
         };
         let levels = vec![
             Self::stacked_row_level(uniques, &codes, columns.len())
-                .zoned(index.tz().map(Arc::from)),
+                .zoned(index.tz().map(Arc::from))
+                .with_width(index.width()),
             Self::stacked_column_level(columns, labels.len())?,
         ];
         Some(Self::from_shared_levels_and_names(levels, vec![None; 2]))
@@ -25946,7 +25979,8 @@ impl MultiIndex {
                 uniques,
                 CodesWindow::from(positions.repeat(piece_keys.len())),
             )
-            .zoned(index.tz().map(Arc::from)),
+            .zoned(index.tz().map(Arc::from))
+            .with_width(index.width()),
         ];
         Some(Self::from_shared_levels_and_names(levels, vec![None; 2]))
     }
@@ -25970,6 +26004,7 @@ impl MultiIndex {
             levels.push(
                 Self::stacked_row_level(Arc::clone(&coded.uniques), &coded.codes, columns.len())
                     .zoned(level.zone.clone())
+                    .with_width(level.width)
                     .declared(level.declared),
             );
         }
