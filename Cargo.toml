@@ -77,8 +77,8 @@ postgres-protocol = "0.6.12"
 pyo3 = { version = "0.30.1" }
 quick-xml = "0.42"
 regex = "1.13.1"
-rust_xlsxwriter = "0.101.0"
-rusqlite = { version = "0.40.2", features = ["bundled", "column_decltype"] }
+rust_xlsxwriter = "0.102.0"
+rusqlite = { version = "0.41.1", features = ["bundled", "column_decltype"] }
 ryu = "1.0.23"
 # Only its safe CPU-affinity calls (fp-frame, Linux): a column-parallel pass
 # whose data fits in one L3 keeps its workers in the caller's L3 domain on a
