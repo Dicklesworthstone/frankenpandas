@@ -42616,6 +42616,99 @@ def test_concat_keys_tuples_split_b4cp7(case: str) -> None:
     assert run(fpd) == run(pd)
 
 
+def _b4cp7_named_frame(m: Any) -> Any:
+    return m.DataFrame({"b": [1, 2], "a": [3, 4]}).rename_axis(columns="field")
+
+
+_B4CP7_HORIZONTAL_CASES = {
+    "frames": lambda m: m.concat([_b4cp7_named_frame(m)] * 2, axis=1, keys=[("x", 1), ("y", 2)]),
+    "unsorted keys": lambda m: m.concat([_b4cp7_named_frame(m)] * 2, axis=1, keys=[("z", 2), ("a", 1)]),
+    "repeated keys": lambda m: m.concat([_b4cp7_named_frame(m)] * 2, axis=1, keys=[("x", 1), ("x", 1)]),
+    "one-part tuples": lambda m: m.concat([_b4cp7_named_frame(m)] * 2, axis=1, keys=[("x",), ("y",)]),
+    "three-part tuples": lambda m: m.concat([_b4cp7_named_frame(m)] * 2, axis=1, keys=[("x", 1, True), ("y", 2, False)]),
+    "outer names": lambda m: m.concat(
+        [_b4cp7_named_frame(m)] * 2, axis=1, keys=[("x", 1), ("y", 2)], names=["source", "batch"]
+    ),
+    "all names": lambda m: m.concat(
+        [_b4cp7_named_frame(m)] * 2, axis=1, keys=[("x", 1), ("y", 2)], names=["source", "batch", "value"]
+    ),
+    "typed names": lambda m: m.concat(
+        [_b4cp7_named_frame(m)] * 2, axis=1, keys=[("x", 1), ("y", 2)], names=[0, ("batch", 1)]
+    ),
+    "empty names": lambda m: m.concat([_b4cp7_named_frame(m)] * 2, axis=1, keys=[("x", 1), ("y", 2)], names=[]),
+    "Series": lambda m: m.concat([m.Series([1, 2], name="v"), m.Series([3, 4], name="w")], axis=1, keys=[("x", 1), ("y", 2)]),
+    "Series names": lambda m: m.concat(
+        [m.Series([1]), m.Series([2])], axis=1, keys=[("x", 1), ("y", 2)], names=["source", "batch"]
+    ),
+    "Series mixed tuple scalar keys": lambda m: m.concat([m.Series([1]), m.Series([2])], axis=1, keys=[("x", 1), "y"], names=["source"]),
+    "Series scalar keys": lambda m: m.concat([m.Series([1]), m.Series([2])], axis=1, keys=["x", "y"], names=["source"]),
+    "mixed frame Series": lambda m: m.concat([_b4cp7_named_frame(m), m.Series([5, 6], name="v")], axis=1, keys=[("x", 1), ("y", 2)]),
+    "typed columns": lambda m: m.concat([m.DataFrame([[1, 2]], columns=[0, 2])] * 2, axis=1, keys=[("x", 1), ("y", 2)]),
+    "different column catalogs": lambda m: m.concat(
+        [_b4cp7_named_frame(m), m.DataFrame({"c": [5, 6], "a": [7, 8]})], axis=1, keys=[("x", 1), ("y", 2)]
+    ),
+    "different column names on equal axes": lambda m: m.concat(
+        [_b4cp7_named_frame(m), _b4cp7_named_frame(m).rename_axis(columns="other")], axis=1, keys=[("x", 1), ("y", 2)]
+    ),
+    "MultiIndex columns": lambda m: m.concat(
+        [m.concat([_b4cp7_named_frame(m)] * 2, axis=1, keys=["p", "q"])] * 2,
+        axis=1, keys=[("x", 1), ("y", 2)], names=["source", "batch"],
+    ),
+    "None object drops its non-tuple key": lambda m: m.concat(
+        [_b4cp7_named_frame(m), None, _b4cp7_named_frame(m)], axis=1, keys=[("x", 1), "unused", ("y", 2)]
+    ),
+    "empty piece": lambda m: m.concat([m.DataFrame(), _b4cp7_named_frame(m)], axis=1, keys=[("x", 1), ("y", 2)]),
+    "all empty columns": lambda m: m.concat([_b4cp7_named_frame(m).iloc[:, :0]] * 2, axis=1, keys=[("x", 1), ("y", 2)]),
+    "mapping": lambda m: m.concat({("x", 1): _b4cp7_named_frame(m), ("y", 2): _b4cp7_named_frame(m)}, axis=1),
+    "ignore_index": lambda m: m.concat(
+        [_b4cp7_named_frame(m)] * 2, axis=1, keys=[("x", 1), ("y", 2)], names=["source", "batch"], ignore_index=True
+    ),
+    "outer row alignment": lambda m: m.concat(
+        [m.Series([1, 2], index=[0, 1]), m.Series([3, 4], index=[1, 2])], axis=1, keys=[("x", 1), ("y", 2)]
+    ),
+    "inner row alignment": lambda m: m.concat(
+        [m.Series([1, 2], index=[0, 1]), m.Series([3, 4], index=[1, 2])], axis=1, keys=[("x", 1), ("y", 2)], join="inner"
+    ),
+}
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("case", list(_B4CP7_HORIZONTAL_CASES))
+def test_concat_tuple_keys_columns_match_pandas_b4cp7(case: str) -> None:
+    got = _B4CP7_HORIZONTAL_CASES[case](fpd)
+    expected = _B4CP7_HORIZONTAL_CASES[case](pd)
+    assert type(got.columns).__name__ == type(expected.columns).__name__
+    assert got.columns.tolist() == expected.columns.tolist()
+    assert list(got.columns.names) == list(expected.columns.names)
+    assert got.index.tolist() == expected.index.tolist()
+    assert got.shape == expected.shape
+    if isinstance(expected.columns, pd.MultiIndex):
+        assert [level.tolist() for level in got.columns.levels] == [level.tolist() for level in expected.columns.levels]
+        assert [list(code) for code in got.columns.codes] == [list(code) for code in expected.columns.codes]
+    for position in range(expected.shape[1]):
+        actual_column = got.iloc[:, position]
+        expected_column = expected.iloc[:, position]
+        assert str(actual_column.dtype) == str(expected_column.dtype)
+        np.testing.assert_array_equal(actual_column.to_numpy(), expected_column.to_numpy())
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("series,names", [(False, ["short"]), (False, ["a", "b", "c", "d"]), (True, ["short"]), (True, ["a", "b", "c"])])
+def test_concat_tuple_keys_reject_wrong_names_b4cp7(series: bool, names: list[str]) -> None:
+    for m in (pd, fpd):
+        piece = m.Series([1]) if series else m.DataFrame({"v": [1]})
+        with pytest.raises(ValueError, match="Length of names must match number of levels in MultiIndex"):
+            m.concat([piece, piece], axis=1, keys=[("x", 1), ("y", 2)], names=names)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_concat_frame_missing_tuple_key_raises_b4cp7() -> None:
+    for m in (pd, fpd):
+        piece = m.DataFrame({"v": [1]})
+        with pytest.raises(ValueError):
+            m.concat([piece, piece], axis=1, keys=[(None, 1), ("y", 2)])
+
+
 def _o88r1_frame(m: Any) -> Any:
     return m.DataFrame({"name": [f"user_{i}" for i in range(50)], "v": np.arange(50.0)})
 

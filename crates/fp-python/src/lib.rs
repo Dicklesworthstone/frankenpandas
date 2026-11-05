@@ -2204,10 +2204,6 @@ fn sparsify_level_texts(levels: &mut [Vec<String>]) {
 /// when no level is named).
 type LevelTexts = (Vec<Vec<String>>, Option<Vec<String>>);
 
-/// A frame's column axis as levels: one label list per level and each
-/// level's name.
-type ColumnLevels = (Vec<Vec<IndexLabel>>, Vec<Option<LabelName>>);
-
 /// The texts pandas prints for a row MultiIndex at `rows`: one list per
 /// level, sparsified unless `sparsify` is false (to_string's), and the level
 /// names when any level is named ("" for an unnamed one).
@@ -85797,21 +85793,25 @@ fn keyed_rows(
         Some(multi) => multi.names().get(level).cloned().flatten(),
         None => piece.name().cloned(),
     };
-    let names = names.unwrap_or_else(|| {
-        let mut names = vec![None; key_levels];
-        names.extend((0..index_levels).map(|level| {
+    let inherited_names = || {
+        (0..index_levels).map(|level| {
             let first = pieces.first().and_then(|piece| level_name(piece, level));
             first.filter(|name| {
                 pieces
                     .iter()
                     .all(|piece| level_name(piece, level).as_ref() == Some(name))
             })
-        }));
-        names
-    });
+        })
+    };
+    let mut names = names
+        .filter(|names| !names.is_empty())
+        .unwrap_or_else(|| vec![None; key_levels]);
+    if names.len() == key_levels {
+        names.extend(inherited_names());
+    }
     if names.len() != key_levels + index_levels {
-        return Err(not_implemented(
-            "concat(names=...) naming other than every key and index level",
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Length of names must match number of levels in MultiIndex.",
         ));
     }
     let rows: usize = pieces.iter().map(|piece| piece.len()).sum();
@@ -86477,13 +86477,6 @@ fn concat_objects(
         .as_ref()
         .map(|items| -> PyResult<Vec<IndexLabel>> { items.iter().map(py_to_index_label).collect() })
         .transpose()?;
-    // Keys that are all tuples of one length are that many key levels of
-    // the rows, as pandas' (each tuple was one key label;
-    // br-frankenpandas-b4cp7).
-    let key_parts: Option<Vec<Vec<IndexLabel>>> = match key_items.as_ref() {
-        Some(items) => tuple_key_parts(items)?,
-        None => None,
-    };
     if names.is_some() && keys.is_none() {
         return Err(not_implemented("concat(names=...) without keys="));
     }
@@ -86534,7 +86527,7 @@ fn concat_objects(
     let mut series: Vec<Series> = Vec::new();
     // The keys of the objects kept: a None object drops out with its key.
     let mut kept_keys: Vec<IndexLabel> = Vec::new();
-    let mut kept_parts: Vec<Vec<IndexLabel>> = Vec::new();
+    let mut kept_key_items: Vec<Bound<'_, PyAny>> = Vec::new();
     let mut kept: Vec<&Bound<'_, PyAny>> = Vec::new();
     for (position, item) in objects.iter().enumerate() {
         if item.is_none() {
@@ -86543,8 +86536,8 @@ fn concat_objects(
         if let Some(keys) = &keys {
             kept_keys.push(keys[position].clone());
         }
-        if let Some(parts) = &key_parts {
-            kept_parts.push(parts[position].clone());
+        if let Some(items) = &key_items {
+            kept_key_items.push(items[position].clone());
         }
         kept.push(item);
         if let Ok(frame) = item.extract::<PyRef<'_, PyDataFrame>>() {
@@ -86597,10 +86590,12 @@ fn concat_objects(
     } else {
         Some(kept_keys)
     };
-    // The rows' key levels: a tuple key's parts, else the key alone.
+    // Split tuple keys after dropping None objects and their keys. The
+    // same key levels label either axis (br-frankenpandas-b4cp7).
+    let key_parts = tuple_key_parts(&kept_key_items)?;
     let row_keys = |keys: &[IndexLabel]| -> Vec<Vec<IndexLabel>> {
-        if key_parts.is_some() {
-            kept_parts.clone()
+        if let Some(parts) = &key_parts {
+            parts.clone()
         } else {
             keys.iter().map(|key| vec![key.clone()]).collect()
         }
@@ -86660,69 +86655,178 @@ fn concat_objects(
             Series::new(out.name(), index, out.column().clone()).map_err(frame_error_to_py)?;
         return PySeries { inner: out }.into_py_any(py);
     }
-    // Frames side by side under keys= get pandas' column axis with the key
-    // level on top of each piece's own levels - its typed labels, or its
-    // column MultiIndex's levels (a piece with one was refused, and a flat
-    // piece's labels were their text; br-frankenpandas-xbl2k); a level
-    // keeps its name where every piece agrees on it.
-    let keyed_columns = match &keys {
-        Some(keys) if axis == 1 && series.is_empty() => {
-            let piece_levels = |frame: &DataFrame| -> PyResult<ColumnLevels> {
-                Ok(match frame.columns_multiindex() {
-                    Some(multi) => (
-                        (0..multi.nlevels())
-                            .map(|level| {
-                                multi
-                                    .get_level_values(level)
-                                    .map(|values| values.labels().to_vec())
-                            })
-                            .collect::<Result<_, _>>()
-                            .map_err(index_error_to_py)?,
-                        multi.names().to_vec(),
-                    ),
-                    None => (
-                        vec![frame.column_labels()],
-                        vec![frame.columns_name().cloned()],
-                    ),
-                })
-            };
+    // Frames add their column levels below every key level. Series side
+    // by side use only the keys: tuple keys form a MultiIndex without an
+    // extra level for the Series names. Reuse the row-axis assembly so
+    // typed labels, tuple depths and inherited names follow one contract.
+    let keyed_columns = match (&keys, &key_parts) {
+        (Some(keys), _) if axis == 1 && series.is_empty() => {
             let pieces = frames
                 .iter()
-                .map(piece_levels)
+                .map(|frame| match frame.columns_multiindex() {
+                    Some(multi) => multi
+                        .to_flat_index(MULTIINDEX_FLAT_SEP)
+                        .with_row_multiindex(multi.clone())
+                        .map_err(index_error_to_py),
+                    None => Ok(Index::new(frame.column_labels())
+                        .rename_index(frame.columns_name().cloned())),
+                })
                 .collect::<PyResult<Vec<_>>>()?;
-            let depth = pieces.first().map_or(1, |(levels, _)| levels.len());
-            if pieces.iter().any(|(levels, _)| levels.len() != depth) {
-                return Err(not_implemented(
-                    "concat(keys=..., axis=1) of DataFrames whose columns have different numbers of levels",
+            let pieces: Vec<&Index> = pieces.iter().collect();
+            let parts = row_keys(keys);
+            if key_parts.is_some() && parts.iter().flatten().any(IndexLabel::is_missing) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Key nan not in level",
                 ));
             }
-            let mut arrays: Vec<Vec<IndexLabel>> = vec![Vec::new(); depth + 1];
-            for (key, (levels, _)) in keys.iter().zip(&pieces) {
-                let width = levels.first().map_or(0, Vec::len);
-                arrays[0].extend(std::iter::repeat_n(key.clone(), width));
-                for (level, labels) in levels.iter().enumerate() {
-                    arrays[level + 1].extend(labels.iter().cloned());
+            let multi = keyed_rows(&parts, &pieces, names.clone())?.1;
+            // A key belonging to an empty piece remains in pandas' level
+            // catalog. Tuple-key catalogs are factorized (sorted), scalar
+            // keys retain their order, and each original column level keeps
+            // its own catalog, including labels unused by a sliced piece.
+            let mut catalogs = if key_parts.is_some() {
+                fp_index::MultiIndex::from_tuples(parts.clone())
+                    .map_err(index_error_to_py)?
+                    .levels()
+                    .into_iter()
+                    .map(|level| level.labels().to_vec())
+                    .collect::<Vec<_>>()
+            } else {
+                let mut catalog = Vec::new();
+                for key in keys {
+                    if !catalog.contains(key) {
+                        catalog.push(key.clone());
+                    }
+                }
+                vec![catalog]
+            };
+            let key_depth = catalogs.len();
+            catalogs.resize_with(multi.nlevels(), Vec::new);
+            let mut catalog_codes: Vec<FxHashMap<IndexLabel, usize>> = catalogs
+                .iter()
+                .map(|catalog| {
+                    catalog
+                        .iter()
+                        .cloned()
+                        .enumerate()
+                        .map(|(code, label)| (label, code))
+                        .collect()
+                })
+                .collect();
+            let catalog_code = |catalog: &mut Vec<IndexLabel>,
+                                lookup: &mut FxHashMap<IndexLabel, usize>,
+                                label: &IndexLabel| {
+                *lookup.entry(label.clone()).or_insert_with(|| {
+                    catalog.push(label.clone());
+                    catalog.len() - 1
+                })
+            };
+            let piece_catalogs: Vec<Vec<Index>> = frames
+                .iter()
+                .map(|frame| match frame.columns_multiindex() {
+                    Some(levels) => levels.levels(),
+                    None => vec![Index::new(frame.column_labels())],
+                })
+                .collect();
+            for levels in &piece_catalogs {
+                for (level, values) in levels.iter().enumerate() {
+                    let catalog = &mut catalogs[key_depth + level];
+                    let lookup = &mut catalog_codes[key_depth + level];
+                    for label in values.labels() {
+                        catalog_code(catalog, lookup, label);
+                    }
                 }
             }
-            let mut names = vec![None];
-            names.extend((0..depth).map(|level| {
-                let first = pieces.first().and_then(|(_, names)| names[level].clone());
-                pieces
+            // Equal catalogs retain their order; otherwise pandas sorts the
+            // union, including unused labels from each piece's MultiIndex.
+            for level in 0..multi.nlevels() - key_depth {
+                let same_catalog = piece_catalogs
                     .iter()
-                    .all(|(_, names)| names[level] == first)
-                    .then_some(first)
-                    .flatten()
-            }));
+                    .all(|catalog| catalog[level].labels() == piece_catalogs[0][level].labels());
+                if !same_catalog {
+                    let at = key_depth + level;
+                    catalogs[at] =
+                        fp_index::MultiIndex::from_arrays(vec![std::mem::take(&mut catalogs[at])])
+                            .map_err(index_error_to_py)?
+                            .levels()[0]
+                            .labels()
+                            .to_vec();
+                    catalog_codes[at] = catalogs[at]
+                        .iter()
+                        .cloned()
+                        .enumerate()
+                        .map(|(code, label)| (label, code))
+                        .collect();
+                }
+            }
+            let mut codes = Vec::with_capacity(catalogs.len());
+            for (level, catalog) in catalogs.iter_mut().enumerate() {
+                let lookup = &mut catalog_codes[level];
+                let mut level_codes = Vec::with_capacity(multi.len());
+                for row in 0..multi.len() {
+                    let label = multi.label_at(level, row);
+                    // Missing tuple components are not in the factorized
+                    // catalog. Keep a sentinel for their rows; levels()
+                    // omits it and codes() reports pandas' -1.
+                    let code = catalog_code(catalog, lookup, label);
+                    level_codes.push(
+                        u32::try_from(code).map_err(|_| {
+                            not_implemented("concat(keys=...) past u32 rows or keys")
+                        })?,
+                    );
+                }
+                codes.push(level_codes);
+            }
+            let mut level_names = multi.names().to_vec();
+            let inherited = names
+                .as_ref()
+                .is_none_or(|names| names.is_empty() || names.len() == key_depth);
+            let equal_axes = frames.iter().all(|frame| {
+                match (frames[0].columns_multiindex(), frame.columns_multiindex()) {
+                    (Some(first), Some(other)) => first.equals(other),
+                    (None, None) => frames[0].column_labels() == frame.column_labels(),
+                    _ => false,
+                }
+            });
+            if inherited && equal_axes {
+                let first_names = match frames[0].columns_multiindex() {
+                    Some(multi) => multi.names().to_vec(),
+                    None => vec![frames[0].columns_name().cloned()],
+                };
+                level_names[key_depth..].clone_from_slice(&first_names);
+            }
             Some(
-                fp_index::MultiIndex::from_arrays(arrays)
+                fp_index::MultiIndex::from_declared_levels(catalogs, codes)
                     .map_err(index_error_to_py)?
-                    .set_names(names),
+                    .set_names(level_names),
             )
+        }
+        (Some(_), Some(parts)) if axis == 1 => {
+            let multi =
+                fp_index::MultiIndex::from_tuples(parts.clone()).map_err(index_error_to_py)?;
+            let level_names = names
+                .clone()
+                .filter(|names| !names.is_empty())
+                .unwrap_or_else(|| vec![None; multi.nlevels()]);
+            if level_names.len() != multi.nlevels() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Length of names must match number of levels in MultiIndex.",
+                ));
+            }
+            Some(multi.set_names(level_names))
         }
         _ => None,
     };
-    if names.is_some() && axis == 1 {
-        return Err(not_implemented("concat(names=..., axis=1)"));
+    if axis == 1
+        && keys.is_some()
+        && keyed_columns.is_none()
+        && let Some(names) = names.as_ref().filter(|names| !names.is_empty())
+        && names.len() != 1
+    {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "Length of new names must be 1, got {}",
+            names.len()
+        )));
     }
     if !series.is_empty() {
         // axis=1: each Series is a column labelled by its key, else its
@@ -86761,6 +86865,14 @@ fn concat_objects(
         out = out
             .with_columns_multiindex(Some(multi))
             .map_err(frame_error_to_py)?;
+    } else if axis == 1 && keys.is_some() {
+        out = out.with_columns_name(
+            names
+                .as_ref()
+                .and_then(|names| names.first())
+                .cloned()
+                .flatten(),
+        );
     }
     if let Some(keys) = &keys
         && axis == 0

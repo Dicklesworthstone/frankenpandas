@@ -27785,6 +27785,22 @@ impl MultiIndex {
         })
     }
 
+    /// Construct from explicit level catalogs and row codes, retaining the
+    /// catalogs' order and unused labels. Concatenation needs this distinction:
+    /// an empty piece still contributes its key to the resulting level, and
+    /// an existing column index keeps its order instead of being factorized
+    /// again from the output rows.
+    pub fn from_declared_levels(
+        catalogs: Vec<Vec<IndexLabel>>,
+        codes: Vec<Vec<u32>>,
+    ) -> Result<Self, IndexError> {
+        let mut multi = Self::from_coded_levels(catalogs, codes)?;
+        for level in &mut multi.levels {
+            level.declared = true;
+        }
+        Ok(multi)
+    }
+
     /// Construct a MultiIndex from frame-like columns.
     ///
     /// Matches `pd.MultiIndex.from_frame(frame)` at the payload level:
@@ -29973,6 +29989,26 @@ mod tests {
         let codes = super::first_seen_label_codes(&unique_text).unwrap();
         assert_eq!(super::first_seen_uniques(&unique_text, &codes), unique_text);
         assert!(super::first_seen_uniques(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn declared_concat_levels_keep_empty_keys_and_missing_codes_b4cp7() {
+        let catalog = vec![
+            IndexLabel::Utf8("unused".into()),
+            IndexLabel::Utf8("used".into()),
+            IndexLabel::Null(fp_types::NullKind::NaN),
+        ];
+        let multi =
+            MultiIndex::from_declared_levels(vec![catalog.clone()], vec![vec![1, 2, 1]]).unwrap();
+        assert_eq!(multi.levels()[0].labels(), &catalog[..2]);
+        assert_eq!(multi.codes(), vec![vec![1, -1, 1]]);
+        assert_eq!(multi.label_at(0, 0), &catalog[1]);
+        assert!(multi.label_at(0, 1).is_missing());
+        let empty = MultiIndex::from_declared_levels(vec![catalog], vec![Vec::new()]).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty.nlevels(), 1);
+        assert_eq!(empty.levels()[0].len(), 2);
+        assert!(MultiIndex::from_declared_levels(vec![Vec::new()], vec![vec![0]]).is_err());
     }
 
     #[test]
