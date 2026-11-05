@@ -2431,6 +2431,20 @@ pub fn power_by_number(base: f64, exponent: f64) -> f64 {
     }
 }
 
+/// IEEE arithmetic on present masked values. Missingness is carried by the
+/// caller's mask, so a NaN computed here never changes that mask.
+fn masked_float_arithmetic(left: f64, right: f64, op: ArithmeticOp) -> f64 {
+    match op {
+        ArithmeticOp::Add => left + right,
+        ArithmeticOp::Sub => left - right,
+        ArithmeticOp::Mul => left * right,
+        ArithmeticOp::Div => left / right,
+        ArithmeticOp::FloorDiv => python_floor_div_f64(left, right),
+        ArithmeticOp::Mod => python_mod_f64(left, right),
+        ArithmeticOp::Pow => left.powf(right),
+    }
+}
+
 /// Whether `data` holds a NaN, and whether every value is finite: `x - x`
 /// is NaN exactly for a NaN or an infinity, so one subtraction a value
 /// answers the second, and only a buffer holding a non-finite value is
@@ -14024,6 +14038,16 @@ impl Column {
         };
 
         let validity = ValidityMask::from_values(&coerced);
+        if dtype == DType::Float64Nullable {
+            // Construction treats input NaNs as missing. Kernel results use
+            // the explicit-mask constructor directly, so a newly computed NaN
+            // remains a value instead of becoming another missing row (6f379).
+            let data = coerced
+                .iter()
+                .map(|value| value.to_f64().unwrap_or(f64::NAN))
+                .collect();
+            return Ok(Self::from_nullable_f64_values_with_validity(data, validity));
+        }
         let data = Self::cached_data_for_values(dtype.clone(), &coerced);
         let values = match (&data, &dtype, validity.all()) {
             (Some(ColumnData::Bool(data)), DType::Bool, true) => {
@@ -15664,6 +15688,44 @@ impl Column {
         }
     }
 
+    /// Build pandas' nullable `Float64` from data and an authoritative mask.
+    ///
+    /// Unlike ordinary `float64`, a valid NaN is a value: arithmetic may
+    /// produce it without introducing an NA. Invalid rows always expose
+    /// `Scalar::Null(NullKind::Null)`, independently of the data underneath.
+    /// Use [`Self::new`] for raw inputs, where NaNs must become missing.
+    ///
+    /// # Panics
+    /// Panics if the data and validity lengths differ.
+    #[must_use]
+    pub fn from_nullable_f64_values_with_validity(data: Vec<f64>, validity: ValidityMask) -> Self {
+        assert_eq!(
+            data.len(),
+            validity.len(),
+            "data and validity lengths differ"
+        );
+        let values = data
+            .iter()
+            .enumerate()
+            .map(|(row, &value)| {
+                if validity.get(row) {
+                    Scalar::Float64(value)
+                } else {
+                    Scalar::Null(NullKind::Null)
+                }
+            })
+            .collect();
+        Self {
+            dtype: DType::Float64Nullable,
+            values: ScalarValues::from_vec(values),
+            validity,
+            data: Some(ColumnData::Float64(Arc::from(data))),
+            categorical: None,
+            width: None,
+            pandas_string: false,
+        }
+    }
+
     /// Nullable Int64 counterpart of `from_f64_values_with_validity`
     /// (br-frankenpandas-lt5qx): invalid slots materialize
     /// `Scalar::Null(NullKind::Null)` (= `missing_for_dtype(Int64)`), valid
@@ -16180,6 +16242,42 @@ impl Column {
             return None;
         }
         Some((data, &self.validity))
+    }
+
+    /// Nullable `Float64` data with its authoritative NA mask. A NaN at a
+    /// valid row is present; callers must not derive missingness from it.
+    #[must_use]
+    pub fn as_masked_f64_slice(&self) -> Option<(&[f64], &ValidityMask)> {
+        if self.dtype != DType::Float64Nullable {
+            return None;
+        }
+        let data: &[f64] = match &self.values {
+            ScalarValues::LazyAllValidFloat64 { data, .. } => data.as_ref(),
+            ScalarValues::LazyAllValidFloat64Vec { data, .. } => data.as_slice(),
+            ScalarValues::LazyAllValidFloat64Slice {
+                data, start, len, ..
+            } => &data[*start..*start + *len],
+            ScalarValues::LazyNullableFloat64 {
+                buffer, start, len, ..
+            } => &buffer[*start..*start + *len],
+            _ => match &self.data {
+                Some(ColumnData::Float64(data)) => data.as_ref(),
+                _ => return None,
+            },
+        };
+        (data.len() == self.validity.len()).then_some((data, &self.validity))
+    }
+
+    /// Run a floating kernel without turning an operation-produced NaN
+    /// into a new NA. The input's mask, including an empty mask, survives.
+    fn masked_f64_unary(&self, f: impl Fn(f64) -> f64) -> Option<Self> {
+        let (data, validity) = self.as_masked_f64_slice()?;
+        let result = data.iter().copied().map(f).collect();
+        Some(
+            Self::from_nullable_f64_values_with_validity(result, validity.clone())
+                .keeping_dtype_of(self)
+                .confined(),
+        )
     }
 
     /// Int64 analogue of [`Self::as_f64_slice_with_validity`]: the contiguous i64
@@ -17527,6 +17625,18 @@ impl Column {
     /// result through the storage's own constructors, which know no width.
     fn take_positions_storage(&self, positions: &[usize]) -> Self {
         let n = positions.len();
+        if let Some((data, validity)) = self.as_masked_f64_slice() {
+            let mut mask = ValidityMask::all_valid(n);
+            let taken = positions
+                .iter()
+                .enumerate()
+                .map(|(row, &position)| {
+                    mask.set(row, validity.get(position));
+                    data[position]
+                })
+                .collect();
+            return Self::from_nullable_f64_values_with_validity(taken, mask);
+        }
         // A categorical held as codes gathers its codes, staying one (its
         // rows were gathered as Scalars into a by-value column, 27% of a
         // categorical sort_values; br-frankenpandas-5oup5).
@@ -18171,6 +18281,14 @@ impl Column {
             return self.take_contiguous_range(start, len);
         }
 
+        if self.dtype == DType::Float64Nullable {
+            let positions = runs
+                .iter()
+                .flat_map(|&(start, len)| start..start + len)
+                .collect::<Vec<_>>();
+            return self.take_positions(&positions);
+        }
+
         if self.validity.all() {
             if let Some(src) = self.as_f64_slice() {
                 let mut data = Vec::with_capacity(out_len);
@@ -18406,6 +18524,14 @@ impl Column {
             end <= self.len(),
             "contiguous range end must be within column length"
         );
+
+        if let Some((data, validity)) = self.as_masked_f64_slice() {
+            let mut mask = ValidityMask::all_valid(len);
+            for row in 0..len {
+                mask.set(row, validity.get(start + row));
+            }
+            return Self::from_nullable_f64_values_with_validity(data[start..end].to_vec(), mask);
+        }
 
         if self.validity.all() {
             if let Some((src_data, src_start)) = self.float64_arc_view_source()
@@ -19696,6 +19822,14 @@ impl Column {
         match self.width {
             None => self,
             Some(NumericWidth::Float32) => {
+                if let Some((data, validity)) = self.as_masked_f64_slice() {
+                    let rounded = data
+                        .iter()
+                        .map(|&value| NumericWidth::round_f32(value))
+                        .collect();
+                    return Self::from_nullable_f64_values_with_validity(rounded, validity.clone())
+                        .with_width_unchecked(NumericWidth::Float32);
+                }
                 if let Some(values) = self.as_f64_slice() {
                     let single = |value: f64| NumericWidth::round_f32(value);
                     if values
@@ -20050,6 +20184,19 @@ impl Column {
     /// for the target dtype.
     #[must_use]
     pub fn with_dtype(&self, dtype: DType) -> Self {
+        if dtype == DType::Float64Nullable && self.dtype == DType::Float64 {
+            let data = self.as_f64_slice_with_validity().map_or_else(
+                || {
+                    self.values()
+                        .iter()
+                        .map(|value| value.to_f64().unwrap_or(f64::NAN))
+                        .collect()
+                },
+                |(data, _)| data.to_vec(),
+            );
+            return Self::from_nullable_f64_values_with_validity(data, self.validity.clone())
+                .keeping_dtype_of(self);
+        }
         let categorical = if matches!(dtype, DType::Categorical) {
             self.categorical.clone()
         } else {
@@ -20280,6 +20427,9 @@ impl Column {
     /// missing value seen.
     #[must_use]
     pub fn has_any_missing(&self) -> bool {
+        if self.dtype == DType::Float64Nullable {
+            return !self.validity.all();
+        }
         // A gap is the validity words' to answer, a NaN datum a block fold's
         // (it vectorizes; `any` stopped a value at a time and read each
         // row's bit: 19% of s.add(t, fill_value=0); br-frankenpandas-ni1zf).
@@ -20483,6 +20633,24 @@ impl Column {
         positions: &[Option<usize>],
         utf8_gap: NullKind,
     ) -> Result<Self, ColumnError> {
+        if let Some((data, validity)) = self.as_masked_f64_slice() {
+            let mut mask = ValidityMask::all_valid(positions.len());
+            let values = positions
+                .iter()
+                .enumerate()
+                .map(|(row, position)| match position {
+                    Some(position) if *position < data.len() => {
+                        mask.set(row, validity.get(*position));
+                        data[*position]
+                    }
+                    _ => {
+                        mask.set(row, false);
+                        f64::NAN
+                    }
+                })
+                .collect();
+            return Ok(Self::from_nullable_f64_values_with_validity(values, mask));
+        }
         let mut present_positions = Vec::with_capacity(positions.len());
         let mut all_present = true;
         // The length once: read a row at a time it was a match over every
@@ -20845,6 +21013,30 @@ impl Column {
         positions: &[Option<usize>],
         absent: Scalar,
     ) -> Result<Self, ColumnError> {
+        if let Some((data, validity)) = self.as_masked_f64_slice() {
+            let fill_valid = !absent.is_missing();
+            let fill = if fill_valid {
+                absent.to_f64()?
+            } else {
+                f64::NAN
+            };
+            let mut mask = ValidityMask::all_valid(positions.len());
+            let result = positions
+                .iter()
+                .enumerate()
+                .map(|(row, position)| match position {
+                    Some(position) if *position < data.len() => {
+                        mask.set(row, validity.get(*position));
+                        data[*position]
+                    }
+                    _ => {
+                        mask.set(row, fill_valid);
+                        fill
+                    }
+                })
+                .collect();
+            return Ok(Self::from_nullable_f64_values_with_validity(result, mask));
+        }
         let mut present_positions = Vec::with_capacity(positions.len());
         let mut all_present = true;
         // The length once: read a row at a time it was a match over every
@@ -21568,6 +21760,12 @@ impl Column {
         op: ArithmeticOp,
         scalar_left: bool,
     ) -> Option<Self> {
+        // A scalar NaN is a present operand of pandas' masked arithmetic,
+        // unlike a NaN in an input array. Preserve the source mask and let
+        // IEEE arithmetic produce NaNs under its valid bits (6f379).
+        if let Some(result) = self.masked_float_scalar(scalar, op, scalar_left) {
+            return Some(result);
+        }
         match (&self.dtype, scalar) {
             (DType::Float64, Scalar::Float64(_) | Scalar::Int64(_)) => {
                 let s = scalar.to_f64().ok().filter(|s| !s.is_nan())?;
@@ -21784,6 +21982,61 @@ impl Column {
             }
         };
         Some(Self::from_f64_values_with_validity(out, validity))
+    }
+
+    /// Scalar arithmetic over an extension array's data, retaining its mask
+    /// even when a numeric scalar or the operation's result is NaN.
+    fn masked_float_scalar(
+        &self,
+        scalar: &Scalar,
+        op: ArithmeticOp,
+        scalar_left: bool,
+    ) -> Option<Self> {
+        let data: std::borrow::Cow<'_, [f64]> = if let Some((data, _)) = self.as_masked_f64_slice()
+        {
+            std::borrow::Cow::Borrowed(data)
+        } else if self.dtype == DType::Int64Nullable
+            && (matches!(scalar, Scalar::Float64(_)) || matches!(op, ArithmeticOp::Div))
+        {
+            let (data, _) = self.as_masked_i64_slice()?;
+            std::borrow::Cow::Owned(data.iter().map(|&value| value as f64).collect())
+        } else {
+            return None;
+        };
+        let scalar_valid = !matches!(scalar, Scalar::Null(_));
+        let number = if scalar_valid {
+            scalar.to_f64().ok()?
+        } else {
+            f64::NAN
+        };
+        let mut validity = self.validity.clone();
+        let result = data
+            .iter()
+            .enumerate()
+            .map(|(row, &value)| {
+                let value_valid = self.validity.get(row);
+                let value = if value_valid { value } else { f64::NAN };
+                let (left, right) = if scalar_left {
+                    (number, value)
+                } else {
+                    (value, number)
+                };
+                let power_identity = matches!(op, ArithmeticOp::Pow)
+                    && ((left == 1.0 && (scalar_left || value_valid))
+                        || (right == 0.0 && (!scalar_left || value_valid)));
+                validity.set(row, (value_valid && scalar_valid) || power_identity);
+                if matches!(op, ArithmeticOp::Pow) && !scalar_left {
+                    power_by_number(left, right)
+                } else {
+                    masked_float_arithmetic(left, right, op)
+                }
+            })
+            .collect();
+        Some(
+            Self::from_nullable_f64_values_with_validity(result, validity)
+                .keeping_dtype_of(self)
+                .confined(),
+        )
     }
 
     /// `self ** s` of a Float64 column: numpy's power by one number
@@ -22297,6 +22550,34 @@ impl Column {
                 DType::Float64 | DType::Float64Nullable => DType::Float64Nullable,
                 other => other,
             };
+        }
+
+        if out_dtype == DType::Float64Nullable {
+            let mut validity = self.validity.and_mask(&right.validity);
+            let mut data = Vec::with_capacity(self.len());
+            for row in 0..self.len() {
+                let left_valid = self.validity.get(row);
+                let right_valid = right.validity.get(row);
+                let left = if left_valid {
+                    self.values[row].to_f64()?
+                } else {
+                    f64::NAN
+                };
+                let right = if right_valid {
+                    right.values[row].to_f64()?
+                } else {
+                    f64::NAN
+                };
+                // pandas' masked power knows these identities even when the
+                // other operand is NA; ordinary operations keep the AND mask.
+                if matches!(op, ArithmeticOp::Pow)
+                    && ((left_valid && left == 1.0) || (right_valid && right == 0.0))
+                {
+                    validity.set(row, true);
+                }
+                data.push(masked_float_arithmetic(left, right, op));
+            }
+            return Ok(Self::from_nullable_f64_values_with_validity(data, validity));
         }
 
         // AG-10: Try vectorized path first; fallback to scalar path.
@@ -23926,8 +24207,11 @@ impl Column {
         // the generic `!(l.is_missing() || r.is_missing())`. All-valid Int64 pairs still
         // take the exact-i64 borrow arm higher up (fires first).
         if let (Some((ld, lv)), Some((rd, rv))) = (
-            self.as_i64_slice_with_validity(),
-            right.as_i64_slice_with_validity(),
+            self.as_i64_slice_with_validity()
+                .or_else(|| self.as_masked_i64_slice()),
+            right
+                .as_i64_slice_with_validity()
+                .or_else(|| right.as_masked_i64_slice()),
         ) {
             let zip = || ld.iter().zip(rd);
             let bools: Vec<bool> = match op {
@@ -23951,9 +24235,15 @@ impl Column {
         // above (never reaches here), so no Int64 pair is f64-promoted; both-Float64 took
         // its arm. A local `fn` so elision ties the outputs' lifetimes to the `&Column`.
         fn nullable_f64_view(col: &Column) -> Option<(std::borrow::Cow<'_, [f64]>, &ValidityMask)> {
-            if let Some((d, v)) = col.as_f64_slice_with_validity() {
+            if let Some((d, v)) = col
+                .as_f64_slice_with_validity()
+                .or_else(|| col.as_masked_f64_slice())
+            {
                 Some((std::borrow::Cow::Borrowed(d), v))
-            } else if let Some((d, v)) = col.as_i64_slice_with_validity() {
+            } else if let Some((d, v)) = col
+                .as_i64_slice_with_validity()
+                .or_else(|| col.as_masked_i64_slice())
+            {
                 Some((
                     std::borrow::Cow::Owned(d.iter().map(|&x| x as f64).collect()),
                     v,
@@ -24110,6 +24400,17 @@ impl Column {
     /// extension dtype keeps `pd.NA` propagation (see
     /// [`binary_comparison`](Self::binary_comparison); br-frankenpandas-zwfz3).
     pub fn compare_scalar(&self, scalar: &Scalar, op: ComparisonOp) -> Result<Self, ColumnError> {
+        if let Some((data, validity)) = self.as_masked_f64_slice()
+            && let Ok(value) = scalar.to_f64()
+        {
+            // A computed NaN is a present float: its IEEE comparison is false
+            // (true for !=), while only the extension array's mask yields NA.
+            return Ok(Self::from_bool_values_with_validity(
+                compare_f64_scalar(data, value, op),
+                validity.clone(),
+            )
+            .with_dtype(DType::BoolNullable));
+        }
         // A NaN-exact float column's missing rows are its NaN rows, and an
         // IEEE comparison of a NaN is pandas' answer for a missing row -
         // false, true under != - so the comparison of the data is the result:
@@ -24408,6 +24709,16 @@ impl Column {
             });
         }
 
+        if self.dtype == DType::Float64Nullable {
+            let positions = mask
+                .values()
+                .iter()
+                .enumerate()
+                .filter_map(|(row, value)| matches!(value, Scalar::Bool(true)).then_some(row))
+                .collect::<Vec<_>>();
+            return Ok(self.take_positions(&positions));
+        }
+
         // Typed fast path (br-frankenpandas-lei31 family): gather the contiguous
         // f64/i64 buffer by the mask directly, skipping the 32-byte Scalar clone
         // and the dtype-coercion scan in Column::new. Bit-identical — selects the
@@ -24670,6 +24981,21 @@ impl Column {
     }
 
     fn fillna_storage(&self, fill_value: &Scalar) -> Result<Self, ColumnError> {
+        if let Some((data, validity)) = self.as_masked_f64_slice() {
+            if fill_value.is_missing() || validity.all() {
+                return Ok(self.clone());
+            }
+            let fill = fill_value.to_f64()?;
+            let values = data
+                .iter()
+                .enumerate()
+                .map(|(row, &value)| if validity.get(row) { value } else { fill })
+                .collect();
+            return Ok(Self::from_nullable_f64_values_with_validity(
+                values,
+                ValidityMask::all_valid(data.len()),
+            ));
+        }
         if self.dtype == DType::Null {
             let replacement_dtype = if fill_value.is_missing() {
                 DType::Null
@@ -24955,6 +25281,12 @@ impl Column {
 
     /// Remove missing values, returning a shorter column.
     pub fn dropna(&self) -> Result<Self, ColumnError> {
+        if self.dtype == DType::Float64Nullable {
+            let positions = (0..self.len())
+                .filter(|&row| self.validity.get(row))
+                .collect::<Vec<_>>();
+            return Ok(self.take_positions(&positions));
+        }
         // Typed fast paths: compact the present values from the raw buffer +
         // validity, no per-element Scalar materialization. Bit-identical to the
         // Scalar filter: a present slot keeps its value in order; a Float64 valid
@@ -25012,6 +25344,15 @@ impl Column {
     /// `ColumnError::LengthMismatch` (left=length, right=offending
     /// index).
     pub fn take(&self, indices: &[usize]) -> Result<Self, ColumnError> {
+        if self.dtype == DType::Float64Nullable {
+            if let Some(&index) = indices.iter().find(|&&index| index >= self.len()) {
+                return Err(ColumnError::LengthMismatch {
+                    left: self.len(),
+                    right: index,
+                });
+            }
+            return Ok(self.take_positions(indices));
+        }
         let mut out = Vec::with_capacity(indices.len());
         for &i in indices {
             match self.values.get(i) {
@@ -25326,6 +25667,19 @@ impl Column {
         let len = pieces.iter().map(|piece| piece.len()).sum::<usize>();
         let mut words = vec![0_u64; len.div_ceil(64)];
         let mut at = 0;
+        if dtype == DType::Float64Nullable {
+            let mut data = Vec::with_capacity(len);
+            for piece in pieces {
+                let (values, validity) = piece.as_masked_f64_slice()?;
+                data.extend_from_slice(values);
+                validity.or_into_words(&mut words, at);
+                at += values.len();
+            }
+            return Some(Self::from_nullable_f64_values_with_validity(
+                data,
+                ValidityMask::from_words(words, len),
+            ));
+        }
         if dtype == DType::Float64 {
             let parts = pieces
                 .iter()
@@ -26011,6 +26365,11 @@ impl Column {
     /// Empty column returns 0.0 (matching pandas).
     #[must_use]
     pub fn sum(&self) -> Scalar {
+        if self.dtype == DType::Float64Nullable
+            && let Some(total) = self.pandas_reductions(|reductions| reductions.sum())
+        {
+            return Scalar::Float64(total);
+        }
         // Typed reduction: an all-valid Float64 column sums straight over its
         // contiguous buffer instead of materializing/iterating a Vec<Scalar>.
         // Bit-identical to nansum's Float64 arm: a sequential left-fold seeded
@@ -26101,6 +26460,16 @@ impl Column {
     /// returns Null(NaN).
     #[must_use]
     pub fn mean(&self) -> Scalar {
+        if self.dtype == DType::Float64Nullable
+            && let Some((count, mean)) =
+                self.pandas_reductions(|reductions| (reductions.count(), reductions.mean()))
+        {
+            return if count == 0 {
+                Scalar::Null(NullKind::Null)
+            } else {
+                Scalar::Float64(mean)
+            };
+        }
         // Typed reduction (see `sum`): for an all-valid Float64 column nanmean
         // is `Σ / count` with count == len; an empty column stays Null(NaN).
         // Chunk fast path (see `all_valid_f64_chunk_mean`): fold the concat
@@ -26250,6 +26619,20 @@ impl Column {
     /// for homogeneous inputs.
     #[must_use]
     pub fn min(&self) -> Scalar {
+        if let Some((data, validity)) = self.as_masked_f64_slice() {
+            let mut result: Option<f64> = None;
+            for (row, &value) in data.iter().enumerate() {
+                if validity.get(row) {
+                    if value.is_nan() {
+                        return Scalar::Float64(value);
+                    }
+                    if result.is_none_or(|current| value < current) {
+                        result = Some(value);
+                    }
+                }
+            }
+            return result.map_or(Scalar::Null(NullKind::Null), Scalar::Float64);
+        }
         // Typed reduction: an all-valid numeric column folds the minimum straight
         // over its contiguous buffer (an associative reduction the compiler can
         // vectorize), skipping the Vec<Scalar> materialization. Bit-identical to
@@ -26354,6 +26737,20 @@ impl Column {
     /// Matches `pd.Series.max()` via fp-types::nanmax.
     #[must_use]
     pub fn max(&self) -> Scalar {
+        if let Some((data, validity)) = self.as_masked_f64_slice() {
+            let mut result: Option<f64> = None;
+            for (row, &value) in data.iter().enumerate() {
+                if validity.get(row) {
+                    if value.is_nan() {
+                        return Scalar::Float64(value);
+                    }
+                    if result.is_none_or(|current| value > current) {
+                        result = Some(value);
+                    }
+                }
+            }
+            return result.map_or(Scalar::Null(NullKind::Null), Scalar::Float64);
+        }
         // Typed reduction (see `min`); nanmax keeps the first element on a tie
         // via strict `>`, dtype-preserved.
         if let Some(data) = self.as_f64_slice()
@@ -26524,6 +26921,15 @@ impl Column {
     /// returns 1.0 (matching pandas).
     #[must_use]
     pub fn prod(&self) -> Scalar {
+        if let Some((data, validity)) = self.as_masked_f64_slice() {
+            let mut product = 1.0;
+            for (row, &value) in data.iter().enumerate() {
+                if validity.get(row) {
+                    product *= value;
+                }
+            }
+            return Scalar::Float64(product);
+        }
         // Typed reduction (mirror of `sum`): an all-valid Float64 column
         // multiplies straight over its contiguous buffer instead of iterating a
         // Vec<Scalar>. Bit-identical to nanprod's Float64 arm: a sequential
@@ -26711,6 +27117,9 @@ impl Column {
     /// Matches `pd.Series.count()`.
     #[must_use]
     pub fn count(&self) -> usize {
+        if self.dtype == DType::Float64Nullable {
+            return self.validity.count_valid();
+        }
         if self.dtype == DType::Float64 {
             if let Some((data, validity)) = self.as_f64_slice_with_validity() {
                 if validity.all() {
@@ -27344,6 +27753,7 @@ impl Column {
                 | DType::BoolNullable
                 | DType::Int64
                 | DType::Int64Nullable
+                | DType::Float64Nullable
                 | DType::Utf8
                 | DType::Interval
         )
@@ -27549,7 +27959,18 @@ impl Column {
                     return Some(reduce(&reductions));
                 }
             }
-            DType::Float64Nullable | DType::Bool | DType::BoolNullable => {}
+            DType::Float64Nullable => {
+                if let Some((data, validity)) = self.as_masked_f64_slice() {
+                    let present = validity.packed_words_for_scan();
+                    let reductions = PandasReductions::new(
+                        ReductionValues::Float(data),
+                        Some(&present),
+                        MissingLayout::Masked,
+                    );
+                    return Some(reduce(&reductions));
+                }
+            }
+            DType::Bool | DType::BoolNullable => {}
             _ => return None,
         }
         // Any other storage: read the cells. Ints and bools are numpy integer
@@ -27567,9 +27988,15 @@ impl Column {
         let mut ints = Vec::with_capacity(cells.len());
         let mut all_present = true;
         for (i, cell) in cells.iter().enumerate() {
+            if masked && !self.validity.get(i) {
+                all_present = false;
+                floats.push(0.0);
+                ints.push(0);
+                continue;
+            }
             #[allow(clippy::cast_precision_loss)] // numpy's int64 -> float64 cast
             let (float, int) = match cell {
-                Scalar::Float64(value) if !value.is_nan() => (*value, 0),
+                Scalar::Float64(value) if masked || !value.is_nan() => (*value, 0),
                 Scalar::Int64(value) => (*value as f64, *value),
                 Scalar::Bool(value) => (f64::from(*value), i64::from(*value)),
                 _ if cell.is_missing() => {
@@ -34652,6 +35079,9 @@ impl Column {
         f: F,
         par_min: usize,
     ) -> Option<Self> {
+        if let Some(result) = self.masked_f64_unary(&f) {
+            return Some(result);
+        }
         if let Some(data) = self.as_f64_slice() {
             return Some(Self::from_f64_values_owned(par_map_vec_f64_with_par_min(
                 data.len(),
@@ -34816,6 +35246,9 @@ impl Column {
     /// inside every chunk rather than replacing this. Do not treat one as a
     /// substitute for the other. (br-frankenpandas-xv9qf)
     fn typed_float_unary_nullable_owned_par<F: Fn(f64) -> f64 + Sync>(&self, f: F) -> Option<Self> {
+        if let Some(result) = self.masked_f64_unary(&f) {
+            return Some(result);
+        }
         let len = self.len();
 
         // br-frankenpandas-284ul. Write-once arm, OFF by default. Only the
@@ -35515,6 +35948,9 @@ impl Column {
         preserves_finiteness: bool,
         par_min_override: Option<usize>,
     ) -> Option<Self> {
+        if let Some(result) = self.masked_f64_unary(&f) {
+            return Some(result);
+        }
         // `par_min_override` lets ONE op decide the length at which the parallel
         // arm is taken, instead of inheriting a single shared number that was set
         // for every elementwise map at once. br-frankenpandas-4kig1.
@@ -75806,5 +76242,284 @@ mod pandas_string_columns_fvsao59 {
         let ints = Column::from_i64_values(vec![1, 2]).as_pandas_string();
         assert!(!ints.is_pandas_string());
         assert!(!strings.with_dtype(DType::Categorical).is_pandas_string());
+    }
+}
+
+#[cfg(test)]
+mod nullable_float_present_nan_6f379 {
+    use fp_types::{DType, NullKind, Scalar};
+
+    use super::{ArithmeticOp, Column, ComparisonOp, ValidityMask};
+
+    fn input() -> Column {
+        Column::new(
+            DType::Float64Nullable,
+            vec![
+                Scalar::Float64(4.0),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(-4.0),
+                Scalar::Float64(0.0),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn assert_validity(column: &Column, expected: &[bool]) {
+        assert_eq!(column.len(), expected.len());
+        assert_eq!(
+            (0..column.len())
+                .map(|row| column.validity().get(row))
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    fn assert_nan(value: &Scalar) {
+        assert!(matches!(value, Scalar::Float64(number) if number.is_nan()));
+    }
+
+    #[test]
+    fn constructor_nan_is_missing_but_explicit_valid_nan_is_present() {
+        let raw = Column::new(
+            DType::Float64Nullable,
+            vec![Scalar::Float64(f64::NAN), Scalar::Float64(1.0)],
+        )
+        .unwrap();
+        assert_validity(&raw, &[false, true]);
+        assert_eq!(raw.values()[0], Scalar::Null(NullKind::Null));
+
+        let computed = Column::from_nullable_f64_values_with_validity(
+            vec![f64::NAN, 1.0],
+            ValidityMask::all_valid(2),
+        );
+        assert_validity(&computed, &[true, true]);
+        assert_nan(&computed.values()[0]);
+        assert_eq!(computed.count(), 2);
+        assert!(!computed.has_any_missing());
+        assert_eq!(
+            computed.isna().unwrap().values(),
+            &[Scalar::Bool(false), Scalar::Bool(false)]
+        );
+    }
+
+    #[test]
+    fn unary_domain_errors_preserve_nullable_mask_and_empty_dtype() {
+        let source = input();
+        let sqrt = source.sqrt().unwrap();
+        assert_eq!(sqrt.dtype(), DType::Float64Nullable);
+        assert_validity(&sqrt, &[true, false, true, true]);
+        assert_eq!(sqrt.values()[0], Scalar::Float64(2.0));
+        assert_eq!(sqrt.values()[1], Scalar::Null(NullKind::Null));
+        assert_nan(&sqrt.values()[2]);
+        assert_eq!(sqrt.values()[3], Scalar::Float64(0.0));
+        assert_eq!(sqrt.count(), 3);
+        assert_eq!(
+            sqrt.isna().unwrap().values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+            ]
+        );
+        let log = source.log().unwrap();
+        assert_validity(&log, &[true, false, true, true]);
+        assert_nan(&log.values()[2]);
+        assert_eq!(log.values()[3], Scalar::Float64(f64::NEG_INFINITY));
+
+        let empty = Column::new(DType::Float64Nullable, vec![]).unwrap();
+        assert_eq!(empty.sqrt().unwrap().dtype(), DType::Float64Nullable);
+        assert_eq!(empty.log().unwrap().dtype(), DType::Float64Nullable);
+
+        let plain = Column::from_f64_values(vec![4.0, -4.0]);
+        let plain_sqrt = plain.sqrt().unwrap();
+        assert_eq!(plain_sqrt.dtype(), DType::Float64);
+        assert_validity(&plain_sqrt, &[true, false]);
+        assert_eq!(plain_sqrt.count(), 1);
+    }
+
+    #[test]
+    fn scalar_arithmetic_keeps_computed_nan_and_input_na_separate() {
+        let source = input();
+        for (scalar, op, nan_row) in [
+            (0.0, ArithmeticOp::Div, 3),
+            (f64::INFINITY, ArithmeticOp::Mul, 3),
+            (0.5, ArithmeticOp::Pow, 2),
+        ] {
+            let result = source
+                .binary_scalar(&Scalar::Float64(scalar), op, false)
+                .unwrap();
+            assert_eq!(result.dtype(), DType::Float64Nullable);
+            assert_validity(&result, &[true, false, true, true]);
+            assert_nan(&result.values()[nan_row]);
+            assert_eq!(result.values()[1], Scalar::Null(NullKind::Null));
+        }
+
+        let nan_scalar = source
+            .binary_scalar(&Scalar::Float64(f64::NAN), ArithmeticOp::Add, false)
+            .unwrap();
+        assert_validity(&nan_scalar, &[true, false, true, true]);
+        for row in [0, 2, 3] {
+            assert_nan(&nan_scalar.values()[row]);
+        }
+        let reverse = source
+            .binary_scalar(&Scalar::Float64(0.0), ArithmeticOp::Div, true)
+            .unwrap();
+        assert_validity(&reverse, &[true, false, true, true]);
+        assert_nan(&reverse.values()[3]);
+
+        let ints = Column::new(
+            DType::Int64Nullable,
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)],
+        )
+        .unwrap();
+        let promoted = ints
+            .binary_scalar(&Scalar::Float64(f64::NAN), ArithmeticOp::Add, false)
+            .unwrap();
+        assert_eq!(promoted.dtype(), DType::Float64Nullable);
+        assert_validity(&promoted, &[true, false]);
+        assert_nan(&promoted.values()[0]);
+    }
+
+    #[test]
+    fn vector_arithmetic_uses_operand_masks_and_propagates_present_nan() {
+        let source = input();
+        let zero = Column::from_f64_values(vec![0.0; 4]);
+        let divided = source.binary_numeric(&zero, ArithmeticOp::Div).unwrap();
+        assert_validity(&divided, &[true, false, true, true]);
+        assert_nan(&divided.values()[3]);
+
+        let sqrt = source.sqrt().unwrap();
+        let added = sqrt.binary_numeric(&zero, ArithmeticOp::Add).unwrap();
+        assert_validity(&added, &[true, false, true, true]);
+        assert_nan(&added.values()[2]);
+
+        let raw_nan = Column::from_f64_values(vec![f64::NAN, 1.0, f64::NAN, 3.0]);
+        let masked = source.binary_numeric(&raw_nan, ArithmeticOp::Add).unwrap();
+        assert_validity(&masked, &[false, false, false, true]);
+        assert_eq!(masked.values()[3], Scalar::Float64(3.0));
+    }
+
+    #[test]
+    fn gathers_alignment_and_concat_preserve_nan_validity() {
+        let sqrt = input().sqrt().unwrap();
+        for taken in [
+            sqrt.take_positions(&[2, 1, 0]),
+            sqrt.take(&[2, 1, 0]).unwrap(),
+        ] {
+            assert_validity(&taken, &[true, false, true]);
+            assert_nan(&taken.values()[0]);
+        }
+        let slice = sqrt.take_contiguous_range(1, 3);
+        assert_validity(&slice, &[false, true, true]);
+        assert_nan(&slice.values()[1]);
+        let runs = sqrt.take_position_runs(&[(0, 1), (2, 2)], 3);
+        assert_validity(&runs, &[true, true, true]);
+        assert_nan(&runs.values()[1]);
+        let aligned = sqrt
+            .reindex_by_positions(&[Some(2), None, Some(1), Some(0)])
+            .unwrap();
+        assert_validity(&aligned, &[true, false, false, true]);
+        assert_nan(&aligned.values()[0]);
+        let filled_alignment = sqrt
+            .reindex_by_positions_with_absent_scalar(
+                &[Some(2), None, Some(1)],
+                Scalar::Float64(7.0),
+            )
+            .unwrap();
+        assert_validity(&filled_alignment, &[true, true, false]);
+        assert_nan(&filled_alignment.values()[0]);
+        assert_eq!(filled_alignment.values()[1], Scalar::Float64(7.0));
+
+        let concatenated = sqrt.concat(&sqrt).unwrap();
+        assert_validity(
+            &concatenated,
+            &[true, false, true, true, true, false, true, true],
+        );
+        assert_nan(&concatenated.values()[2]);
+        assert_nan(&concatenated.values()[6]);
+        let cast = sqrt.astype(DType::Float64Nullable).unwrap();
+        assert_validity(&cast, &[true, false, true, true]);
+        assert_nan(&cast.values()[2]);
+    }
+
+    #[test]
+    fn drop_fill_and_filter_use_mask_instead_of_nan_payload() {
+        let sqrt = input().sqrt().unwrap();
+        let dropped = sqrt.dropna().unwrap();
+        assert_validity(&dropped, &[true, true, true]);
+        assert_nan(&dropped.values()[1]);
+        let filled = sqrt.fillna(&Scalar::Float64(9.0)).unwrap();
+        assert_validity(&filled, &[true, true, true, true]);
+        assert_eq!(filled.values()[1], Scalar::Float64(9.0));
+        assert_nan(&filled.values()[2]);
+        let nan_fill = sqrt.fillna(&Scalar::Float64(f64::NAN)).unwrap();
+        assert_validity(&nan_fill, &[true, false, true, true]);
+        assert_nan(&nan_fill.values()[2]);
+        let filtered = sqrt
+            .filter_by_mask(&Column::from_bool_values(vec![false, true, true, false]))
+            .unwrap();
+        assert_validity(&filtered, &[false, true]);
+        assert_nan(&filtered.values()[1]);
+    }
+
+    #[test]
+    fn reductions_count_present_nan_and_propagate_its_numeric_value() {
+        let sqrt = input().sqrt().unwrap();
+        for reduced in [sqrt.sum(), sqrt.mean(), sqrt.min(), sqrt.max(), sqrt.prod()] {
+            assert_nan(&reduced);
+        }
+        let (count, sum, mean) = sqrt
+            .pandas_reductions(|reductions| {
+                (reductions.count(), reductions.sum(), reductions.mean())
+            })
+            .unwrap();
+        assert_eq!(count, 3);
+        assert!(sum.is_nan());
+        assert!(mean.is_nan());
+        let absent =
+            Column::new(DType::Float64Nullable, vec![Scalar::Null(NullKind::Null)]).unwrap();
+        assert_eq!(absent.sum(), Scalar::Float64(0.0));
+        assert_eq!(absent.prod(), Scalar::Float64(1.0));
+        assert_eq!(absent.mean(), Scalar::Null(NullKind::Null));
+    }
+
+    #[test]
+    fn comparisons_treat_nan_as_present_and_propagate_only_masked_na() {
+        let sqrt = input().sqrt().unwrap();
+        let scalar = sqrt
+            .compare_scalar(&Scalar::Float64(0.0), ComparisonOp::Gt)
+            .unwrap();
+        assert_eq!(scalar.dtype(), DType::BoolNullable);
+        assert_validity(&scalar, &[true, false, true, true]);
+        assert_eq!(scalar.values()[2], Scalar::Bool(false));
+        let unequal = sqrt
+            .compare_scalar(&Scalar::Float64(f64::NAN), ComparisonOp::Ne)
+            .unwrap();
+        assert_validity(&unequal, &[true, false, true, true]);
+        assert_eq!(unequal.values()[2], Scalar::Bool(true));
+        let paired = sqrt.binary_comparison(&sqrt, ComparisonOp::Eq).unwrap();
+        assert_validity(&paired, &[true, false, true, true]);
+        assert_eq!(paired.values()[0], Scalar::Bool(true));
+        assert_eq!(paired.values()[2], Scalar::Bool(false));
+
+        // The shared mixed-numeric view must never round two nullable ints.
+        let large = Column::new(
+            DType::Int64Nullable,
+            vec![Scalar::Int64(9_007_199_254_740_993)],
+        )
+        .unwrap();
+        let smaller = Column::new(
+            DType::Int64Nullable,
+            vec![Scalar::Int64(9_007_199_254_740_992)],
+        )
+        .unwrap();
+        assert_eq!(
+            large
+                .binary_comparison(&smaller, ComparisonOp::Gt)
+                .unwrap()
+                .values(),
+            &[Scalar::Bool(true)]
+        );
     }
 }
