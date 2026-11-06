@@ -20516,6 +20516,7 @@ impl Column {
                 | DType::BoolNullable
                 | DType::Int64
                 | DType::Int64Nullable
+                | DType::Float64Nullable
                 | DType::Utf8
                 | DType::Interval
         ) {
@@ -33805,6 +33806,11 @@ impl Column {
     /// dtype; Utf8 inputs return `ColumnError::Type` because pandas raises
     /// TypeError on non-numeric .abs().
     pub fn abs(&self) -> Result<Self, ColumnError> {
+        // Extension Float64 uses its mask alone for NA: a present NaN
+        // produced by arithmetic stays present through another operation.
+        if let Some(column) = self.masked_f64_unary(f64::abs) {
+            return Ok(column);
+        }
         // Typed fast path: all-valid Int64/Float64 take abs over the contiguous
         // buffer and re-ingest typed (same dtype preserved), skipping the lazy
         // Scalar materialization and the 32B-per-cell Vec<Scalar>. Bit-identical
@@ -33965,6 +33971,9 @@ impl Column {
 
     /// Negate numeric values. Matches numpy's negative ufunc.
     pub fn neg(&self) -> Result<Self, ColumnError> {
+        if let Some(column) = self.masked_f64_unary(|value| -value) {
+            return Ok(column);
+        }
         // Typed, dtype-preserving fast path (all-valid only): Int64 negates over
         // the i64 buffer (wrapping, incl i64::MIN) and stays Int64; Float64
         // negates over the f64 buffer. Bit-identical to the scalar loop.
@@ -37374,6 +37383,46 @@ impl Column {
             return Ok(self.clone());
         }
         let abs = periods.unsigned_abs() as usize;
+        if let Some((data, validity)) = self.as_masked_f64_slice() {
+            // Shift the data and mask together. Re-ingesting Scalars would
+            // mistake a present NaN for an NA, including an untouched NaN in
+            // the surviving run. A raw NaN fill is missing, as on construction.
+            let fill_missing = fill.is_missing();
+            let fill_value = if fill_missing { 0.0 } else { fill.to_f64()? };
+            let mut out = vec![fill_value; len];
+            let mut invalid = Vec::new();
+            if abs >= len {
+                if fill_missing {
+                    invalid.push((0, len));
+                }
+            } else if periods > 0 {
+                out[abs..].copy_from_slice(&data[..len - abs]);
+                if fill_missing {
+                    invalid.push((0, abs));
+                }
+                validity.for_each_invalid_range(|start, run| {
+                    let end = (start + run).min(len - abs);
+                    if start < end {
+                        invalid.push((start + abs, end - start));
+                    }
+                });
+            } else {
+                out[..len - abs].copy_from_slice(&data[abs..]);
+                validity.for_each_invalid_range(|start, run| {
+                    let (from, end) = (start.max(abs), start + run);
+                    if from < end {
+                        invalid.push((from - abs, end - from));
+                    }
+                });
+                if fill_missing {
+                    invalid.push((len - abs, abs));
+                }
+            }
+            return Ok(Self::from_nullable_f64_values_with_validity(
+                out,
+                ValidityMask::from_invalid_ranges(Arc::from(invalid), len),
+            ));
+        }
         // Typed all-valid-Float64 fast path with a MISSING fill (the default
         // shift, which vacates slots to NaN/missing): build the output f64
         // buffer directly — NaN in the vacated slots, the contiguous source run
@@ -37692,6 +37741,41 @@ impl Column {
     }
 
     fn round_storage(&self, decimals: i32) -> Result<Self, ColumnError> {
+        if let Some((data, validity)) = self.as_masked_f64_slice() {
+            // NumPy divides before rounding negative decimal places and
+            // multiplies afterwards. Keep Float32 arithmetic in Float32,
+            // including overflow; newly produced NaNs are present values.
+            let factor = 10_f64.powi(decimals.saturating_abs());
+            let rounded = if self.width == Some(NumericWidth::Float32) {
+                #[allow(clippy::cast_possible_truncation)] // NumPy Float32 scaling
+                let factor = factor as f32;
+                data.iter()
+                    .map(|&value| {
+                        #[allow(clippy::cast_possible_truncation)] // Float32 input
+                        let value = value as f32;
+                        f64::from(if decimals < 0 {
+                            (value / factor).round_ties_even() * factor
+                        } else {
+                            (value * factor).round_ties_even() / factor
+                        })
+                    })
+                    .collect()
+            } else {
+                data.iter()
+                    .map(|&value| {
+                        if decimals < 0 {
+                            (value / factor).round_ties_even() * factor
+                        } else {
+                            (value * factor).round_ties_even() / factor
+                        }
+                    })
+                    .collect()
+            };
+            return Ok(Self::from_nullable_f64_values_with_validity(
+                rounded,
+                validity.clone(),
+            ));
+        }
         if matches!(self.dtype, DType::Bool) || (self.dtype == DType::Int64 && decimals >= 0) {
             return Ok(self.clone());
         }
@@ -76247,7 +76331,7 @@ mod pandas_string_columns_fvsao59 {
 
 #[cfg(test)]
 mod nullable_float_present_nan_6f379 {
-    use fp_types::{DType, NullKind, Scalar};
+    use fp_types::{DType, NullKind, NumericWidth, Scalar};
 
     use super::{ArithmeticOp, Column, ComparisonOp, ValidityMask};
 
@@ -76300,6 +76384,191 @@ mod nullable_float_present_nan_6f379 {
             computed.isna().unwrap().values(),
             &[Scalar::Bool(false), Scalar::Bool(false)]
         );
+    }
+
+    #[test]
+    fn absolute_and_negative_keep_present_nan_and_nullable_width() {
+        let source = input().sqrt().unwrap();
+        for source in [
+            source.clone(),
+            source.with_width_unchecked(NumericWidth::Float32),
+        ] {
+            for absolute in [
+                source.abs().unwrap(),
+                source.fabs().unwrap(),
+                source.absolute().unwrap(),
+            ] {
+                assert_eq!(absolute.dtype(), DType::Float64Nullable);
+                assert_eq!(absolute.width(), source.width());
+                assert_validity(&absolute, &[true, false, true, true]);
+                assert_eq!(absolute.values()[0], Scalar::Float64(2.0));
+                assert_nan(&absolute.values()[2]);
+            }
+            let negative = source.neg().unwrap();
+            assert_eq!(negative.dtype(), DType::Float64Nullable);
+            assert_eq!(negative.width(), source.width());
+            assert_validity(&negative, &[true, false, true, true]);
+            let (data, _) = negative.as_masked_f64_slice().unwrap();
+            assert_eq!(data[0], -2.0);
+            assert!(data[2].is_nan());
+            assert_eq!(data[3].to_bits(), (-0.0_f64).to_bits());
+        }
+
+        let plain = Column::from_f64_values(vec![-2.0, f64::NAN]);
+        for result in [plain.abs().unwrap(), plain.neg().unwrap()] {
+            assert_eq!(result.dtype(), DType::Float64);
+            assert_validity(&result, &[true, false]);
+        }
+        let empty = Column::new(DType::Float64Nullable, Vec::new()).unwrap();
+        for result in [empty.abs().unwrap(), empty.neg().unwrap()] {
+            assert_eq!(result.dtype(), DType::Float64Nullable);
+            assert!(result.is_empty());
+        }
+    }
+
+    #[test]
+    fn nullable_round_preserves_mask_through_ties_and_nan_overflow() {
+        // Live pandas Float64: half-to-even for both signs, with a present
+        // NaN remaining present even when scale overflow creates more NaNs.
+        let mut validity = ValidityMask::all_valid(8);
+        validity.set(7, false);
+        let source = Column::from_nullable_f64_values_with_validity(
+            vec![15.0, 25.0, -15.0, -25.0, 1.25, -0.0, f64::NAN, 9.0],
+            validity,
+        );
+        let tens = source.round(-1).unwrap();
+        assert_eq!(tens.dtype(), DType::Float64Nullable);
+        assert_validity(&tens, &[true, true, true, true, true, true, true, false]);
+        let (data, _) = tens.as_masked_f64_slice().unwrap();
+        assert_eq!(&data[..5], &[20.0, 20.0, -20.0, -20.0, 0.0]);
+        assert_eq!(data[5].to_bits(), (-0.0_f64).to_bits());
+        assert!(data[6].is_nan());
+
+        let tenths = source.round(1).unwrap();
+        assert_eq!(tenths.values()[4], Scalar::Float64(1.2));
+        assert_nan(&tenths.values()[6]);
+        assert_eq!(tenths.values()[7], Scalar::Null(NullKind::Null));
+        for decimals in [400, -400, i32::MAX, i32::MIN] {
+            let rounded = source.round(decimals).unwrap();
+            assert_eq!(rounded.dtype(), DType::Float64Nullable);
+            assert_validity(&rounded, &[true, true, true, true, true, true, true, false]);
+            for value in &rounded.values()[..7] {
+                assert_nan(value);
+            }
+            assert_eq!(rounded.values()[7], Scalar::Null(NullKind::Null));
+        }
+        let empty = Column::new(DType::Float64Nullable, Vec::new()).unwrap();
+        assert_eq!(empty.round(2).unwrap().dtype(), DType::Float64Nullable);
+        let plain = Column::from_f64_values(vec![1.25, f64::NAN]);
+        let rounded = plain.round(1).unwrap();
+        assert_eq!(rounded.dtype(), DType::Float64);
+        assert_validity(&rounded, &[true, false]);
+        assert_eq!(rounded.values()[0], Scalar::Float64(1.2));
+    }
+
+    #[test]
+    fn nullable_float32_round_keeps_single_precision_and_present_nan() {
+        let mut validity = ValidityMask::all_valid(5);
+        validity.set(4, false);
+        let source = Column::from_nullable_f64_values_with_validity(
+            vec![NumericWidth::round_f32(3.0e38), 1.25, -0.0, f64::NAN, 0.0],
+            validity,
+        )
+        .with_width_unchecked(NumericWidth::Float32);
+        let rounded = source.round(1).unwrap();
+        assert_eq!(rounded.dtype(), DType::Float64Nullable);
+        assert_eq!(rounded.width(), Some(NumericWidth::Float32));
+        assert_validity(&rounded, &[true, true, true, true, false]);
+        let (data, _) = rounded.as_masked_f64_slice().unwrap();
+        assert_eq!(data[0], f64::INFINITY);
+        assert_eq!(data[1], f64::from(1.2_f32));
+        assert_eq!(data[2].to_bits(), (-0.0_f64).to_bits());
+        assert!(data[3].is_nan());
+        for decimals in [50, -50] {
+            let rounded = source.round(decimals).unwrap();
+            assert_eq!(rounded.width(), Some(NumericWidth::Float32));
+            assert_validity(&rounded, &[true, true, true, true, false]);
+            for value in &rounded.values()[..4] {
+                assert_nan(value);
+            }
+        }
+    }
+
+    #[test]
+    fn nullable_shift_moves_nan_and_mask_independently() {
+        let source = input().sqrt().unwrap();
+        let forward = source.shift(1, Scalar::Null(NullKind::Null)).unwrap();
+        assert_eq!(forward.dtype(), DType::Float64Nullable);
+        assert_validity(&forward, &[false, true, false, true]);
+        assert_eq!(forward.values()[1], Scalar::Float64(2.0));
+        assert_nan(&forward.values()[3]);
+
+        for fill in [Scalar::Null(NullKind::Null), Scalar::Float64(f64::NAN)] {
+            let backward = source.shift(-1, fill).unwrap();
+            assert_eq!(backward.dtype(), DType::Float64Nullable);
+            assert_validity(&backward, &[false, true, true, false]);
+            assert_nan(&backward.values()[1]);
+            assert_eq!(backward.values()[2], Scalar::Float64(0.0));
+        }
+        let backward = source.shift(-1, Scalar::Float64(1.0)).unwrap();
+        assert_validity(&backward, &[false, true, true, true]);
+        assert_nan(&backward.values()[1]);
+        assert_eq!(backward.values()[3], Scalar::Float64(1.0));
+
+        for periods in [4, -4, 5, -5, i64::MAX, i64::MIN] {
+            let missing = source.shift(periods, Scalar::Float64(f64::NAN)).unwrap();
+            assert_eq!(missing.dtype(), DType::Float64Nullable);
+            assert_validity(&missing, &[false; 4]);
+            let filled = source.shift(periods, Scalar::Bool(true)).unwrap();
+            assert_eq!(filled.dtype(), DType::Float64Nullable);
+            assert_validity(&filled, &[true; 4]);
+            assert!(
+                filled
+                    .values()
+                    .iter()
+                    .all(|value| *value == Scalar::Float64(1.0))
+            );
+        }
+        let unchanged = source.shift(0, Scalar::Float64(f64::NAN)).unwrap();
+        assert_validity(&unchanged, &[true, false, true, true]);
+        assert_nan(&unchanged.values()[2]);
+        let empty = Column::new(DType::Float64Nullable, Vec::new()).unwrap();
+        assert_eq!(
+            empty.shift(1, Scalar::Float64(0.0)).unwrap().dtype(),
+            DType::Float64Nullable
+        );
+        let plain = Column::from_f64_values(vec![1.0, f64::NAN, 3.0]);
+        let shifted = plain.shift(1, Scalar::Null(NullKind::Null)).unwrap();
+        assert_eq!(shifted.dtype(), DType::Float64);
+        assert_validity(&shifted, &[false, true, false]);
+    }
+
+    #[test]
+    fn all_missing_uses_nullable_mask_even_when_every_datum_is_nan() {
+        let mut validity = ValidityMask::all_valid(2);
+        validity.set(0, false);
+        let mixed = Column::from_nullable_f64_values_with_validity(
+            vec![f64::NAN, f64::NAN],
+            validity.clone(),
+        );
+        assert!(!mixed.all_missing());
+        assert!(mixed.has_any_missing());
+        validity.set(1, false);
+        let absent =
+            Column::from_nullable_f64_values_with_validity(vec![f64::NAN, f64::NAN], validity);
+        assert!(absent.all_missing());
+        let present = Column::from_nullable_f64_values_with_validity(
+            vec![f64::NAN],
+            ValidityMask::all_valid(1),
+        );
+        assert!(!present.all_missing());
+        assert!(!present.has_any_missing());
+        assert!(
+            Column::new(DType::Float64Nullable, Vec::new())
+                .unwrap()
+                .all_missing()
+        );
+        assert!(Column::from_f64_values(vec![f64::NAN]).all_missing());
     }
 
     #[test]
