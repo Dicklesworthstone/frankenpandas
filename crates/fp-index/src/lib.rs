@@ -4115,6 +4115,22 @@ impl Index {
         self.declared.and_then(DeclaredDtype::masked)
     }
 
+    /// Whether `label` is missing under this index's dtype. A nullable
+    /// floating index holds an arithmetic-produced NaN as a present float;
+    /// its NA is an explicit null label (br-frankenpandas-6f379).
+    #[must_use]
+    pub fn label_is_missing(&self, label: &IndexLabel) -> bool {
+        if matches!(
+            self.masked(),
+            Some(MaskedDtype::Float64 | MaskedDtype::Width(NumericWidth::Float32))
+        ) && matches!(label, IndexLabel::Float64(_))
+        {
+            false
+        } else {
+            label.is_missing()
+        }
+    }
+
     /// Whether every label is of `masked`'s kind or missing.
     fn holds_masked(&self, masked: MaskedDtype) -> bool {
         if self.labels.has_lazy_int64_backing() {
@@ -7051,7 +7067,7 @@ impl Index {
         self.unique()
             .labels
             .iter()
-            .filter(|label| !dropna || !label.is_missing())
+            .filter(|label| !dropna || !self.label_is_missing(label))
             .count()
     }
 
@@ -7296,7 +7312,18 @@ impl Index {
             .labels()
             .iter()
             .map(|label| {
-                if label.is_missing() {
+                // Floating extension casts retain their source's explicit
+                // mask. Ordinary float NaNs still become NA on construction;
+                // an already-masked floating index's present NaN stays valid.
+                let missing = if matches!(
+                    masked,
+                    MaskedDtype::Float64 | MaskedDtype::Width(NumericWidth::Float32)
+                ) {
+                    self.label_is_missing(label)
+                } else {
+                    label.is_missing()
+                };
+                if missing {
                     return Ok(IndexLabel::Null(fp_types::NullKind::Null));
                 }
                 Ok(match masked {
@@ -7683,8 +7710,15 @@ impl Index {
         let mut seen_order: Vec<IndexLabel> = Vec::new();
         let mut counts: FxHashMap<IndexLabel, usize> = FxHashMap::default();
         let mut total = 0usize;
+        let masked = self.masked().is_some();
+        let mut missing_count = 0usize;
         for label in &self.labels {
-            if dropna && label.is_missing() {
+            let missing = self.label_is_missing(label);
+            if missing && (dropna || masked) {
+                if !dropna {
+                    missing_count += 1;
+                    total += 1;
+                }
                 continue;
             }
             total += 1;
@@ -7700,6 +7734,11 @@ impl Index {
                 (label, count)
             })
             .collect();
+        // pandas' masked arrays count the data first, then append their NA
+        // bucket before the stable count sort. A present NaN is in the data.
+        if missing_count != 0 {
+            pairs.push((IndexLabel::Null(fp_types::NullKind::Null), missing_count));
+        }
         if sort {
             if ascending {
                 pairs.sort_by_key(|entry| entry.1);
@@ -8091,8 +8130,8 @@ impl Index {
 
     /// Drop missing labels, preserving order.
     ///
-    /// Matches `pd.Index.dropna()`. Labels whose `is_missing()` returns
-    /// true are removed. The name (if any) is preserved.
+    /// Matches `pd.Index.dropna()`. Labels missing under this index's dtype
+    /// are removed. The name (if any) is preserved.
     #[must_use]
     pub fn dropna(&self) -> Self {
         if self.labels.has_lazy_int64_backing() {
@@ -8101,7 +8140,7 @@ impl Index {
         self.propagate_name(Self::new(
             self.labels
                 .iter()
-                .filter(|label| !label.is_missing())
+                .filter(|label| !self.label_is_missing(label))
                 .cloned()
                 .collect(),
         ))
@@ -8239,7 +8278,7 @@ impl Index {
             self.labels
                 .iter()
                 .map(|label| {
-                    if label.is_missing() {
+                    if self.label_is_missing(label) {
                         value.clone()
                     } else {
                         label.clone()
@@ -8255,7 +8294,10 @@ impl Index {
         if self.labels.has_lazy_int64_backing() {
             return vec![false; self.labels.len()];
         }
-        self.labels.iter().map(IndexLabel::is_missing).collect()
+        self.labels
+            .iter()
+            .map(|label| self.label_is_missing(label))
+            .collect()
     }
 
     /// Matches `pd.Index.notna()`.
@@ -8266,7 +8308,7 @@ impl Index {
         }
         self.labels
             .iter()
-            .map(|label| !label.is_missing())
+            .map(|label| !self.label_is_missing(label))
             .collect()
     }
 
@@ -8792,6 +8834,9 @@ impl Index {
     pub fn hasnans(&self) -> bool {
         if self.labels.has_lazy_int64_backing() {
             return false;
+        }
+        if self.masked().is_some() {
+            return self.labels.iter().any(|label| self.label_is_missing(label));
         }
         if let Some(nanos) = self.labels.datetime64_nanos() {
             return nanos.contains(&i64::MIN);
@@ -25238,6 +25283,17 @@ impl MultiIndex {
     #[must_use]
     pub fn declared_level_order(&self, level: usize) -> Option<&[IndexLabel]> {
         self.levels.get(level)?.declared_catalog()
+    }
+
+    /// Restore whether one level reports its declared catalog or its sorted
+    /// factorization, without changing the catalog, codes or row labels.
+    /// Native snapshots can carry a mixture of these per-level states.
+    #[must_use]
+    pub fn with_level_order_declared(mut self, level: usize, declared: bool) -> Self {
+        if let Some(target) = self.levels.get_mut(level) {
+            target.declared = declared;
+        }
+        self
     }
 
     /// This MultiIndex with every level's catalog its labels sorted, as
@@ -49514,5 +49570,202 @@ mod infer_freq_like_pandas_acelo {
                 IndexLabel::Utf8("c_3".to_owned()),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod masked_float_index_6f379 {
+    use fp_types::{NullKind, NumericWidth, Scalar};
+
+    use super::{DuplicateKeep, Index, IndexLabel, MaskedDtype, MultiIndex, OrderedF64};
+
+    fn float(value: f64) -> IndexLabel {
+        IndexLabel::Float64(OrderedF64(value))
+    }
+
+    #[test]
+    fn masked_float_index_distinguishes_present_nan_from_na() {
+        let na = IndexLabel::Null(NullKind::Null);
+        for masked in [
+            MaskedDtype::Float64,
+            MaskedDtype::Width(NumericWidth::Float32),
+        ] {
+            let index = Index::new(vec![
+                float(f64::NAN),
+                na.clone(),
+                float(2.0),
+                float(f64::NAN),
+            ])
+            .with_masked(masked)
+            .set_name("values");
+            assert_eq!(index.isna(), [false, true, false, false]);
+            assert_eq!(index.notna(), [true, false, true, true]);
+            assert!(index.hasnans());
+            assert_eq!(index.nunique(), 2);
+            assert_eq!(index.nunique_with_dropna(false), 3);
+            let unique = index.unique();
+            assert_eq!(unique.labels(), &[float(f64::NAN), na.clone(), float(2.0)]);
+            assert_eq!(unique.masked(), Some(masked));
+            assert_eq!(
+                index.duplicated(DuplicateKeep::First),
+                [false, false, false, true]
+            );
+            assert_eq!(
+                index.duplicated(DuplicateKeep::Last),
+                [true, false, false, false]
+            );
+            let dropped = index.dropna();
+            assert_eq!(
+                dropped.labels(),
+                &[float(f64::NAN), float(2.0), float(f64::NAN)]
+            );
+            assert_eq!(dropped.masked(), Some(masked));
+            assert_eq!(dropped.name(), index.name());
+            assert!(!dropped.hasnans());
+            let filled = index.fillna(&float(7.0));
+            assert_eq!(
+                filled.labels(),
+                &[float(f64::NAN), float(7.0), float(2.0), float(f64::NAN)]
+            );
+            assert_eq!(filled.masked(), Some(masked));
+            assert!(!filled.hasnans());
+            assert_eq!(
+                index.value_counts(),
+                [(float(f64::NAN), 2), (float(2.0), 1)]
+            );
+            let empty = index.take(&[]);
+            assert_eq!(empty.dtype(), masked.name());
+            assert_eq!(empty.nunique_with_dropna(false), 0);
+            assert!(!empty.hasnans());
+        }
+        let ordinary = Index::new(vec![float(f64::NAN), float(2.0)]);
+        assert_eq!(ordinary.isna(), [true, false]);
+        assert_eq!(ordinary.nunique(), 1);
+        assert_eq!(ordinary.dropna().labels(), &[float(2.0)]);
+    }
+
+    #[test]
+    fn masked_float_index_casts_keep_present_nan_but_raw_nan_becomes_na() {
+        let na = IndexLabel::Null(NullKind::Null);
+        for source in ["Float64", "Float32"] {
+            let index = Index::new(vec![float(f64::NAN), na.clone(), float(1.25), float(-0.0)])
+                .with_masked(MaskedDtype::of_name(source).unwrap());
+            for target in ["Float64", "Float32"] {
+                let cast = index.astype(target).unwrap();
+                assert_eq!(cast.dtype(), target);
+                assert_eq!(cast.isna(), [false, true, false, false]);
+                assert_eq!(cast.labels(), index.labels());
+                let IndexLabel::Float64(zero) = &cast.labels()[3] else {
+                    panic!("float cast changed zero's label kind");
+                };
+                assert_eq!(zero.0.to_bits(), (-0.0_f64).to_bits());
+                let raw = Index::new(vec![float(f64::NAN), float(1.25)])
+                    .astype(target)
+                    .unwrap();
+                assert_eq!(raw.isna(), [true, false]);
+                assert_eq!(raw.labels()[0], na);
+            }
+            let plain = index.astype("float64").unwrap();
+            assert_eq!(plain.isna(), [true, true, false, false]);
+        }
+    }
+
+    #[test]
+    fn masked_index_counts_append_na_before_stable_sort() {
+        let na = IndexLabel::Null(NullKind::Null);
+        let index = Index::new(vec![
+            na.clone(),
+            float(f64::NAN),
+            float(2.0),
+            float(f64::NAN),
+            na.clone(),
+            float(2.0),
+            float(3.0),
+        ])
+        .with_masked(MaskedDtype::Float64);
+        for (sort, ascending, labels, counts) in [
+            (
+                false,
+                false,
+                vec![float(f64::NAN), float(2.0), float(3.0), na.clone()],
+                vec![2, 2, 1, 2],
+            ),
+            (
+                true,
+                false,
+                vec![float(f64::NAN), float(2.0), na.clone(), float(3.0)],
+                vec![2, 2, 2, 1],
+            ),
+            (
+                true,
+                true,
+                vec![float(3.0), float(f64::NAN), float(2.0), na.clone()],
+                vec![1, 2, 2, 2],
+            ),
+        ] {
+            let actual = index.value_counts_with_options(false, sort, ascending, false);
+            let expected: Vec<_> = labels
+                .iter()
+                .cloned()
+                .zip(counts.iter().copied().map(Scalar::Int64))
+                .collect();
+            assert_eq!(actual, expected);
+            let normalized = index.value_counts_with_options(true, sort, ascending, false);
+            for ((label, value), (expected_label, count)) in normalized.iter().zip(expected) {
+                assert_eq!(label, &expected_label);
+                assert_eq!(value.to_f64().unwrap(), count.to_f64().unwrap() / 7.0);
+            }
+        }
+        let present = index.value_counts_with_options(true, false, false, true);
+        assert_eq!(
+            present,
+            vec![
+                (float(f64::NAN), Scalar::Float64(0.4)),
+                (float(2.0), Scalar::Float64(0.4)),
+                (float(3.0), Scalar::Float64(0.2)),
+            ]
+        );
+        for (masked, value) in [
+            (MaskedDtype::Int64, IndexLabel::Int64(1)),
+            (MaskedDtype::Boolean, IndexLabel::Bool(true)),
+        ] {
+            let source = Index::new(vec![na.clone(), value.clone()]).with_masked(masked);
+            assert_eq!(
+                source.value_counts_with_options(false, true, false, false),
+                vec![(value, Scalar::Int64(1)), (na.clone(), Scalar::Int64(1)),]
+            );
+        }
+        let object = Index::new(vec![na.clone(), IndexLabel::Utf8("x".to_owned())]);
+        assert_eq!(
+            object.value_counts_with_options(false, false, false, false)[0].0,
+            na
+        );
+    }
+
+    #[test]
+    fn multiindex_declared_order_can_be_restored_per_level() {
+        let text = |value: &str| IndexLabel::Utf8(value.to_owned());
+        let first = vec![text("b"), text("a"), text("unused")];
+        let second = vec![text("z"), text("x"), text("unused")];
+        let original = MultiIndex::from_declared_levels(
+            vec![first.clone(), second.clone()],
+            vec![vec![0, 1, 0], vec![0, 1, 0]],
+        )
+        .unwrap();
+        let mixed = original.clone().with_level_order_declared(1, false);
+        assert_eq!(mixed.declared_level_order(0), Some(first.as_slice()));
+        assert_eq!(mixed.declared_level_order(1), None);
+        assert_eq!(mixed.levels()[0].labels(), first);
+        assert_eq!(mixed.levels()[1].labels(), &[text("x"), text("z")]);
+        assert_eq!(mixed.codes()[1], [1, 0, 1]);
+        for row in 0..original.len() {
+            assert_eq!(mixed.get_tuple(row), original.get_tuple(row));
+        }
+        let restored = mixed.with_level_order_declared(1, true);
+        assert_eq!(restored.levels()[1].labels(), second);
+        assert_eq!(restored.codes(), original.codes());
+        assert_eq!(restored.level_codes(1), original.level_codes(1));
+        let unchanged = restored.clone().with_level_order_declared(99, false);
+        assert_eq!(unchanged.levels(), restored.levels());
     }
 }
