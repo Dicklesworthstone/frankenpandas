@@ -21891,16 +21891,36 @@ impl Column {
 
     /// `self <op> s` (`s <op> self` when `scalar_left`) of a masked Int64
     /// column of no narrower width by an int, + - * // %: the wrapping int64
-    /// op over its data, a zero divisor's quotient and remainder 0, its mask
-    /// carried - the cells binary_numeric's masked fallback makes of the
-    /// pair, a missing row NA (si + 1 went through the scalar's broadcast
-    /// and a Scalar a row: 11.5 ms at 200k rows, pandas 0.09). None for any
-    /// other op or column.
+    /// op over its data, its mask carried. A forward zero divisor's quotient
+    /// and remainder are 0; reflected // and % promote to masked Float64
+    /// when a present divisor is zero (znfox). A missing row stays NA (si + 1
+    /// went through the scalar's broadcast and a Scalar a row: 11.5 ms at
+    /// 200k rows, pandas 0.09). None for any other op or column.
     fn masked_i64_scalar(&self, s: i64, op: ArithmeticOp, scalar_left: bool) -> Option<Self> {
         if self.width.is_some() {
             return None;
         }
         let (data, validity) = self.as_masked_i64_slice()?;
+        if scalar_left
+            && matches!(op, ArithmeticOp::FloorDiv | ArithmeticOp::Mod)
+            && data
+                .iter()
+                .enumerate()
+                .any(|(row, &divisor)| divisor == 0 && validity.get(row))
+        {
+            // pandas promotes the integer results after computing them:
+            // retain exact quotients and remainders (and positive integer
+            // zero), then fill zero divisors with inf/-inf/NaN. The explicit
+            // mask keeps those NaNs present and input NA rows missing.
+            let out = data
+                .iter()
+                .map(|&divisor| promoted_int_floor_op(s, divisor, op))
+                .collect();
+            return Some(Self::from_nullable_f64_values_with_validity(
+                out,
+                validity.clone(),
+            ));
+        }
         let floor_op = |a: i64, b: i64| match (b, op) {
             (0, _) => 0,
             (_, ArithmeticOp::Mod) => python_mod_i64(a, b),
@@ -48415,10 +48435,10 @@ mod tests {
         }
 
         /// A masked Int64 column's typed kernels: + - * // % by an int (a zero
-        /// divisor 0) and by an int column, a compare with an int, a float and
-        /// NaN, fillna and astype to float64 give pandas' masked cells, and the
-        /// masked results stay masked through fillna, a filter, a reindex and
-        /// a sort (br-frankenpandas-aykex). NEGATIVE: a plain int64 column with
+        /// divisor 0 on the forward path) and by an int column, a compare
+        /// with an int, a float and NaN, fillna and astype to float64 give
+        /// pandas' masked cells. Results stay masked through fillna, a filter,
+        /// a reindex and a sort (br-frankenpandas-aykex). NEGATIVE: a plain int64 column with
         /// a gap keeps numpy's rules and dtype; ** declines the kernel.
         #[test]
         fn masked_int_kernels_keep_the_mask_aykex() {
@@ -48483,9 +48503,18 @@ mod tests {
                 by(ArithmeticOp::FloorDiv, 0, false),
                 [Some(0), None, Some(0), Some(0)]
             );
+            let reflected = masked
+                .binary_scalar(&Scalar::Int64(5), ArithmeticOp::FloorDiv, true)
+                .unwrap();
+            assert_eq!(reflected.dtype(), DType::Float64Nullable);
             assert_eq!(
-                by(ArithmeticOp::FloorDiv, 5, true),
-                [Some(0), None, Some(-1), Some(0)]
+                reflected.values(),
+                &[
+                    Scalar::Float64(0.0),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Float64(-1.0),
+                    Scalar::Float64(f64::INFINITY),
+                ]
             );
             let divisors = Column::from_i64_values(vec![2, 2, 0, 3]);
             let floor = masked
@@ -76326,6 +76355,202 @@ mod pandas_string_columns_fvsao59 {
         let ints = Column::from_i64_values(vec![1, 2]).as_pandas_string();
         assert!(!ints.is_pandas_string());
         assert!(!strings.with_dtype(DType::Categorical).is_pandas_string());
+    }
+}
+
+#[cfg(test)]
+mod masked_integer_reflected_zero_division_znfox {
+    use fp_types::{DType, NullKind, Scalar};
+
+    use super::{ArithmeticOp, Column, ValidityMask};
+
+    fn divisors(values: &[i64]) -> Column {
+        let mut values: Vec<Scalar> = values.iter().copied().map(Scalar::Int64).collect();
+        values.push(Scalar::Null(NullKind::Null));
+        Column::new(DType::Int64Nullable, values).unwrap()
+    }
+
+    fn assert_nullable_floats(column: &Column, expected: &[Option<f64>]) {
+        assert_eq!(column.dtype(), DType::Float64Nullable);
+        assert_eq!(column.len(), expected.len());
+        for (row, expected) in expected.iter().enumerate() {
+            assert_eq!(column.validity().get(row), expected.is_some(), "row {row}");
+            match expected {
+                Some(expected) => {
+                    let Scalar::Float64(actual) = column.values()[row] else {
+                        panic!("expected a present float at row {row}");
+                    };
+                    if expected.is_nan() {
+                        assert!(actual.is_nan(), "row {row}: {actual}");
+                    } else {
+                        assert_eq!(actual.to_bits(), expected.to_bits(), "row {row}");
+                    }
+                }
+                None => assert_eq!(column.values()[row], Scalar::Null(NullKind::Null)),
+            }
+        }
+    }
+
+    // Measured against pandas 2.2.3: integer reflection promotes when a
+    // divisor is zero, and the new NaN is present in the extension array.
+    // Forward Int64 // 0 and Int64 % 0 instead retain the integer dtype.
+    #[test]
+    fn reflected_integer_zero_divisors_promote_and_preserve_mask() {
+        let source = divisors(&[0, 7, -7, 2, -2]);
+        for (numerator, floors, remainders) in [
+            (
+                100,
+                [f64::INFINITY, 14.0, -15.0, 50.0, -50.0],
+                [f64::NAN, 2.0, -5.0, 0.0, 0.0],
+            ),
+            (
+                -100,
+                [f64::NEG_INFINITY, -15.0, 14.0, -50.0, 50.0],
+                [f64::NAN, 5.0, -2.0, 0.0, 0.0],
+            ),
+            (
+                0,
+                [f64::NAN, 0.0, 0.0, 0.0, 0.0],
+                [f64::NAN, 0.0, 0.0, 0.0, 0.0],
+            ),
+        ] {
+            for (op, values) in [
+                (ArithmeticOp::FloorDiv, floors),
+                (ArithmeticOp::Mod, remainders),
+            ] {
+                let result = source
+                    .binary_scalar(&Scalar::Int64(numerator), op, true)
+                    .unwrap();
+                let mut expected: Vec<Option<f64>> = values.into_iter().map(Some).collect();
+                expected.push(None);
+                assert_nullable_floats(&result, &expected);
+                assert_eq!(result.count(), 5);
+                assert_eq!(result.isna().unwrap().values()[0], Scalar::Bool(false));
+            }
+        }
+    }
+
+    #[test]
+    fn promoted_integer_division_keeps_precision_and_integer_overflow() {
+        let source = divisors(&[0, -7, 7, -1, 2]);
+        // These expected values are the live pandas oracle's results, not
+        // divisions of f64 operands: 2**53+1 has already lost a bit as f64,
+        // and i64::MIN // -1 wraps before the promotion to Float64.
+        for (numerator, floors, remainders) in [
+            (
+                9_007_199_254_740_993,
+                [
+                    f64::INFINITY,
+                    -1_286_742_750_677_285.0,
+                    1_286_742_750_677_284.0,
+                    -9_007_199_254_740_992.0,
+                    4_503_599_627_370_496.0,
+                ],
+                [f64::NAN, -2.0, 5.0, 0.0, 1.0],
+            ),
+            (
+                i64::MIN,
+                [
+                    f64::NEG_INFINITY,
+                    1.317_624_576_693_539_3e18,
+                    -1.317_624_576_693_539_3e18,
+                    -9.223_372_036_854_776e18,
+                    -4.611_686_018_427_388e18,
+                ],
+                [f64::NAN, -1.0, 6.0, 0.0, 0.0],
+            ),
+        ] {
+            for (op, values) in [
+                (ArithmeticOp::FloorDiv, floors),
+                (ArithmeticOp::Mod, remainders),
+            ] {
+                let result = source
+                    .binary_scalar(&Scalar::Int64(numerator), op, true)
+                    .unwrap();
+                let mut expected: Vec<Option<f64>> = values.into_iter().map(Some).collect();
+                expected.push(None);
+                assert_nullable_floats(&result, &expected);
+            }
+        }
+    }
+
+    #[test]
+    fn masked_zero_payloads_and_empty_columns_do_not_promote() {
+        let source =
+            Column::masked_int64_from(vec![7, 0, -7], ValidityMask::from_words(vec![0b101], 3));
+        for (op, expected) in [
+            (ArithmeticOp::FloorDiv, [14, -15]),
+            (ArithmeticOp::Mod, [2, -5]),
+        ] {
+            let result = source.binary_scalar(&Scalar::Int64(100), op, true).unwrap();
+            assert_eq!(result.dtype(), DType::Int64Nullable);
+            assert_eq!(
+                result.values(),
+                &[
+                    Scalar::Int64(expected[0]),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Int64(expected[1]),
+                ]
+            );
+            for values in [vec![], vec![Scalar::Null(NullKind::Null)]] {
+                let missing = Column::new(DType::Int64Nullable, values.clone()).unwrap();
+                let result = missing
+                    .binary_scalar(&Scalar::Int64(100), op, true)
+                    .unwrap();
+                assert_eq!(result.dtype(), DType::Int64Nullable);
+                assert_eq!(result.values(), values.as_slice());
+            }
+        }
+    }
+
+    #[test]
+    fn forward_and_array_integer_division_keep_integer_zero_results() {
+        let source = divisors(&[100, -100, 0]);
+        let zeros = Column::from_i64_values(vec![0; source.len()]);
+        let masked_zeros = zeros.astype(DType::Int64Nullable).unwrap();
+        for op in [ArithmeticOp::FloorDiv, ArithmeticOp::Mod] {
+            let scalar = source.binary_scalar(&Scalar::Int64(0), op, false).unwrap();
+            for result in [
+                scalar,
+                source.binary_numeric(&zeros, op).unwrap(),
+                source.binary_numeric(&masked_zeros, op).unwrap(),
+            ] {
+                assert_eq!(result.dtype(), DType::Int64Nullable);
+                assert_eq!(
+                    result.values(),
+                    &[
+                        Scalar::Int64(0),
+                        Scalar::Int64(0),
+                        Scalar::Int64(0),
+                        Scalar::Null(NullKind::Null),
+                    ]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn float_numerators_keep_ieee_signs_and_present_nan() {
+        let source = divisors(&[0, 2, -2]);
+        for (number, op, expected) in [
+            (0.0, ArithmeticOp::FloorDiv, [f64::NAN, 0.0, -0.0]),
+            (-0.0, ArithmeticOp::FloorDiv, [f64::NAN, -0.0, 0.0]),
+            (100.0, ArithmeticOp::Mod, [f64::NAN, 0.0, -0.0]),
+            (f64::NAN, ArithmeticOp::Mod, [f64::NAN; 3]),
+        ] {
+            let result = source
+                .binary_scalar(&Scalar::Float64(number), op, true)
+                .unwrap();
+            assert_nullable_floats(
+                &result,
+                &[
+                    Some(expected[0]),
+                    Some(expected[1]),
+                    Some(expected[2]),
+                    None,
+                ],
+            );
+        }
     }
 }
 
