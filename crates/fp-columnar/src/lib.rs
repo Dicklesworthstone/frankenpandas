@@ -8500,6 +8500,16 @@ impl Clone for Column {
         // deliberately excluded. `values`/`validity`/`dtype` are unchanged and the
         // cache is a consistent view of `values` (`PartialEq` ignores `data`).
         let data = match &self.data {
+            // Nullable Float64 needs its explicit-mask backing after cloning:
+            // scalar fallbacks interpret a present NaN as missing. Sharing
+            // this buffer preserves the same numerical semantics as the
+            // original column without changing ordinary float64 clone shapes.
+            Some(d @ ColumnData::Float64(_))
+                if self.dtype == DType::Float64Nullable
+                    && matches!(values, ScalarValues::Eager(_)) =>
+            {
+                Some(d.clone())
+            }
             Some(d @ ColumnData::Int64(_))
                 if self.dtype == DType::Int64 && matches!(values, ScalarValues::Eager(_)) =>
             {
@@ -37883,14 +37893,18 @@ impl Column {
                 validity.clone(),
             ));
         }
-        // Nullable Float64 fast path (mirror of abs): round present slots over the
+        // Ordinary Float64 with missing values: round present slots over the
         // raw &[f64] with the IDENTICAL formula as the loop, write NaN at invalid
         // slots, re-ingest via `from_f64_values`. Bit-identical for a Float64
         // column: present ⇒ same `(x*factor).round_ties_even()/factor`; missing ⇒
         // NaN ⇒ marked missing; round of a present value never yields the only-at-
         // -missing NaN (finite/inf round stays finite/inf), so the NaN set ==
         // original missing set. (~403ms / 15x slower than pandas on a 10%-null 5M.)
+        // A zero or infinite scaling factor can create new NaNs. Those must
+        // be marked missing by the scalar fallback, not inherit a valid bit.
         if self.dtype == DType::Float64
+            && factor.is_finite()
+            && factor != 0.0
             && let Some((data, _)) = self.as_f64_slice_with_validity()
         {
             // round PRESERVES missingness exactly (a present value never rounds to
@@ -76612,6 +76626,48 @@ mod nullable_float_present_nan_6f379 {
     }
 
     #[test]
+    fn nullable_float_clone_retains_authoritative_storage() {
+        let mixed = input().sqrt().unwrap();
+        let present = Column::from_nullable_f64_values_with_validity(
+            vec![f64::from_bits(0x7ff8_0000_0000_0042), -0.0, 2.0],
+            ValidityMask::all_valid(3),
+        );
+        let empty = Column::new(DType::Float64Nullable, Vec::new()).unwrap();
+        for source in [mixed, present, empty] {
+            for source in [
+                source.clone(),
+                source.with_width_unchecked(NumericWidth::Float32),
+            ] {
+                let cloned = source.clone().clone();
+                assert_eq!(cloned.dtype(), source.dtype());
+                assert_eq!(cloned.width(), source.width());
+                assert_eq!(cloned.validity(), source.validity());
+                assert_eq!(cloned.count(), source.count());
+                let (original, _) = source.as_masked_f64_slice().unwrap();
+                let (copied, _) = cloned.as_masked_f64_slice().unwrap();
+                assert_eq!(
+                    copied
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    original
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>()
+                );
+                let absolute = cloned.abs().unwrap();
+                assert_eq!(absolute.validity(), source.validity());
+                assert_eq!(absolute.count(), source.count());
+                for (row, value) in original.iter().enumerate() {
+                    if source.validity().get(row) && value.is_nan() {
+                        assert_nan(&absolute.values()[row]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn absolute_and_negative_keep_present_nan_and_nullable_width() {
         let source = input().sqrt().unwrap();
         for source in [
@@ -76689,6 +76745,41 @@ mod nullable_float_present_nan_6f379 {
         assert_eq!(rounded.dtype(), DType::Float64);
         assert_validity(&rounded, &[true, false]);
         assert_eq!(rounded.values()[0], Scalar::Float64(1.2));
+    }
+
+    #[test]
+    fn ordinary_float_round_overflow_recomputes_missingness() {
+        let mut validity = ValidityMask::all_valid(4);
+        validity.set(1, false);
+        validity.set(2, false);
+        let sources = [
+            Column::from_f64_values(vec![2.0, f64::NAN, f64::NAN, -0.0]),
+            Column::from_f64_values_with_validity(vec![2.0, 99.0, -17.0, -0.0], validity),
+        ];
+        for source in sources {
+            for decimals in [400, -400] {
+                let rounded = source.round(decimals).unwrap();
+                assert_eq!(rounded.dtype(), DType::Float64);
+                assert_validity(&rounded, &[false; 4]);
+                assert_eq!(rounded.count(), 0);
+                assert!(rounded.all_missing());
+                assert!(
+                    rounded
+                        .isna()
+                        .unwrap()
+                        .values()
+                        .iter()
+                        .all(|value| *value == Scalar::Bool(true))
+                );
+            }
+            for decimals in [1, -1] {
+                let rounded = source.round(decimals).unwrap();
+                assert_validity(&rounded, &[true, false, false, true]);
+                assert_eq!(rounded.count(), 2);
+                let data = rounded.as_f64_slice_with_validity().unwrap().0;
+                assert_eq!(data[3].to_bits(), (-0.0_f64).to_bits());
+            }
+        }
     }
 
     #[test]
