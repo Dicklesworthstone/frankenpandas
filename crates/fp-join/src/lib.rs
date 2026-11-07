@@ -936,6 +936,25 @@ impl Ord for JoinKeyComponent {
             (Present(IndexLabel::Utf8(a)), Present(IndexLabel::Utf8(b))) => a.cmp(b),
             (Present(IndexLabel::Timedelta64(a)), Present(IndexLabel::Timedelta64(b))) => a.cmp(b),
             (Present(IndexLabel::Datetime64(a)), Present(IndexLabel::Datetime64(b))) => a.cmp(b),
+            (Present(IndexLabel::Period(a)), Present(IndexLabel::Period(b))) => a.cmp(b),
+            (Present(IndexLabel::Interval(a)), Present(IndexLabel::Interval(b))) => {
+                if a.left == b.left && a.right == b.right {
+                    // pandas orders equal-endpoint intervals by the spelling
+                    // of closed: both, left, neither, right. The core enum's
+                    // declaration order is different.
+                    let closed_rank = |value: &fp_types::Interval| {
+                        match (value.closed.left_closed(), value.closed.right_closed()) {
+                            (true, true) => 0,
+                            (true, false) => 1,
+                            (false, false) => 2,
+                            (false, true) => 3,
+                        }
+                    };
+                    closed_rank(a).cmp(&closed_rank(b))
+                } else {
+                    a.cmp(b)
+                }
+            }
             // Typed-null labels sort after every concrete label (nulls-last,
             // consistent with the derived IndexLabel Ord) but before Missing.
             // Unreachable today: join key extraction maps missing to Missing,
@@ -1020,6 +1039,14 @@ impl Ord for JoinKeyComponent {
             }
             (FloatBits(_), Present(IndexLabel::Utf8(_))) => Ordering::Less,
             (Present(IndexLabel::Utf8(_)), FloatBits(_)) => Ordering::Greater,
+            // Extension values follow strings and integers, so they must
+            // also follow floats to keep mixed-key comparisons transitive.
+            (FloatBits(_), Present(IndexLabel::Period(_) | IndexLabel::Interval(_))) => {
+                Ordering::Less
+            }
+            (Present(IndexLabel::Period(_) | IndexLabel::Interval(_)), FloatBits(_)) => {
+                Ordering::Greater
+            }
             // Float64/Bool index labels (br-frankenpandas-i10en). Join key
             // extraction maps float keys to FloatBits and bool keys to Int64, so
             // a Present(Float64)/Present(Bool) join key is unreachable today;
@@ -1033,8 +1060,8 @@ impl Ord for JoinKeyComponent {
     }
 }
 
-/// Stable per-variant rank used only as the cross-variant fallback for the
-/// (unreachable) Float64/Bool join-key cases above, keeping `Ord` total.
+/// Stable per-variant fallback for comparisons without a dedicated arm.
+/// Numeric keys and their relation to extension keys are handled above.
 fn join_component_rank(c: &JoinKeyComponent) -> u8 {
     use JoinKeyComponent::{FloatBits, Missing, Present};
     match c {
@@ -1077,10 +1104,25 @@ fn scalar_to_key_component(s: &fp_types::Scalar) -> JoinKeyComponent {
         fp_types::Scalar::Datetime64(v) if *v != fp_types::Timestamp::NAT => {
             JoinKeyComponent::Present(IndexLabel::Datetime64(*v))
         }
+        fp_types::Scalar::Period(value) if !value.is_nat() => {
+            JoinKeyComponent::Present(IndexLabel::Period(*value))
+        }
+        fp_types::Scalar::Interval(value) => {
+            JoinKeyComponent::Present(IndexLabel::Interval(*value))
+        }
         fp_types::Scalar::Object(object @ fp_types::ObjectValue::Bytes(_)) => {
             JoinKeyComponent::Present(IndexLabel::Object(object.clone()))
         }
-        _ => JoinKeyComponent::Missing, // Null, NaN, NaT
+        // Enumerate the missing/unsupported representations so adding a new
+        // scalar kind cannot silently turn every value of that kind into the
+        // same missing join key. List/host objects are rejected by
+        // validate_object_join_keys before key collection.
+        fp_types::Scalar::Null(_)
+        | fp_types::Scalar::Float64(_)
+        | fp_types::Scalar::Timedelta64(_)
+        | fp_types::Scalar::Datetime64(_)
+        | fp_types::Scalar::Period(_)
+        | fp_types::Scalar::Object(_) => JoinKeyComponent::Missing,
     }
 }
 
@@ -22638,6 +22680,333 @@ mod typed_validate_cardinality_uza04 {
                 Scalar::Int64(200),
                 Scalar::Int64(300),
             ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod extension_join_key_tests {
+    use fp_columnar::Column;
+    use fp_frame::{ColumnStore, DataFrame};
+    use fp_index::Index;
+    use fp_types::{DType, Interval, IntervalClosed, NullKind, Period, PeriodFreq, Scalar};
+
+    use super::{
+        JoinType, MergeExecutionOptions, MergeValidateMode, MergedDataFrame, merge_dataframes,
+        merge_dataframes_on_with_options,
+    };
+
+    fn frame(keys: Vec<Scalar>, dtype: DType, side: &str) -> DataFrame {
+        let len = keys.len();
+        let rows = (0..len)
+            .map(|row| i64::try_from(row).expect("small fixture"))
+            .collect();
+        DataFrame::new_with_column_order(
+            Index::new_known_unique_int64_unit_range(0, len),
+            ColumnStore::from_pairs([
+                ("key".to_owned(), Column::new(dtype, keys).unwrap()),
+                (side.to_owned(), Column::from_i64_values(rows)),
+            ]),
+            vec!["key".to_owned(), side.to_owned()],
+        )
+        .unwrap()
+    }
+
+    fn row_pairs(merged: &MergedDataFrame) -> Vec<(Option<f64>, Option<f64>)> {
+        let row = |value: &Scalar| {
+            if value.is_missing() {
+                None
+            } else {
+                Some(value.to_f64().unwrap())
+            }
+        };
+        merged.columns["left_row"]
+            .values()
+            .iter()
+            .zip(merged.columns["right_row"].values())
+            .map(|(left, right)| (row(left), row(right)))
+            .collect()
+    }
+
+    fn period(ordinal: i32) -> Scalar {
+        Scalar::Period(Period::new(i64::from(ordinal), PeriodFreq::Monthly))
+    }
+
+    fn interval(left: i32) -> Scalar {
+        Scalar::Interval(Interval::new(
+            f64::from(left),
+            f64::from(left) + 1.0,
+            IntervalClosed::Right,
+        ))
+    }
+
+    fn assert_join_values(dtype: DType, key: fn(i32) -> Scalar, missing: Scalar) {
+        let left = frame(
+            vec![key(2), key(0), key(2), missing.clone()],
+            dtype.clone(),
+            "left_row",
+        );
+        let right = frame(
+            vec![key(1), key(2), missing, key(2)],
+            dtype.clone(),
+            "right_row",
+        );
+        // Recorded from the live pandas 2.2.3 oracle: keep the duplicate
+        // product, and match a missing key only to the other missing key.
+        let cases = [
+            (
+                JoinType::Inner,
+                vec![
+                    (Some(0.0), Some(1.0)),
+                    (Some(0.0), Some(3.0)),
+                    (Some(2.0), Some(1.0)),
+                    (Some(2.0), Some(3.0)),
+                    (Some(3.0), Some(2.0)),
+                ],
+            ),
+            (
+                JoinType::Left,
+                vec![
+                    (Some(0.0), Some(1.0)),
+                    (Some(0.0), Some(3.0)),
+                    (Some(1.0), None),
+                    (Some(2.0), Some(1.0)),
+                    (Some(2.0), Some(3.0)),
+                    (Some(3.0), Some(2.0)),
+                ],
+            ),
+            (
+                JoinType::Right,
+                vec![
+                    (None, Some(0.0)),
+                    (Some(0.0), Some(1.0)),
+                    (Some(2.0), Some(1.0)),
+                    (Some(3.0), Some(2.0)),
+                    (Some(0.0), Some(3.0)),
+                    (Some(2.0), Some(3.0)),
+                ],
+            ),
+        ];
+        for (how, expected) in cases {
+            let merged = merge_dataframes_on_with_options(
+                &left,
+                &right,
+                &["key"],
+                &["key"],
+                how,
+                MergeExecutionOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(row_pairs(&merged), expected, "{dtype:?} {how:?}");
+        }
+        // Exercise the independent single-key shortcut too.
+        let shortcut = merge_dataframes(&left, &right, "key", JoinType::Inner).unwrap();
+        assert_eq!(shortcut.index.len(), 5);
+
+        // With no missing keys, outer/sort=True must order by the actual
+        // Period ordinals or Interval endpoints, not just the variant tag.
+        let left = frame(vec![key(2), key(0), key(2)], dtype.clone(), "left_row");
+        let right = frame(vec![key(1), key(2), key(2)], dtype, "right_row");
+        for sort in [false, true] {
+            let merged = merge_dataframes_on_with_options(
+                &left,
+                &right,
+                &["key"],
+                &["key"],
+                JoinType::Outer,
+                MergeExecutionOptions {
+                    sort,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                row_pairs(&merged),
+                vec![
+                    (Some(1.0), None),
+                    (None, Some(0.0)),
+                    (Some(0.0), Some(1.0)),
+                    (Some(0.0), Some(2.0)),
+                    (Some(2.0), Some(1.0)),
+                    (Some(2.0), Some(2.0)),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn period_keys_preserve_values_duplicates_and_nat() {
+        assert_join_values(
+            DType::Period,
+            period,
+            Scalar::Period(Period::new(i64::MIN, PeriodFreq::Monthly)),
+        );
+    }
+
+    #[test]
+    fn interval_keys_preserve_values_duplicates_and_missing() {
+        assert_join_values(DType::Interval, interval, Scalar::Null(NullKind::NaN));
+    }
+
+    #[test]
+    fn extension_keys_validate_real_cardinality() {
+        for (dtype, keys) in [
+            (DType::Period, vec![period(2), period(0), period(1)]),
+            (DType::Interval, vec![interval(2), interval(0), interval(1)]),
+        ] {
+            let left = frame(keys.clone(), dtype.clone(), "left_row");
+            let right = frame(keys.clone(), dtype.clone(), "right_row");
+            let options = MergeExecutionOptions {
+                validate_mode: Some(MergeValidateMode::OneToOne),
+                ..Default::default()
+            };
+            let merged = merge_dataframes_on_with_options(
+                &left,
+                &right,
+                &["key"],
+                &["key"],
+                JoinType::Inner,
+                options.clone(),
+            )
+            .unwrap();
+            assert_eq!(
+                row_pairs(&merged),
+                vec![
+                    (Some(0.0), Some(0.0)),
+                    (Some(1.0), Some(1.0)),
+                    (Some(2.0), Some(2.0)),
+                ]
+            );
+            let repeated = frame(vec![keys[0].clone(), keys[0].clone()], dtype, "right_row");
+            assert!(
+                merge_dataframes_on_with_options(
+                    &left,
+                    &repeated,
+                    &["key"],
+                    &["key"],
+                    JoinType::Inner,
+                    options,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn period_keys_include_frequency() {
+        let left = frame(vec![period(0)], DType::Period, "left_row");
+        let right = frame(
+            vec![Scalar::Period(Period::new(0, PeriodFreq::Daily))],
+            DType::Period,
+            "right_row",
+        );
+        let merged = merge_dataframes(&left, &right, "key", JoinType::Inner).unwrap();
+        assert!(
+            merged.index.is_empty(),
+            "equal ordinals on different frequency axes must not match"
+        );
+    }
+
+    #[test]
+    fn interval_keys_match_numeric_endpoints_and_distinguish_closedness() {
+        let integer = Interval::new(-0.0, 1.0, IntervalClosed::Right).with_int_endpoints();
+        let left = frame(vec![Scalar::Interval(integer)], DType::Interval, "left_row");
+        let right = frame(
+            vec![
+                Scalar::Interval(Interval::new(0.0, 1.0, IntervalClosed::Left)),
+                interval(0),
+            ],
+            DType::Interval,
+            "right_row",
+        );
+        let merged = merge_dataframes(&left, &right, "key", JoinType::Inner).unwrap();
+        assert_eq!(row_pairs(&merged), vec![(Some(0.0), Some(1.0))]);
+    }
+
+    #[test]
+    fn interval_sort_uses_closed_spelling_when_endpoints_tie() {
+        let keys = [
+            IntervalClosed::Right,
+            IntervalClosed::Left,
+            IntervalClosed::Both,
+            IntervalClosed::Neither,
+        ]
+        .map(|closed| Scalar::Interval(Interval::new(0.0, 1.0, closed)));
+        let left = frame(keys.to_vec(), DType::Interval, "left_row");
+        let right = frame(keys.to_vec(), DType::Interval, "right_row");
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["key"],
+            &["key"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                sort: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            row_pairs(&merged),
+            vec![
+                (Some(2.0), Some(2.0)),
+                (Some(1.0), Some(1.0)),
+                (Some(3.0), Some(3.0)),
+                (Some(0.0), Some(0.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn extension_key_order_is_transitive_with_floats_and_strings() {
+        let keys = [
+            Scalar::Int64(0),
+            Scalar::Float64(0.5),
+            Scalar::Utf8("key".to_owned()),
+            period(0),
+            interval(0),
+        ]
+        .map(|value| super::scalar_to_key_component(&value));
+        for left in &keys {
+            for middle in &keys {
+                for right in &keys {
+                    if left < middle && middle < right {
+                        assert!(
+                            left < right,
+                            "non-transitive join keys: {left:?} < {middle:?} < {right:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn composite_keys_keep_each_extension_component() {
+        let left = frame(vec![period(0), period(0), period(1)], DType::Period, "left_row")
+            .with_column(
+                "span",
+                Column::new(DType::Interval, vec![interval(0), interval(1), interval(0)]).unwrap(),
+            )
+            .unwrap();
+        let right = frame(vec![period(0), period(1), period(1)], DType::Period, "right_row")
+            .with_column(
+                "span",
+                Column::new(DType::Interval, vec![interval(1), interval(0), interval(2)]).unwrap(),
+            )
+            .unwrap();
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["key", "span"],
+            &["key", "span"],
+            JoinType::Inner,
+            MergeExecutionOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            row_pairs(&merged),
+            vec![(Some(1.0), Some(0.0)), (Some(2.0), Some(1.0))]
         );
     }
 }

@@ -46089,3 +46089,139 @@ def test_expanding_skew_kahan_parity_like_pandas_ndemb(case: str) -> None:
 
 
 
+# Period and Interval join keys must keep their identity. Treating every
+# such scalar as missing joins unrelated rows and invents duplicate keys.
+def _semantic_join_keys(
+    m: Any, family: str, codes: list, *, floating: bool = False, closed: str = "right"
+) -> Any:
+    if family == "period":
+        values = [
+            m.NaT if code is None else m.Period(f"2024-{code + 1:02d}", freq="M")
+            for code in codes
+        ]
+        return m.Series(values).astype("period[M]")
+    return m.Series(
+        [
+            np.nan
+            if code is None
+            else m.Interval(
+                float(code) if floating else code,
+                float(code + 1) if floating else code + 1,
+                closed=closed,
+            )
+            for code in codes
+        ]
+    )
+
+
+def _semantic_join_shown(
+    m: Any,
+    family: str,
+    left_codes: list,
+    right_codes: list,
+    *,
+    how: str = "inner",
+    sort: bool = False,
+    validate: Any = None,
+    groups: Any = None,
+    right_float: bool = False,
+    right_closed: str = "right",
+) -> list:
+    left, right = _mv_frames(
+        m,
+        _semantic_join_keys(m, family, left_codes),
+        _semantic_join_keys(
+            m, family, right_codes, floating=right_float, closed=right_closed
+        ),
+    )
+    on = ["k"]
+    if groups is not None:
+        left["g"], right["g"] = groups
+        on.append("g")
+    merged = m.merge(left, right, on=on, how=how, sort=sort, validate=validate)
+    # The row identities expose matching, Cartesian expansion, ordering,
+    # and unmatched-side promotion independently of key dtype reporting.
+    return [list(merged.columns)] + _e23_shown(merged[["l", "r"]])
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("family", ["period", "interval"])
+@pytest.mark.parametrize(
+    "how,missing,sort",
+    [
+        ("inner", True, False),
+        ("left", True, False),
+        ("right", True, False),
+        ("inner", False, True),
+        ("left", False, True),
+        ("right", False, True),
+        ("outer", False, False),
+    ],
+)
+def test_period_interval_merge_row_identity_like_pandas(
+    family: str, how: str, missing: bool, sort: bool
+) -> None:
+    left, right = [2, 0, 2, 4], [2, 2, 3]
+    if missing:
+        left.append(None)
+        right.append(None)
+    expected = _semantic_join_shown(pd, family, left, right, how=how, sort=sort)
+    assert _semantic_join_shown(fpd, family, left, right, how=how, sort=sort) == expected
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("family", ["period", "interval"])
+@pytest.mark.parametrize("how", ["inner", "left", "right"])
+def test_period_interval_composite_merge_identity_like_pandas(
+    family: str, how: str
+) -> None:
+    left, right = [0, 0, 1, 1, None], [1, 0, 1, None, 0]
+    groups = (["x", "y", "x", "y", "x"], ["y", "y", "x", "x", "z"])
+    kwargs = {"how": how, "groups": groups, "validate": "one_to_one"}
+    expected = _semantic_join_shown(pd, family, left, right, **kwargs)
+    assert _semantic_join_shown(fpd, family, left, right, **kwargs) == expected
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("right_float", [False, True])
+@pytest.mark.parametrize("right_closed", ["right", "left", "both", "neither"])
+def test_interval_merge_endpoint_types_and_closedness_like_pandas(
+    right_float: bool, right_closed: str
+) -> None:
+    kwargs = {"right_float": right_float, "right_closed": right_closed}
+    expected = _semantic_join_shown(pd, "interval", [0, 1, 0], [0, 1, 0], **kwargs)
+    assert (
+        _semantic_join_shown(fpd, "interval", [0, 1, 0], [0, 1, 0], **kwargs)
+        == expected
+    )
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("family", ["period", "interval"])
+@pytest.mark.parametrize(
+    "left,right,validate,rejected",
+    [
+        ([0, 1], [1, 0], "one_to_one", False),
+        ([0, None], [None, 0], "one_to_one", False),
+        ([0, 0], [0, 1], "one_to_one", True),
+        ([0, 1], [0, 0], "one_to_one", True),
+        ([None, None], [None, 0], "one_to_one", True),
+        ([0, 1], [1, 1], "one_to_many", False),
+        ([0, 0], [0, 1], "many_to_one", False),
+        ([0, 0], [0, 1], "one_to_many", True),
+        ([0, 1], [0, 0], "many_to_one", True),
+    ],
+)
+def test_period_interval_merge_validate_identity_like_pandas(
+    family: str, left: list, right: list, validate: str, rejected: bool
+) -> None:
+    if rejected:
+        for m in (pd, fpd):
+            with pytest.raises(m.errors.MergeError):
+                _semantic_join_shown(m, family, left, right, validate=validate)
+    else:
+        expected = _semantic_join_shown(pd, family, left, right, validate=validate)
+        assert (
+            _semantic_join_shown(fpd, family, left, right, validate=validate)
+            == expected
+        )
