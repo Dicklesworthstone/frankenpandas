@@ -46225,3 +46225,85 @@ def test_period_interval_merge_validate_identity_like_pandas(
             _semantic_join_shown(fpd, family, left, right, validate=validate)
             == expected
         )
+
+
+def _ordered_merge_keys(m: Any, family: str, codes: list) -> Any:
+    if family in ("period", "interval"):
+        return _semantic_join_keys(m, family, codes)
+    if family == "object_period":
+        return _semantic_join_keys(m, "period", codes).astype("object")
+    if family == "datetime":
+        return m.Series(
+            [m.NaT if code is None else m.Timestamp(f"2024-01-{code + 1:02d}") for code in codes]
+        )
+    if family == "timedelta":
+        return m.Series([m.NaT if code is None else m.Timedelta(code, unit="D") for code in codes])
+    if family == "float":
+        return m.Series(codes, dtype="float64")
+    if family == "category_period":
+        categories = [m.Period(f"2024-{code + 1:02d}", freq="M") for code in [2, 1, 0]]
+        values = [m.NaT if code is None else m.Period(f"2024-{code + 1:02d}", freq="M") for code in codes]
+    else:
+        categories = ["c", "b", "a"]
+        values = [None if code is None else ["b", "a", "c"][code] for code in codes]
+    return m.Series(m.Categorical(values, categories=categories))
+
+
+def _ordered_merge_shown(m: Any, family: str, how: str, sort: bool) -> list:
+    left, right = _mv_frames(
+        m,
+        _ordered_merge_keys(m, family, [2, 0, 2, None]),
+        _ordered_merge_keys(m, family, [1, 2, None, 2]),
+    )
+    return _e23_shown(m.merge(left, right, on="k", how=how, sort=sort)[["l", "r"]])
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize(
+    "family",
+    ["period", "datetime", "timedelta", "interval", "float", "object_period", "category", "category_period"],
+)
+@pytest.mark.parametrize(
+    "how,sort", [("inner", True), ("left", True), ("right", True), ("outer", True), ("outer", False)]
+)
+def test_merge_sort_uses_source_dtype_and_missing_order_like_pandas(
+    family: str, how: str, sort: bool
+) -> None:
+    expected = _ordered_merge_shown(pd, family, how, sort)
+    assert _ordered_merge_shown(fpd, family, how, sort) == expected
+
+
+def _categorical_merge_order_shown(
+    m: Any, ordered: bool, right_categories: list, how: str
+) -> list:
+    left, right = _mv_frames(
+        m,
+        m.Categorical(["c", "b", None], categories=["c", "b", "a"], ordered=ordered),
+        m.Categorical(["a", "b", None], categories=right_categories, ordered=ordered),
+    )
+    return _e23_shown(m.merge(left, right, on="k", how=how, sort=True)[["l", "r"]])
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("ordered", [False, True])
+@pytest.mark.parametrize("right_categories", [["c", "b", "a"], ["a", "b", "c"], ["a", "b", "d"]])
+@pytest.mark.parametrize("how", ["inner", "left", "right", "outer"])
+def test_merge_sort_categorical_dictionary_compatibility_like_pandas(
+    ordered: bool, right_categories: list, how: str
+) -> None:
+    expected = _categorical_merge_order_shown(pd, ordered, right_categories, how)
+    assert _categorical_merge_order_shown(fpd, ordered, right_categories, how) == expected
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("family", ["period", "datetime", "timedelta", "category"])
+def test_merge_sort_missing_placement_is_per_composite_key_like_pandas(family: str) -> None:
+    def run(m: Any) -> list:
+        keys = _ordered_merge_keys(m, family, [None, 2, None, 0])
+        left, right = _mv_frames(m, keys, keys)
+        left["g"] = ["b", "a", "a", "b"]
+        right["g"] = ["b", "a", "a", "b"]
+        return _e23_shown(m.merge(left, right, on=["g", "k"], sort=True)[["l", "r"]])
+
+    expected = run(pd)
+    assert run(fpd) == expected

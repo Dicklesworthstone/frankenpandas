@@ -942,13 +942,14 @@ impl Ord for JoinKeyComponent {
                     // pandas orders equal-endpoint intervals by the spelling
                     // of closed: both, left, neither, right. The core enum's
                     // declaration order is different.
-                    let closed_rank = |value: &fp_types::Interval| {
-                        match (value.closed.left_closed(), value.closed.right_closed()) {
-                            (true, true) => 0,
-                            (true, false) => 1,
-                            (false, false) => 2,
-                            (false, true) => 3,
-                        }
+                    let closed_rank = |value: &fp_types::Interval| match (
+                        value.closed.left_closed(),
+                        value.closed.right_closed(),
+                    ) {
+                        (true, true) => 0,
+                        (true, false) => 1,
+                        (false, false) => 2,
+                        (false, true) => 3,
                     };
                     closed_rank(a).cmp(&closed_rank(b))
                 } else {
@@ -1373,9 +1374,100 @@ fn reorder_vec_by_index<T: Clone>(values: &mut Vec<T>, order: &[usize]) {
     }
 }
 
+/// Merge sorting follows each pair of source dtypes. Temporal NaT and a
+/// compatible categorical's missing code precede its values; ordinary nulls
+/// sort last. Categorical values use the left dictionary's order, including
+/// unordered dictionaries whose right side is a permutation of the same set.
+#[derive(Default)]
+struct MergeKeySortOrder {
+    missing_first: bool,
+    category_ranks: Option<FxHashMap<JoinKeyComponent, usize>>,
+}
+
+impl MergeKeySortOrder {
+    fn for_columns(left: &Column, right: &Column) -> Self {
+        if let (Some(left), Some(right)) = (left.categorical(), right.categorical()) {
+            let left_dtype = fp_types::infer_dtype(&left.categories).ok();
+            let right_dtype = fp_types::infer_dtype(&right.categories).ok();
+            if left.ordered != right.ordered
+                || left.categories.len() != right.categories.len()
+                || left_dtype.is_none()
+                || left_dtype != right_dtype
+            {
+                return Self::default();
+            }
+            let ranks: FxHashMap<_, _> = left
+                .categories
+                .iter()
+                .enumerate()
+                .map(|(rank, value)| (scalar_to_key_component(value), rank))
+                .collect();
+            // Category identity includes the categories' dtype: equal-valued
+            // integer and floating IntervalIndexes are different dictionaries.
+            let compatible = ranks.len() == left.categories.len()
+                && !ranks.contains_key(&JoinKeyComponent::Missing)
+                && right
+                    .categories
+                    .iter()
+                    .enumerate()
+                    .all(|(position, value)| {
+                        let Some(&rank) = ranks.get(&scalar_to_key_component(value)) else {
+                            return false;
+                        };
+                        if left.ordered && rank != position {
+                            return false;
+                        }
+                        match (&left.categories[rank], value) {
+                            (Scalar::Interval(a), Scalar::Interval(b)) => a.subtype == b.subtype,
+                            _ => true,
+                        }
+                    });
+            return if compatible {
+                Self {
+                    missing_first: true,
+                    category_ranks: Some(ranks),
+                }
+            } else {
+                Self::default()
+            };
+        }
+        // A categorical that is coerced to its values during a mixed-dtype
+        // merge retains ordinary null ordering, even for temporal categories.
+        let temporal = matches!(
+            (left.dtype(), right.dtype()),
+            (DType::Period, DType::Period)
+                | (DType::Timedelta64, DType::Timedelta64)
+                | (DType::Datetime64 { .. }, DType::Datetime64 { .. })
+        );
+        Self {
+            missing_first: temporal,
+            category_ranks: None,
+        }
+    }
+
+    fn compare(&self, left: &JoinKeyComponent, right: &JoinKeyComponent) -> Ordering {
+        if self.missing_first {
+            match (left, right) {
+                (JoinKeyComponent::Missing, JoinKeyComponent::Missing) => return Ordering::Equal,
+                (JoinKeyComponent::Missing, _) => return Ordering::Less,
+                (_, JoinKeyComponent::Missing) => return Ordering::Greater,
+                _ => {}
+            }
+        }
+        if let Some(ranks) = &self.category_ranks
+            && let (Some(left_rank), Some(right_rank)) = (ranks.get(left), ranks.get(right))
+        {
+            return left_rank.cmp(right_rank);
+        }
+        left.cmp(right)
+    }
+}
+
 fn sort_merge_rows_by_join_keys(
     left_keys: &[CompositeJoinKey],
     right_keys: &[CompositeJoinKey],
+    left_key_columns: &[&Column],
+    right_key_columns: &[&Column],
     left_positions: &mut Vec<Option<usize>>,
     right_positions: &mut Vec<Option<usize>>,
 ) {
@@ -1403,7 +1495,27 @@ fn sort_merge_rows_by_join_keys(
             .filter(|k| set.insert(*k))
             .collect()
     };
-    distinct.sort_unstable();
+    let orders: Vec<_> = left_key_columns
+        .iter()
+        .zip(right_key_columns)
+        .map(|(left, right)| MergeKeySortOrder::for_columns(left, right))
+        .collect();
+    if orders
+        .iter()
+        .all(|order| !order.missing_first && order.category_ranks.is_none())
+    {
+        distinct.sort_unstable();
+    } else {
+        distinct.sort_unstable_by(|left, right| {
+            for ((left, right), order) in left.iter().zip(right.iter()).zip(&orders) {
+                let comparison = order.compare(left, right);
+                if comparison != Ordering::Equal {
+                    return comparison;
+                }
+            }
+            Ordering::Equal
+        });
+    }
     let d = distinct.len();
     let mut rank_of: FxHashMap<&CompositeJoinKey, u32> = FxHashMap::default();
     rank_of.reserve(d);
@@ -10550,6 +10662,8 @@ fn merge_dataframes_on_with_options_storage(
                 sort_merge_rows_by_join_keys(
                     &left_keys,
                     &right_keys,
+                    &left_key_columns,
+                    &right_key_columns,
                     &mut left_positions,
                     &mut right_positions,
                 );
@@ -22696,7 +22810,13 @@ mod extension_join_key_tests {
         merge_dataframes_on_with_options,
     };
 
+    type KeyFactory = fn(i32) -> Scalar;
+
     fn frame(keys: Vec<Scalar>, dtype: DType, side: &str) -> DataFrame {
+        frame_column(Column::new(dtype, keys).unwrap(), side)
+    }
+
+    fn frame_column(keys: Column, side: &str) -> DataFrame {
         let len = keys.len();
         let rows = (0..len)
             .map(|row| i64::try_from(row).expect("small fixture"))
@@ -22704,7 +22824,7 @@ mod extension_join_key_tests {
         DataFrame::new_with_column_order(
             Index::new_known_unique_int64_unit_range(0, len),
             ColumnStore::from_pairs([
-                ("key".to_owned(), Column::new(dtype, keys).unwrap()),
+                ("key".to_owned(), keys),
                 (side.to_owned(), Column::from_i64_values(rows)),
             ]),
             vec!["key".to_owned(), side.to_owned()],
@@ -22849,6 +22969,244 @@ mod extension_join_key_tests {
     }
 
     #[test]
+    fn sorted_temporal_merges_put_nat_first_and_keep_duplicate_order() {
+        let families: [(DType, KeyFactory); 3] = [
+            (DType::Period, period),
+            (DType::Timedelta64, |value| {
+                Scalar::Timedelta64(i64::from(value))
+            }),
+            (DType::Datetime64 { tz: None }, |value| {
+                Scalar::Datetime64(i64::from(value))
+            }),
+        ];
+        for (dtype, key) in families {
+            let left = frame(
+                vec![key(2), key(0), key(2), Scalar::Null(NullKind::NaT)],
+                dtype.clone(),
+                "left_row",
+            );
+            let right = frame(
+                vec![key(1), key(2), Scalar::Null(NullKind::NaT), key(2)],
+                dtype.clone(),
+                "right_row",
+            );
+            let product = [
+                (Some(0.0), Some(1.0)),
+                (Some(0.0), Some(3.0)),
+                (Some(2.0), Some(1.0)),
+                (Some(2.0), Some(3.0)),
+            ];
+            for how in [
+                JoinType::Inner,
+                JoinType::Left,
+                JoinType::Right,
+                JoinType::Outer,
+            ] {
+                let mut expected = vec![(Some(3.0), Some(2.0))];
+                if matches!(how, JoinType::Left | JoinType::Outer) {
+                    expected.push((Some(1.0), None));
+                }
+                if matches!(how, JoinType::Right | JoinType::Outer) {
+                    expected.push((None, Some(0.0)));
+                }
+                if how == JoinType::Right {
+                    expected.extend([product[0], product[2], product[1], product[3]]);
+                } else {
+                    expected.extend(product);
+                }
+                for sort in [false, true] {
+                    if !sort && how != JoinType::Outer {
+                        continue;
+                    }
+                    let merged = merge_dataframes_on_with_options(
+                        &left,
+                        &right,
+                        &["key"],
+                        &["key"],
+                        how,
+                        MergeExecutionOptions {
+                            sort,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(row_pairs(&merged), expected, "{dtype:?} {how:?} {sort}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sorted_non_temporal_merges_keep_missing_last() {
+        let families: [(DType, KeyFactory); 2] = [
+            (DType::Interval, interval),
+            (DType::Float64, |value| Scalar::Float64(f64::from(value))),
+        ];
+        for (dtype, key) in families {
+            let left = frame(
+                vec![Scalar::Null(NullKind::NaN), key(1), key(0)],
+                dtype.clone(),
+                "left_row",
+            );
+            let right = frame(
+                vec![key(0), Scalar::Null(NullKind::NaN), key(2)],
+                dtype,
+                "right_row",
+            );
+            let merged = merge_dataframes(&left, &right, "key", JoinType::Outer).unwrap();
+            assert_eq!(
+                row_pairs(&merged),
+                vec![
+                    (Some(2.0), Some(0.0)),
+                    (Some(1.0), None),
+                    (None, Some(2.0)),
+                    (Some(0.0), Some(1.0)),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn categorical_merges_use_compatible_left_dictionary_order() {
+        for ordered in [false, true] {
+            for right_categories in [["c", "b", "a"], ["a", "b", "c"], ["a", "b", "d"]] {
+                let left = frame_column(
+                    Column::from_categorical_codes(
+                        vec![0, 1, -1],
+                        fp_types::CategoricalMetadata::new(
+                            ["c", "b", "a"].map(|v| Scalar::Utf8(v.to_owned())).to_vec(),
+                            ordered,
+                        ),
+                    ),
+                    "left_row",
+                );
+                let right = frame_column(
+                    Column::from_categorical_codes(
+                        vec![if right_categories[0] == "c" { 2 } else { 0 }, 1, -1],
+                        fp_types::CategoricalMetadata::new(
+                            right_categories
+                                .map(|v| Scalar::Utf8(v.to_owned()))
+                                .to_vec(),
+                            ordered,
+                        ),
+                    ),
+                    "right_row",
+                );
+                let compatible = right_categories == ["c", "b", "a"]
+                    || (!ordered && right_categories == ["a", "b", "c"]);
+                let expected = if compatible {
+                    vec![
+                        (Some(2.0), Some(2.0)),
+                        (Some(0.0), None),
+                        (Some(1.0), Some(1.0)),
+                        (None, Some(0.0)),
+                    ]
+                } else {
+                    vec![
+                        (None, Some(0.0)),
+                        (Some(1.0), Some(1.0)),
+                        (Some(0.0), None),
+                        (Some(2.0), Some(2.0)),
+                    ]
+                };
+                for sort in [false, true] {
+                    let merged = merge_dataframes_on_with_options(
+                        &left,
+                        &right,
+                        &["key"],
+                        &["key"],
+                        JoinType::Outer,
+                        MergeExecutionOptions {
+                            sort,
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        row_pairs(&merged),
+                        expected,
+                        "{ordered} {right_categories:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn categorical_numeric_dtype_mismatch_uses_value_order() {
+        let left = frame_column(
+            Column::from_categorical_codes(
+                vec![0, 1, -1],
+                fp_types::CategoricalMetadata::new(vec![Scalar::Int64(2), Scalar::Int64(1)], false),
+            ),
+            "left_row",
+        );
+        let right = frame_column(
+            Column::from_categorical_codes(
+                vec![0, 1, -1],
+                fp_types::CategoricalMetadata::new(
+                    vec![Scalar::Float64(1.0), Scalar::Float64(2.0)],
+                    false,
+                ),
+            ),
+            "right_row",
+        );
+        let merged = merge_dataframes(&left, &right, "key", JoinType::Outer).unwrap();
+        assert_eq!(
+            row_pairs(&merged),
+            vec![
+                (Some(1.0), Some(0.0)),
+                (Some(0.0), Some(1.0)),
+                (Some(2.0), Some(2.0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn composite_temporal_sort_places_nat_within_each_prefix() {
+        let keys = vec![
+            Scalar::Null(NullKind::NaT),
+            period(2),
+            Scalar::Null(NullKind::NaT),
+            period(0),
+        ];
+        let groups = Column::new(
+            DType::Utf8,
+            ["b", "a", "a", "b"]
+                .map(|v| Scalar::Utf8(v.to_owned()))
+                .to_vec(),
+        )
+        .unwrap();
+        let left = frame(keys.clone(), DType::Period, "left_row")
+            .with_column("group", groups.clone())
+            .unwrap();
+        let right = frame(keys, DType::Period, "right_row")
+            .with_column("group", groups)
+            .unwrap();
+        let merged = merge_dataframes_on_with_options(
+            &left,
+            &right,
+            &["group", "key"],
+            &["group", "key"],
+            JoinType::Inner,
+            MergeExecutionOptions {
+                sort: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            row_pairs(&merged),
+            vec![
+                (Some(2.0), Some(2.0)),
+                (Some(1.0), Some(1.0)),
+                (Some(0.0), Some(0.0)),
+                (Some(3.0), Some(3.0)),
+            ]
+        );
+    }
+
+    #[test]
     fn extension_keys_validate_real_cardinality() {
         for (dtype, keys) in [
             (DType::Period, vec![period(2), period(0), period(1)]),
@@ -22983,18 +23341,26 @@ mod extension_join_key_tests {
 
     #[test]
     fn composite_keys_keep_each_extension_component() {
-        let left = frame(vec![period(0), period(0), period(1)], DType::Period, "left_row")
-            .with_column(
-                "span",
-                Column::new(DType::Interval, vec![interval(0), interval(1), interval(0)]).unwrap(),
-            )
-            .unwrap();
-        let right = frame(vec![period(0), period(1), period(1)], DType::Period, "right_row")
-            .with_column(
-                "span",
-                Column::new(DType::Interval, vec![interval(1), interval(0), interval(2)]).unwrap(),
-            )
-            .unwrap();
+        let left = frame(
+            vec![period(0), period(0), period(1)],
+            DType::Period,
+            "left_row",
+        )
+        .with_column(
+            "span",
+            Column::new(DType::Interval, vec![interval(0), interval(1), interval(0)]).unwrap(),
+        )
+        .unwrap();
+        let right = frame(
+            vec![period(0), period(1), period(1)],
+            DType::Period,
+            "right_row",
+        )
+        .with_column(
+            "span",
+            Column::new(DType::Interval, vec![interval(1), interval(0), interval(2)]).unwrap(),
+        )
+        .unwrap();
         let merged = merge_dataframes_on_with_options(
             &left,
             &right,
