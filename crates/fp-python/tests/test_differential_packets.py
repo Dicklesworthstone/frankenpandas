@@ -46307,3 +46307,132 @@ def test_merge_sort_missing_placement_is_per_composite_key_like_pandas(family: s
 
     expected = run(pd)
     assert run(fpd) == expected
+
+
+# nullable_ufunc_6f379: a computed NaN is a present value in a masked array.
+# Check values AND the mask: ordinary NaN-aware equality conflates NaN with NA.
+def _nullable_ufunc_6f379_scalar_equal(actual: Any, expected: Any) -> None:
+    if expected is pd.NA:
+        assert actual is fpd.NA
+    elif isinstance(expected, (float, np.floating)) and math.isnan(expected):
+        assert actual is not fpd.NA
+        assert isinstance(actual, (float, np.floating)) and math.isnan(actual)
+    else:
+        assert actual is not fpd.NA
+        assert actual == expected
+
+
+def _nullable_ufunc_6f379_equal(actual: Any, expected: Any) -> None:
+    if isinstance(expected, tuple):
+        assert isinstance(actual, tuple) and len(actual) == len(expected)
+        for got, want in zip(actual, expected):
+            _nullable_ufunc_6f379_equal(got, want)
+        return
+    assert str(actual.dtype) == str(expected.dtype)
+    assert actual.name == expected.name
+    assert actual.index.tolist() == expected.index.tolist()
+    assert actual.isna().tolist() == expected.isna().tolist()
+    assert actual.count() == expected.count()
+    assert len(actual) == len(expected)
+    for got, want in zip(actual.tolist(), expected.tolist()):
+        _nullable_ufunc_6f379_scalar_equal(got, want)
+    for skipna in (False, True):
+        _nullable_ufunc_6f379_scalar_equal(
+            actual.sum(skipna=skipna), expected.sum(skipna=skipna)
+        )
+
+
+def _nullable_ufunc_6f379_source(m: Any, dtype: str, shape: str) -> Any:
+    if shape == "empty":
+        values = []
+    elif dtype == "boolean":
+        values = [True, False, True] if shape == "valid" else [True, None, False]
+    else:
+        values = [4, -4, 0] if shape == "valid" else [4, None, -4, 0]
+    return m.Series(values, index=[f"r{i}" for i in range(len(values))], dtype=dtype, name="data")
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("dtype", ["Float64", "Float32", "Int64", "Int32", "boolean"])
+@pytest.mark.parametrize("shape", ["empty", "valid", "masked"])
+@pytest.mark.parametrize("operation", ["sqrt", "log", "square", "isfinite", "frexp"])
+def test_nullable_ufunc_6f379_dtype_mask_and_values(
+    dtype: str, shape: str, operation: str
+) -> None:
+    ufunc = getattr(np, operation)
+    with np.errstate(all="ignore"):
+        expected = ufunc(_nullable_ufunc_6f379_source(pd, dtype, shape))
+        actual = ufunc(_nullable_ufunc_6f379_source(fpd, dtype, shape))
+    _nullable_ufunc_6f379_equal(actual, expected)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("dtype", ["Float64", "Float32"])
+@pytest.mark.parametrize("operation", ["exp", "isnan", "modf", "fmax", "maximum", "hypot"])
+def test_nullable_ufunc_6f379_chained_present_nan_and_broadcast(
+    dtype: str, operation: str
+) -> None:
+    def run(m: Any) -> Any:
+        source = np.sqrt(_nullable_ufunc_6f379_source(m, dtype, "masked"))
+        ufunc = getattr(np, operation)
+        if ufunc.nin == 2:
+            # A length-one array broadcasts without changing the Series' mask.
+            return ufunc(source, np.array([2.0], dtype=dtype.lower()))
+        return ufunc(source)
+
+    with np.errstate(all="ignore"):
+        expected = run(pd)
+        actual = run(fpd)
+    _nullable_ufunc_6f379_equal(actual, expected)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("operation", ["divide", "multiply", "power"])
+@pytest.mark.parametrize("numpy_loop", [False, True])
+def test_nullable_ufunc_6f379_arithmetic_nan_is_present(
+    operation: str, numpy_loop: bool
+) -> None:
+    scalar = {"divide": 0.0, "multiply": np.inf, "power": 0.5}[operation]
+    kwargs = {"dtype": "float64"} if numpy_loop else {}
+    ufunc = getattr(np, operation)
+    with np.errstate(all="ignore"):
+        expected = ufunc(_nullable_ufunc_6f379_source(pd, "Float64", "masked"), scalar, **kwargs)
+        actual = ufunc(_nullable_ufunc_6f379_source(fpd, "Float64", "masked"), scalar, **kwargs)
+    _nullable_ufunc_6f379_equal(actual, expected)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("operation", ["maximum", "fmax", "hypot"])
+def test_nullable_ufunc_6f379_combines_only_input_masks(operation: str) -> None:
+    def run(m: Any) -> Any:
+        left = np.sqrt(m.Series([-4.0, None, 9.0], index=["a", "b", "c"], dtype="Float64", name="data"))
+        right = np.sqrt(m.Series([16.0, -1.0, None], index=["a", "b", "c"], dtype="Float64", name="data"))
+        return getattr(np, operation)(left, right)
+
+    with np.errstate(all="ignore"):
+        expected = run(pd)
+        actual = run(fpd)
+    _nullable_ufunc_6f379_equal(actual, expected)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("operation", ["sqrt", "log"])
+def test_nullable_ufunc_6f379_plain_float_nan_stays_missing(operation: str) -> None:
+    def run(m: Any) -> Any:
+        return getattr(np, operation)(m.Series([4.0, None, -4.0, 0.0], name="data"))
+
+    with np.errstate(all="ignore"):
+        expected = run(pd)
+        actual = run(fpd)
+    _nullable_ufunc_6f379_equal(actual, expected)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_nullable_ufunc_6f379_scalar_access_and_iteration_keep_present_nan() -> None:
+    with np.errstate(all="ignore"):
+        expected = np.sqrt(_nullable_ufunc_6f379_source(pd, "Float64", "masked"))
+        actual = np.sqrt(_nullable_ufunc_6f379_source(fpd, "Float64", "masked"))
+    for got, want in zip(actual, expected):
+        _nullable_ufunc_6f379_scalar_equal(got, want)
+    for position in range(len(expected)):
+        _nullable_ufunc_6f379_scalar_equal(actual.iloc[position], expected.iloc[position])

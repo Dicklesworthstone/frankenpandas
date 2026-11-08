@@ -44,7 +44,7 @@ use pyo3::{
         PyTimeAccess, PyTuple, PyTzInfoAccess,
     },
 };
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
@@ -7900,7 +7900,12 @@ fn cell_to_py(py: Python<'_>, column: &Column, value: &Scalar) -> PyResult<Py<Py
     }
     // A nullable extension column's missing value is pd.NA - pandas'
     // `string` dtype's too (fvsao.59; it read back None).
-    if value.is_missing() && (is_nullable_extension(&column.dtype()) || column.is_pandas_string()) {
+    // A nullable float's valid NaN is a value; its absent cells are stored
+    // as explicit Nulls. Kernels can produce NaN without setting the NA
+    // mask, and tolist/iteration must keep that distinction (6f379).
+    if (is_nullable_extension(&column.dtype()) && matches!(value, Scalar::Null(_)))
+        || (column.is_pandas_string() && value.is_missing())
+    {
         return na_object(py);
     }
     // A period column's missing value is NaT whichever way it went missing
@@ -8274,7 +8279,7 @@ fn element_to_py(py: Python<'_>, column: &Column, value: &Scalar) -> PyResult<Py
         }
         DType::Int64 | DType::Float64 => numpy_scalar_of(py, value, column.width()),
         DType::Bool if !value.is_missing() => numpy_scalar(py, value),
-        dtype if is_nullable_extension(&dtype) && !value.is_missing() => {
+        dtype if is_nullable_extension(&dtype) && !matches!(value, Scalar::Null(_)) => {
             numpy_scalar_of(py, value, column.width())
         }
         _ => cell_to_py(py, column, value),
@@ -9783,9 +9788,10 @@ fn repeated_object_text_column(
     let Ok(buffer) = pyo3::buffer::PyBuffer::<u64>::get(&pointers) else {
         return Ok(None);
     };
-    let Some(cells) = buffer.as_slice(py).filter(|cells| cells.len() == len) else {
+    if !buffer.is_c_contiguous() || buffer.item_count() != len {
         return Ok(None);
-    };
+    }
+    let pointers = buffer.to_vec(py)?;
     // Each row's distinct element, numbered as first met. The pointers'
     // low bits are alignment zeros: rotated out of the bits FxHash buckets
     // by (a bijection, so equal keys are equal pointers).
@@ -9960,24 +9966,19 @@ fn matrix_columns(
             return Ok((0..width).map(|_| build(Vec::new())).collect());
         }
         let buffer = pyo3::buffer::PyBuffer::<T>::get(array)?;
-        if let Some(cells) = buffer.as_slice(py) {
+        if buffer.is_c_contiguous() {
+            let cells = buffer.to_vec(py)?;
             let mut out: Vec<Vec<T>> = (0..width).map(|_| Vec::with_capacity(rows)).collect();
             for (block_index, block) in out.chunks_mut(BLOCK).enumerate() {
                 let start = block_index * BLOCK;
                 for tile in cells.chunks(TILE_ROWS * width) {
                     for (offset, column) in block.iter_mut().enumerate() {
                         let at = start + offset;
-                        column.extend(tile.chunks_exact(width).map(|row| row[at].get()));
+                        column.extend(tile.chunks_exact(width).map(|row| row[at]));
                     }
                 }
             }
             return Ok(out.into_iter().map(build).collect());
-        }
-        if let Some(cells) = buffer.as_fortran_slice(py) {
-            return Ok(cells
-                .chunks_exact(rows)
-                .map(|column| build(column.iter().map(pyo3::buffer::ReadOnlyCell::get).collect()))
-                .collect());
         }
         Ok(buffer
             .to_fortran_vec(py)?
@@ -10588,31 +10589,13 @@ fn py_array_like_column(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Opti
         "M" => nanos_column(temporal_nanos("datetime64[ns]")?, true),
         "m" => nanos_column(temporal_nanos("timedelta64[ns]")?, false),
         "i" if native => {
-            // A contiguous buffer read straight into the column's Arc, as the
-            // float64 arm: ndarray_elements' Vec and from_i64_values'
-            // Arc::from copied it twice (a 2-column int frame's build 0.83x
-            // pandas; br-frankenpandas-qpbpa). A strided view copies once.
-            let buffer = pyo3::buffer::PyBuffer::<i64>::get(obj)?;
-            match buffer.as_slice(py) {
-                Some(cells) => Column::from_i64_arc(
-                    cells.iter().map(pyo3::buffer::ReadOnlyCell::get).collect(),
-                ),
-                None => Column::from_i64_values(buffer.to_vec(py)?),
-            }
+            // Copy through the supported buffer API, including strided
+            // views, before giving the column its owned numeric storage.
+            Column::from_i64_values(ndarray_elements::<i64>(py, obj)?)
         }
         "i" => Column::from_i64_values(obj.call_method0("tolist")?.extract::<Vec<i64>>()?),
         "f" if native && name == "float64" => {
-            // A contiguous buffer read straight into the column's Arc: one
-            // copy where to_vec and from_f64_values' Arc::from made two
-            // (Series(ndarray) of a million floats 1.0 ms;
-            // br-frankenpandas-br362). A strided view gathers as before.
-            let buffer = pyo3::buffer::PyBuffer::<f64>::get(obj)?;
-            match buffer.as_slice(py) {
-                Some(cells) => Column::from_f64_arc(
-                    cells.iter().map(pyo3::buffer::ReadOnlyCell::get).collect(),
-                ),
-                None => Column::from_f64_values(buffer.to_vec(py)?),
-            }
+            Column::from_f64_values(ndarray_elements::<f64>(py, obj)?)
         }
         // A numpy bool is one byte, zero or not.
         "b" => Column::from_bool_values(
@@ -17305,15 +17288,12 @@ impl PyIndex {
     ) -> PyResult<Self> {
         let _ = axis;
         let filling = allow_fill && fill_value.is_some_and(|value| !value.is_none());
-        // An int64 array's positions over a typed int64 index are read in
-        // place, each wrapped, checked and gathered in one pass
+        // An int64 array's positions over a typed int64 index are copied
+        // once, then each wrapped, checked and gathered in one pass
         // (br-frankenpandas-fk877); a position out of range answers below.
         if !filling
             && let Some(buffer) = native_int64_buffer(indices)?
-            && let Some(cells) = buffer.as_slice(py)
-            && let Some(inner) = self
-                .inner
-                .take_signed_i64(cells.iter().map(pyo3::buffer::ReadOnlyCell::get))
+            && let Some(inner) = self.inner.take_signed_i64(buffer.to_vec(py)?.into_iter())
         {
             return Ok(PyIndex { inner });
         }
@@ -20671,14 +20651,12 @@ impl PyDatetimeIndex {
     /// range is pandas' IndexError (it became NaT). Positions in one constant
     /// step keep the freq scaled by it, as pandas.
     fn take(&self, py: Python<'_>, indices: &Bound<'_, PyAny>) -> PyResult<Self> {
-        // An int64 array's positions are read in place, each wrapped,
-        // checked and gathered in one pass (they were copied out, then
-        // passed over four times; br-frankenpandas-lsn8d).
+        // Copy the array's positions in logical order, then wrap, check
+        // and gather them in one pass (br-frankenpandas-lsn8d).
         let len = self.inner.len();
-        if let Some(buffer) = native_int64_buffer(indices)?
-            && let Some(cells) = buffer.as_slice(py)
-        {
-            let positions = cells.iter().map(pyo3::buffer::ReadOnlyCell::get);
+        if let Some(buffer) = native_int64_buffer(indices)? {
+            let values = buffer.to_vec(py)?;
+            let positions = values.iter().copied();
             let inner = signed_take(len, positions, |at| self.inner.take_signed(at))?;
             return Ok(Self { inner });
         }
@@ -24552,14 +24530,13 @@ impl PyTimedeltaIndex {
     /// range is pandas' IndexError (it became NaT). Positions in one constant
     /// step keep the freq scaled by it, as pandas.
     fn take(&self, py: Python<'_>, indices: &Bound<'_, PyAny>) -> PyResult<Self> {
-        // An int64 array's positions are read in place, and the freq is
-        // that of the positions as given: a negative one keeps none, as
-        // pandas (br-frankenpandas-lsn8d).
+        // Copy the array's positions in logical order. The freq is that
+        // of the positions as given: a negative one keeps none, as pandas
+        // (br-frankenpandas-lsn8d).
         let len = self.inner.len();
-        if let Some(buffer) = native_int64_buffer(indices)?
-            && let Some(cells) = buffer.as_slice(py)
-        {
-            let positions = cells.iter().map(pyo3::buffer::ReadOnlyCell::get);
+        if let Some(buffer) = native_int64_buffer(indices)? {
+            let values = buffer.to_vec(py)?;
+            let positions = values.iter().copied();
             let inner = signed_take(len, positions, |at| self.inner.take_signed(at))?;
             return Ok(Self { inner });
         }
@@ -28644,7 +28621,7 @@ fn aligned_power(base: &Series, exponent: &Series) -> Result<Series, fp_frame::F
             }
         })
         .collect();
-    let col = Column::new(DType::Float64, values)?.with_width(NumericWidth::Float32);
+    let col = Column::new(DType::Float64, values)?.cast_to_width(NumericWidth::Float32, false)?;
     Series::new(result.name(), result.index().clone(), col)
 }
 
@@ -30957,7 +30934,8 @@ fn scalar_arith(
                 .collect();
             let col = Column::new(DType::Float64, values)
                 .ok()?
-                .with_width(NumericWidth::Float32);
+                .cast_to_width(NumericWidth::Float32, false)
+                .ok()?;
             return Series::new(like.name(), like.index().clone(), col).ok();
         }
     }
@@ -31361,7 +31339,7 @@ fn is_flex_zero_div_array_operand(other: &Bound<'_, PyAny>) -> PyResult<bool> {
     {
         return Ok(true);
     }
-    if is_numpy_ndarray(other) {
+    if other.get_type().name().is_ok_and(|name| name == "ndarray") {
         let ndim: usize = other.getattr("ndim").and_then(|n| n.extract()).unwrap_or(0);
         return Ok(ndim > 0);
     }
@@ -31451,7 +31429,8 @@ fn flex_int_zero_div(
     let both_bool = s.inner.dtype() == DType::Bool && right.dtype() == DType::Bool;
     let col = Column::new(DType::Int64, values).map_err(column_error_to_py)?;
     let col = if both_bool {
-        col.with_width(NumericWidth::Int8)
+        col.cast_to_width(NumericWidth::Int8, false)
+            .map_err(column_error_to_py)?
     } else {
         col
     };
@@ -31529,7 +31508,8 @@ fn narrowed_frame_arith(
                 .collect();
             let col = Column::new(DType::Float64, values)
                 .map_err(column_error_to_py)?
-                .with_width(NumericWidth::Float32);
+                .cast_to_width(NumericWidth::Float32, false)
+                .map_err(column_error_to_py)?;
             columns.push(col);
             continue;
         }
@@ -34501,28 +34481,35 @@ fn ufunc_series_values<'py>(
     py: Python<'py>,
     series: &Series,
     ufunc_name: &str,
-    mask: &mut Vec<bool>,
+    mask: &mut Option<Vec<bool>>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let fill = match series.dtype() {
+    let (dtype, fill) = match series.dtype() {
         DType::Categorical => {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
                 "Object with dtype category cannot perform the numpy op {ufunc_name}"
             )));
         }
-        DType::Int64Nullable => Scalar::Int64(1),
-        DType::Float64Nullable => Scalar::Float64(f64::NAN),
-        DType::BoolNullable => Scalar::Bool(false),
+        DType::Int64Nullable => (DType::Int64, Scalar::Int64(1)),
+        DType::Float64Nullable => (DType::Float64, Scalar::Float64(f64::NAN)),
+        DType::BoolNullable => (DType::Bool, Scalar::Bool(false)),
         _ => return column_ndarray(py, series.column()),
     };
-    let values = series.column().values();
-    if mask.is_empty() {
-        mask.resize(values.len(), false);
+    let column = series.column();
+    let values = column.values();
+    // Some(empty) still identifies a nullable input. Looking for a set bit
+    // lost the extension dtype on both empty and all-valid arrays (6f379).
+    let mask = mask.get_or_insert_with(|| vec![false; values.len()]);
+    if mask.len() != values.len() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "nullable ufunc inputs have different lengths after alignment",
+        ));
     }
     let data = values
         .iter()
         .zip(mask.iter_mut())
-        .map(|(value, masked)| {
-            if value.is_missing() {
+        .enumerate()
+        .map(|(row, (value, masked))| {
+            if !column.validity().get(row) {
                 *masked = true;
                 fill.clone()
             } else {
@@ -34530,7 +34517,13 @@ fn ufunc_series_values<'py>(
             }
         })
         .collect();
-    column_ndarray(py, &Column::from_values(data).map_err(column_error_to_py)?)
+    // The input array uses the underlying numpy dtype, including a narrow
+    // width. Inference from its values made empty inputs object arrays and
+    // widened Float32/Int32 before numpy chose its ufunc loop.
+    let data = Column::new(dtype, data)
+        .map_err(column_error_to_py)?
+        .keeping_dtype_of(column);
+    column_ndarray(py, &data)
 }
 
 /// A ufunc's 1-D result as the column of a Series, a masked input's
@@ -34538,14 +34531,52 @@ fn ufunc_series_values<'py>(
 fn ufunc_result_column(
     py: Python<'_>,
     result: &Bound<'_, PyAny>,
-    mask: &[bool],
+    mask: Option<&[bool]>,
 ) -> PyResult<Column> {
+    if let Some(mask) = mask {
+        if mask.len() != result.len()? {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "ufunc result and nullable mask have different lengths",
+            ));
+        }
+        let dtype = result.getattr("dtype")?;
+        if dtype.getattr("kind")?.extract::<String>()? == "f" {
+            let name = dtype.getattr("name")?.extract::<String>()?;
+            let native = dtype.getattr("isnative")?.extract::<bool>()?;
+            let values = match (name.as_str(), native) {
+                ("float64", true) => ndarray_elements::<f64>(py, result)?,
+                ("float32", true) => ndarray_elements::<f32>(py, result)?
+                    .into_iter()
+                    .map(f64::from)
+                    .collect(),
+                _ => result.call_method0("tolist")?.extract::<Vec<f64>>()?,
+            };
+            let mut validity = fp_columnar::ValidityMask::all_valid(mask.len());
+            for (row, &missing) in mask.iter().enumerate() {
+                if missing {
+                    validity.set(row, false);
+                }
+            }
+            // Reading this through the ordinary float constructor would
+            // turn sqrt(-1), 0/0, and other computed NaNs into new NAs.
+            let column = Column::from_nullable_f64_values_with_validity(values, validity);
+            return if matches!(name.as_str(), "float16" | "float32") {
+                // pandas' masked arrays promote numpy's float16 result
+                // (e.g. sqrt(boolean)) to their smallest float, Float32.
+                column
+                    .cast_to_width(NumericWidth::Float32, true)
+                    .map_err(column_error_to_py)
+            } else {
+                Ok(column)
+            };
+        }
+    }
     let column = py_array_like_column(py, result)?.ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyTypeError, _>("a ufunc returned no array")
     })?;
-    if !mask.contains(&true) {
+    let Some(mask) = mask else {
         return Ok(column);
-    }
+    };
     let dtype = match column.dtype() {
         DType::Bool => DType::BoolNullable,
         DType::Int64 => DType::Int64Nullable,
@@ -34564,7 +34595,9 @@ fn ufunc_result_column(
             }
         })
         .collect();
-    Column::new(dtype, values).map_err(column_error_to_py)
+    Column::new(dtype, values)
+        .map(|result| result.keeping_dtype_of(&column))
+        .map_err(column_error_to_py)
 }
 
 /// A column-to-column kernel ([`Column::exp`], [`Column::log`], ...).
@@ -34874,7 +34907,7 @@ fn array_ufunc<'py>(
             (&out, np.call_method1("asarray", (result,))?),
             Some(&copy_kwargs),
         )?;
-        return ufunc_rebuild(this, &out, &[], this);
+        return ufunc_rebuild(this, &out, None, this);
     }
     if method == "reduce"
         && inputs.len() == 1
@@ -34950,11 +34983,11 @@ fn array_ufunc<'py>(
             })
             .collect::<PyResult<Vec<_>>>()?;
         let result = call(arrays, kwargs)?;
-        return ufunc_rebuild(this, &result, &[], &shape_of);
+        return ufunc_rebuild(this, &result, None, &shape_of);
     }
     // Series: the values (and a nullable input's mask), then the index and
     // the name back - the one name the inputs share, else None.
-    let mut mask = Vec::new();
+    let mut mask = None;
     let mut names = Vec::new();
     let mut arrays = Vec::with_capacity(arguments.len());
     for argument in &arguments {
@@ -35008,7 +35041,7 @@ fn array_ufunc<'py>(
             }
             return Ok(result.clone());
         }
-        let column = ufunc_result_column(py, result, &mask)?;
+        let column = ufunc_result_column(py, result, mask.as_deref())?;
         let inner = Series::new(name.clone(), shaped.inner.index().clone(), column)
             .map_err(frame_error_to_py)?;
         Ok(Py::new(py, PySeries { inner })?.into_bound(py).into_any())
@@ -35029,7 +35062,7 @@ fn array_ufunc<'py>(
 fn ufunc_rebuild<'py>(
     this: &Bound<'py, PyAny>,
     result: &Bound<'py, PyAny>,
-    mask: &[bool],
+    mask: Option<&[bool]>,
     shape_of: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let py = this.py();
@@ -45566,44 +45599,37 @@ fn float32_block<'py>(
         };
         sources.push(source);
     }
-    // Each column's cells written once, in place, into the (width, rows)
-    // block numpy holds: each was collected into a Vec and copied into an
-    // np.empty row (to_numpy(float32) 0.47x pandas; br-frankenpandas-lkoh1).
+    // Reuse one owned float32 row for conversion, then copy it into the
+    // (width, rows) block through the supported writable buffer API. This
+    // keeps scratch storage bounded by rows and the transpose F-ordered.
     let block = np.call_method1("empty", ((width, rows), "float32"))?;
-    let buffer = pyo3::buffer::PyBuffer::<f32>::get(&block)?;
-    let Some(cells) = buffer.as_mut_slice(py) else {
-        return Ok(None);
-    };
-    for (source, row) in sources.iter().zip(cells.chunks_exact(rows)) {
+    let mut row = Vec::with_capacity(rows);
+    for (position, source) in sources.iter().enumerate() {
+        row.clear();
         // numpy's casts: a float64 or int64 to its nearest float32.
         match source {
             Float32Source::Floats(data) => {
-                for (cell, &value) in row.iter().zip(*data) {
-                    cell.set(value as f32);
-                }
+                row.extend(data.iter().map(|&value| value as f32));
             }
             Float32Source::Ints(data) => {
-                for (cell, &value) in row.iter().zip(*data) {
-                    cell.set(value as f32);
-                }
+                row.extend(data.iter().map(|&value| value as f32));
             }
             Float32Source::Masked(data, validity) => {
-                for (position, (cell, &value)) in row.iter().zip(*data).enumerate() {
-                    cell.set(if validity.get(position) {
+                row.extend(data.iter().enumerate().map(|(position, &value)| {
+                    if validity.get(position) {
                         value as f32
                     } else {
                         f32::NAN
-                    });
-                }
+                    }
+                }));
             }
             Float32Source::Cells(values) => {
-                for (cell, &value) in row.iter().zip(values) {
-                    cell.set(value);
-                }
+                row.extend_from_slice(values);
             }
         }
+        pyo3::buffer::PyBuffer::<f32>::get(&block.get_item(position)?)?
+            .copy_from_slice(py, &row)?;
     }
-    drop(buffer);
     block.getattr("T").map(Some)
 }
 
@@ -74227,8 +74253,7 @@ fn expanding_skew_frame(
     }
     Ok(
         DataFrame::new_with_column_order(df.index().clone(), out_cols, col_order)?
-            .with_column_index_name(df.column_index_name().map(str::to_owned))
-            .with_column_levels(df.column_levels()),
+            .with_labels_of(df),
     )
 }
 
@@ -99328,6 +99353,7 @@ impl PyIntervalIndex {
         Self {
             intervals,
             name: rust_idx.name().map(String::from),
+            subtype: None,
         }
     }
 }
@@ -103282,7 +103308,7 @@ pub fn test(py: Python<'_>) -> PyResult<()> {
     Ok(())
 }
 
-#[pyclass(name = "Flags", module = "frankenpandas", skip_from_py_object)]
+#[pyclass(name = "Flags", module = "frankenpandas")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PyFlags {
     #[pyo3(get, set)]
@@ -104039,7 +104065,7 @@ fn wide_to_long(
     Ok(PyDataFrame { inner: indexed_df })
 }
 
-#[pyclass(name = "ExcelFile", module = "frankenpandas", skip_from_py_object)]
+#[pyclass(name = "ExcelFile", module = "frankenpandas")]
 #[derive(Clone)]
 pub struct PyExcelFile {
     pub path: String,
@@ -104141,7 +104167,7 @@ impl PyExcelFile {
 /// be built (br-frankenpandas-0gmqq); appending to an existing workbook
 /// (mode='a') and writing one sheet twice (pandas overlays the cells) stay
 /// refused.
-#[pyclass(name = "ExcelWriter", module = "frankenpandas", skip_from_py_object)]
+#[pyclass(name = "ExcelWriter", module = "frankenpandas")]
 pub struct PyExcelWriter {
     path: Py<PyAny>,
     /// The sheets queued so far; `None` once the workbook is written.
@@ -107336,7 +107362,7 @@ fn excel_whole_number(value: f64) -> Option<i64> {
 /// `pd.HDFStore` exists so `isinstance`/import checks resolve, but it cannot be
 /// constructed: its methods used to fabricate (keys() empty, get() an empty
 /// frame, put() a no-op).
-#[pyclass(name = "HDFStore", module = "frankenpandas", skip_from_py_object)]
+#[pyclass(name = "HDFStore", module = "frankenpandas")]
 #[derive(Clone)]
 pub struct PyHDFStore;
 
@@ -107865,7 +107891,7 @@ fn set_eng_float_format(accuracy: usize, use_eng_prefix: bool) -> PyResult<()> {
 }
 
 /// Result of a FrankenPandas plot operation, wrapping the deterministic rendered SVG representation.
-#[pyclass(name = "PlotResult", skip_from_py_object)]
+#[pyclass(name = "PlotResult")]
 #[derive(Clone, Debug)]
 pub struct PyPlotResult {
     svg: String,
@@ -107946,7 +107972,7 @@ impl PyPlotResult {
 }
 
 /// Plotting accessor for DataFrame and Series (matches pandas `.plot` accessor).
-#[pyclass(name = "PlotAccessor", skip_from_py_object)]
+#[pyclass(name = "PlotAccessor")]
 #[derive(Clone, Debug)]
 pub struct PyPlotAccessor {
     df: Option<DataFrame>,
@@ -113318,7 +113344,9 @@ mod tests {
                 inner: Series::new(
                     "f",
                     Index::default_range(2),
-                    Column::from_f64_values(vec![2.5, 3.5]).with_width(NumericWidth::Float32),
+                    Column::from_f64_values(vec![2.5, 3.5])
+                        .cast_to_width(NumericWidth::Float32, false)
+                        .expect("float32 column"), // ubs:ignore — test fixture
                 )
                 .expect("s_f32"), // ubs:ignore — test fixture
             };
