@@ -207,6 +207,11 @@ no newer stable under that name. Migration candidates (`serde_yml`,
 - **Breaking:** none for fp-runtime interop surface; `Outcome<T, E>` preserved.
 - **Tests:** `cargo test -p fp-runtime --features asupersync` (55 passed, 0 failed), `ag_e2e::e2e_scenario6_asupersync_replay_bundle_integrity` (passed), no-feature refusal `sidecar_verification_rejects_asupersync_evidence_without_feature_y13st` (passed), workspace check / clippy / fmt all clean.
 
+### asupersync: 0.5.0 → 0.6.2 — 2026-11-08
+- **Scope:** `crates/fp-runtime/Cargo.toml` (`version = "0.6.2"`, optional, `default-features = false`). `cargo update -p asupersync` moved only asupersync and franken-{kernel,evidence,decision} (0.5.0 → 0.6.0) in `Cargo.lock`; the same four entries were updated in the `crates/fp-python/Cargo.lock` sdist lock. That lock has other, older drift that this bump does not refresh.
+- **Breaking:** none for fp-runtime. The six 0.6.0 breaks (`QuicFrame`, `ChildRegion`, two new report fields, `SignalMaskGuard`, `UnwindSafe`) do not touch `Outcome<T, E>`, the only asupersync item fp-runtime names.
+- **Tests:** with `fp-runtime/asupersync,fp-conformance/asupersync,frankenpandas/asupersync`: fp-runtime lib 56 passed, 7 ignored; `ag_e2e` 8 passed, including `e2e_scenario6_asupersync_replay_bundle_integrity`; `e2e_workflow` 11, `smoke` 2, frankenpandas lib 11 and `readme_quick_example` 87 passed; fp-conformance lib 1708 passed, 25 failed, all `oracle_unavailable` because the build worker has no Python pandas. `cargo check --workspace --all-targets --keep-going`, with and without those features, passes for every crate except fp-python, whose sources call fp-columnar/fp-frame APIs that are not in the tree. `cargo clippy -p fp-runtime --features asupersync --all-targets -- -D warnings` is clean (hz3).
+
 ### libfuzzer-sys: 0.4.10 → 0.4.12 — 2026-04-22 (commit `b3f3322`)
 - **Scope:** `fuzz/Cargo.toml` (separate inner workspace).
 - **Breaking:** none.
