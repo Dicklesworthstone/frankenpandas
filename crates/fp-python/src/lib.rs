@@ -9803,8 +9803,7 @@ fn repeated_object_text_column(
     let mut first_rows: Vec<usize> = Vec::new();
     let mut slots: Vec<u32> = Vec::with_capacity(len);
     let mut lines = [(u64::MAX, 0_u32); LINES];
-    for (row, cell) in cells.iter().enumerate() {
-        let pointer = cell.get();
+    for (row, &pointer) in pointers.iter().enumerate() {
         let line = &mut lines[(pointer >> 4) as usize % LINES];
         if line.0 != pointer {
             let next = first_rows.len();
@@ -10938,6 +10937,65 @@ fn frame_column_names_arg(frame: &DataFrame, obj: &Bound<'_, PyAny>) -> Option<V
         .collect()
 }
 
+/// A string column argument must select a string label, even when another
+/// label has the same storage text. The scalar `df['0']` path checked this,
+/// but list selections and `subset=`, `.loc`, `.at`, and merge keys bypassed
+/// it and silently read the integer-labelled column 0 (fvsao.32).
+///
+/// Check the original argument before typed labels are resolved to storage
+/// names. MultiIndex columns have their own tuple/level resolution and are
+/// deliberately left to that path. Missing names keep the caller's normal
+/// missing-key handling; only a name that would alias another type is refused.
+fn check_column_text_aliases(frame: &DataFrame, key: &Bound<'_, PyAny>) -> PyResult<()> {
+    if frame.columns_multiindex().is_some() {
+        return Ok(());
+    }
+    let check = |name: &str| -> PyResult<()> {
+        if frame.column(name).is_some() && !matches!(frame.column_label(name), IndexLabel::Utf8(_))
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(
+                name.to_owned(),
+            ));
+        }
+        Ok(())
+    };
+    if let Ok(name) = key.extract::<String>() {
+        return check(&name);
+    }
+    if let Ok(list) = key.cast::<PyList>() {
+        for item in list.iter() {
+            if let Ok(name) = item.extract::<String>() {
+                check(&name)?;
+            }
+        }
+    } else if let Ok(tuple) = key.cast::<PyTuple>() {
+        // A full tuple that labels a column stays one label. Otherwise
+        // callers such as .loc and dropna read it as a sequence of keys.
+        if frame_column_name_for(frame, key).is_none() {
+            for item in tuple.iter() {
+                if let Ok(name) = item.extract::<String>() {
+                    check(&name)?;
+                }
+            }
+        }
+    } else if let Ok(index) = plain_index_ref(key) {
+        for label in index.inner.labels() {
+            if let IndexLabel::Utf8(name) = label {
+                check(name)?;
+            }
+        }
+    } else if key.is_instance_of::<PySeries>()
+        || key.get_type().name().is_ok_and(|name| name == "ndarray")
+    {
+        for item in key.try_iter()? {
+            if let Ok(name) = item?.extract::<String>() {
+                check(&name)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A column argument - a `.loc` column key, `subset=`, `on=`, `keys=`,
 /// `items=`, ... - with its typed labels read as the names they select
 /// (`loc[:, 0]` / `subset=[0]` name the column '0' of `DataFrame([[1,
@@ -10948,6 +11006,7 @@ fn column_arg<'py>(
     frame: &DataFrame,
     key: Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyAny>> {
+    check_column_text_aliases(frame, &key)?;
     Ok(match frame_column_names_arg(frame, &key) {
         Some(names) if key.is_instance_of::<PyList>() => PyList::new(py, names)?.into_any(),
         Some(names) => match names.into_iter().next() {
@@ -52361,6 +52420,9 @@ impl PyDataFrame {
             bool_mask_key(key)
         };
         let bool_mask = series_mask || list_mask.is_some();
+        if !bool_mask {
+            check_column_text_aliases(&self.inner, key)?;
+        }
         if !bool_mask && let Ok(cols) = key.extract::<Vec<String>>() {
             for col in &cols {
                 if self.inner.column(col).is_none() {
@@ -55751,6 +55813,7 @@ impl PyDataFrame {
                 )));
             }
 
+            check_column_text_aliases(&self.inner, by)?;
             let by_cols: Vec<String> = if let Some(names) = self.sort_key_names(by) {
                 // A typed label (by=0) names its column (fvsao.32), a
                 // tuple its MultiIndex column (g3bux).
@@ -56808,6 +56871,7 @@ impl PyDataFrame {
     /// Return the first n rows ordered by columns in descending order.
     #[pyo3(signature = (n, columns, keep="first"))]
     fn nlargest(&self, n: usize, columns: &Bound<'_, PyAny>, keep: &str) -> PyResult<PyDataFrame> {
+        check_column_text_aliases(&self.inner, columns)?;
         // A tuple names its MultiIndex column (g3bux).
         let cols = match self.sort_key_names(columns) {
             Some(names) => names,
@@ -56847,6 +56911,7 @@ impl PyDataFrame {
     /// Return the first n rows ordered by columns in ascending order.
     #[pyo3(signature = (n, columns, keep="first"))]
     fn nsmallest(&self, n: usize, columns: &Bound<'_, PyAny>, keep: &str) -> PyResult<PyDataFrame> {
+        check_column_text_aliases(&self.inner, columns)?;
         // A tuple names its MultiIndex column (g3bux).
         let cols = match self.sort_key_names(columns) {
             Some(names) => names,
@@ -60731,9 +60796,7 @@ impl PyDataFrame {
                 let mut names = Vec::new();
                 for item in items.try_iter()? {
                     let item = item?;
-                    if let Ok(text) = item.extract::<String>() {
-                        names.push(text);
-                    } else if let Some(name) = frame_column_name_for(&self.inner, &item) {
+                    if let Some(name) = frame_column_name_for(&self.inner, &item) {
                         names.push(name);
                     }
                 }
@@ -60758,53 +60821,20 @@ impl PyDataFrame {
         key: &Bound<'py, PyAny>,
         default: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        // A typed label (get(0)) names the column carrying it (fvsao.32).
-        let key = &column_arg(py, &self.inner, key.clone())?;
-        if let Ok(col_name) = key.extract::<String>() {
-            let col_names = self.inner.column_names();
-            let matches: Vec<&str> = col_names
-                .iter()
-                .filter(|c| c.as_str() == col_name.as_str())
-                .map(|s| s.as_str())
-                .collect();
-            if matches.len() > 1 {
-                let frame = self
-                    .inner
-                    .select_columns(&matches)
-                    .map_err(frame_error_to_py)?;
-                let py_df = Py::new(py, PyDataFrame { inner: frame })?;
-                return Ok(py_df.into_bound(py).into_any());
-            } else if matches.len() == 1 {
-                if let Some(col) = self.inner.column(&col_name) {
-                    let s = Series::new(
-                        self.inner.column_series_name(&col_name),
-                        self.inner.index().clone(),
-                        col.clone(),
-                    )
-                    .map_err(frame_error_to_py)?;
-                    let py_s = Py::new(py, PySeries { inner: s })?;
-                    return Ok(py_s.into_bound(py).into_any());
-                }
+        // `get` uses the same typed label and duplicate/MultiIndex handling
+        // as `[]`. Its separate name-only implementation selected column 0
+        // for get('0') and get(['0']) (fvsao.32).
+        match self.__getitem__(py, key) {
+            Ok(result) => Ok(result.into_bound(py)),
+            Err(error)
+                if error.is_instance_of::<pyo3::exceptions::PyKeyError>(py)
+                    || error.is_instance_of::<pyo3::exceptions::PyValueError>(py)
+                    || error.is_instance_of::<pyo3::exceptions::PyIndexError>(py) =>
+            {
+                Ok(default.cloned().unwrap_or_else(|| py.None().into_bound(py)))
             }
-        } else if let Ok(cols) = key.extract::<Vec<String>>() {
-            let mut all_exist = true;
-            for col in &cols {
-                if self.inner.column(col).is_none() {
-                    all_exist = false;
-                    break;
-                }
-            }
-            if all_exist {
-                let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
-                let frame = self
-                    .inner
-                    .select_columns(&refs)
-                    .map_err(frame_error_to_py)?;
-                let py_df = Py::new(py, PyDataFrame { inner: frame })?;
-                return Ok(py_df.into_bound(py).into_any());
-            }
+            Err(error) => Err(error),
         }
-        Ok(default.cloned().unwrap_or_else(|| py.None().into_bound(py)))
     }
 
     fn first(&self, offset: &str) -> PyResult<PyDataFrame> {
@@ -61352,11 +61382,11 @@ impl PyDataFrame {
                 .map_err(frame_error_to_py)?;
             return Ok(PyDataFrame { inner });
         };
-        let [key] = keys.as_slice() else {
+        if keys.len() != 1 {
             return Err(not_implemented(
                 "DataFrame.join(on=[several columns]) against a MultiIndex",
             ));
-        };
+        }
         if !matches!(how, "left" | "inner") {
             return Err(not_implemented(&format!(
                 "DataFrame.join(on=..., how='{how}')"
@@ -61383,12 +61413,13 @@ impl PyDataFrame {
             .inner
             .with_column(CALLER_ROW, Column::from_i64_values((0..rows).collect()))
             .map_err(frame_error_to_py)?;
-        let left_on = pyo3::types::PyString::new(py, key);
         let right_on = pyo3::types::PyString::new(py, OTHER_INDEX);
         let args = MergeArgs {
             how,
             on: None,
-            left_on: Some(left_on.as_any()),
+            // Forward the original typed label: converting 0 to its
+            // storage name '0' would name a different column on re-entry.
+            left_on: on,
             right_on: Some(right_on.as_any()),
             left_index: false,
             right_index: false,
@@ -64032,12 +64063,17 @@ impl PyDataFrameILoc {
                 let col = self.inner.column_at(c_norm as usize).ok_or_else(|| {
                     PyErr::new::<pyo3::exceptions::PyIndexError, _>("column index out of bounds")
                 })?;
-                let col_series = Series::new(
-                    self.inner.column_series_name(&col_name),
-                    self.inner.series_index(),
-                    col.clone(),
-                )
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+                // A MultiIndex column names the extracted Series by its
+                // full tuple, including typed or empty levels. Its flat
+                // storage key (e.g. 'value_open') is not the column label.
+                let name = if let Some(multi) = self.inner.columns_multiindex() {
+                    let key = multiindex_scalar_tuple_to_py(py, multi, c_norm as usize)?;
+                    py_series_name(key.as_any())?
+                } else {
+                    self.inner.column_series_name(&col_name)
+                };
+                let col_series = Series::new(name, self.inner.series_index(), col.clone())
+                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
 
                 if let Ok(row_slice) = row_key.cast::<pyo3::types::PySlice>() {
                     let sub = slice_rows(row_slice, self.inner.len())?
