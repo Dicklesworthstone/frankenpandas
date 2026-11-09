@@ -50,7 +50,7 @@ arrow = { version = "60.0.0", default-features = false, features = ["prettyprint
 arrow-ipc = { version = "60.0.0", default-features = false, features = ["lz4"] }
 bumpalo = { version = "3.20.3", features = ["collections"] }
 bytes = "1.12.1"
-calamine = "0.37.0"
+calamine = "0.38.0"
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 chrono-tz = "0.10.4"
 csv = "1.4.0"
