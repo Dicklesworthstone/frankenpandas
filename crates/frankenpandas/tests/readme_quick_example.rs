@@ -864,6 +864,7 @@ fn readme_merge_asof_compiles_and_runs() -> Result<(), Box<dyn std::error::Error
         allow_exact_matches: true,
         tolerance: Some(5.0),
         by: None,
+        ..MergeAsofOptions::new()
     };
     let _tuned =
         merge_asof_with_options(&trades, &quotes, "timestamp", AsofDirection::Backward, opts)?;

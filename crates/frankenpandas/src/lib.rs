@@ -407,8 +407,9 @@ pub use fp_io::{
 pub use fp_join::{
     AsofDirection, DataFrameMergeExt, JoinError, JoinExecutionOptions, JoinType, JoinedSeries,
     MergeAsofOptions, MergeExecutionOptions, MergeValidateMode, MergedDataFrame, join_series,
-    join_series_with_options, merge_asof, merge_asof_with_options, merge_dataframes,
-    merge_dataframes_on, merge_dataframes_on_with, merge_dataframes_on_with_options, merge_ordered,
+    join_series_with_options, merge_asof, merge_asof_on_with_options, merge_asof_with_options,
+    merge_dataframes, merge_dataframes_on, merge_dataframes_on_with,
+    merge_dataframes_on_with_options, merge_ordered, merge_ordered_with_options,
 };
 
 /// Target container types supported by the polymorphic [`concat()`] entrypoint.
@@ -999,6 +1000,7 @@ pub mod prelude {
         melt,
         merge,
         merge_asof,
+        merge_asof_on_with_options,
         merge_asof_with_options,
         merge_dataframes,
         merge_dataframes_on,
@@ -1006,6 +1008,7 @@ pub mod prelude {
         merge_dataframes_on_with_options,
         merge_on,
         merge_ordered,
+        merge_ordered_with_options,
         // NanOps — null-skipping aggregation primitives (matches README NanOps section)
         nanall,
         nanany,

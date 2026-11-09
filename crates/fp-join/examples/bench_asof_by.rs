@@ -43,6 +43,7 @@ fn opts(by: &str) -> MergeAsofOptions {
         allow_exact_matches: true,
         tolerance: None,
         by: Some(vec![by.to_string()]),
+        ..MergeAsofOptions::new()
     }
 }
 

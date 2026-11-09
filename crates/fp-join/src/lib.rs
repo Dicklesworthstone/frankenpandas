@@ -9577,6 +9577,18 @@ pub fn merge_dataframes_on_with_options(
     join_type: JoinType,
     options: MergeExecutionOptions,
 ) -> Result<MergedDataFrame, JoinError> {
+    merge_dataframes_on_with_fill(left, right, left_on, right_on, join_type, options, false)
+}
+
+fn merge_dataframes_on_with_fill(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    join_type: JoinType,
+    options: MergeExecutionOptions,
+    forward_fill: bool,
+) -> Result<MergedDataFrame, JoinError> {
     let suffixes = resolve_merge_suffixes(options.suffixes.clone());
     let indicator_name = resolve_merge_indicator_name(options.indicator_name.as_deref())?;
     // A column key a side repeats (['a', 'a']; not a join key) rides through
@@ -9593,6 +9605,7 @@ pub fn merge_dataframes_on_with_options(
         right_on,
         join_type,
         options,
+        forward_fill,
     )?;
     let merged = keeping_source_widths(
         merged,
@@ -9833,6 +9846,7 @@ fn merge_dataframes_on_with_options_storage(
     right_on: &[&str],
     join_type: JoinType,
     options: MergeExecutionOptions,
+    forward_fill: bool,
 ) -> Result<MergedDataFrame, JoinError> {
     let MergeExecutionOptions {
         indicator_name,
@@ -10698,6 +10712,27 @@ fn merge_dataframes_on_with_options_storage(
         .as_ref()
         .map(|(_, positions)| positions.as_slice());
 
+    // Ordered merges carry the last matched SOURCE ROW forward. Filling
+    // values would replace genuine nulls in that row and could combine cells
+    // from different source rows. Shared join keys still use the unfilled
+    // indexers so right-only keys retain their own values.
+    let carry_rows = |positions: &[Option<usize>]| {
+        let mut last = None;
+        positions
+            .iter()
+            .map(|position| {
+                if position.is_some() {
+                    last = *position;
+                }
+                last
+            })
+            .collect::<Vec<_>>()
+    };
+    let filled_left = forward_fill.then(|| carry_rows(&left_positions));
+    let filled_right = forward_fill.then(|| carry_rows(&right_positions));
+    let left_data_positions = filled_left.as_deref().unwrap_or(&left_positions);
+    let right_data_positions = filled_right.as_deref().unwrap_or(&right_positions);
+
     // Build output columns by reindexing.
     let n = left_positions.len();
     // Lazy unit-range output index (see build_single_key_dense_i64 site).
@@ -10772,7 +10807,7 @@ fn merge_dataframes_on_with_options_storage(
                 let key_column = if let Some(positions) = all_present_left_positions {
                     take_positions_typed(col, positions)
                 } else {
-                    reindex_join_column_with_invented_gap(col, &left_positions)?
+                    reindex_join_column_with_invented_gap(col, left_data_positions)?
                 };
                 insert_merged_output_column(
                     &mut columns,
@@ -10786,7 +10821,7 @@ fn merge_dataframes_on_with_options_storage(
         let reindexed = if let Some(positions) = all_present_left_positions {
             take_positions_typed(col, positions)
         } else {
-            reindex_join_column_with_invented_gap(col, &left_positions)?
+            reindex_join_column_with_invented_gap(col, left_data_positions)?
         };
         let out_name = if right_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.left.as_deref())
@@ -10811,7 +10846,7 @@ fn merge_dataframes_on_with_options_storage(
         let reindexed = if let Some(positions) = all_present_right_positions {
             take_positions_typed(col, positions)
         } else {
-            reindex_join_column_with_invented_gap(col, &right_positions)?
+            reindex_join_column_with_invented_gap(col, right_data_positions)?
         };
         let out_name = if left_col_names.contains(name) {
             apply_merge_suffix(name, suffixes.right.as_deref())
@@ -11075,80 +11110,53 @@ pub fn merge_ordered(
     on: &[&str],
     fill_method: Option<&str>,
 ) -> Result<MergedDataFrame, JoinError> {
-    let options = MergeExecutionOptions {
-        sort: true,
-        ..MergeExecutionOptions::default()
-    };
-    let merged = merge_dataframes_on_with_options(left, right, on, on, JoinType::Outer, options)?;
-
-    if let Some(method) = fill_method {
-        // Convert to DataFrame to apply fill
-        let mut df = fp_frame::DataFrame::new_with_column_order(
-            merged.index.clone(),
-            merged.columns.clone(),
-            merged.column_order.clone(),
-        )
-        .map_err(JoinError::Frame)?;
-
-        df = match method {
-            "ffill" => df.ffill(None).map_err(JoinError::Frame)?,
-            _ => {
-                return Err(JoinError::Frame(FrameError::CompatibilityRejected(
-                    format!("merge_ordered: fill_method must be 'ffill' or None, got '{method}'"),
-                )));
-            }
-        };
-        // pandas forward-fills the join's row indexers, not the values: a
-        // column the fill leaves whole keeps its side's dtype (an int
-        // column stayed float64 after the outer join's NaN), one with a
-        // leading gap is still float64 NaN there.
-        let names: Vec<String> = df.column_names().into_iter().cloned().collect();
-        for name in names {
-            let Some(source) = source_column_dtype(left, right, &name) else {
-                continue;
-            };
-            let Some(filled) = df.column(&name) else {
-                continue;
-            };
-            if filled.dtype() != source
-                && matches!(source, DType::Int64 | DType::Bool)
-                && !filled.values().iter().any(Scalar::is_missing)
-            {
-                let restored = filled.astype(source).map_err(|err| {
-                    JoinError::Frame(FrameError::CompatibilityRejected(err.to_string()))
-                })?;
-                df = df.with_column(name, restored).map_err(JoinError::Frame)?;
-            }
-        }
-
-        let column_order = df.column_names().into_iter().cloned().collect();
-        Ok(MergedDataFrame {
-            index: df.index().clone(),
-            columns: df.columns().clone(),
-            column_order,
-        })
-    } else {
-        Ok(merged)
-    }
+    merge_ordered_with_options(
+        left,
+        right,
+        on,
+        on,
+        JoinType::Outer,
+        fill_method,
+        MergeExecutionOptions::default(),
+    )
 }
 
-/// The dtype of the input column a merged column `name` came from: the
-/// left's or the right's of that name, else (an overlap) the left's for a
-/// `_x` suffix and the right's for a `_y` one.
-fn source_column_dtype(
+/// Ordered merge with independent key names, join direction and suffixes.
+///
+/// Sorting is always by the complete join key. `ffill` propagates source
+/// row positions before gathering columns, preserving actual missing cells
+/// and the dtype of each side whenever no leading gap is introduced.
+pub fn merge_ordered_with_options(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
-    name: &str,
-) -> Option<DType> {
-    let dtype = |frame: &fp_frame::DataFrame, name: &str| frame.column(name).map(Column::dtype);
-    match (left.column(name), right.column(name)) {
-        (Some(column), None) | (None, Some(column)) => Some(column.dtype()),
-        (Some(_), Some(_)) => None,
-        (None, None) => name
-            .strip_suffix("_x")
-            .and_then(|stem| dtype(left, stem))
-            .or_else(|| name.strip_suffix("_y").and_then(|stem| dtype(right, stem))),
+    left_on: &[&str],
+    right_on: &[&str],
+    how: JoinType,
+    fill_method: Option<&str>,
+    mut options: MergeExecutionOptions,
+) -> Result<MergedDataFrame, JoinError> {
+    if let Some(method) = fill_method
+        && method != "ffill"
+    {
+        return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+            format!("merge_ordered: fill_method must be 'ffill' or None, got '{method}'"),
+        )));
     }
+    if how == JoinType::Cross {
+        return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+            "merge_ordered: how must be 'left', 'right', 'inner' or 'outer'".to_owned(),
+        )));
+    }
+    options.sort = true;
+    merge_dataframes_on_with_fill(
+        left,
+        right,
+        left_on,
+        right_on,
+        how,
+        options,
+        fill_method.is_some(),
+    )
 }
 
 /// Direction for asof merge matching.
@@ -11176,6 +11184,14 @@ pub struct MergeAsofOptions {
     /// Columns to match exactly before performing asof merge.
     /// Acts like an equi-join on these columns first.
     pub by: Option<Vec<String>>,
+    /// Left grouping columns when the two sides use different names.
+    /// Must be paired with `right_by` and cannot be combined with `by`.
+    pub left_by: Option<Vec<String>>,
+    /// Right grouping columns, matched positionally to `left_by`.
+    pub right_by: Option<Vec<String>>,
+    /// Suffixes for overlapping non-shared-key columns, as in `merge`.
+    /// `None` uses `("_x", "_y")`.
+    pub suffixes: Option<[Option<String>; 2]>,
 }
 
 impl MergeAsofOptions {
@@ -11185,6 +11201,9 @@ impl MergeAsofOptions {
             allow_exact_matches: true,
             tolerance: None,
             by: None,
+            left_by: None,
+            right_by: None,
+            suffixes: None,
         }
     }
 
@@ -11293,12 +11312,14 @@ struct Datetime64AsofKey<'a> {
     data: &'a [i64],
     validity: &'a ValidityMask,
     all_valid: bool,
+    nat_is_missing: bool,
 }
 
 impl Datetime64AsofKey<'_> {
     #[inline]
     fn is_valid(self, i: usize) -> bool {
-        (self.all_valid || self.validity.get(i)) && self.data[i] != fp_types::Timestamp::NAT
+        (self.all_valid || self.validity.get(i))
+            && (!self.nat_is_missing || self.data[i] != fp_types::Timestamp::NAT)
     }
 }
 
@@ -11309,6 +11330,35 @@ fn datetime64_key_parts(column: &Column) -> Option<Datetime64AsofKey<'_>> {
         data,
         validity,
         all_valid: validity.all(),
+        nat_is_missing: true,
+    })
+}
+
+/// The exact integer representation of integer, datetime and timedelta keys.
+/// Numeric i64::MIN is a value; only temporal keys use it as the NaT sentinel.
+/// Keeping these keys out of f64 prevents adjacent IDs/nanoseconds above 2^53
+/// from becoming false exact matches, including within grouped asof joins.
+fn integer_asof_key_parts(column: &Column) -> Option<Datetime64AsofKey<'_>> {
+    if matches!(column.dtype(), DType::Datetime64 { .. }) {
+        return datetime64_key_parts(column);
+    }
+    let (data, validity, nat_is_missing) = match column.dtype() {
+        DType::Int64 => {
+            let (data, validity) = column.as_i64_slice_with_validity()?;
+            (data, validity, false)
+        }
+        DType::Int64Nullable => {
+            let (data, validity) = column.as_masked_i64_slice()?;
+            (data, validity, false)
+        }
+        DType::Timedelta64 => (column.as_timedelta64_slice()?, column.validity(), true),
+        _ => return None,
+    };
+    Some(Datetime64AsofKey {
+        data,
+        validity,
+        all_valid: validity.all(),
+        nat_is_missing,
     })
 }
 
@@ -11351,21 +11401,22 @@ fn compute_asof_matches_datetime64(
 ) -> Vec<Option<usize>> {
     let mut filtered_values = Vec::new();
     let mut filtered_positions = Vec::new();
-    let (right_valid_values, right_valid_positions) =
-        if right.all_valid && !right.data.contains(&fp_types::Timestamp::NAT) {
-            (right.data, None)
-        } else {
-            for i in 0..right.data.len() {
-                if right.is_valid(i) {
-                    filtered_values.push(right.data[i]);
-                    filtered_positions.push(i);
-                }
+    let (right_valid_values, right_valid_positions) = if right.all_valid
+        && (!right.nat_is_missing || !right.data.contains(&fp_types::Timestamp::NAT))
+    {
+        (right.data, None)
+    } else {
+        for i in 0..right.data.len() {
+            if right.is_valid(i) {
+                filtered_values.push(right.data[i]);
+                filtered_positions.push(i);
             }
-            (
-                filtered_values.as_slice(),
-                Some(filtered_positions.as_slice()),
-            )
-        };
+        }
+        (
+            filtered_values.as_slice(),
+            Some(filtered_positions.as_slice()),
+        )
+    };
 
     compute_asof_matches_datetime64_prepared(
         left,
@@ -11525,7 +11576,7 @@ fn compute_asof_matches_datetime64_prepared(
     right_matches
 }
 
-fn try_asof_datetime_matches(
+fn try_asof_integer_matches(
     left_key: &Column,
     right_key: &Column,
     on: &str,
@@ -11533,14 +11584,8 @@ fn try_asof_datetime_matches(
     allow_exact_matches: bool,
     tolerance: Option<f64>,
 ) -> Option<Result<Vec<Option<usize>>, JoinError>> {
-    if !matches!(
-        (left_key.dtype(), right_key.dtype()),
-        (DType::Datetime64 { tz: left_tz }, DType::Datetime64 { tz: right_tz }) if left_tz == right_tz
-    ) {
-        return None;
-    }
-    let left = datetime64_key_parts(left_key)?;
-    let right = datetime64_key_parts(right_key)?;
+    let left = integer_asof_key_parts(left_key)?;
+    let right = integer_asof_key_parts(right_key)?;
 
     Some((|| {
         ensure_sorted_non_decreasing_datetime64(left, "left", on)?;
@@ -11661,36 +11706,81 @@ pub fn merge_asof_with_options(
     direction: AsofDirection,
     options: MergeAsofOptions,
 ) -> Result<MergedDataFrame, JoinError> {
-    // If `by` columns are specified, we need to do grouped asof merge
-    if let Some(ref by_cols) = options.by {
-        return merge_asof_grouped(left, right, on, direction, &options, by_cols);
-    }
+    merge_asof_on_with_options(left, right, on, on, direction, options)
+}
 
-    merge_asof_simple(left, right, on, direction, &options)
+/// Perform an asof merge with independently named ordering and grouping keys.
+///
+/// Unlike a shared `on` key, distinct `left_on` / `right_on` columns both
+/// appear in the output. Grouping key pairs follow the same rule: only a
+/// pair whose names are equal is emitted once. `options.by` selects common
+/// grouping columns; `left_by` and `right_by` select paired side-specific
+/// columns instead. Both frames must be globally sorted by their ordering key.
+pub fn merge_asof_on_with_options(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &str,
+    right_on: &str,
+    direction: AsofDirection,
+    options: MergeAsofOptions,
+) -> Result<MergedDataFrame, JoinError> {
+    let invalid =
+        |message: &str| JoinError::Frame(FrameError::CompatibilityRejected(message.to_owned()));
+    let (left_by, right_by) = match (&options.by, &options.left_by, &options.right_by) {
+        (Some(by), None, None) => (by.as_slice(), by.as_slice()),
+        (None, Some(left_by), Some(right_by)) => (left_by.as_slice(), right_by.as_slice()),
+        (None, None, None) => (&[][..], &[][..]),
+        (Some(_), _, _) => return Err(invalid("Can only pass by OR left_by and right_by")),
+        (None, Some(_), None) => return Err(invalid("missing right_by")),
+        (None, None, Some(_)) => return Err(invalid("missing left_by")),
+    };
+    if left_by.len() != right_by.len() {
+        return Err(invalid("left_by and right_by must be the same length"));
+    }
+    let keys = AsofKeys {
+        left_on,
+        right_on,
+        left_by,
+        right_by,
+    };
+    if !left_by.is_empty() {
+        return merge_asof_grouped(left, right, keys, direction, &options);
+    }
+    merge_asof_simple(left, right, keys, direction, &options)
+}
+
+#[derive(Clone, Copy)]
+struct AsofKeys<'a> {
+    left_on: &'a str,
+    right_on: &'a str,
+    left_by: &'a [String],
+    right_by: &'a [String],
 }
 
 /// Simple asof merge without grouping.
 fn merge_asof_simple(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
-    on: &str,
+    keys: AsofKeys<'_>,
     direction: AsofDirection,
     options: &MergeAsofOptions,
 ) -> Result<MergedDataFrame, JoinError> {
+    let on = keys.left_on;
+    let right_on = keys.right_on;
     let left_key = left.columns().get(on).ok_or_else(|| {
         JoinError::Frame(FrameError::CompatibilityRejected(format!(
             "merge_asof: column '{on}' not found in left"
         )))
     })?;
-    let right_key = right.columns().get(on).ok_or_else(|| {
+    let right_key = right.columns().get(right_on).ok_or_else(|| {
         JoinError::Frame(FrameError::CompatibilityRejected(format!(
-            "merge_asof: column '{on}' not found in right"
+            "merge_asof: column '{right_on}' not found in right"
         )))
     })?;
 
     ensure_matching_asof_key_dtypes(left_key, right_key, on)?;
 
-    if let Some(datetime_matches) = try_asof_datetime_matches(
+    if let Some(integer_matches) = try_asof_integer_matches(
         left_key,
         right_key,
         on,
@@ -11698,18 +11788,17 @@ fn merge_asof_simple(
         options.allow_exact_matches,
         options.tolerance,
     ) {
-        let right_matches = datetime_matches?;
-        return build_asof_output(left, right, on, &right_matches, None);
+        let right_matches = integer_matches?;
+        return build_asof_output(left, right, keys, &right_matches, options);
     }
 
-    // Non-Datetime64 keys: use the f64 numeric path. The grouped Datetime64
-    // route below still uses the old shift-to-f64 bridge until it gets its own
-    // i64 grouped path.
+    // Float keys retain their native f64 ordering. The datetime shift is a
+    // fallback only for a temporal column without an accessible typed backing.
     let (left_vals, right_vals) = match try_asof_datetime_shift(left_key, right_key, on) {
         Some(shifted) => shifted?,
         None => (
             asof_numeric_values(left_key, "left", on)?,
-            asof_numeric_values(right_key, "right", on)?,
+            asof_numeric_values(right_key, "right", right_on)?,
         ),
     };
 
@@ -11717,7 +11806,7 @@ fn merge_asof_simple(
     // null in the joined columns (no match). Dtype incompatibility is rejected
     // above before this value-level rule is reached.
     ensure_sorted_non_decreasing(&left_vals, "left", on)?;
-    ensure_sorted_non_decreasing(&right_vals, "right", on)?;
+    ensure_sorted_non_decreasing(&right_vals, "right", right_on)?;
 
     let right_matches = compute_asof_matches(
         &left_vals,
@@ -11727,28 +11816,29 @@ fn merge_asof_simple(
         options.tolerance,
     );
 
-    build_asof_output(left, right, on, &right_matches, None)
+    build_asof_output(left, right, keys, &right_matches, options)
 }
 
 /// Grouped asof merge: match on `by` columns first, then asof within groups.
 fn merge_asof_grouped(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
-    on: &str,
+    keys: AsofKeys<'_>,
     direction: AsofDirection,
     options: &MergeAsofOptions,
-    by_cols: &[String],
 ) -> Result<MergedDataFrame, JoinError> {
+    let on = keys.left_on;
+    let right_on = keys.right_on;
     // Validate by columns exist
-    for col in by_cols {
+    for (col, right_col) in keys.left_by.iter().zip(keys.right_by) {
         let left_column = left.columns().get(col).ok_or_else(|| {
             JoinError::Frame(FrameError::CompatibilityRejected(format!(
                 "merge_asof: 'by' column '{col}' not found in left"
             )))
         })?;
-        let right_column = right.columns().get(col).ok_or_else(|| {
+        let right_column = right.columns().get(right_col).ok_or_else(|| {
             JoinError::Frame(FrameError::CompatibilityRejected(format!(
-                "merge_asof: 'by' column '{col}' not found in right"
+                "merge_asof: 'by' column '{right_col}' not found in right"
             )))
         })?;
         validate_object_join_keys(left_column)?;
@@ -11760,36 +11850,38 @@ fn merge_asof_grouped(
             "merge_asof: column '{on}' not found in left"
         )))
     })?;
-    let right_key = right.columns().get(on).ok_or_else(|| {
+    let right_key = right.columns().get(right_on).ok_or_else(|| {
         JoinError::Frame(FrameError::CompatibilityRejected(format!(
-            "merge_asof: column '{on}' not found in right"
+            "merge_asof: column '{right_on}' not found in right"
         )))
     })?;
 
     ensure_matching_asof_key_dtypes(left_key, right_key, on)?;
 
-    // Datetime64 keys: shift-to-f64 (exact for <~104-day ns ranges) instead of the
-    // rejected/precision-lossy direct cast. Falls back to the f64 numeric path.
-    let (left_vals, right_vals) = match try_asof_datetime_shift(left_key, right_key, on) {
-        Some(shifted) => shifted?,
-        None => (
-            asof_numeric_values(left_key, "left", on)?,
-            asof_numeric_values(right_key, "right", on)?,
-        ),
+    let integer_keys = integer_asof_key_parts(left_key).zip(integer_asof_key_parts(right_key));
+    let (left_vals, right_vals) = if let Some((left_key, right_key)) = integer_keys {
+        ensure_sorted_non_decreasing_datetime64(left_key, "left", on)?;
+        ensure_sorted_non_decreasing_datetime64(right_key, "right", right_on)?;
+        (Vec::new(), Vec::new())
+    } else {
+        let (left_vals, right_vals) = match try_asof_datetime_shift(left_key, right_key, on) {
+            Some(shifted) => shifted?,
+            None => (
+                asof_numeric_values(left_key, "left", on)?,
+                asof_numeric_values(right_key, "right", right_on)?,
+            ),
+        };
+        ensure_sorted_non_decreasing(&left_vals, "left", on)?;
+        ensure_sorted_non_decreasing(&right_vals, "right", right_on)?;
+        (left_vals, right_vals)
     };
-
-    // With matching key dtypes, pandas accepts NaN keys: the NaN row gets a
-    // null in the joined columns (no match). Dtype incompatibility is rejected
-    // above before this value-level rule is reached.
-    ensure_sorted_non_decreasing(&left_vals, "left", on)?;
-    ensure_sorted_non_decreasing(&right_vals, "right", on)?;
 
     // Dense u32 group ids over the `by` columns (shared id space for left and
     // right). The single non-float `by` column case factorizes the column's
     // scalars with a borrowed typed key — no per-row `format!`/`Vec<String>`
     // allocation — and is bit-identical to the Debug-string grouping (see
     // `build_group_ids`). Everything else falls back to the string path.
-    let (left_ids, right_ids) = build_group_ids(left, right, by_cols)?;
+    let (left_ids, right_ids) = build_group_ids(left, right, keys.left_by, keys.right_by)?;
 
     // Group right rows by their `by` group id for asof matching (looked up by
     // `.get()` per left group below). No per-group sort validation is needed:
@@ -11819,21 +11911,56 @@ fn merge_asof_grouped(
         left_groups.entry(id).or_default().push(left_idx);
     }
 
-    let mut right_matches: Vec<Option<usize>> = vec![None; left_vals.len()];
+    let mut right_matches: Vec<Option<usize>> = vec![None; left.len()];
     for (group_id, left_positions) in &left_groups {
         let Some(group_indices) = right_groups.get(group_id) else {
             continue; // no right rows for this group -> all matches stay None
         };
-        let group_right_vals: Vec<f64> = group_indices.iter().map(|&i| right_vals[i]).collect();
-        let group_left_vals: Vec<f64> = left_positions.iter().map(|&i| left_vals[i]).collect();
-
-        let group_matches = compute_asof_matches(
-            &group_left_vals,
-            &group_right_vals,
-            direction,
-            options.allow_exact_matches,
-            options.tolerance,
-        );
+        let group_matches = if let Some((left_key, right_key)) = integer_keys {
+            let take_group = |key: Datetime64AsofKey<'_>, positions: &[usize]| {
+                let mut validity = ValidityMask::all_valid(positions.len());
+                let data: Vec<i64> = positions
+                    .iter()
+                    .enumerate()
+                    .map(|(out, &source)| {
+                        if !key.is_valid(source) {
+                            validity.set(out, false);
+                        }
+                        key.data[source]
+                    })
+                    .collect();
+                (data, validity)
+            };
+            let (left_data, left_validity) = take_group(left_key, left_positions);
+            let (right_data, right_validity) = take_group(right_key, group_indices);
+            compute_asof_matches_datetime64(
+                Datetime64AsofKey {
+                    data: &left_data,
+                    validity: &left_validity,
+                    all_valid: left_validity.all(),
+                    nat_is_missing: left_key.nat_is_missing,
+                },
+                Datetime64AsofKey {
+                    data: &right_data,
+                    validity: &right_validity,
+                    all_valid: right_validity.all(),
+                    nat_is_missing: right_key.nat_is_missing,
+                },
+                direction,
+                options.allow_exact_matches,
+                options.tolerance,
+            )
+        } else {
+            let group_right_vals: Vec<f64> = group_indices.iter().map(|&i| right_vals[i]).collect();
+            let group_left_vals: Vec<f64> = left_positions.iter().map(|&i| left_vals[i]).collect();
+            compute_asof_matches(
+                &group_left_vals,
+                &group_right_vals,
+                direction,
+                options.allow_exact_matches,
+                options.tolerance,
+            )
+        };
 
         for (k, &left_idx) in left_positions.iter().enumerate() {
             if let Some(Some(group_idx)) = group_matches.get(k) {
@@ -11842,7 +11969,7 @@ fn merge_asof_grouped(
         }
     }
 
-    build_asof_output(left, right, on, &right_matches, Some(by_cols))
+    build_asof_output(left, right, keys, &right_matches, options)
 }
 
 /// Borrowed, allocation-free `by`-key for the single-column factorize fast
@@ -11924,11 +12051,12 @@ fn build_group_ids(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
     by_cols: &[String],
+    right_by_cols: &[String],
 ) -> Result<(Vec<u32>, Vec<u32>), JoinError> {
     if by_cols.len() == 1
         && let (Some(lcol), Some(rcol)) = (
             left.columns().get(&by_cols[0]),
-            right.columns().get(&by_cols[0]),
+            right.columns().get(&right_by_cols[0]),
         )
         && let Some(ids) = try_factorize_typed(lcol.values(), rcol.values())
     {
@@ -11936,7 +12064,7 @@ fn build_group_ids(
     }
 
     let left_keys = build_group_keys(left, by_cols)?;
-    let right_keys = build_group_keys(right, by_cols)?;
+    let right_keys = build_group_keys(right, right_by_cols)?;
     let mut codes: FxHashMap<Vec<String>, u32> = FxHashMap::default();
     let mut next = 0u32;
     let mut intern = |k: &Vec<String>, codes: &mut FxHashMap<Vec<String>, u32>| -> u32 {
@@ -12158,9 +12286,9 @@ enum AsofOutputTask<'a> {
 fn build_asof_output(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
-    on: &str,
+    keys: AsofKeys<'_>,
     right_matches: &[Option<usize>],
-    by_cols: Option<&[String]>,
+    options: &MergeAsofOptions,
 ) -> Result<MergedDataFrame, JoinError> {
     let right_n = right.len();
 
@@ -12168,13 +12296,17 @@ fn build_asof_output(
     let right_col_names_all: Vec<String> =
         right.column_names().iter().map(|s| s.to_string()).collect();
 
-    // Exclude the `on` column and `by` columns from right output
+    // Only identically named pairs are shared output keys. Distinct keys
+    // remain separate columns, even when a key also names the other side's
+    // payload column (which then receives the usual overlap suffix).
     let excluded_cols: HashSet<&str> = {
         let mut s = HashSet::new();
-        s.insert(on);
-        if let Some(by) = by_cols {
-            for c in by {
-                s.insert(c.as_str());
+        if keys.left_on == keys.right_on {
+            s.insert(keys.left_on);
+        }
+        for (left_by, right_by) in keys.left_by.iter().zip(keys.right_by) {
+            if left_by == right_by {
+                s.insert(left_by.as_str());
             }
         }
         s
@@ -12188,23 +12320,10 @@ fn build_asof_output(
 
     let left_name_set: HashSet<&String> = left_col_names.iter().collect();
     let right_name_set: HashSet<&String> = right_col_names_all.iter().collect();
-    let mut excluded_names = HashSet::new();
-    excluded_names.insert(on);
-    // `by` columns are equi-join keys: pandas emits them once, unsuffixed,
-    // exactly like `on`. They were left out of this set, so a `by` column
-    // present on both sides counted as an overlap and the LEFT copy came out
-    // as `group_x` (the right copy is excluded above), where pandas 2.2.3
-    // returns `group` (br-frankenpandas-fkiu9, live-oracle
-    // merge_asof_by_group_and_no_exact_matches).
-    if let Some(by) = by_cols {
-        for column in by {
-            excluded_names.insert(column.as_str());
-        }
-    }
     let overlap_names =
-        collect_overlapping_column_names(&left_name_set, &right_name_set, &excluded_names);
+        collect_overlapping_column_names(&left_name_set, &right_name_set, &excluded_cols);
     let overlap_set: HashSet<String> = overlap_names.iter().cloned().collect();
-    let suffixes = ResolvedMergeSuffixes::default();
+    let suffixes = resolve_merge_suffixes(options.suffixes.clone());
     ensure_merge_suffixes_for_overlaps(&overlap_names, &suffixes)?;
 
     let n_out = left.len();
@@ -12279,7 +12398,8 @@ fn build_asof_output(
                             }
                         }
                     }
-                    return Ok(Column::from_f64_values_with_validity(data, validity));
+                    return Ok(Column::from_f64_values_with_validity(data, validity)
+                        .keeping_dtype_of(right_col));
                 }
                 // A right column that gains an UNMATCHED row gains a gap, and an
                 // all-valid numpy int64 cannot hold one — pandas widens it to
@@ -20853,6 +20973,254 @@ mod tests {
     }
 
     #[test]
+    fn merge_asof_distinct_ordering_and_grouping_keys() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["t", "symbol", "venue", "price"],
+            vec![
+                (
+                    "t",
+                    vec![Scalar::Int64(1), Scalar::Int64(3), Scalar::Int64(5)],
+                ),
+                (
+                    "symbol",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("a".into()),
+                    ],
+                ),
+                (
+                    "venue",
+                    vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "price",
+                    vec![Scalar::Int64(7), Scalar::Int64(8), Scalar::Int64(9)],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict(
+            &["u", "ticker", "venue", "price"],
+            vec![
+                (
+                    "u",
+                    vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(4)],
+                ),
+                (
+                    "ticker",
+                    vec![
+                        Scalar::Utf8("a".into()),
+                        Scalar::Utf8("b".into()),
+                        Scalar::Utf8("a".into()),
+                    ],
+                ),
+                (
+                    "venue",
+                    vec![Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)],
+                ),
+                (
+                    "price",
+                    vec![Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)],
+                ),
+            ],
+        )
+        .unwrap();
+        let options = super::MergeAsofOptions {
+            left_by: Some(vec!["symbol".to_owned(), "venue".to_owned()]),
+            right_by: Some(vec!["ticker".to_owned(), "venue".to_owned()]),
+            suffixes: Some([Some("_trade".to_owned()), Some("_quote".to_owned())]),
+            ..super::MergeAsofOptions::new()
+        };
+        let result = super::merge_asof_on_with_options(
+            &left,
+            &right,
+            "t",
+            "u",
+            super::AsofDirection::Backward,
+            options,
+        )
+        .unwrap();
+        assert_eq!(
+            result.column_order,
+            [
+                "t",
+                "symbol",
+                "venue",
+                "price_trade",
+                "u",
+                "ticker",
+                "price_quote"
+            ]
+        );
+        assert_eq!(
+            result.columns["u"].values(),
+            &[Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(4)]
+        );
+        assert_eq!(
+            result.columns["price_quote"].values(),
+            &[Scalar::Int64(10), Scalar::Int64(20), Scalar::Int64(30)]
+        );
+    }
+
+    #[test]
+    fn merge_asof_exact_integer_keys_do_not_round_or_treat_min_as_nat() {
+        for base in [1_i64 << 53, i64::MIN] {
+            let left = fp_frame::DataFrame::from_dict(
+                &["t", "g"],
+                vec![
+                    ("t", vec![Scalar::Int64(base), Scalar::Int64(base + 3)]),
+                    ("g", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+                ],
+            )
+            .unwrap();
+            let right = fp_frame::DataFrame::from_dict(
+                &["u", "g", "v"],
+                vec![
+                    ("u", vec![Scalar::Int64(base + 1), Scalar::Int64(base + 4)]),
+                    ("g", vec![Scalar::Int64(1), Scalar::Int64(1)]),
+                    ("v", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+                ],
+            )
+            .unwrap();
+            for by in [None, Some(vec!["g".to_owned()])] {
+                let options = super::MergeAsofOptions {
+                    by,
+                    ..super::MergeAsofOptions::new()
+                };
+                let result = super::merge_asof_on_with_options(
+                    &left,
+                    &right,
+                    "t",
+                    "u",
+                    super::AsofDirection::Backward,
+                    options,
+                )
+                .unwrap();
+                assert!(result.columns["v"].values()[0].is_missing());
+                assert_eq!(result.columns["v"].values()[1], Scalar::Float64(10.0));
+            }
+        }
+    }
+
+    #[test]
+    fn merge_asof_grouped_datetimes_span_years_without_losing_nanoseconds() {
+        let frame = |key: &str, times: Vec<i64>| {
+            let mut columns = ColumnStore::new();
+            columns.insert(
+                key.to_owned(),
+                Column::from_temporal_nanos(DType::datetime64_naive(), times),
+            );
+            columns.insert("g".to_owned(), Column::from_i64_values(vec![1, 1]));
+            columns.insert("v".to_owned(), Column::from_i64_values(vec![10, 20]));
+            fp_frame::DataFrame::new_with_column_order(
+                Index::new_known_unique_int64_unit_range(0, 2),
+                columns,
+                vec![key.to_owned(), "g".to_owned(), "v".to_owned()],
+            )
+            .unwrap()
+        };
+        let left = frame("t", vec![1, 100_000_000_000_000_001]);
+        let right = frame("u", vec![2, 100_000_000_000_000_002]);
+        let result = super::merge_asof_on_with_options(
+            &left,
+            &right,
+            "t",
+            "u",
+            super::AsofDirection::Backward,
+            super::MergeAsofOptions::new().by(vec!["g".to_owned()]),
+        )
+        .unwrap();
+        assert!(result.columns["v_y"].values()[0].is_missing());
+        assert_eq!(result.columns["v_y"].values()[1], Scalar::Float64(10.0));
+    }
+
+    #[test]
+    fn merge_asof_rejects_incomplete_or_conflicting_group_key_options() {
+        let frame = fp_frame::DataFrame::from_dict(
+            &["t", "g"],
+            vec![("t", vec![Scalar::Int64(1)]), ("g", vec![Scalar::Int64(1)])],
+        )
+        .unwrap();
+        for options in [
+            super::MergeAsofOptions {
+                left_by: Some(vec!["g".to_owned()]),
+                ..super::MergeAsofOptions::new()
+            },
+            super::MergeAsofOptions {
+                left_by: Some(vec!["g".to_owned()]),
+                right_by: Some(vec![]),
+                ..super::MergeAsofOptions::new()
+            },
+            super::MergeAsofOptions {
+                by: Some(vec!["g".to_owned()]),
+                right_by: Some(vec!["g".to_owned()]),
+                ..super::MergeAsofOptions::new()
+            },
+        ] {
+            assert!(
+                super::merge_asof_with_options(
+                    &frame,
+                    &frame,
+                    "t",
+                    super::AsofDirection::Backward,
+                    options
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn merge_asof_gather_preserves_float32_with_and_without_unmatched_rows() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["t"],
+            vec![("t", vec![Scalar::Int64(1), Scalar::Int64(3)])],
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict(
+            &["u", "v"],
+            vec![
+                ("u", vec![Scalar::Int64(2), Scalar::Int64(4)]),
+                ("v", vec![Scalar::Float64(1.25), Scalar::Float64(2.5)]),
+            ],
+        )
+        .unwrap();
+        let source = right
+            .column("v")
+            .unwrap()
+            .cast_to_width(fp_types::NumericWidth::Float32, false)
+            .unwrap();
+        let right = right.with_column("v", source).unwrap();
+        for direction in [
+            super::AsofDirection::Backward,
+            super::AsofDirection::Forward,
+        ] {
+            let merged = super::merge_asof_on_with_options(
+                &left,
+                &right,
+                "t",
+                "u",
+                direction,
+                super::MergeAsofOptions::new(),
+            )
+            .unwrap();
+            let result = &merged.columns["v"];
+            assert_eq!(result.dtype(), DType::Float64);
+            assert_eq!(result.width(), Some(fp_types::NumericWidth::Float32));
+            if direction == super::AsofDirection::Backward {
+                assert!(result.values()[0].is_missing());
+                assert_eq!(result.values()[1], Scalar::Float64(1.25));
+            } else {
+                assert_eq!(
+                    result.values(),
+                    &[Scalar::Float64(1.25), Scalar::Float64(2.5)]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn merge_asof_backward() {
         use super::DataFrameMergeExt;
 
@@ -22175,6 +22543,103 @@ mod tests {
             &[Scalar::Int64(1), Scalar::Int64(1), Scalar::Int64(2)]
         );
         assert_eq!(frame.column("s_y").unwrap().dtype(), DType::Float64);
+    }
+
+    #[test]
+    fn merge_ordered_ffill_preserves_missing_source_cells() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["k", "value", "row"],
+            vec![
+                ("k", vec![1.into(), 3.into(), 5.into()]),
+                (
+                    "value",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(3.0),
+                    ],
+                ),
+                ("row", vec![10.into(), 30.into(), 50.into()]),
+            ],
+        )
+        .unwrap();
+        let right =
+            fp_frame::DataFrame::from_dict(&["k"], vec![("k", vec![2.into(), 4.into(), 6.into()])])
+                .unwrap();
+        let merged = super::merge_ordered(&left, &right, &["k"], Some("ffill")).unwrap();
+        assert_eq!(
+            merged.columns["k"].values(),
+            &[1.into(), 2.into(), 3.into(), 4.into(), 5.into(), 6.into()],
+        );
+        let values = merged.columns["value"].values();
+        assert_eq!(values[0], Scalar::Float64(1.0));
+        assert_eq!(values[1], Scalar::Float64(1.0));
+        assert!(values[2].is_missing());
+        assert!(values[3].is_missing());
+        assert_eq!(values[4], Scalar::Float64(3.0));
+        assert_eq!(values[5], Scalar::Float64(3.0));
+        assert_eq!(
+            merged.columns["row"].values(),
+            &[
+                10.into(),
+                10.into(),
+                30.into(),
+                30.into(),
+                50.into(),
+                50.into()
+            ],
+        );
+    }
+
+    #[test]
+    fn merge_ordered_separate_keys_and_join_directions() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["a", "value"],
+            vec![
+                ("a", vec![3.into(), 1.into()]),
+                ("value", vec![30.into(), 10.into()]),
+            ],
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict(
+            &["b", "value"],
+            vec![
+                ("b", vec![2.into(), 3.into()]),
+                ("value", vec![20.into(), 300.into()]),
+            ],
+        )
+        .unwrap();
+        for (how, rows) in [
+            (JoinType::Outer, 3),
+            (JoinType::Left, 2),
+            (JoinType::Right, 2),
+            (JoinType::Inner, 1),
+        ] {
+            let result = super::merge_ordered_with_options(
+                &left,
+                &right,
+                &["a"],
+                &["b"],
+                how,
+                Some("ffill"),
+                super::MergeExecutionOptions {
+                    suffixes: Some([Some("_left".to_owned()), Some("_right".to_owned())]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(result.index.len(), rows);
+            assert_eq!(result.column_order, ["a", "value_left", "b", "value_right"]);
+            if how == JoinType::Outer {
+                assert_eq!(
+                    result.columns["a"].values(),
+                    &[1.into(), 1.into(), 3.into()]
+                );
+                assert_eq!(result.columns["value_left"].dtype(), DType::Int64);
+                assert!(result.columns["b"].values()[0].is_missing());
+                assert_eq!(result.columns["b"].values()[1], Scalar::Float64(2.0));
+            }
+        }
     }
 
     #[test]
