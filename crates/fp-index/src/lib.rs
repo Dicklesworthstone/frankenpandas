@@ -2882,6 +2882,286 @@ pub struct IndexCategories {
     pub ordered: bool,
 }
 
+/// A native snapshot of an [`Index`], including metadata omitted by its
+/// historical serde representation. Names are typed labels, so the integer
+/// name `0` remains distinct from the string name `"0"`.
+///
+/// Deserializing this value does not construct an index. Call [`Self::restore`]
+/// to validate the payload before using it. A snapshot format must preserve
+/// non-finite floating-point labels (for example, with a binary serializer).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IndexSnapshot {
+    #[serde(
+        serialize_with = "snapshot_label_serde::serialize_labels",
+        deserialize_with = "snapshot_label_serde::deserialize_labels"
+    )]
+    labels: Vec<IndexLabel>,
+    #[serde(
+        serialize_with = "snapshot_label_serde::serialize_name",
+        deserialize_with = "snapshot_label_serde::deserialize_name"
+    )]
+    name: Option<IndexLabel>,
+    row_multiindex: Option<MultiIndexSnapshot>,
+    tz: Option<String>,
+    freq: Option<String>,
+    range: Option<(i64, i64, i64)>,
+    declared: Option<DeclaredDtype>,
+    categories: Option<IndexCategoriesSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IndexCategoriesSnapshot {
+    #[serde(
+        serialize_with = "snapshot_label_serde::serialize_labels",
+        deserialize_with = "snapshot_label_serde::deserialize_labels"
+    )]
+    categories: Vec<IndexLabel>,
+    ordered: bool,
+}
+
+/// Native tuple labels use the core's IndexTuple host wrapper. They have an
+/// explicit recursive wire form; arbitrary host objects still fail through
+/// ObjectValue's serializer. Borrow labels while writing instead of copying a
+/// second index-sized vector just for serialization.
+mod snapshot_label_serde {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeSeq};
+
+    use super::IndexLabel;
+
+    #[derive(Serialize)]
+    #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+    enum LabelRef<'a> {
+        Label(&'a IndexLabel),
+        Tuple(LabelsRef<'a>),
+    }
+
+    impl<'a> LabelRef<'a> {
+        fn new(label: &'a IndexLabel) -> Self {
+            match label.as_tuple() {
+                Some(items) => Self::Tuple(LabelsRef(items)),
+                None => Self::Label(label),
+            }
+        }
+    }
+
+    struct LabelsRef<'a>(&'a [IndexLabel]);
+
+    impl Serialize for LabelsRef<'_> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            let mut sequence = serializer.serialize_seq(Some(self.0.len()))?;
+            for label in self.0 {
+                sequence.serialize_element(&LabelRef::new(label))?;
+            }
+            sequence.end()
+        }
+    }
+
+    #[derive(Deserialize)]
+    #[serde(
+        tag = "kind",
+        content = "value",
+        rename_all = "snake_case",
+        deny_unknown_fields
+    )]
+    enum Label {
+        Label(IndexLabel),
+        Tuple(Vec<Self>),
+    }
+
+    impl Label {
+        fn restore(self) -> IndexLabel {
+            match self {
+                Self::Label(label) => label,
+                Self::Tuple(items) => {
+                    IndexLabel::tuple(items.into_iter().map(Self::restore).collect())
+                }
+            }
+        }
+    }
+
+    pub(super) fn serialize_labels<S: Serializer>(
+        labels: &[IndexLabel],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        LabelsRef(labels).serialize(serializer)
+    }
+
+    pub(super) fn deserialize_labels<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<IndexLabel>, D::Error> {
+        Ok(Vec::<Label>::deserialize(deserializer)?
+            .into_iter()
+            .map(Label::restore)
+            .collect())
+    }
+
+    #[allow(clippy::ref_option, reason = "serde's field adapter takes a reference")]
+    pub(super) fn serialize_name<S: Serializer>(
+        name: &Option<IndexLabel>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        name.as_ref().map(LabelRef::new).serialize(serializer)
+    }
+
+    pub(super) fn deserialize_name<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<IndexLabel>, D::Error> {
+        Ok(Option::<Label>::deserialize(deserializer)?.map(Label::restore))
+    }
+
+    pub(super) fn serialize_names<S: Serializer>(
+        names: &[Option<IndexLabel>],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let mut sequence = serializer.serialize_seq(Some(names.len()))?;
+        for name in names {
+            sequence.serialize_element(&name.as_ref().map(LabelRef::new))?;
+        }
+        sequence.end()
+    }
+
+    pub(super) fn deserialize_names<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<Option<IndexLabel>>, D::Error> {
+        Ok(Vec::<Option<Label>>::deserialize(deserializer)?
+            .into_iter()
+            .map(|name| name.map(Label::restore))
+            .collect())
+    }
+}
+
+impl IndexSnapshot {
+    fn validate(&self) -> Result<(), IndexError> {
+        if let Some(declared) = self.declared
+            && !self
+                .labels
+                .iter()
+                .all(|label| snapshot_dtype_holds(declared, label))
+        {
+            return Err(IndexError::InvalidArgument(format!(
+                "native index snapshot labels do not match declared dtype {}",
+                declared.name()
+            )));
+        }
+        validate_snapshot_zone(&self.labels, self.tz.as_deref())?;
+        if let Some((start, stop, step)) = self.range {
+            let range = RangeIndex::new(start, stop, step)?;
+            if range.len() != self.labels.len() {
+                return Err(IndexError::LengthMismatch {
+                    expected: range.len(),
+                    actual: self.labels.len(),
+                    context: "native index snapshot range length".to_owned(),
+                });
+            }
+            // Checking just the endpoints would accept [0, 99, 2] as range(3).
+            if self.labels.iter().enumerate().any(|(position, label)| {
+                let expected = i128::from(start) + position as i128 * i128::from(step);
+                !matches!(label, IndexLabel::Int64(value) if i128::from(*value) == expected)
+            }) {
+                return Err(IndexError::InvalidArgument(
+                    "native index snapshot range does not match its labels".to_owned(),
+                ));
+            }
+        }
+        if let Some(categories) = &self.categories {
+            let known: FxHashSet<&IndexLabel> = categories.categories.iter().collect();
+            if !self
+                .labels
+                .iter()
+                .all(|label| label.is_missing() || known.contains(label))
+            {
+                return Err(IndexError::InvalidArgument(
+                    "native categorical index snapshot contains a label outside its categories"
+                        .to_owned(),
+                ));
+            }
+        }
+        if let Some(multi) = &self.row_multiindex {
+            multi.validate()?;
+            if multi.len() != self.labels.len() {
+                return Err(IndexError::LengthMismatch {
+                    expected: self.labels.len(),
+                    actual: multi.len(),
+                    context: "native index snapshot row MultiIndex height".to_owned(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Restore the labels and all axis metadata after checking their consistency.
+    ///
+    /// # Errors
+    /// Rejects invalid dtype, range, category, timezone, or row-level metadata.
+    pub fn restore(self) -> Result<Index, IndexError> {
+        self.validate()?;
+        let mut index = Index::new(self.labels)
+            .set_names(self.name.map(LabelName::typed))
+            .with_tz(self.tz.as_deref())?
+            .with_freq(self.freq)
+            .with_range_span(self.range)
+            .with_declared_dtype(self.declared)
+            .with_categories(self.categories.map(|categories| IndexCategories {
+                categories: categories.categories,
+                ordered: categories.ordered,
+            }))?;
+        if let Some(multi) = self.row_multiindex {
+            index = index.with_row_multiindex(multi.restore()?)?;
+        }
+        Ok(index)
+    }
+}
+
+fn snapshot_dtype_holds(dtype: DeclaredDtype, label: &IndexLabel) -> bool {
+    use fp_types::NullKind;
+    match dtype {
+        DeclaredDtype::Object => true,
+        DeclaredDtype::Int64 => matches!(label, IndexLabel::Int64(_)),
+        DeclaredDtype::Width(width) if !width.is_float() => {
+            matches!(label, IndexLabel::Int64(value) if width.holds_int(*value))
+        }
+        DeclaredDtype::Float64 | DeclaredDtype::Width(_) => {
+            matches!(
+                label,
+                IndexLabel::Float64(_) | IndexLabel::Null(NullKind::NaN)
+            )
+        }
+        DeclaredDtype::Bool => matches!(label, IndexLabel::Bool(_)),
+        DeclaredDtype::Datetime64 => {
+            matches!(
+                label,
+                IndexLabel::Datetime64(_) | IndexLabel::Null(NullKind::NaT)
+            )
+        }
+        DeclaredDtype::Timedelta64 => {
+            matches!(
+                label,
+                IndexLabel::Timedelta64(_) | IndexLabel::Null(NullKind::NaT)
+            )
+        }
+        DeclaredDtype::Masked(masked) => masked.holds(label),
+    }
+}
+
+fn validate_snapshot_zone(labels: &[IndexLabel], zone: Option<&str>) -> Result<(), IndexError> {
+    if let Some(zone) = zone {
+        fp_types::tz_validate(zone)?;
+        if !labels.iter().all(|label| {
+            matches!(
+                label,
+                IndexLabel::Datetime64(_) | IndexLabel::Null(fp_types::NullKind::NaT)
+            )
+        }) {
+            return Err(IndexError::InvalidArgument(
+                "native index snapshot timezone requires datetime labels".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A dtype an [`Index`] is declared with where its labels alone read
 /// another: pandas' `Index([1, 2], dtype=object)` holds the ints 1 and 2
 /// under the object dtype (they became the strings '1' and '2';
@@ -3188,6 +3468,32 @@ fn saturating_usize_sum(values: impl IntoIterator<Item = usize>) -> usize {
 }
 
 impl Index {
+    /// Capture labels, typed names, and all persistent axis metadata.
+    /// Runtime lookup caches and label identities are rebuilt on restoration.
+    ///
+    /// # Errors
+    /// Rejects inconsistent metadata or a MultiIndex too large for its row codes.
+    pub fn snapshot(&self) -> Result<IndexSnapshot, IndexError> {
+        let snapshot = IndexSnapshot {
+            labels: self.labels().to_vec(),
+            name: self.name().map(LabelName::label),
+            row_multiindex: self
+                .row_multiindex()
+                .map(MultiIndex::snapshot)
+                .transpose()?,
+            tz: self.tz().map(str::to_owned),
+            freq: self.freq().map(str::to_owned),
+            range: self.range,
+            declared: self.declared_dtype(),
+            categories: self.categories().map(|categories| IndexCategoriesSnapshot {
+                categories: categories.categories.clone(),
+                ordered: categories.ordered,
+            }),
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
     #[must_use]
     pub fn new(labels: Vec<IndexLabel>) -> Self {
         Self::from_labels(IndexLabels::new(labels))
@@ -23859,6 +24165,123 @@ pub struct MultiIndex {
     tuple_lookup: Arc<OnceLock<Option<TupleLookup>>>,
 }
 
+/// A native snapshot of a [`MultiIndex`]. Full catalogs and row codes retain
+/// unused levels and their declared order, unlike expanded-row serialization.
+/// Typed level names, timezone, width and missing-label ordering are preserved.
+/// Call [`Self::restore`] to validate deserialized data before using it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MultiIndexSnapshot {
+    levels: Vec<MultiIndexLevelSnapshot>,
+    #[serde(
+        serialize_with = "snapshot_label_serde::serialize_names",
+        deserialize_with = "snapshot_label_serde::deserialize_names"
+    )]
+    names: Vec<Option<IndexLabel>>,
+    missing_is_a_level: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MultiIndexLevelSnapshot {
+    #[serde(
+        serialize_with = "snapshot_label_serde::serialize_labels",
+        deserialize_with = "snapshot_label_serde::deserialize_labels"
+    )]
+    catalog: Vec<IndexLabel>,
+    codes: Vec<u32>,
+    declared: bool,
+    zone: Option<String>,
+    width: Option<NumericWidth>,
+}
+
+impl MultiIndexSnapshot {
+    fn len(&self) -> usize {
+        self.levels.first().map_or(0, |level| level.codes.len())
+    }
+
+    fn validate(&self) -> Result<(), IndexError> {
+        if self.names.len() != self.levels.len() {
+            return Err(IndexError::LengthMismatch {
+                expected: self.levels.len(),
+                actual: self.names.len(),
+                context: "native MultiIndex snapshot names".to_owned(),
+            });
+        }
+        let len = self.len();
+        for level in &self.levels {
+            if level.codes.len() != len {
+                return Err(IndexError::LengthMismatch {
+                    expected: len,
+                    actual: level.codes.len(),
+                    context: "native MultiIndex snapshot level height".to_owned(),
+                });
+            }
+            if let Some(&code) = level
+                .codes
+                .iter()
+                .find(|&&code| code as usize >= level.catalog.len())
+            {
+                return Err(IndexError::OutOfBounds {
+                    position: code as usize,
+                    length: level.catalog.len(),
+                });
+            }
+            if let Some(zone) = &level.zone {
+                fp_types::tz_validate(zone)?;
+                if !level
+                    .catalog
+                    .iter()
+                    .all(|label| label.is_missing() || matches!(label, IndexLabel::Datetime64(_)))
+                {
+                    return Err(IndexError::InvalidArgument(
+                        "native MultiIndex snapshot timezone requires datetime level labels"
+                            .to_owned(),
+                    ));
+                }
+            }
+            if let Some(width) = level.width
+                && !level.catalog.iter().all(|label| {
+                    label.is_missing() || snapshot_dtype_holds(DeclaredDtype::Width(width), label)
+                })
+            {
+                return Err(IndexError::InvalidArgument(
+                    "native MultiIndex snapshot width does not match its level labels".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Restore catalog membership, row codes and all persistent level metadata.
+    ///
+    /// # Errors
+    /// Rejects mismatched names/heights, out-of-range codes and invalid level
+    /// timezone or numeric-width metadata before constructing lookup engines.
+    pub fn restore(self) -> Result<MultiIndex, IndexError> {
+        self.validate()?;
+        let names = self
+            .names
+            .into_iter()
+            .map(|name| name.map(LabelName::typed))
+            .collect();
+        // The checks above establish all invariants required by Level::from_codes.
+        // Rebuild caches rather than accepting serialized cached lookup state.
+        let levels = self
+            .levels
+            .into_iter()
+            .map(|level| {
+                Level::from_codes(Arc::new(level.catalog), CodesWindow::from(level.codes))
+                    .declared(level.declared)
+                    .zoned(level.zone.map(Arc::from))
+                    .with_width(level.width)
+            })
+            .collect();
+        Ok(MultiIndex::from_shared_levels_and_names(levels, names)
+            .with_missing_as_level(self.missing_is_a_level))
+    }
+}
+
 /// A MultiIndex's full-tuple lookup, as pandas' MultiIndex engine: every
 /// row's tuple -> its positions, built once. A get_loc / `in` of a full
 /// tuple compared every row's labels (`(7, x) in mi` of 200k rows 0.39 ms,
@@ -24588,6 +25011,42 @@ impl PartialEq for MultiIndex {
 }
 
 impl MultiIndex {
+    /// Capture full level catalogs, row codes, typed names and level metadata.
+    ///
+    /// # Errors
+    /// Rejects inconsistent metadata or more rows than the u32 coding supports.
+    pub fn snapshot(&self) -> Result<MultiIndexSnapshot, IndexError> {
+        let levels = self
+            .levels
+            .iter()
+            .map(|level| {
+                let coded = level.codes().ok_or_else(|| {
+                    IndexError::InvalidArgument(
+                        "native MultiIndex snapshot exceeds the u32 row-code limit".to_owned(),
+                    )
+                })?;
+                Ok(MultiIndexLevelSnapshot {
+                    catalog: coded.uniques.as_ref().clone(),
+                    codes: coded.codes.as_slice().to_vec(),
+                    declared: level.declared,
+                    zone: level.zone.as_deref().map(str::to_owned),
+                    width: level.width,
+                })
+            })
+            .collect::<Result<Vec<_>, IndexError>>()?;
+        let snapshot = MultiIndexSnapshot {
+            levels,
+            names: self
+                .names()
+                .iter()
+                .map(|name| name.as_ref().map(LabelName::label))
+                .collect(),
+            missing_is_a_level: self.missing_is_a_level(),
+        };
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
     fn from_levels_and_names(levels: Vec<Vec<IndexLabel>>, names: Vec<Option<LabelName>>) -> Self {
         Self::from_shared_levels_and_names(
             levels.into_iter().map(Level::from_rows).collect(),
@@ -49570,6 +50029,250 @@ mod infer_freq_like_pandas_acelo {
                 IndexLabel::Utf8("c_3".to_owned()),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod native_snapshot_tests {
+    use fp_types::{NullKind, NumericWidth};
+
+    use super::{
+        DeclaredDtype, Index, IndexCategories, IndexLabel, LabelName, MaskedDtype, MultiIndex,
+        OrderedF64,
+    };
+
+    fn text(value: &str) -> IndexLabel {
+        IndexLabel::Utf8(value.to_owned())
+    }
+
+    fn assert_multi_metadata(actual: &MultiIndex, expected: &MultiIndex) {
+        assert_eq!(actual.nlevels(), expected.nlevels());
+        assert_eq!(actual.len(), expected.len());
+        assert_eq!(actual.names(), expected.names());
+        assert_eq!(actual.codes(), expected.codes());
+        assert_eq!(actual.missing_is_a_level(), expected.missing_is_a_level());
+        for level in 0..expected.nlevels() {
+            assert_eq!(actual.level_codes(level), expected.level_codes(level));
+            assert_eq!(actual.level_labels(level), expected.level_labels(level));
+            assert_eq!(
+                actual.declared_level_order(level),
+                expected.declared_level_order(level)
+            );
+            assert_eq!(actual.level_zone(level), expected.level_zone(level));
+            assert_eq!(actual.level_width(level), expected.level_width(level));
+        }
+    }
+
+    #[test]
+    fn native_index_snapshot_preserves_categorical_and_typed_name() {
+        let original = Index::new(vec![text("a"), text("b"), IndexLabel::Null(NullKind::Null)])
+            .set_name(LabelName::typed(IndexLabel::Int64(0)))
+            .with_declared_dtype(Some(DeclaredDtype::Object))
+            .with_categories(Some(IndexCategories {
+                categories: vec![text("b"), text("a"), text("unused")],
+                ordered: true,
+            }))
+            .unwrap();
+        let restored = original.snapshot().unwrap().restore().unwrap();
+        assert_eq!(restored.labels(), original.labels());
+        assert_eq!(restored.name().unwrap().label(), IndexLabel::Int64(0));
+        assert_eq!(restored.categories(), original.categories());
+        assert_eq!(restored.declared_dtype(), original.declared_dtype());
+        assert_ne!(restored.label_identity, original.label_identity);
+    }
+
+    #[test]
+    fn native_index_snapshot_preserves_range_and_empty_dtype() {
+        let name = LabelName::typed(IndexLabel::tuple(vec![
+            text("axis"),
+            IndexLabel::tuple(vec![IndexLabel::Int64(7), IndexLabel::Bool(true)]),
+        ]));
+        for (start, stop, step) in [(5, -3, -2), (1, 8, 3), (3, 1, 1), (0, 0, 1)] {
+            let original = Index::from_range(start, stop, step).set_name(&name);
+            let restored = original.snapshot().unwrap().restore().unwrap();
+            assert_eq!(restored.labels(), original.labels());
+            assert_eq!(restored.range_span(), Some((start, stop, step)));
+            assert_eq!(restored.name(), original.name());
+        }
+        let original = Index::new(Vec::new())
+            .with_declared_dtype(Some(DeclaredDtype::Width(NumericWidth::Int16)));
+        let restored = original.snapshot().unwrap().restore().unwrap();
+        assert!(restored.is_empty());
+        assert_eq!(restored.dtype(), "int16");
+        assert_eq!(restored.width(), Some(NumericWidth::Int16));
+    }
+
+    #[test]
+    fn native_index_snapshot_preserves_temporal_and_masked_float_metadata() {
+        let original = Index::from_datetime64(vec![1_700_000_000_000_000_001, i64::MIN])
+            .with_tz(Some("America/New_York"))
+            .unwrap()
+            .with_freq(Some("ns".to_owned()))
+            .set_name(LabelName::typed(IndexLabel::Bool(true)));
+        let restored = original.snapshot().unwrap().restore().unwrap();
+        assert_eq!(restored.labels(), original.labels());
+        assert_eq!(restored.tz(), Some("America/New_York"));
+        assert_eq!(restored.freq(), Some("ns"));
+        assert_eq!(restored.name(), original.name());
+
+        let original = Index::new(vec![
+            IndexLabel::Float64(OrderedF64(f64::NAN)),
+            IndexLabel::Null(NullKind::Null),
+            IndexLabel::Float64(OrderedF64(f64::INFINITY)),
+            IndexLabel::Float64(OrderedF64(f64::NEG_INFINITY)),
+            IndexLabel::Float64(OrderedF64(-0.0)),
+        ])
+        .with_masked(MaskedDtype::Float64);
+        let restored = original.snapshot().unwrap().restore().unwrap();
+        assert_eq!(restored.labels(), original.labels());
+        assert_eq!(restored.masked(), Some(MaskedDtype::Float64));
+        assert!(!restored.label_is_missing(&restored.labels()[0]));
+        assert!(restored.label_is_missing(&restored.labels()[1]));
+        let IndexLabel::Float64(negative_zero) = restored.labels()[4] else {
+            panic!("floating label lost its type");
+        };
+        assert_eq!(negative_zero.0.to_bits(), (-0.0_f64).to_bits());
+    }
+
+    #[test]
+    fn native_multiindex_snapshot_preserves_catalogs_and_per_level_metadata() {
+        let original = MultiIndex::from_declared_levels(
+            vec![
+                vec![text("b"), text("a"), text("unused")],
+                vec![
+                    IndexLabel::Datetime64(3),
+                    IndexLabel::Datetime64(1),
+                    IndexLabel::Datetime64(99),
+                    IndexLabel::Null(NullKind::NaT),
+                ],
+                vec![
+                    IndexLabel::Int64(7),
+                    IndexLabel::Int64(1),
+                    IndexLabel::Int64(99),
+                ],
+            ],
+            vec![vec![0, 1, 0], vec![0, 1, 0], vec![0, 1, 0]],
+        )
+        .unwrap()
+        .set_names(vec![
+            Some(LabelName::typed(IndexLabel::Int64(0))),
+            Some(LabelName::typed(IndexLabel::tuple(vec![
+                text("time"),
+                IndexLabel::Int64(1),
+            ]))),
+            None,
+        ])
+        .with_level_order_declared(1, false)
+        .with_level_zone(1, Some("UTC"))
+        .with_level_width(2, Some(NumericWidth::Int16))
+        .with_missing_as_level(true);
+        let restored = original.snapshot().unwrap().restore().unwrap();
+        assert_multi_metadata(&restored, &original);
+        assert_eq!(
+            restored.levels()[0].labels(),
+            &[text("b"), text("a"), text("unused")]
+        );
+        assert!(restored.declared_level_order(1).is_none());
+        // Switching that one level back to declared order still sees the unused
+        // catalog entries; saving only levels() / codes() would have lost them.
+        let declared = restored.with_level_order_declared(1, true);
+        assert_eq!(declared.level_codes(1), original.level_codes(1));
+        assert_eq!(declared.declared_level_order(1).unwrap().len(), 4);
+
+        let row_index = original
+            .to_flat_index("|")
+            .with_row_multiindex(original.clone())
+            .unwrap();
+        let restored = row_index.snapshot().unwrap().restore().unwrap();
+        assert_eq!(restored.labels(), row_index.labels());
+        assert_multi_metadata(restored.row_multiindex().unwrap(), &original);
+    }
+
+    #[test]
+    fn native_multiindex_snapshot_preserves_empty_and_sliced_levels() {
+        let original = MultiIndex::from_declared_levels(
+            vec![
+                vec![text("b"), text("a"), text("unused")],
+                vec![IndexLabel::Int64(9)],
+            ],
+            vec![vec![0, 1, 0], vec![0, 0, 0]],
+        )
+        .unwrap();
+        for source in [original.take(&[1]).unwrap(), original.take(&[]).unwrap()] {
+            let restored = source.snapshot().unwrap().restore().unwrap();
+            assert_multi_metadata(&restored, &source);
+            assert_eq!(restored.declared_level_order(0).unwrap().len(), 3);
+        }
+        let empty = MultiIndex::from_arrays(Vec::new()).unwrap();
+        assert_multi_metadata(&empty.snapshot().unwrap().restore().unwrap(), &empty);
+    }
+
+    #[test]
+    fn native_index_snapshot_rejects_forged_range_and_metadata() {
+        let source = Index::from_range(0, 3, 1).snapshot().unwrap();
+        let mut invalid = source.clone();
+        invalid.labels[1] = IndexLabel::Int64(99);
+        assert!(invalid.restore().is_err());
+        let mut invalid = source.clone();
+        invalid.labels.pop();
+        assert!(invalid.restore().is_err());
+        let mut invalid = source.clone();
+        invalid.range = Some((0, 3, 0));
+        assert!(invalid.restore().is_err());
+        let mut invalid = source.clone();
+        invalid.tz = Some("UTC".to_owned());
+        assert!(invalid.restore().is_err());
+        let mut invalid = source;
+        invalid.declared = Some(DeclaredDtype::Bool);
+        assert!(invalid.restore().is_err());
+
+        let source = Index::new(vec![text("a")])
+            .with_categories(Some(IndexCategories {
+                categories: vec![text("a")],
+                ordered: false,
+            }))
+            .unwrap();
+        let mut invalid = source.snapshot().unwrap();
+        invalid.labels[0] = text("outsider");
+        assert!(invalid.restore().is_err());
+        let mut invalid = source.snapshot().unwrap();
+        invalid.row_multiindex = Some(
+            MultiIndex::from_arrays(vec![vec![text("a"), text("b")]])
+                .unwrap()
+                .snapshot()
+                .unwrap(),
+        );
+        assert!(invalid.restore().is_err());
+    }
+
+    #[test]
+    fn native_multiindex_snapshot_rejects_bad_codes_names_and_level_metadata() {
+        let source = MultiIndex::from_arrays(vec![vec![text("a")], vec![IndexLabel::Int64(1)]])
+            .unwrap()
+            .snapshot()
+            .unwrap();
+        let mut invalid = source.clone();
+        invalid.names.pop();
+        assert!(invalid.restore().is_err());
+        let mut invalid = source.clone();
+        invalid.levels[0].codes[0] = u32::MAX;
+        assert!(invalid.restore().is_err());
+        let mut invalid = source.clone();
+        invalid.levels[0].codes.clear();
+        assert!(invalid.restore().is_err());
+        let mut invalid = source.clone();
+        invalid.levels[0].zone = Some("UTC".to_owned());
+        assert!(invalid.restore().is_err());
+        let mut invalid = source.clone();
+        invalid.levels[1].zone = Some("Not/A_Timezone".to_owned());
+        assert!(invalid.restore().is_err());
+        let mut invalid = source.clone();
+        invalid.levels[0].width = Some(NumericWidth::Int8);
+        assert!(invalid.restore().is_err());
+        let mut invalid = source;
+        invalid.levels[1].catalog[0] = IndexLabel::Int64(256);
+        invalid.levels[1].width = Some(NumericWidth::Int8);
+        assert!(invalid.restore().is_err());
     }
 }
 

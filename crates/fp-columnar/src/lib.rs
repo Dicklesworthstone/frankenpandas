@@ -13607,6 +13607,8 @@ pub enum ColumnError {
     /// dtype (fvsao.23; its int64 view is nanoseconds or ordinals).
     #[error("{0}")]
     UnsupportedCast(String),
+    #[error("invalid column snapshot: {0}")]
+    InvalidSnapshot(String),
     #[error(transparent)]
     Type(#[from] TypeError),
 }
@@ -13850,6 +13852,138 @@ impl Column {
             | DType::Period => Some(ColumnData::from_scalars(values, dtype)),
             _ => None,
         }
+    }
+
+    /// Validate a deserialized native snapshot and rebuild its typed cache.
+    ///
+    /// Unlike [`Self::new`], this does not infer or cast values, normalize
+    /// missing markers, or derive categorical metadata. The stored dtype,
+    /// scalar variants, validity, category order, width and string flag are
+    /// authoritative. In particular, a nullable Float64's valid NaN stays a
+    /// value and remains distinct from a masked-out NA.
+    ///
+    /// Ordinary serde deserialization deliberately remains unchanged; native
+    /// snapshot readers must call this before exposing an untrusted column.
+    pub fn restore_snapshot(mut self) -> Result<Self, ColumnError> {
+        if let DType::Datetime64 { tz: Some(timezone) } = &self.dtype {
+            fp_types::tz_validate(timezone).map_err(|error| {
+                ColumnError::InvalidSnapshot(format!("invalid datetime timezone: {error}"))
+            })?;
+        }
+        if self.values.len() != self.validity.len() {
+            return Err(ColumnError::InvalidSnapshot(format!(
+                "{} values but {} validity bits",
+                self.values.len(),
+                self.validity.len()
+            )));
+        }
+        if let Some(width) = self.width
+            && !width.fits_storage(&self.dtype)
+        {
+            return Err(ColumnError::InvalidSnapshot(format!(
+                "width {width:?} is incompatible with {:?}",
+                self.dtype
+            )));
+        }
+        if self.pandas_string && self.dtype != DType::Utf8 {
+            return Err(ColumnError::InvalidSnapshot(
+                "the pandas string flag requires Utf8 storage".to_owned(),
+            ));
+        }
+        if (self.dtype == DType::Categorical) != self.categorical.is_some() {
+            return Err(ColumnError::InvalidSnapshot(
+                "categorical metadata must be present exactly for Categorical storage".to_owned(),
+            ));
+        }
+
+        // Bucket by the same typed keys used by column set operations, then
+        // compare the actual values: object reprs need not be unique. Using
+        // semantic_eq here would accept distinct nearby float categories.
+        let mut categories: FxHashMap<SetMemberKey<'_>, Vec<&Scalar>> = FxHashMap::default();
+        if let Some(metadata) = &self.categorical {
+            for (position, category) in metadata.categories.iter().enumerate() {
+                if category.is_missing() {
+                    return Err(ColumnError::InvalidSnapshot(format!(
+                        "category {position} is missing"
+                    )));
+                }
+                let key = set_member_key(category).ok_or_else(|| {
+                    ColumnError::InvalidSnapshot(format!("category {position} has no value"))
+                })?;
+                let bucket = categories.entry(key).or_default();
+                if bucket.contains(&category) {
+                    return Err(ColumnError::InvalidSnapshot(format!(
+                        "category {position} duplicates an earlier category"
+                    )));
+                }
+                bucket.push(category);
+            }
+        }
+
+        let values = self.values.as_slice();
+        for (row, value) in values.iter().enumerate() {
+            let valid = self.validity.get(row);
+            let missing = value.is_missing();
+            let valid_nullable_nan = self.dtype == DType::Float64Nullable
+                && matches!(value, Scalar::Float64(number) if number.is_nan());
+            if (valid && missing && !valid_nullable_nan) || (!valid && !missing) {
+                return Err(ColumnError::InvalidSnapshot(format!(
+                    "row {row} has a scalar inconsistent with its validity bit"
+                )));
+            }
+            // Existing columns can hold any of the explicit missing kinds,
+            // including NaT in an integer column. Preserve these exactly.
+            if missing {
+                continue;
+            }
+            let matches_dtype = match &self.dtype {
+                DType::Null | DType::Sparse => false,
+                DType::Bool | DType::BoolNullable => matches!(value, Scalar::Bool(_)),
+                DType::Int64 | DType::Int64Nullable => matches!(value, Scalar::Int64(_)),
+                DType::Float64 | DType::Float64Nullable => matches!(value, Scalar::Float64(_)),
+                // Utf8 is also the object bucket: preserve heterogeneous
+                // values, bytes and lists instead of stringifying them.
+                DType::Utf8 => !self.pandas_string || matches!(value, Scalar::Utf8(_)),
+                DType::Categorical => set_member_key(value)
+                    .and_then(|key| categories.get(&key))
+                    .is_some_and(|bucket| bucket.contains(&value)),
+                DType::Timedelta64 => matches!(value, Scalar::Timedelta64(_)),
+                DType::Datetime64 { .. } => matches!(value, Scalar::Datetime64(_)),
+                DType::Period => matches!(value, Scalar::Period(_)),
+                DType::Interval => matches!(value, Scalar::Interval(_)),
+            };
+            if !matches_dtype {
+                return Err(ColumnError::InvalidSnapshot(format!(
+                    "row {row} is incompatible with {:?} or its metadata",
+                    self.dtype
+                )));
+            }
+            if let Some(width) = self.width {
+                let fits = match value {
+                    Scalar::Int64(number) => width.holds_int(*number),
+                    Scalar::Float64(number) => {
+                        NumericWidth::round_f32(*number).to_bits() == number.to_bits()
+                    }
+                    _ => false,
+                };
+                if !fits {
+                    return Err(ColumnError::InvalidSnapshot(format!(
+                        "row {row} is not confined to width {width:?}"
+                    )));
+                }
+            }
+        }
+
+        // The cache is derived only after validation, without reconstructing
+        // values through a constructor that would change null kinds. Nullable
+        // Float64 needs its cache even for valid NaNs; its explicit mask is
+        // what distinguishes those values from missing rows in typed kernels.
+        self.data = if self.dtype == DType::Float64Nullable {
+            Some(ColumnData::from_scalars(values, self.dtype.clone()))
+        } else {
+            Self::cached_data_for_values(self.dtype.clone(), values)
+        };
+        Ok(self)
     }
 
     fn normalize_missing_for_dtype(value: Scalar, dtype: DType) -> Scalar {
@@ -41668,6 +41802,317 @@ mod tests {
         assert!(column.data.is_some());
         assert!(roundtrip.data.is_none());
         assert_eq!(column, roundtrip);
+    }
+
+    fn column_snapshot_roundtrip(column: &Column) -> Column {
+        let serialized = serde_json::to_vec(column).expect("serialize snapshot column");
+        let deserialized: Column =
+            serde_json::from_slice(&serialized).expect("deserialize snapshot column");
+        assert!(
+            deserialized.data.is_none(),
+            "ordinary serde still skips caches"
+        );
+        let restored = deserialized
+            .restore_snapshot()
+            .expect("restore snapshot column");
+        assert_eq!(
+            serde_json::to_vec(&restored).unwrap(),
+            serialized,
+            "restoring must not normalize values, null kinds or metadata"
+        );
+        restored
+    }
+
+    #[test]
+    fn column_snapshot_preserves_every_dtype_and_missing_kind() {
+        let nulls = vec![
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Null(NullKind::NaT),
+        ];
+        let cases = vec![
+            (DType::Null, nulls.clone()),
+            (DType::Bool, vec![Scalar::Bool(true), nulls[0].clone()]),
+            (
+                DType::BoolNullable,
+                vec![Scalar::Bool(false), nulls[2].clone()],
+            ),
+            (
+                DType::Int64,
+                vec![
+                    Scalar::Int64(i64::MIN),
+                    Scalar::Int64(i64::MAX),
+                    nulls[0].clone(),
+                ],
+            ),
+            (
+                DType::Int64Nullable,
+                vec![
+                    Scalar::Int64(9_007_199_254_740_993),
+                    nulls[1].clone(),
+                    nulls[2].clone(),
+                ],
+            ),
+            (
+                DType::Float64,
+                vec![
+                    Scalar::Float64(-0.0),
+                    Scalar::Float64(f64::INFINITY),
+                    Scalar::Float64(f64::NEG_INFINITY),
+                    Scalar::Float64(f64::NAN),
+                    nulls[1].clone(),
+                    nulls[2].clone(),
+                ],
+            ),
+            (
+                DType::Float64Nullable,
+                vec![Scalar::Float64(1.25), nulls[0].clone()],
+            ),
+            (
+                DType::Utf8,
+                vec![Scalar::Utf8("α".to_owned()), nulls[0].clone()],
+            ),
+            (
+                DType::Categorical,
+                vec![Scalar::Int64(10), nulls[1].clone()],
+            ),
+            (
+                DType::Timedelta64,
+                vec![Scalar::Timedelta64(i64::MAX), nulls[2].clone()],
+            ),
+            (
+                DType::datetime64_tz("America/New_York"),
+                vec![
+                    Scalar::Datetime64(1_700_000_000_000_000_123),
+                    nulls[2].clone(),
+                ],
+            ),
+            (
+                DType::Period,
+                vec![
+                    Scalar::Period(Period::new(5, PeriodFreq::Monthly)),
+                    Scalar::Period(Period::new(6, PeriodFreq::Daily)),
+                    nulls[2].clone(),
+                ],
+            ),
+            (
+                DType::Interval,
+                vec![
+                    Scalar::Interval(Interval::new(0.0, 2.0, IntervalClosed::Both)),
+                    nulls[0].clone(),
+                ],
+            ),
+            (DType::Sparse, nulls),
+        ];
+        for (dtype, values) in cases {
+            let column = Column::new(dtype.clone(), values).expect("typed column");
+            let restored = column_snapshot_roundtrip(&column);
+            assert_eq!(restored.dtype(), dtype);
+            assert_eq!(restored.validity(), column.validity());
+            if dtype == DType::Period {
+                assert!(
+                    restored.data.is_none(),
+                    "mixed period frequencies need scalar storage"
+                );
+            }
+            column_snapshot_roundtrip(&Column::new(dtype, Vec::new()).unwrap());
+        }
+    }
+
+    #[test]
+    fn column_snapshot_preserves_nullable_nan_and_rebuilds_its_cache() {
+        let mut validity = ValidityMask::all_valid(5);
+        validity.set(1, false);
+        let column = Column::from_nullable_f64_values_with_validity(
+            vec![f64::NAN, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.0],
+            validity,
+        );
+        let restored = column_snapshot_roundtrip(&column);
+        let (data, mask) = restored
+            .as_masked_f64_slice()
+            .expect("rebuilt masked cache");
+        assert!(data[0].is_nan());
+        assert!(mask.get(0));
+        assert!(!mask.get(1));
+        assert_eq!(data[2], f64::INFINITY);
+        assert_eq!(data[3], f64::NEG_INFINITY);
+        assert_eq!(data[4].to_bits(), (-0.0_f64).to_bits());
+        assert!(matches!(restored.values()[0], Scalar::Float64(value) if value.is_nan()));
+        assert_eq!(restored.values()[1], Scalar::Null(NullKind::Null));
+        assert_eq!(
+            restored.count(),
+            4,
+            "a valid NaN must still count as a value"
+        );
+    }
+
+    #[test]
+    fn column_snapshot_preserves_object_and_extension_metadata() {
+        let object = Column::from_object_values(vec![
+            Scalar::Int64(9_007_199_254_740_993),
+            Scalar::Bool(true),
+            Scalar::Object(fp_types::ObjectValue::list(vec![
+                Scalar::Null(NullKind::NaT),
+                Scalar::Object(fp_types::ObjectValue::bytes(vec![0, 255])),
+            ])),
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Null(NullKind::NaT),
+        ]);
+        let restored = column_snapshot_roundtrip(&object);
+        assert_eq!(restored.values(), object.values());
+        let string = Column::new(
+            DType::Utf8,
+            vec![
+                Scalar::Utf8("text".to_owned()),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .unwrap()
+        .as_pandas_string();
+        assert!(column_snapshot_roundtrip(&string).is_pandas_string());
+
+        let categories = fp_types::CategoricalMetadata::new(
+            vec![
+                Scalar::Float64(2.0),
+                Scalar::Float64(1.0),
+                Scalar::Float64(1.0 + f64::EPSILON),
+                Scalar::Float64(99.0),
+            ],
+            true,
+        );
+        let categorical = Column::from_categorical_codes(vec![1, 0, -1, 2], categories.clone());
+        let restored = column_snapshot_roundtrip(&categorical);
+        assert_eq!(restored.categorical(), Some(&categories));
+        assert_eq!(restored.values(), categorical.values());
+
+        for width in [
+            fp_types::NumericWidth::Int8,
+            fp_types::NumericWidth::Int16,
+            fp_types::NumericWidth::Int32,
+            fp_types::NumericWidth::UInt8,
+            fp_types::NumericWidth::UInt16,
+            fp_types::NumericWidth::UInt32,
+            fp_types::NumericWidth::UInt64,
+            fp_types::NumericWidth::Float32,
+        ] {
+            for nullable in [false, true] {
+                let source = Column::from_i64_values(vec![0, 17, 100]);
+                let narrowed = source.cast_to_width(width, nullable).unwrap();
+                let restored = column_snapshot_roundtrip(&narrowed);
+                assert_eq!(restored.width(), Some(width));
+                assert_eq!(restored.dtype(), narrowed.dtype());
+            }
+        }
+    }
+
+    #[test]
+    fn column_snapshot_materializes_lazy_values_before_serializing() {
+        let mut mask = ValidityMask::all_valid(3);
+        mask.set(1, false);
+        let columns = vec![
+            Column::from_i64_values_owned(vec![i64::MAX, 2, 3]),
+            Column::from_f64_values_owned(vec![-0.0, 1.25, f64::INFINITY]),
+            Column::from_bool_values(vec![true, false, true]),
+            Column::from_datetime64_values(vec![1, 2, 3]),
+            Column::from_period_values_owned(vec![1, 2, 3], PeriodFreq::Monthly),
+            Column::from_i64_values_with_validity(vec![10, 20, 30], mask.clone()),
+            Column::from_f64_values_with_validity(vec![1.5, 0.0, 2.5], mask),
+            Column::from_categorical_codes(
+                vec![0, -1, 1],
+                fp_types::CategoricalMetadata::new(
+                    vec![Scalar::Utf8("b".to_owned()), Scalar::Utf8("a".to_owned())],
+                    true,
+                ),
+            ),
+        ];
+        for column in columns {
+            assert!(!column.scalar_cache_is_materialized());
+            let restored = column_snapshot_roundtrip(&column);
+            assert!(column.scalar_cache_is_materialized());
+            assert_eq!(restored.values(), column.values());
+            assert_eq!(restored.validity(), column.validity());
+        }
+    }
+
+    fn assert_invalid_column_snapshot(column: Column) {
+        let encoded = serde_json::to_vec(&column).unwrap();
+        let decoded: Column = serde_json::from_slice(&encoded).unwrap();
+        assert!(matches!(
+            decoded.restore_snapshot(),
+            Err(ColumnError::InvalidSnapshot(_))
+        ));
+    }
+
+    #[test]
+    fn column_snapshot_rejects_inconsistent_dtype_mask_and_width() {
+        let mut short_mask = Column::from_i64_values(vec![1, 2]);
+        short_mask.validity = ValidityMask::all_valid(1);
+        assert_invalid_column_snapshot(short_mask);
+        let mut hidden_value = Column::from_i64_values(vec![1]);
+        hidden_value.validity = ValidityMask::all_invalid(1);
+        assert_invalid_column_snapshot(hidden_value);
+        let mut valid_null = Column::new(DType::Int64, vec![Scalar::Null(NullKind::Null)]).unwrap();
+        valid_null.validity = ValidityMask::all_valid(1);
+        assert_invalid_column_snapshot(valid_null);
+        let mut numpy_nan = Column::from_f64_values(vec![f64::NAN]);
+        numpy_nan.validity = ValidityMask::all_valid(1);
+        assert_invalid_column_snapshot(numpy_nan);
+        let mut wrong_dtype = Column::from_i64_values(vec![1]);
+        wrong_dtype.dtype = DType::Bool;
+        assert_invalid_column_snapshot(wrong_dtype);
+        for values in [
+            Vec::new(),
+            vec![Scalar::Datetime64(123)],
+            vec![Scalar::Null(NullKind::NaT)],
+        ] {
+            let mut invalid_timezone = Column::new(DType::datetime64_naive(), values).unwrap();
+            invalid_timezone.dtype = DType::datetime64_tz("Not/A_Timezone");
+            assert_invalid_column_snapshot(invalid_timezone);
+        }
+        let mut wrong_width = Column::from_bool_values(vec![true]);
+        wrong_width.width = Some(fp_types::NumericWidth::Int8);
+        assert_invalid_column_snapshot(wrong_width);
+        let mut out_of_range = Column::from_i64_values(vec![256]);
+        out_of_range.width = Some(fp_types::NumericWidth::UInt8);
+        assert_invalid_column_snapshot(out_of_range);
+        let mut unrounded = Column::from_f64_values(vec![0.1]);
+        unrounded.width = Some(fp_types::NumericWidth::Float32);
+        assert_invalid_column_snapshot(unrounded);
+        let mut wrong_string_storage = Column::from_i64_values(vec![1]);
+        wrong_string_storage.pandas_string = true;
+        assert_invalid_column_snapshot(wrong_string_storage);
+        let string_with_number =
+            Column::from_object_values(vec![Scalar::Int64(1)]).as_pandas_string();
+        assert_invalid_column_snapshot(string_with_number);
+    }
+
+    #[test]
+    fn column_snapshot_rejects_corrupt_category_metadata() {
+        let categorical = || Column::new(DType::Categorical, vec![Scalar::Int64(1)]).unwrap();
+        let mut missing_metadata = categorical();
+        missing_metadata.categorical = None;
+        assert_invalid_column_snapshot(missing_metadata);
+        let mut wrong_storage = categorical();
+        wrong_storage.dtype = DType::Int64;
+        assert_invalid_column_snapshot(wrong_storage);
+        for categories in [
+            vec![Scalar::Int64(1), Scalar::Int64(1)],
+            vec![Scalar::Int64(1), Scalar::Null(NullKind::Null)],
+            vec![Scalar::Int64(2)],
+        ] {
+            assert_invalid_column_snapshot(
+                categorical()
+                    .with_categorical(Some(fp_types::CategoricalMetadata::new(categories, false))),
+            );
+        }
+        let near = Column::new(DType::Categorical, vec![Scalar::Float64(1.0)])
+            .unwrap()
+            .with_categorical(Some(fp_types::CategoricalMetadata::new(
+                vec![Scalar::Float64(1.0 + f64::EPSILON)],
+                false,
+            )));
+        assert_invalid_column_snapshot(near);
     }
 
     #[test]
