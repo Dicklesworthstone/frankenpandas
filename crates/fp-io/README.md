@@ -22,6 +22,26 @@ workspace.
 SQL backend expansion (PostgreSQL / MySQL) is tracked under
 br-frankenpandas-fd90 (slices 2-3 open).
 
+## Native Pickle and HDF snapshots
+
+`write_pickle_bytes` and the file/trait variants write a versioned
+`frankenpandas.dataframe.v2` native snapshot. The format retains exact
+column dtypes, scalar and missing-value kinds, validity masks, categorical
+catalogs, numeric widths, string-extension markers, sparse storage, and
+row/column axis metadata. Columns are stored in positional order, including
+duplicate column names. HDF stores the same envelope under its configured key.
+
+The reader validates stored columns and axes before exposing the frame.
+Unknown format versions and inconsistent state fail with an IO error.
+These files are FrankenPandas snapshots, not arbitrary pandas object pickles
+or PyTables-compatible HDF tables.
+
+Existing `frankenpandas.dataframe.v1` envelopes remain readable through
+their original JSON Split inference. Their absent dtype/null metadata cannot
+be reconstructed. New v2 files require a v2-aware reader; older readers refuse
+the new marker. Public JSON Split reads and writes retain their existing
+pandas-oriented inference independently of the native snapshot format.
+
 ## When to depend on fp-io directly
 
 Most users should depend on the umbrella `frankenpandas` crate

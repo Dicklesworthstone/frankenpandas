@@ -3953,37 +3953,139 @@ pub fn read_html_str_with_options(
 }
 
 const PICKLE_FORMAT_KEY: &str = "__frankenpandas_pickle_format";
-const PICKLE_FORMAT_VERSION: &str = "frankenpandas.dataframe.v1";
+const PICKLE_FORMAT_VERSION: &str = "frankenpandas.dataframe.v2";
+const PICKLE_LEGACY_FORMAT_VERSION: &str = "frankenpandas.dataframe.v1";
 const PICKLE_ORIENT_KEY: &str = "orient";
 const PICKLE_PAYLOAD_KEY: &str = "payload";
 
+/// The native wire format owns axes but can borrow columns while writing.
+/// A sequence of named columns, rather than a map, retains duplicate columns.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeFrameSnapshot<C> {
+    index: fp_index::IndexSnapshot,
+    row_multiindex: Option<fp_index::MultiIndexSnapshot>,
+    columns: Vec<(String, C)>,
+    column_axis: fp_index::IndexSnapshot,
+    column_multiindex: Option<fp_index::MultiIndexSnapshot>,
+    allows_duplicate_labels: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativePickleSnapshot<C> {
+    #[serde(rename = "__frankenpandas_pickle_format")]
+    format: String,
+    payload: NativeFrameSnapshot<C>,
+}
+
+impl<'a> NativeFrameSnapshot<&'a Column> {
+    fn capture(frame: &'a DataFrame) -> Result<Self, IoError> {
+        let column_axis = Index::new(frame.column_labels())
+            .set_names(frame.columns_name().cloned())
+            .with_range_span(frame.column_range_span())
+            .with_tz(frame.columns_tz())?
+            .snapshot()?;
+        let columns = frame
+            .column_names()
+            .into_iter()
+            .enumerate()
+            .map(|(position, name)| {
+                let column = frame.column_at(position).ok_or_else(|| {
+                    IoError::Pickle(format!("missing column at position {position}"))
+                })?;
+                Ok((name.clone(), column))
+            })
+            .collect::<Result<Vec<_>, IoError>>()?;
+        Ok(Self {
+            index: frame.index().snapshot()?,
+            row_multiindex: frame
+                .row_multiindex()
+                .map(fp_index::MultiIndex::snapshot)
+                .transpose()?,
+            columns,
+            column_axis,
+            column_multiindex: frame
+                .columns_multiindex()
+                .map(fp_index::MultiIndex::snapshot)
+                .transpose()?,
+            allows_duplicate_labels: frame.flags().allows_duplicate_labels(),
+        })
+    }
+}
+
+impl NativeFrameSnapshot<Column> {
+    fn restore(self) -> Result<DataFrame, IoError> {
+        let axis = self.column_axis.restore()?;
+        // The frame's flat column axis supports these labels, name, timezone
+        // and range. Refuse metadata it cannot retain instead of dropping it.
+        if axis.row_multiindex().is_some()
+            || axis.freq().is_some()
+            || axis.custom_business_day().is_some()
+            || axis.declared_dtype().is_some()
+            || axis.categories().is_some()
+        {
+            return Err(IoError::Pickle(
+                "unsupported metadata in native snapshot column axis".to_owned(),
+            ));
+        }
+
+        let mut columns = Vec::with_capacity(self.columns.len());
+        let mut names = Vec::with_capacity(self.columns.len());
+        for (name, column) in self.columns {
+            names.push(name.clone());
+            columns.push((name, column.restore_snapshot()?));
+        }
+        let mut frame = DataFrame::new_with_column_order(
+            self.index.restore()?,
+            fp_frame::ColumnStore::from_pairs(columns),
+            names,
+        )?
+        .with_column_labels(axis.labels().to_vec())?
+        .with_columns_name(axis.name().cloned())
+        .with_columns_tz(axis.tz().map(str::to_owned));
+        // Typed labels share the frame's storage-key map. Conflicting labels
+        // for a repeated key must not silently overwrite each other.
+        if frame.column_labels() != axis.labels() {
+            return Err(IoError::Pickle(
+                "conflicting typed labels in native snapshot column axis".to_owned(),
+            ));
+        }
+        if let Some(span) = axis.range_span() {
+            frame = frame.with_column_range(span);
+        }
+        if let Some(multiindex) = self.row_multiindex {
+            frame = frame.with_row_multiindex(multiindex.restore()?)?;
+        }
+        if let Some(multiindex) = self.column_multiindex {
+            frame = frame.with_columns_multiindex(Some(multiindex.restore()?))?;
+        }
+        frame
+            .set_flags(Some(self.allows_duplicate_labels))
+            .map_err(IoError::from)
+    }
+}
+
 /// Serialize a DataFrame to Pickle bytes.
 ///
-/// This emits a fail-closed FrankenPandas envelope containing the existing
-/// split-orient DataFrame representation. It is intentionally narrower than
-/// pandas' arbitrary Python-object pickle support.
+/// Writes the typed v2 FrankenPandas snapshot envelope, preserving column
+/// dtypes, missing-value kinds, validity masks and axis metadata. This is a
+/// native snapshot, not an arbitrary pandas Python-object pickle. Readers
+/// predating v2 reject this version rather than infer a lossy representation.
 pub fn write_pickle_bytes_with_options(
     frame: &DataFrame,
     options: &PickleWriteOptions,
 ) -> Result<Vec<u8>, IoError> {
-    let split_json = write_json_string(frame, JsonOrient::Split)?;
-    let split_value = serde_json::from_str::<serde_json::Value>(&split_json)?;
-    let mut envelope = serde_json::Map::new();
-    envelope.insert(
-        PICKLE_FORMAT_KEY.to_owned(),
-        serde_json::Value::String(PICKLE_FORMAT_VERSION.to_owned()),
-    );
-    envelope.insert(
-        PICKLE_ORIENT_KEY.to_owned(),
-        serde_json::Value::String("split".to_owned()),
-    );
-    envelope.insert(PICKLE_PAYLOAD_KEY.to_owned(), split_value);
-
-    serde_pickle::to_vec(
-        &serde_json::Value::Object(envelope),
-        pickle_ser_options(options),
-    )
-    .map_err(|err| IoError::Pickle(err.to_string()))
+    let payload = NativeFrameSnapshot::capture(frame)
+        .map_err(|err| IoError::Pickle(format!("invalid native snapshot: {err}")))?;
+    let envelope = NativePickleSnapshot {
+        format: PICKLE_FORMAT_VERSION.to_owned(),
+        payload,
+    };
+    // Keep the typed payload binary. JSON would erase valid NaNs, non-finite
+    // index labels and the distinction between values and missing markers.
+    serde_pickle::to_vec(&envelope, pickle_ser_options(options))
+        .map_err(|err| IoError::Pickle(err.to_string()))
 }
 
 /// Deserialize a DataFrame from Pickle bytes.
@@ -3993,35 +4095,53 @@ pub fn read_pickle_bytes(input: &[u8]) -> Result<DataFrame, IoError> {
 
 /// Deserialize a DataFrame from Pickle bytes with options.
 ///
-/// Only the versioned FrankenPandas envelope is accepted. Foreign Python
-/// pickles fail closed with [`IoError::Pickle`].
+/// Typed v2 snapshots are validated before constructing columns and axes.
+/// Legacy v1 snapshots retain their original JSON Split inference; dtype and
+/// null metadata absent from those files cannot be recovered. Unknown versions
+/// and foreign Python pickles fail closed with [`IoError::Pickle`].
 pub fn read_pickle_bytes_with_options(
     input: &[u8],
     options: &PickleReadOptions,
 ) -> Result<DataFrame, IoError> {
-    let value = serde_pickle::from_slice::<serde_json::Value>(input, pickle_de_options(options))
+    let value = serde_pickle::value_from_slice(input, pickle_de_options(options))
         .map_err(|err| IoError::Pickle(err.to_string()))?;
-    let envelope = value
-        .as_object()
-        .ok_or_else(|| IoError::Pickle("pickle payload must be an object".to_owned()))?;
-
-    match envelope
-        .get(PICKLE_FORMAT_KEY)
-        .and_then(|value| value.as_str())
-    {
-        Some(PICKLE_FORMAT_VERSION) => {}
-        Some(other) => {
-            return Err(IoError::Pickle(format!(
-                "unsupported FrankenPandas pickle format '{other}'"
-            )));
-        }
-        None => {
+    let serde_pickle::Value::Dict(envelope) = &value else {
+        return Err(IoError::Pickle("pickle payload must be an object".to_owned()));
+    };
+    let format = match envelope.get(&serde_pickle::HashableValue::String(
+        PICKLE_FORMAT_KEY.to_owned(),
+    )) {
+        Some(serde_pickle::Value::String(format)) => format.clone(),
+        _ => {
             return Err(IoError::Pickle(
                 "pickle payload is missing FrankenPandas format marker".to_owned(),
             ));
         }
+    };
+    match format.as_str() {
+        PICKLE_FORMAT_VERSION => {
+            let snapshot: NativePickleSnapshot<Column> = serde_pickle::from_value(value)
+                .map_err(|err| IoError::Pickle(err.to_string()))?;
+            snapshot
+                .payload
+                .restore()
+                .map_err(|err| IoError::Pickle(format!("invalid native snapshot: {err}")))
+        }
+        PICKLE_LEGACY_FORMAT_VERSION => {
+            let legacy = serde_pickle::from_value(value)
+                .map_err(|err| IoError::Pickle(err.to_string()))?;
+            read_legacy_pickle_snapshot(legacy)
+        }
+        other => Err(IoError::Pickle(format!(
+            "unsupported FrankenPandas pickle format '{other}'"
+        ))),
     }
+}
 
+fn read_legacy_pickle_snapshot(value: serde_json::Value) -> Result<DataFrame, IoError> {
+    let envelope = value
+        .as_object()
+        .ok_or_else(|| IoError::Pickle("pickle payload must be an object".to_owned()))?;
     match envelope
         .get(PICKLE_ORIENT_KEY)
         .and_then(|value| value.as_str())
@@ -22506,6 +22626,528 @@ mod tests {
         let wide = "<table><tr><th>a</th></tr><tr><td>1</td><td>2</td></tr></table>";
         let err = read_html_str(wide).expect_err("wide row");
         assert!(matches!(err, IoError::Html(message) if message.contains("row 0")));
+    }
+
+    fn make_typed_snapshot_dataframe() -> DataFrame {
+        let mut mask = ValidityMask::all_valid(5);
+        mask.set(1, false);
+        let columns = BTreeMap::from([
+            (
+                "number".to_owned(),
+                Column::from_nullable_f64_values_with_validity(
+                    vec![
+                        f64::from_bits(0x7ff8_0000_0000_0042),
+                        f64::NAN,
+                        -0.0,
+                        f64::INFINITY,
+                        f64::NEG_INFINITY,
+                    ],
+                    mask,
+                ),
+            ),
+            (
+                "count".to_owned(),
+                Column::new(
+                    DType::Int64Nullable,
+                    vec![
+                        Scalar::Int64(9_007_199_254_740_993),
+                        Scalar::Int64(i64::MIN),
+                        Scalar::Int64(i64::MAX),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Int64(-1),
+                    ],
+                )
+                .unwrap(),
+            ),
+            (
+                "enabled".to_owned(),
+                Column::new(
+                    DType::BoolNullable,
+                    vec![
+                        Scalar::Bool(true),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Bool(false),
+                        Scalar::Bool(true),
+                        Scalar::Bool(false),
+                    ],
+                )
+                .unwrap(),
+            ),
+            (
+                "object".to_owned(),
+                Column::from_object_values(vec![
+                    Scalar::Int64(9_007_199_254_740_993),
+                    Scalar::Null(NullKind::Null),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaT),
+                    Scalar::Object(fp_types::ObjectValue::bytes(vec![0, 255])),
+                ]),
+            ),
+        ]);
+        DataFrame::new_with_column_order(
+            Index::from_range(9, -1, -2)
+                .set_name(fp_index::LabelName::typed(IndexLabel::Int64(0))),
+            columns,
+            vec![
+                "number".to_owned(),
+                "object".to_owned(),
+                "count".to_owned(),
+                "enabled".to_owned(),
+            ],
+        )
+        .unwrap()
+        .with_columns_name(Some(fp_index::LabelName::typed(IndexLabel::Int64(2))))
+        .set_flags(Some(false))
+        .unwrap()
+    }
+
+    fn assert_typed_snapshot_dataframe(actual: &DataFrame, source: &DataFrame) {
+        assert_eq!(
+            actual.column_names(),
+            vec!["number", "object", "count", "enabled"]
+        );
+        assert_eq!(actual.index().range_span(), Some((9, -1, -2)));
+        assert_eq!(actual.index().name().unwrap().label(), IndexLabel::Int64(0));
+        assert_eq!(actual.index().labels(), source.index().labels());
+        assert_eq!(actual.columns_name().unwrap().label(), IndexLabel::Int64(2));
+        assert!(!actual.flags().allows_duplicate_labels());
+        for (name, dtype) in [
+            ("count", DType::Int64Nullable),
+            ("enabled", DType::BoolNullable),
+            ("object", DType::Utf8),
+        ] {
+            let column = actual.column(name).unwrap();
+            assert_eq!(column.dtype(), dtype);
+            assert_eq!(column.values(), source.column(name).unwrap().values());
+            assert_eq!(column.validity(), source.column(name).unwrap().validity());
+        }
+        let number = actual.column("number").unwrap();
+        assert_eq!(number.dtype(), DType::Float64Nullable);
+        let (values, validity) = number.as_masked_f64_slice().unwrap();
+        assert_eq!(values[0].to_bits(), 0x7ff8_0000_0000_0042);
+        assert!(validity.get(0));
+        assert!(!validity.get(1));
+        assert_eq!(values[2].to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(values[3], f64::INFINITY);
+        assert_eq!(values[4], f64::NEG_INFINITY);
+        assert_eq!(number.values()[1], Scalar::Null(NullKind::Null));
+        assert_eq!(number.count(), 4);
+    }
+
+    #[test]
+    fn pickle_typed_roundtrip_preserves_values_null_kinds_and_validity() {
+        let source = make_typed_snapshot_dataframe();
+        for protocol in [PickleProtocol::V2, PickleProtocol::V3] {
+            let bytes = super::write_pickle_bytes_with_options(
+                &source,
+                &PickleWriteOptions { protocol },
+            )
+            .unwrap();
+            let actual = read_pickle_bytes(&bytes).unwrap();
+            assert_typed_snapshot_dataframe(&actual, &source);
+        }
+    }
+
+    #[test]
+    fn pickle_typed_roundtrip_preserves_extension_and_sparse_columns() {
+        let categories = fp_types::CategoricalMetadata::new(
+            vec![
+                Scalar::Utf8("b".to_owned()),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Utf8("unused".to_owned()),
+            ],
+            true,
+        );
+        let sparse_dtype =
+            fp_types::SparseDType::new(DType::Int64, Scalar::Int64(0)).unwrap();
+        let columns = BTreeMap::from([
+            (
+                "category".to_owned(),
+                Column::from_categorical_codes(vec![1, 0, -1, 1], categories.clone()),
+            ),
+            (
+                "narrow".to_owned(),
+                Column::from_i64_values(vec![0, 1, 127, -128])
+                    .cast_to_width(fp_types::NumericWidth::Int8, false)
+                    .unwrap(),
+            ),
+            (
+                "string".to_owned(),
+                Column::new(
+                    DType::Utf8,
+                    vec![
+                        Scalar::Utf8("α".to_owned()),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Utf8("β".to_owned()),
+                        Scalar::Utf8(String::new()),
+                    ],
+                )
+                .unwrap()
+                .as_pandas_string(),
+            ),
+            (
+                "sparse".to_owned(),
+                Column::from_sparse(
+                    fp_columnar::SparseColumn::from_dense(
+                        sparse_dtype.clone(),
+                        vec![
+                            Scalar::Int64(0),
+                            Scalar::Int64(7),
+                            Scalar::Int64(0),
+                            Scalar::Int64(9),
+                        ],
+                    )
+                    .unwrap(),
+                ),
+            ),
+            (
+                "time".to_owned(),
+                Column::new(
+                    DType::datetime64_tz("America/New_York"),
+                    vec![
+                        Scalar::Datetime64(1_700_000_000_000_000_123),
+                        Scalar::Null(NullKind::NaT),
+                        Scalar::Datetime64(1),
+                        Scalar::Datetime64(-1),
+                    ],
+                )
+                .unwrap(),
+            ),
+        ]);
+        let source = DataFrame::new(Index::default_range(4), columns).unwrap();
+        let actual = read_pickle_bytes(&write_pickle_bytes(&source).unwrap()).unwrap();
+        for name in source.column_names() {
+            let expected = source.column(name).unwrap();
+            let decoded = actual.column(name).unwrap();
+            assert_eq!(decoded.dtype(), expected.dtype());
+            assert_eq!(decoded.values(), expected.values());
+            assert_eq!(decoded.validity(), expected.validity());
+        }
+        assert_eq!(actual.column("category").unwrap().categorical(), Some(&categories));
+        assert_eq!(
+            actual.column("narrow").unwrap().width(),
+            Some(fp_types::NumericWidth::Int8)
+        );
+        assert!(actual.column("string").unwrap().is_pandas_string());
+        let backing = actual.column("sparse").unwrap().sparse().unwrap();
+        assert_eq!(backing.indices(), &[1, 3]);
+        assert_eq!(backing.stored_values(), &[Scalar::Int64(7), Scalar::Int64(9)]);
+        assert_eq!(backing.sparse_dtype(), &sparse_dtype);
+    }
+
+    #[test]
+    fn pickle_typed_roundtrip_keeps_duplicate_columns_by_position() {
+        let source = DataFrame::new_with_column_order(
+            Index::default_range(2),
+            fp_frame::ColumnStore::from_pairs([
+                ("0".to_owned(), Column::from_i64_values(vec![10, 11])),
+                ("0".to_owned(), Column::from_bool_values(vec![true, false])),
+                ("1".to_owned(), Column::from_i64_values(vec![20, 21])),
+            ]),
+            vec!["0".to_owned(), "0".to_owned(), "1".to_owned()],
+        )
+        .unwrap()
+        .with_column_labels(vec![
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(0),
+            IndexLabel::Int64(1),
+        ])
+        .unwrap()
+        .with_columns_name(Some(fp_index::LabelName::typed(IndexLabel::tuple(vec![
+            IndexLabel::Utf8("axis".to_owned()),
+            IndexLabel::Int64(7),
+        ]))));
+        let actual = read_pickle_bytes(&write_pickle_bytes(&source).unwrap()).unwrap();
+        assert_eq!(actual.column_names(), vec!["0", "0", "1"]);
+        assert_eq!(actual.column_labels(), source.column_labels());
+        assert_eq!(actual.columns_name(), source.columns_name());
+        for position in 0..3 {
+            let expected = source.column_at(position).unwrap();
+            let decoded = actual.column_at(position).unwrap();
+            assert_eq!(decoded.dtype(), expected.dtype());
+            assert_eq!(decoded.values(), expected.values());
+        }
+    }
+
+    #[test]
+    fn pickle_typed_roundtrip_preserves_empty_shapes_and_column_range() {
+        let empty = DataFrame::new_with_column_order(
+            Index::new(Vec::new()).with_declared_dtype(Some(fp_index::DeclaredDtype::Int64)),
+            BTreeMap::from([
+                (
+                    "4".to_owned(),
+                    Column::new(DType::Int64Nullable, Vec::new()).unwrap(),
+                ),
+                (
+                    "2".to_owned(),
+                    Column::new(DType::BoolNullable, Vec::new()).unwrap(),
+                ),
+            ]),
+            vec!["4".to_owned(), "2".to_owned()],
+        )
+        .unwrap()
+        .with_column_labels(vec![IndexLabel::Int64(4), IndexLabel::Int64(2)])
+        .unwrap()
+        .with_column_range((4, 0, -2));
+        let actual = read_pickle_bytes(&write_pickle_bytes(&empty).unwrap()).unwrap();
+        assert_eq!(actual.index().len(), 0);
+        assert_eq!(
+            actual.index().declared_dtype(),
+            Some(fp_index::DeclaredDtype::Int64)
+        );
+        assert_eq!(actual.column_range_span(), Some((4, 0, -2)));
+        assert_eq!(actual.column_labels(), vec![IndexLabel::Int64(4), IndexLabel::Int64(2)]);
+        assert_eq!(actual.column("4").unwrap().dtype(), DType::Int64Nullable);
+        assert_eq!(actual.column("2").unwrap().dtype(), DType::BoolNullable);
+
+        let no_columns =
+            DataFrame::new(Index::from_range(3, 0, -1), BTreeMap::new()).unwrap();
+        let actual = read_pickle_bytes(&write_pickle_bytes(&no_columns).unwrap()).unwrap();
+        assert_eq!(actual.num_columns(), 0);
+        assert_eq!(actual.index().labels(), no_columns.index().labels());
+        assert_eq!(actual.index().range_span(), Some((3, 0, -1)));
+    }
+
+    #[test]
+    fn pickle_typed_roundtrip_preserves_nonfinite_and_tuple_index_labels() {
+        let nan_bits = 0x7ff8_0000_0000_0042;
+        let index = Index::new(vec![
+            IndexLabel::Float64(fp_index::OrderedF64(f64::from_bits(nan_bits))),
+            IndexLabel::Float64(fp_index::OrderedF64(f64::INFINITY)),
+            IndexLabel::Float64(fp_index::OrderedF64(-0.0)),
+            IndexLabel::tuple(vec![
+                IndexLabel::Utf8("α".to_owned()),
+                IndexLabel::Int64(9_007_199_254_740_993),
+            ]),
+        ]);
+        let source = DataFrame::new(index, BTreeMap::new()).unwrap();
+        let actual = read_pickle_bytes(&write_pickle_bytes(&source).unwrap()).unwrap();
+        for (position, bits) in [
+            (0, nan_bits),
+            (1, f64::INFINITY.to_bits()),
+            (2, (-0.0_f64).to_bits()),
+        ] {
+            let IndexLabel::Float64(value) = &actual.index().labels()[position] else {
+                panic!("floating index label changed type");
+            };
+            assert_eq!(value.0.to_bits(), bits);
+        }
+        assert_eq!(actual.index().labels()[3], source.index().labels()[3]);
+        assert!(actual.row_multiindex().is_none());
+    }
+
+    #[test]
+    fn pickle_typed_roundtrip_preserves_multiindex_catalogs_on_both_axes() {
+        let row_axis = fp_index::MultiIndex::from_declared_levels(
+            vec![
+                vec!["b".into(), "a".into(), "unused".into()],
+                vec![
+                    IndexLabel::Datetime64(3),
+                    IndexLabel::Datetime64(1),
+                    IndexLabel::Datetime64(99),
+                    IndexLabel::Null(NullKind::NaT),
+                ],
+            ],
+            vec![vec![0, 1, 0], vec![0, 1, 0]],
+        )
+        .unwrap()
+        .set_names(vec![
+            Some(fp_index::LabelName::typed(IndexLabel::Int64(0))),
+            Some(fp_index::LabelName::typed(IndexLabel::tuple(vec![
+                "time".into(),
+                IndexLabel::Int64(1),
+            ]))),
+        ])
+        .with_level_order_declared(1, false)
+        .with_level_zone(1, Some("UTC"))
+        .with_missing_as_level(true);
+        let column_axis = fp_index::MultiIndex::from_declared_levels(
+            vec![
+                vec!["metrics".into(), "unused".into()],
+                vec![IndexLabel::Int64(7), IndexLabel::Int64(1), IndexLabel::Int64(99)],
+            ],
+            vec![vec![0, 0], vec![0, 1]],
+        )
+        .unwrap()
+        .set_names(vec![Some("group".into()), Some("number".into())])
+        .with_level_width(1, Some(fp_types::NumericWidth::Int16));
+        let source = DataFrame::new_with_column_order(
+            Index::default_range(3),
+            BTreeMap::from([
+                ("right".to_owned(), Column::from_i64_values(vec![1, 2, 3])),
+                ("left".to_owned(), Column::from_i64_values(vec![4, 5, 6])),
+            ]),
+            vec!["right".to_owned(), "left".to_owned()],
+        )
+        .unwrap()
+        .with_row_multiindex(row_axis.clone())
+        .unwrap()
+        .with_columns_multiindex(Some(column_axis.clone()))
+        .unwrap();
+        let actual = read_pickle_bytes(&write_pickle_bytes(&source).unwrap()).unwrap();
+        assert_eq!(actual.column_names(), vec!["right", "left"]);
+        assert_eq!(actual.index().range_span(), source.index().range_span());
+        for (decoded, expected) in [
+            (actual.row_multiindex().unwrap(), &row_axis),
+            (actual.columns_multiindex().unwrap(), &column_axis),
+        ] {
+            assert_eq!(decoded.names(), expected.names());
+            assert_eq!(decoded.nlevels(), expected.nlevels());
+            assert_eq!(decoded.len(), expected.len());
+            assert_eq!(decoded.missing_is_a_level(), expected.missing_is_a_level());
+            for level in 0..expected.nlevels() {
+                assert_eq!(decoded.level_codes(level), expected.level_codes(level));
+                assert_eq!(
+                    decoded.declared_level_order(level),
+                    expected.declared_level_order(level)
+                );
+                assert_eq!(decoded.level_zone(level), expected.level_zone(level));
+                assert_eq!(decoded.level_width(level), expected.level_width(level));
+            }
+        }
+    }
+
+    #[test]
+    fn pickle_typed_roundtrip_preserves_custom_business_calendar() {
+        let calendar = fp_index::CustomBusinessDaySpec {
+            weekmask: [false, true, true, true, true, false, false],
+            holidays: vec![2, 9],
+            display_weekmask: Some("Tue Wed Thu Fri".to_owned()),
+            display_weekmask_flags: None,
+            display_holidays: vec![9, 2, 2],
+            normalize: true,
+            offset_nanos: -3_600_000_000_000,
+        };
+        let index = Index::from_datetime64_values(vec![0, 1, 2])
+            .with_tz(Some("UTC"))
+            .unwrap()
+            .with_freq(Some("2C-1h".to_owned()))
+            .with_custom_business_day(Some(calendar.clone()));
+        let source = DataFrame::new(index, BTreeMap::new()).unwrap();
+        let actual = read_pickle_bytes(&write_pickle_bytes(&source).unwrap()).unwrap();
+        assert_eq!(actual.index().tz(), Some("UTC"));
+        assert_eq!(actual.index().freq(), Some("2C-1h"));
+        assert_eq!(actual.index().custom_business_day(), Some(&calendar));
+    }
+
+    #[test]
+    fn pickle_typed_roundtrip_keeps_large_integer_columns_across_mask_words() {
+        let values = (0..257)
+            .map(|row| {
+                if row % 65 == 0 {
+                    Scalar::Null(NullKind::Null)
+                } else {
+                    Scalar::Int64(9_007_199_254_740_993 + row)
+                }
+            })
+            .collect();
+        let column = Column::new(DType::Int64Nullable, values).unwrap();
+        let source = DataFrame::new(
+            Index::default_range(257),
+            BTreeMap::from([("count".to_owned(), column)]),
+        )
+        .unwrap();
+        let actual = read_pickle_bytes(&write_pickle_bytes(&source).unwrap()).unwrap();
+        assert_eq!(actual.column("count").unwrap().dtype(), DType::Int64Nullable);
+        assert_eq!(
+            actual.column("count").unwrap().values(),
+            source.column("count").unwrap().values()
+        );
+        assert_eq!(
+            actual.column("count").unwrap().validity(),
+            source.column("count").unwrap().validity()
+        );
+    }
+
+    fn legacy_pickle_fixture() -> Vec<u8> {
+        // This is an independently constructed v1 schema fixture, not output
+        // from the v2 writer or a claim that a historical binary was executed.
+        serde_pickle::to_vec(
+            &serde_json::json!({
+                "__frankenpandas_pickle_format": "frankenpandas.dataframe.v1",
+                "orient": "split",
+                "payload": {
+                    "columns": ["count"],
+                    "index": ["r0", "r1"],
+                    "data": [[7], [null]]
+                }
+            }),
+            serde_pickle::SerOptions::new().proto_v2(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn pickle_legacy_v1_retains_json_split_inference() {
+        let actual = read_pickle_bytes(&legacy_pickle_fixture()).unwrap();
+        assert_eq!(actual.column_names(), vec!["count"]);
+        assert_eq!(actual.column("count").unwrap().dtype(), DType::Float64);
+        assert_eq!(
+            actual.column("count").unwrap().values(),
+            &[Scalar::Float64(7.0), Scalar::Null(NullKind::NaN)]
+        );
+        assert_eq!(actual.index().labels(), &["r0".into(), "r1".into()]);
+    }
+
+    fn finite_native_snapshot_value() -> serde_json::Value {
+        let source = DataFrame::new(
+            Index::from_range(0, 3, 1),
+            BTreeMap::from([("a".to_owned(), Column::from_i64_values(vec![1, 2, 3]))]),
+        )
+        .unwrap();
+        serde_json::to_value(super::NativePickleSnapshot {
+            format: super::PICKLE_FORMAT_VERSION.to_owned(),
+            payload: super::NativeFrameSnapshot::capture(&source).unwrap(),
+        })
+        .unwrap()
+    }
+
+    fn assert_invalid_native_snapshot(value: &serde_json::Value) {
+        let bytes = serde_pickle::to_vec(value, serde_pickle::SerOptions::new()).unwrap();
+        assert!(matches!(read_pickle_bytes(&bytes), Err(IoError::Pickle(_))));
+    }
+
+    #[test]
+    fn pickle_typed_reader_rejects_inconsistent_shape_dtype_and_axes() {
+        let source = finite_native_snapshot_value();
+        let mut unknown_version = source.clone();
+        unknown_version[super::PICKLE_FORMAT_KEY] = "frankenpandas.dataframe.v999".into();
+        assert_invalid_native_snapshot(&unknown_version);
+        let mut unknown_field = source.clone();
+        unknown_field["payload"]["unrecognized_metadata"] = true.into();
+        assert_invalid_native_snapshot(&unknown_field);
+        let mut wrong_dtype = source.clone();
+        wrong_dtype["payload"]["columns"][0][1]["dtype"] =
+            serde_json::to_value(DType::Bool).unwrap();
+        assert_invalid_native_snapshot(&wrong_dtype);
+        let mut short_mask = source.clone();
+        short_mask["payload"]["columns"][0][1]["validity"]["bits"] =
+            serde_json::json!([true, true]);
+        assert_invalid_native_snapshot(&short_mask);
+        let mut hidden_value = source.clone();
+        hidden_value["payload"]["columns"][0][1]["validity"]["bits"] =
+            serde_json::json!([true, false, true]);
+        assert_invalid_native_snapshot(&hidden_value);
+        let mut wrong_height = source.clone();
+        wrong_height["payload"]["columns"][0][1] =
+            serde_json::to_value(Column::from_i64_values(vec![1, 2])).unwrap();
+        assert_invalid_native_snapshot(&wrong_height);
+        let mut wrong_width = source.clone();
+        wrong_width["payload"]["column_axis"]["labels"] = serde_json::json!([]);
+        assert_invalid_native_snapshot(&wrong_width);
+        let mut unsupported_axis = source.clone();
+        unsupported_axis["payload"]["column_axis"]["freq"] = "D".into();
+        assert_invalid_native_snapshot(&unsupported_axis);
+        let mut false_range = source.clone();
+        let other =
+            serde_json::to_value(Index::from_i64(vec![99]).snapshot().unwrap()).unwrap();
+        false_range["payload"]["index"]["labels"][1] = other["labels"][0].clone();
+        assert_invalid_native_snapshot(&false_range);
+        let mut malformed_v2 = source;
+        malformed_v2["payload"] = serde_json::json!({
+            "columns": ["a"], "index": [0], "data": [[1]]
+        });
+        assert_invalid_native_snapshot(&malformed_v2);
     }
 
     #[test]
