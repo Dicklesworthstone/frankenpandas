@@ -2782,7 +2782,9 @@ pub struct PickleReadOptions {
 pub const DEFAULT_HDF5_KEY: &str = "frame";
 
 #[cfg(feature = "hdf5")]
-const HDF5_PAYLOAD_DATASET: &str = "__frankenpandas_dataframe_pickle_v1";
+const HDF5_PAYLOAD_DATASET: &str = "__frankenpandas_dataframe_pickle_v2";
+#[cfg(feature = "hdf5")]
+const HDF5_LEGACY_PAYLOAD_DATASET: &str = "__frankenpandas_dataframe_pickle_v1";
 
 /// Options controlling HDF5 path reads.
 ///
@@ -4103,10 +4105,20 @@ pub fn read_pickle_bytes_with_options(
     input: &[u8],
     options: &PickleReadOptions,
 ) -> Result<DataFrame, IoError> {
+    read_pickle_snapshot(input, options, None)
+}
+
+fn read_pickle_snapshot(
+    input: &[u8],
+    options: &PickleReadOptions,
+    required_format: Option<&str>,
+) -> Result<DataFrame, IoError> {
     let value = serde_pickle::value_from_slice(input, pickle_de_options(options))
         .map_err(|err| IoError::Pickle(err.to_string()))?;
     let serde_pickle::Value::Dict(envelope) = &value else {
-        return Err(IoError::Pickle("pickle payload must be an object".to_owned()));
+        return Err(IoError::Pickle(
+            "pickle payload must be an object".to_owned(),
+        ));
     };
     let format = match envelope.get(&serde_pickle::HashableValue::String(
         PICKLE_FORMAT_KEY.to_owned(),
@@ -4118,18 +4130,25 @@ pub fn read_pickle_bytes_with_options(
             ));
         }
     };
+    if let Some(required) = required_format
+        && format != required
+    {
+        return Err(IoError::Pickle(format!(
+            "snapshot requires format '{required}', found '{format}'"
+        )));
+    }
     match format.as_str() {
         PICKLE_FORMAT_VERSION => {
-            let snapshot: NativePickleSnapshot<Column> = serde_pickle::from_value(value)
-                .map_err(|err| IoError::Pickle(err.to_string()))?;
+            let snapshot: NativePickleSnapshot<Column> =
+                serde_pickle::from_value(value).map_err(|err| IoError::Pickle(err.to_string()))?;
             snapshot
                 .payload
                 .restore()
                 .map_err(|err| IoError::Pickle(format!("invalid native snapshot: {err}")))
         }
         PICKLE_LEGACY_FORMAT_VERSION => {
-            let legacy = serde_pickle::from_value(value)
-                .map_err(|err| IoError::Pickle(err.to_string()))?;
+            let legacy =
+                serde_pickle::from_value(value).map_err(|err| IoError::Pickle(err.to_string()))?;
             read_legacy_pickle_snapshot(legacy)
         }
         other => Err(IoError::Pickle(format!(
@@ -10664,15 +10683,35 @@ pub fn read_hdf_key(path: &Path, key: &str) -> Result<DataFrame, IoError> {
 #[cfg(feature = "hdf5")]
 pub fn read_hdf_with_options(path: &Path, options: &HdfReadOptions) -> Result<DataFrame, IoError> {
     let key = normalize_hdf5_key(&options.key)?;
-    let dataset_path = hdf5_payload_path(&key);
     let file = Hdf5File::open(path).map_err(hdf5_error)?;
-    let dataset = file.dataset(&dataset_path).map_err(|err| {
+    let group = file
+        .group(&key)
+        .map_err(|err| IoError::Hdf5(format!("missing FrankenPandas group '{key}': {err}")))?;
+    // Inspect membership fallibly. A corrupt or unreadable v2 entry must not
+    // silently fall back to an older payload that happens to share this group.
+    let typed = group
+        .member_names()
+        .map_err(hdf5_error)?
+        .iter()
+        .any(|name| name == HDF5_PAYLOAD_DATASET);
+    let dataset_name = if typed {
+        HDF5_PAYLOAD_DATASET
+    } else {
+        HDF5_LEGACY_PAYLOAD_DATASET
+    };
+    let dataset_path = format!("{key}/{dataset_name}");
+    let dataset = group.dataset(dataset_name).map_err(|err| {
         IoError::Hdf5(format!(
             "missing FrankenPandas payload dataset '{dataset_path}': {err}"
         ))
     })?;
     let payload = dataset.read_raw::<u8>().map_err(hdf5_error)?;
-    read_pickle_bytes(&payload).map_err(|err| {
+    read_pickle_snapshot(
+        &payload,
+        &PickleReadOptions::default(),
+        typed.then_some(PICKLE_FORMAT_VERSION),
+    )
+    .map_err(|err| {
         IoError::Hdf5(format!(
             "invalid FrankenPandas payload at key '{key}': {err}"
         ))
@@ -10765,7 +10804,7 @@ fn normalize_hdf5_key(key: &str) -> Result<String, IoError> {
         if part.is_empty() || part == "." || part == ".." {
             return Err(IoError::Hdf5(format!("invalid hdf5 key '{key}'")));
         }
-        if part == HDF5_PAYLOAD_DATASET {
+        if part == HDF5_PAYLOAD_DATASET || part == HDF5_LEGACY_PAYLOAD_DATASET {
             return Err(IoError::Hdf5(format!(
                 "hdf5 key '{key}' uses reserved FrankenPandas dataset name"
             )));
@@ -10773,11 +10812,6 @@ fn normalize_hdf5_key(key: &str) -> Result<String, IoError> {
     }
 
     Ok(trimmed.to_owned())
-}
-
-#[cfg(feature = "hdf5")]
-fn hdf5_payload_path(key: &str) -> String {
-    format!("{key}/{HDF5_PAYLOAD_DATASET}")
 }
 
 #[cfg(feature = "hdf5")]
@@ -22685,8 +22719,7 @@ mod tests {
             ),
         ]);
         DataFrame::new_with_column_order(
-            Index::from_range(9, -1, -2)
-                .set_name(fp_index::LabelName::typed(IndexLabel::Int64(0))),
+            Index::from_range(9, -1, -2).set_name(fp_index::LabelName::typed(IndexLabel::Int64(0))),
             columns,
             vec![
                 "number".to_owned(),
@@ -22738,11 +22771,9 @@ mod tests {
     fn pickle_typed_roundtrip_preserves_values_null_kinds_and_validity() {
         let source = make_typed_snapshot_dataframe();
         for protocol in [PickleProtocol::V2, PickleProtocol::V3] {
-            let bytes = super::write_pickle_bytes_with_options(
-                &source,
-                &PickleWriteOptions { protocol },
-            )
-            .unwrap();
+            let bytes =
+                super::write_pickle_bytes_with_options(&source, &PickleWriteOptions { protocol })
+                    .unwrap();
             let actual = read_pickle_bytes(&bytes).unwrap();
             assert_typed_snapshot_dataframe(&actual, &source);
         }
@@ -22758,8 +22789,7 @@ mod tests {
             ],
             true,
         );
-        let sparse_dtype =
-            fp_types::SparseDType::new(DType::Int64, Scalar::Int64(0)).unwrap();
+        let sparse_dtype = fp_types::SparseDType::new(DType::Int64, Scalar::Int64(0)).unwrap();
         let columns = BTreeMap::from([
             (
                 "category".to_owned(),
@@ -22823,7 +22853,10 @@ mod tests {
             assert_eq!(decoded.values(), expected.values());
             assert_eq!(decoded.validity(), expected.validity());
         }
-        assert_eq!(actual.column("category").unwrap().categorical(), Some(&categories));
+        assert_eq!(
+            actual.column("category").unwrap().categorical(),
+            Some(&categories)
+        );
         assert_eq!(
             actual.column("narrow").unwrap().width(),
             Some(fp_types::NumericWidth::Int8)
@@ -22831,7 +22864,10 @@ mod tests {
         assert!(actual.column("string").unwrap().is_pandas_string());
         let backing = actual.column("sparse").unwrap().sparse().unwrap();
         assert_eq!(backing.indices(), &[1, 3]);
-        assert_eq!(backing.stored_values(), &[Scalar::Int64(7), Scalar::Int64(9)]);
+        assert_eq!(
+            backing.stored_values(),
+            &[Scalar::Int64(7), Scalar::Int64(9)]
+        );
         assert_eq!(backing.sparse_dtype(), &sparse_dtype);
     }
 
@@ -22896,12 +22932,14 @@ mod tests {
             Some(fp_index::DeclaredDtype::Int64)
         );
         assert_eq!(actual.column_range_span(), Some((4, 0, -2)));
-        assert_eq!(actual.column_labels(), vec![IndexLabel::Int64(4), IndexLabel::Int64(2)]);
+        assert_eq!(
+            actual.column_labels(),
+            vec![IndexLabel::Int64(4), IndexLabel::Int64(2)]
+        );
         assert_eq!(actual.column("4").unwrap().dtype(), DType::Int64Nullable);
         assert_eq!(actual.column("2").unwrap().dtype(), DType::BoolNullable);
 
-        let no_columns =
-            DataFrame::new(Index::from_range(3, 0, -1), BTreeMap::new()).unwrap();
+        let no_columns = DataFrame::new(Index::from_range(3, 0, -1), BTreeMap::new()).unwrap();
         let actual = read_pickle_bytes(&write_pickle_bytes(&no_columns).unwrap()).unwrap();
         assert_eq!(actual.num_columns(), 0);
         assert_eq!(actual.index().labels(), no_columns.index().labels());
@@ -22964,7 +23002,11 @@ mod tests {
         let column_axis = fp_index::MultiIndex::from_declared_levels(
             vec![
                 vec!["metrics".into(), "unused".into()],
-                vec![IndexLabel::Int64(7), IndexLabel::Int64(1), IndexLabel::Int64(99)],
+                vec![
+                    IndexLabel::Int64(7),
+                    IndexLabel::Int64(1),
+                    IndexLabel::Int64(99),
+                ],
             ],
             vec![vec![0, 0], vec![0, 1]],
         )
@@ -23048,7 +23090,10 @@ mod tests {
         )
         .unwrap();
         let actual = read_pickle_bytes(&write_pickle_bytes(&source).unwrap()).unwrap();
-        assert_eq!(actual.column("count").unwrap().dtype(), DType::Int64Nullable);
+        assert_eq!(
+            actual.column("count").unwrap().dtype(),
+            DType::Int64Nullable
+        );
         assert_eq!(
             actual.column("count").unwrap().values(),
             source.column("count").unwrap().values()
@@ -23139,8 +23184,7 @@ mod tests {
         unsupported_axis["payload"]["column_axis"]["freq"] = "D".into();
         assert_invalid_native_snapshot(&unsupported_axis);
         let mut false_range = source.clone();
-        let other =
-            serde_json::to_value(Index::from_i64(vec![99]).snapshot().unwrap()).unwrap();
+        let other = serde_json::to_value(Index::from_i64(vec![99]).snapshot().unwrap()).unwrap();
         false_range["payload"]["index"]["labels"][1] = other["labels"][0].clone();
         assert_invalid_native_snapshot(&false_range);
         let mut malformed_v2 = source;
@@ -23555,6 +23599,211 @@ mod tests {
             err,
             IoError::Pickle(message) if message.contains("format marker")
         ));
+    }
+
+    #[cfg(feature = "hdf5")]
+    fn write_hdf_snapshot_fixture(path: &std::path::Path, key: &str, datasets: &[(&str, &[u8])]) {
+        let file = hdf5::File::create(path).expect("create hdf snapshot fixture");
+        let group = file.create_group(key).expect("create fixture group");
+        for &(name, payload) in datasets {
+            group
+                .new_dataset_builder()
+                .with_data(payload)
+                .create(name)
+                .expect("create fixture payload");
+        }
+        file.flush().expect("flush hdf snapshot fixture");
+    }
+
+    #[cfg(feature = "hdf5")]
+    #[test]
+    fn hdf5_typed_roundtrip_preserves_native_values_and_metadata() {
+        let source = make_typed_snapshot_dataframe();
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_hdf5_typed_{}_{}.h5",
+            std::process::id(),
+            line!()
+        ));
+
+        write_hdf_key(&source, &path, "tables/測定").expect("write typed hdf");
+        let actual = read_hdf_key(&path, "/tables/測定/").expect("read typed hdf");
+        assert_typed_snapshot_dataframe(&actual, &source);
+
+        let file = hdf5::File::open(&path).expect("inspect typed hdf");
+        let group = file.group("tables/測定").expect("inspect typed group");
+        assert_eq!(
+            group.member_names().expect("list payloads"),
+            vec![super::HDF5_PAYLOAD_DATASET.to_owned()]
+        );
+    }
+
+    #[cfg(feature = "hdf5")]
+    #[test]
+    fn hdf5_reader_loads_legacy_v1_container() {
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_hdf5_legacy_{}_{}.h5",
+            std::process::id(),
+            line!()
+        ));
+        let payload = legacy_pickle_fixture();
+        write_hdf_snapshot_fixture(
+            &path,
+            "tables/legacy",
+            &[(super::HDF5_LEGACY_PAYLOAD_DATASET, &payload)],
+        );
+
+        let actual = read_hdf_key(&path, "tables/legacy").expect("read legacy hdf");
+        assert_eq!(actual.column_names(), vec!["count"]);
+        assert_eq!(actual.column("count").unwrap().dtype(), DType::Float64);
+        assert_eq!(
+            actual.column("count").unwrap().values(),
+            &[Scalar::Float64(7.0), Scalar::Null(NullKind::NaN)]
+        );
+        assert_eq!(actual.index().labels(), &["r0".into(), "r1".into()]);
+    }
+
+    #[cfg(feature = "hdf5")]
+    #[test]
+    fn hdf5_reader_accepts_typed_payload_in_legacy_container() {
+        let source = make_typed_snapshot_dataframe();
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_hdf5_transition_{}_{}.h5",
+            std::process::id(),
+            line!()
+        ));
+        let payload = write_pickle_bytes(&source).expect("write typed payload");
+        write_hdf_snapshot_fixture(
+            &path,
+            "frame",
+            &[(super::HDF5_LEGACY_PAYLOAD_DATASET, &payload)],
+        );
+
+        let actual = read_hdf(&path).expect("read typed payload at legacy path");
+        assert_typed_snapshot_dataframe(&actual, &source);
+    }
+
+    #[cfg(feature = "hdf5")]
+    #[test]
+    fn hdf5_reader_prefers_valid_typed_payload_when_legacy_also_exists() {
+        let source = make_typed_snapshot_dataframe();
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_hdf5_both_versions_{}_{}.h5",
+            std::process::id(),
+            line!()
+        ));
+        let typed = write_pickle_bytes(&source).expect("write typed payload");
+        let legacy = legacy_pickle_fixture();
+        write_hdf_snapshot_fixture(
+            &path,
+            "frame",
+            &[
+                (super::HDF5_PAYLOAD_DATASET, &typed),
+                (super::HDF5_LEGACY_PAYLOAD_DATASET, &legacy),
+            ],
+        );
+
+        let actual = read_hdf(&path).expect("read authoritative typed payload");
+        assert_typed_snapshot_dataframe(&actual, &source);
+    }
+
+    #[cfg(feature = "hdf5")]
+    #[test]
+    fn hdf5_typed_container_never_falls_back_to_legacy_payload() {
+        let legacy = legacy_pickle_fixture();
+        for (case, typed_payload) in [b"not a pickle".as_slice(), legacy.as_slice()]
+            .into_iter()
+            .enumerate()
+        {
+            let path = std::env::temp_dir().join(format!(
+                "fp_io_hdf5_corrupt_typed_{}_{}_{case}.h5",
+                std::process::id(),
+                line!()
+            ));
+            write_hdf_snapshot_fixture(
+                &path,
+                "frame",
+                &[
+                    (super::HDF5_PAYLOAD_DATASET, typed_payload),
+                    (super::HDF5_LEGACY_PAYLOAD_DATASET, legacy.as_slice()),
+                ],
+            );
+
+            let err = read_hdf(&path).expect_err("invalid typed payload must fail");
+            assert!(matches!(
+                err,
+                IoError::Hdf5(message) if message.contains("key 'frame'")
+            ));
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_hdf5_wrong_object_{}_{}.h5",
+            std::process::id(),
+            line!()
+        ));
+        write_hdf_snapshot_fixture(
+            &path,
+            "frame",
+            &[(super::HDF5_LEGACY_PAYLOAD_DATASET, &legacy)],
+        );
+        {
+            let file = hdf5::File::open_rw(&path).expect("open fixture for editing");
+            let group = file.group("frame").expect("open fixture group");
+            group
+                .create_group(super::HDF5_PAYLOAD_DATASET)
+                .expect("create wrong object at typed payload path");
+            file.flush().expect("flush wrong object fixture");
+        }
+        assert!(matches!(read_hdf(&path), Err(IoError::Hdf5(_))));
+    }
+
+    #[cfg(feature = "hdf5")]
+    #[test]
+    fn hdf5_reserved_keys_do_not_truncate_existing_destination() {
+        let source = make_typed_snapshot_dataframe();
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_hdf5_reserved_{}_{}.h5",
+            std::process::id(),
+            line!()
+        ));
+        write_hdf(&source, &path).expect("write existing snapshot");
+        let original = std::fs::read(&path).expect("read original bytes");
+
+        for reserved in [
+            super::HDF5_PAYLOAD_DATASET,
+            super::HDF5_LEGACY_PAYLOAD_DATASET,
+        ] {
+            let key = format!("tables/{reserved}/nested");
+            let err = write_hdf_key(&source, &path, &key)
+                .expect_err("reserved key must fail before opening destination");
+            assert!(matches!(
+                err,
+                IoError::Hdf5(message) if message.contains("reserved")
+            ));
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+        assert_typed_snapshot_dataframe(&read_hdf(&path).unwrap(), &source);
+    }
+
+    #[cfg(feature = "hdf5")]
+    #[test]
+    fn hdf5_snapshot_validation_precedes_destination_creation() {
+        let source = make_typed_snapshot_dataframe();
+        let path = std::env::temp_dir().join(format!(
+            "fp_io_hdf5_validation_{}_{}.h5",
+            std::process::id(),
+            line!()
+        ));
+        write_hdf(&source, &path).expect("write existing snapshot");
+        let original = std::fs::read(&path).expect("read original bytes");
+
+        let invalid = DataFrame::new(
+            Index::from_i64(vec![0]).with_range_span(Some((0, 2, 1))),
+            BTreeMap::from([("count".to_owned(), Column::from_i64_values(vec![7]))]),
+        )
+        .unwrap();
+        assert!(write_hdf(&invalid, &path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_typed_snapshot_dataframe(&read_hdf(&path).unwrap(), &source);
     }
 
     #[cfg(feature = "hdf5")]

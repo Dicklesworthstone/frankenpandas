@@ -29,7 +29,12 @@ br-frankenpandas-fd90 (slices 2-3 open).
 column dtypes, scalar and missing-value kinds, validity masks, categorical
 catalogs, numeric widths, string-extension markers, sparse storage, and
 row/column axis metadata. Columns are stored in positional order, including
-duplicate column names. HDF stores the same envelope under its configured key.
+duplicate column names. HDF stores the same envelope under its configured key
+in the `__frankenpandas_dataframe_pickle_v2` dataset. HDF readers also accept
+legacy `__frankenpandas_dataframe_pickle_v1` datasets. When a v2 dataset is
+present, its envelope must be v2 and valid; corruption never falls back to an
+older payload in the same group. Key and snapshot validation happen before
+an existing HDF destination is opened for replacement.
 
 The reader validates stored columns and axes before exposing the frame.
 Unknown format versions and inconsistent state fail with an IO error.
