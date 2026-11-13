@@ -2055,6 +2055,8 @@ pub use api::types::pandas_dtype;
 pub struct SparseDType {
     pub value_dtype: DType,
     pub fill_value: Scalar,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<NumericWidth>,
 }
 
 impl SparseDType {
@@ -2077,6 +2079,7 @@ impl SparseDType {
         Ok(Self {
             value_dtype,
             fill_value,
+            width: None,
         })
     }
 
@@ -2108,11 +2111,25 @@ impl SparseDType {
     /// would surface as a dtype name that no longer round-trips.
     #[must_use]
     pub fn pandas_name(&self) -> String {
-        format!(
-            "Sparse[{}, {}]",
-            self.value_dtype.name(),
-            scalar_to_string_for_astype(self.fill_value.clone())
-        )
+        let subtype = self
+            .width
+            .map_or(self.value_dtype.name(), |width| width.name(false));
+        let fill = match &self.fill_value {
+            Scalar::Utf8(value) if value.contains('\'') && !value.contains('"') => {
+                format!("{value:?}")
+            }
+            Scalar::Utf8(value) => format!(
+                "'{}'",
+                value
+                    .replace('\\', "\\\\")
+                    .replace('\'', "\\'")
+                    .replace('\n', "\\n")
+                    .replace('\r', "\\r")
+                    .replace('\t', "\\t")
+            ),
+            value => scalar_to_string_for_astype(value.clone()),
+        };
+        format!("Sparse[{}, {}]", subtype, fill)
     }
 }
 

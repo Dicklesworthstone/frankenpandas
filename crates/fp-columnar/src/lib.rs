@@ -3404,6 +3404,12 @@ impl I64CellKind {
 }
 
 enum ScalarValues {
+    /// Compressed sparse cells. Dense materialization is shared and lazy;
+    /// the subtype and fill value remain part of the stored representation.
+    Sparse {
+        column: Arc<SparseColumn>,
+        values: Arc<OnceLock<Vec<Scalar>>>,
+    },
     /// Eager Scalar backing (the general fallback for mixed/typed columns that
     /// no lazy variant covers). The Scalar buffer is `Arc`-shared so
     /// `Column::clone` shares it in O(1) instead of deep-copying every
@@ -6598,6 +6604,9 @@ impl ScalarValues {
 
     fn as_slice(&self) -> &[Scalar] {
         match self {
+            Self::Sparse { column, values } => {
+                values.get_or_init(|| column.to_dense_values()).as_slice()
+            }
             Self::Eager(values) => values,
             Self::LazyAllValidInt64 { data, values, .. } => values
                 .get_or_init(|| data.iter().copied().map(Scalar::Int64).collect())
@@ -7508,6 +7517,7 @@ impl ScalarValues {
             )
         };
         match self {
+            Self::Sparse { column, .. } => column.cell(idx).clone(),
             Self::Eager(values) => values[idx].clone(),
             Self::LazyAllValidInt64 { data, .. } => Scalar::Int64(data[idx]),
             Self::LazyAllValidInt64Vec { data, .. } => Scalar::Int64(data[idx]),
@@ -7562,6 +7572,7 @@ impl ScalarValues {
 
     fn len(&self) -> usize {
         match self {
+            Self::Sparse { column, .. } => column.len(),
             Self::Eager(values) => values.len(),
             Self::LazyAllValidInt64 { data, .. } => data.len(),
             Self::LazyAllValidInt64Vec { data, .. } => data.len(),
@@ -7627,6 +7638,7 @@ impl ScalarValues {
     /// See [`Column::scalar_cache_is_materialized`]; exhaustive on purpose.
     fn scalar_cache_is_materialized(&self) -> bool {
         match self {
+            Self::Sparse { values, .. } => values.get().is_some(),
             Self::Eager(_) => true,
             Self::LazyAllValidInt64 { values, .. }
             | Self::LazyAllValidInt64Vec { values, .. }
@@ -7898,6 +7910,10 @@ fn contiguous_ascending_start(positions: &[usize]) -> Option<usize> {
 impl Clone for ScalarValues {
     fn clone(&self) -> Self {
         match self {
+            Self::Sparse { column, values } => Self::Sparse {
+                column: Arc::clone(column),
+                values: Arc::clone(values),
+            },
             Self::Eager(values) => Self::Eager(values.clone()),
             Self::LazyAllValidInt64 { data, .. } => {
                 Self::lazy_all_valid_int64_arc(Arc::clone(data))
@@ -8441,13 +8457,35 @@ impl std::fmt::Debug for ScalarValues {
 
 impl Serialize for ScalarValues {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if let Self::Sparse { column, .. } = self {
+            #[derive(Serialize)]
+            struct SparseValues<'a> {
+                sparse: &'a SparseColumn,
+            }
+            return SparseValues { sparse: column }.serialize(serializer);
+        }
         self.as_slice().serialize(serializer)
     }
 }
 
 impl<'de> Deserialize<'de> for ScalarValues {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Vec::<Scalar>::deserialize(deserializer).map(|v| Self::Eager(Arc::from(v)))
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum StoredValues {
+            Dense(Vec<Scalar>),
+            Sparse { sparse: SparseColumn },
+        }
+        match StoredValues::deserialize(deserializer)? {
+            StoredValues::Dense(values) => Ok(Self::Eager(Arc::from(values))),
+            StoredValues::Sparse { sparse } => {
+                sparse.validate().map_err(serde::de::Error::custom)?;
+                Ok(Self::Sparse {
+                    column: Arc::new(sparse),
+                    values: Arc::new(OnceLock::new()),
+                })
+            }
+        }
     }
 }
 
@@ -8555,6 +8593,8 @@ impl PartialEq for Column {
             && self.categorical == other.categorical
             && self.width == other.width
             && self.pandas_string == other.pandas_string
+            && self.sparse().map(SparseColumn::sparse_dtype)
+                == other.sparse().map(SparseColumn::sparse_dtype)
     }
 }
 
@@ -13614,6 +13654,98 @@ pub enum ColumnError {
 }
 
 impl SparseColumn {
+    fn validity(&self) -> ValidityMask {
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+        if self.fill_value().is_missing() {
+            let mut start = 0;
+            for (&position, value) in self.indices.iter().zip(&self.values) {
+                if !value.is_missing() {
+                    if position > start {
+                        ranges.push((start, position - start));
+                    }
+                    start = position + 1;
+                }
+            }
+            if start < self.len {
+                ranges.push((start, self.len - start));
+            }
+        } else {
+            for (&position, value) in self.indices.iter().zip(&self.values) {
+                if value.is_missing() {
+                    if let Some((start, len)) = ranges.last_mut()
+                        && *start + *len == position
+                    {
+                        *len += 1;
+                    } else {
+                        ranges.push((position, 1));
+                    }
+                }
+            }
+        }
+        ValidityMask::from_invalid_ranges(Arc::from(ranges), self.len)
+    }
+
+    fn take(&self, positions: impl Iterator<Item = usize>, len: usize) -> Self {
+        let mut indices = Vec::new();
+        let mut values = Vec::new();
+        for (row, position) in positions.enumerate() {
+            assert!(
+                position < self.len,
+                "sparse position must be within the column"
+            );
+            if let Ok(stored) = self.indices.binary_search(&position) {
+                indices.push(row);
+                values.push(self.values[stored].clone());
+            }
+        }
+        Self {
+            dtype: self.dtype.clone(),
+            len,
+            indices,
+            values,
+        }
+    }
+
+    fn validate(&self) -> Result<(), ColumnError> {
+        if matches!(self.dtype.value_dtype, DType::Sparse | DType::Null)
+            || self
+                .dtype
+                .width
+                .is_some_and(|width| !width.fits_storage(&self.dtype.value_dtype))
+            || self.indices.len() != self.values.len()
+            || self.indices.last().is_some_and(|&last| last >= self.len)
+            || self.indices.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(ColumnError::InvalidSnapshot(
+                "invalid sparse storage".to_owned(),
+            ));
+        }
+        for value in &self.values {
+            if !value.is_missing()
+                && self.dtype.value_dtype != DType::Utf8
+                && value.dtype() != self.dtype.value_dtype
+            {
+                return Err(ColumnError::InvalidSnapshot(
+                    "sparse value does not match its subtype".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Read one logical cell without materializing the dense array.
+    #[must_use]
+    pub fn cell(&self, position: usize) -> &Scalar {
+        assert!(
+            position < self.len,
+            "sparse position must be within the column"
+        );
+        match self.indices.binary_search(&position) {
+            Ok(at) => &self.values[at],
+            Err(_) => &self.dtype.fill_value,
+        }
+    }
+
     pub fn from_dense(dtype: SparseDType, values: Vec<Scalar>) -> Result<Self, ColumnError> {
         let len = values.len();
         let value_dtype = dtype.value_dtype.clone();
@@ -13622,13 +13754,20 @@ impl SparseColumn {
         let mut sparse_values = Vec::new();
 
         for (idx, value) in values.into_iter().enumerate() {
-            let value = if value.dtype() == value_dtype || value.dtype() == DType::Null {
+            let value = if value_dtype == DType::Utf8 {
+                value
+            } else if value.dtype() == value_dtype || value.dtype() == DType::Null {
                 Column::normalize_missing_for_dtype(value, value_dtype.clone())
             } else {
                 cast_scalar_owned(value, value_dtype.clone())?
             };
 
-            if !value.semantic_eq(&fill_value) {
+            let is_fill = if value_dtype == DType::Utf8 {
+                (value.is_missing() && fill_value.is_missing()) || value == fill_value
+            } else {
+                sparse_fill_matches(&value, &fill_value)
+            };
+            if !is_fill {
                 indices.push(idx);
                 sparse_values.push(value);
             }
@@ -13644,6 +13783,19 @@ impl SparseColumn {
 
     pub fn from_dense_column(dtype: SparseDType, column: &Column) -> Result<Self, ColumnError> {
         Self::from_dense(dtype, column.values().to_vec())
+    }
+
+    fn with_result_values(&self, dtype: SparseDType, column: &Column) -> Self {
+        Self {
+            dtype,
+            len: self.len,
+            indices: self.indices.clone(),
+            values: self
+                .indices
+                .iter()
+                .map(|&position| column.values()[position].clone())
+                .collect(),
+        }
     }
 
     #[must_use]
@@ -13705,7 +13857,37 @@ impl SparseColumn {
     }
 
     pub fn to_dense_column(&self) -> Result<Column, ColumnError> {
-        Column::new(self.dtype.value_dtype.clone(), self.to_dense_values())
+        let column = if self.dtype.value_dtype == DType::Utf8 {
+            Ok(Column::from_object_values(self.to_dense_values()))
+        } else {
+            Column::new(self.dtype.value_dtype.clone(), self.to_dense_values())
+        }?;
+        match self.dtype.width {
+            Some(width) => column.cast_to_width(width, false),
+            None => Ok(column),
+        }
+    }
+}
+
+fn sparse_fill_matches(value: &Scalar, fill: &Scalar) -> bool {
+    if value.is_missing() && fill.is_missing() {
+        return true;
+    }
+    match (value, fill) {
+        (Scalar::Float64(value), Scalar::Int64(fill))
+        | (Scalar::Int64(fill), Scalar::Float64(value)) => {
+            value.is_finite()
+                && value.fract() == 0.0
+                && *value >= i64::MIN as f64
+                && *value < -(i64::MIN as f64)
+                && *value as i64 == *fill
+        }
+        (Scalar::Bool(value), Scalar::Int64(fill)) | (Scalar::Int64(fill), Scalar::Bool(value)) => {
+            i64::from(*value) == *fill
+        }
+        (Scalar::Bool(value), Scalar::Float64(fill))
+        | (Scalar::Float64(fill), Scalar::Bool(value)) => f64::from(u8::from(*value)) == *fill,
+        _ => value == fill,
     }
 }
 
@@ -13865,6 +14047,24 @@ impl Column {
     /// Ordinary serde deserialization deliberately remains unchanged; native
     /// snapshot readers must call this before exposing an untrusted column.
     pub fn restore_snapshot(mut self) -> Result<Self, ColumnError> {
+        if let Some(sparse) = self.sparse() {
+            sparse.validate()?;
+            if self.dtype != DType::Sparse
+                || self.categorical.is_some()
+                || self.width.is_some()
+                || self.pandas_string
+                || self.validity != sparse.validity()
+            {
+                return Err(ColumnError::InvalidSnapshot(
+                    "sparse column metadata or validity is inconsistent".to_owned(),
+                ));
+            }
+            self.data = None;
+            return Ok(self);
+        }
+        // Older snapshots could hold the bare Sparse tag only over missing
+        // cells. The ordinary validation below preserves those markers and
+        // rejects every present cell without sparse subtype metadata.
         if let DType::Datetime64 { tz: Some(timezone) } = &self.dtype {
             fp_types::tz_validate(timezone).map_err(|error| {
                 ColumnError::InvalidSnapshot(format!("invalid datetime timezone: {error}"))
@@ -14021,10 +14221,76 @@ impl Column {
         }
     }
 
+    /// Store a sparse column without allocating its dense Scalar view.
+    #[must_use]
+    pub fn from_sparse(column: SparseColumn) -> Self {
+        let validity = column.validity();
+        Self {
+            dtype: DType::Sparse,
+            values: ScalarValues::Sparse {
+                column: Arc::new(column),
+                values: Arc::new(OnceLock::new()),
+            },
+            validity,
+            data: None,
+            categorical: None,
+            width: None,
+            pandas_string: false,
+        }
+    }
+
+    #[must_use]
+    pub fn sparse(&self) -> Option<&SparseColumn> {
+        match &self.values {
+            ScalarValues::Sparse { column, .. } => Some(column),
+            _ => None,
+        }
+    }
+
+    fn sparse_binary_result(
+        &self,
+        right: &Self,
+        dtype: SparseDType,
+        result: &Self,
+    ) -> SparseColumn {
+        let explicit = |column: &Self, other: &Self, position: usize| match column.sparse() {
+            Some(sparse) => sparse.indices.binary_search(&position).is_ok(),
+            None => !sparse_fill_matches(
+                &column.values()[position],
+                other.sparse().expect("one sparse operand").fill_value(),
+            ),
+        };
+        let indices: Vec<usize> = (0..self.len())
+            .filter(|&position| explicit(self, right, position) || explicit(right, self, position))
+            .collect();
+        let values = indices
+            .iter()
+            .map(|&position| result.values()[position].clone())
+            .collect();
+        SparseColumn {
+            dtype,
+            len: self.len(),
+            indices,
+            values,
+        }
+    }
+
+    /// Materialize sparse storage into its dense logical subtype.
+    pub fn to_dense(&self) -> Result<Self, ColumnError> {
+        match self.sparse() {
+            Some(column) => column.to_dense_column(),
+            None => Ok(self.clone()),
+        }
+    }
+
     /// Construct a column, coercing values to the target dtype.
     /// AG-03: takes ownership of the values vec and uses `cast_scalar_owned`
     /// to skip cloning when values already have the correct dtype.
     pub fn new(dtype: DType, values: Vec<Scalar>) -> Result<Self, ColumnError> {
+        if dtype == DType::Sparse {
+            let sparse = SparseDType::new(DType::Float64, Scalar::Null(NullKind::NaN))?;
+            return SparseColumn::from_dense(sparse, values).map(Self::from_sparse);
+        }
         if dtype == DType::Categorical {
             #[derive(Hash, PartialEq, Eq)]
             enum CatKey<'a> {
@@ -17769,6 +18035,9 @@ impl Column {
     /// result through the storage's own constructors, which know no width.
     fn take_positions_storage(&self, positions: &[usize]) -> Self {
         let n = positions.len();
+        if let Some(sparse) = self.sparse() {
+            return Self::from_sparse(sparse.take(positions.iter().copied(), n));
+        }
         if let Some((data, validity)) = self.as_masked_f64_slice() {
             let mut mask = ValidityMask::all_valid(n);
             let taken = positions
@@ -18668,6 +18937,10 @@ impl Column {
             end <= self.len(),
             "contiguous range end must be within column length"
         );
+
+        if let Some(sparse) = self.sparse() {
+            return Self::from_sparse(sparse.take(start..end, len));
+        }
 
         if let Some((data, validity)) = self.as_masked_f64_slice() {
             let mut mask = ValidityMask::all_valid(len);
@@ -20778,6 +21051,12 @@ impl Column {
         positions: &[Option<usize>],
         utf8_gap: NullKind,
     ) -> Result<Self, ColumnError> {
+        if self.sparse().is_some() {
+            return self.reindex_by_positions_with_absent_scalar_storage(
+                positions,
+                Scalar::Null(NullKind::NaN),
+            );
+        }
         if let Some((data, validity)) = self.as_masked_f64_slice() {
             let mut mask = ValidityMask::all_valid(positions.len());
             let values = positions
@@ -21158,6 +21437,32 @@ impl Column {
         positions: &[Option<usize>],
         absent: Scalar,
     ) -> Result<Self, ColumnError> {
+        if let Some(sparse) = self.sparse() {
+            let mut dtype = sparse.sparse_dtype().clone();
+            let gaps = positions
+                .iter()
+                .any(|position| position.is_none_or(|position| position >= self.len()));
+            if gaps
+                && ((absent.is_missing()
+                    && matches!(
+                        dtype.value_dtype,
+                        DType::Int64 | DType::Bool | DType::Float64
+                    ))
+                    || (matches!(absent, Scalar::Float64(_))
+                        && matches!(dtype.value_dtype, DType::Int64 | DType::Bool)))
+            {
+                dtype.value_dtype = DType::Float64;
+                dtype.width = None;
+            }
+            let values = positions
+                .iter()
+                .map(|position| match position {
+                    Some(position) if *position < self.len() => sparse.cell(*position).clone(),
+                    _ => absent.clone(),
+                })
+                .collect();
+            return SparseColumn::from_dense(dtype, values).map(Self::from_sparse);
+        }
         if let Some((data, validity)) = self.as_masked_f64_slice() {
             let fill_valid = !absent.is_missing();
             let fill = if fill_valid {
@@ -21905,6 +22210,33 @@ impl Column {
         op: ArithmeticOp,
         scalar_left: bool,
     ) -> Option<Self> {
+        if let Some(sparse) = self.sparse() {
+            let dense = sparse.to_dense_column().ok()?;
+            let broadcast = Self::new(scalar.dtype(), vec![scalar.clone(); self.len()]).ok()?;
+            let out = if scalar_left {
+                broadcast.binary_numeric(&dense, op).ok()?
+            } else {
+                dense.binary_numeric(&broadcast, op).ok()?
+            };
+            let fill = Self::new(sparse.value_dtype(), vec![sparse.fill_value().clone()]).ok()?;
+            let rhs = Self::new(scalar.dtype(), vec![scalar.clone()]).ok()?;
+            let fill = if scalar_left {
+                rhs.binary_numeric(&fill, op).ok()?
+            } else {
+                fill.binary_numeric(&rhs, op).ok()?
+            };
+            let out = match sparse
+                .sparse_dtype()
+                .width
+                .filter(|width| width.fits_storage(&out.dtype()))
+            {
+                Some(width) => out.cast_to_width(width, false).ok()?,
+                None => out,
+            };
+            let mut dtype = SparseDType::new(out.dtype(), fill.values()[0].clone()).ok()?;
+            dtype.width = out.width();
+            return Some(Self::from_sparse(sparse.with_result_values(dtype, &out)));
+        }
         // A scalar NaN is a present operand of pandas' masked arithmetic,
         // unlike a NaN in an input array. Preserve the source mask and let
         // IEEE arithmetic produce NaNs under its valid bits (6f379).
@@ -22610,6 +22942,31 @@ impl Column {
                 left: self.len(),
                 right: right.len(),
             });
+        }
+        if self.sparse().is_some() || right.sparse().is_some() {
+            let left_dense = self.to_dense()?;
+            let right_dense = right.to_dense()?;
+            let out = left_dense.binary_numeric(&right_dense, op)?;
+            let default_fill = |column: &Self, other: &Self| {
+                column.sparse().map_or_else(
+                    || {
+                        other
+                            .sparse()
+                            .expect("one sparse operand")
+                            .fill_value()
+                            .clone()
+                    },
+                    |sparse| sparse.fill_value().clone(),
+                )
+            };
+            let left_fill = Self::new(left_dense.dtype(), vec![default_fill(self, right)])?;
+            let right_fill = Self::new(right_dense.dtype(), vec![default_fill(right, self)])?;
+            let fill = left_fill.binary_numeric(&right_fill, op)?;
+            let mut dtype = SparseDType::new(out.dtype(), fill.values()[0].clone())?;
+            dtype.width = out.width();
+            return Ok(Self::from_sparse(
+                self.sparse_binary_result(right, dtype, &out),
+            ));
         }
 
         // Typed TEMPORAL arithmetic fast path — BEFORE the numeric common_dtype/to_f64
@@ -24099,6 +24456,28 @@ impl Column {
     ///
     /// Both columns must have the same length.
     pub fn binary_comparison(&self, right: &Self, op: ComparisonOp) -> Result<Self, ColumnError> {
+        if self.sparse().is_some() || right.sparse().is_some() {
+            let dense = self.to_dense()?.binary_comparison(&right.to_dense()?, op)?;
+            let fill_column = |column: &Self, other: &Self| match column.sparse() {
+                Some(sparse) => Self::new(sparse.value_dtype(), vec![sparse.fill_value().clone()]),
+                None => Self::new(
+                    column.dtype(),
+                    vec![
+                        other
+                            .sparse()
+                            .expect("one sparse operand")
+                            .fill_value()
+                            .clone(),
+                    ],
+                ),
+            };
+            let fill =
+                fill_column(self, right)?.binary_comparison(&fill_column(right, self)?, op)?;
+            let dtype = SparseDType::new(DType::Bool, fill.values()[0].clone())?;
+            return Ok(Self::from_sparse(
+                self.sparse_binary_result(right, dtype, &dense),
+            ));
+        }
         // Two NaN-exact float columns: a missing row is a NaN on a side, which
         // compares as pandas answers a missing row (false, true under !=),
         // so the data's comparison is the result - the missing rows were set
@@ -24565,6 +24944,13 @@ impl Column {
     /// extension dtype keeps `pd.NA` propagation (see
     /// [`binary_comparison`](Self::binary_comparison); br-frankenpandas-zwfz3).
     pub fn compare_scalar(&self, scalar: &Scalar, op: ComparisonOp) -> Result<Self, ColumnError> {
+        if let Some(sparse) = self.sparse() {
+            let dense = sparse.to_dense_column()?.compare_scalar(scalar, op)?;
+            let fill = Self::new(sparse.value_dtype(), vec![sparse.fill_value().clone()])?
+                .compare_scalar(scalar, op)?;
+            let dtype = SparseDType::new(DType::Bool, fill.values()[0].clone())?;
+            return Ok(Self::from_sparse(sparse.with_result_values(dtype, &dense)));
+        }
         if let Some((data, validity)) = self.as_masked_f64_slice()
             && let Ok(value) = scalar.to_f64()
         {
@@ -24853,6 +25239,12 @@ impl Column {
     /// The mask must be a `Bool`-typed column of the same length.
     /// Missing values in the mask are treated as `false` (not selected).
     pub fn filter_by_mask(&self, mask: &Self) -> Result<Self, ColumnError> {
+        if mask.sparse().is_some() {
+            return self.filter_by_mask(&mask.to_dense()?);
+        }
+        if self.sparse().is_some() && mask.dtype == DType::Null && self.len() == mask.len() {
+            return Ok(self.take_positions(&[]));
+        }
         if mask.dtype == DType::Null {
             if self.len() != mask.len() {
                 return Err(ColumnError::LengthMismatch {
@@ -24874,7 +25266,7 @@ impl Column {
             });
         }
 
-        if self.dtype == DType::Float64Nullable {
+        if self.dtype == DType::Float64Nullable || self.sparse().is_some() {
             let positions = mask
                 .values()
                 .iter()
@@ -25135,6 +25527,16 @@ impl Column {
     /// Returns a new column where every missing position is replaced
     /// by `fill_value`. The fill value is cast to the column's dtype.
     pub fn fillna(&self, fill_value: &Scalar) -> Result<Self, ColumnError> {
+        if let Some(sparse) = self.sparse() {
+            let dense = sparse.to_dense_column()?.fillna(fill_value)?;
+            let mut dtype = sparse.sparse_dtype().clone();
+            dtype.value_dtype = dense.dtype();
+            dtype.width = dense.width();
+            if dtype.fill_value.is_missing() {
+                dtype.fill_value = fill_value.clone();
+            }
+            return Ok(Self::from_sparse(sparse.with_result_values(dtype, &dense)));
+        }
         // The fill joins the width: a float32 column's fillna(0.1) is
         // float32's 0.1; a `string` column stays `string` for a text fill.
         let text_fill = fill_value.is_missing() || matches!(fill_value, Scalar::Utf8(_));
@@ -25700,6 +26102,9 @@ impl Column {
     /// matching pandas' permissive slice semantics.
     pub fn slice(&self, start: usize, len: usize) -> Result<Self, ColumnError> {
         if start >= self.values.len() {
+            if self.sparse().is_some() {
+                return Ok(self.take_positions(&[]));
+            }
             return Self::new(self.dtype.clone(), Vec::new());
         }
         let end = start.saturating_add(len).min(self.values.len());
@@ -25784,6 +26189,13 @@ impl Column {
                 left: self.dtype.clone(),
                 right: other.dtype.clone(),
             });
+        }
+        if let (Some(left), Some(right)) = (self.sparse(), other.sparse()) {
+            let dense = left.to_dense_column()?.concat(&right.to_dense_column()?)?;
+            let mut dtype = left.sparse_dtype().clone();
+            dtype.value_dtype = dense.dtype();
+            dtype.width = dense.width();
+            return SparseColumn::from_dense_column(dtype, &dense).map(Self::from_sparse);
         }
         // perf: typed buffer concat for the ubiquitous all-valid Int64/Float64
         // case — extend the contiguous i64/f64 buffers directly instead of cloning
@@ -27841,6 +28253,16 @@ impl Column {
     ///
     /// Matches `pd.Series.isna()` / `isnull()`.
     pub fn isnull(&self) -> Result<Self, ColumnError> {
+        if let Some(sparse) = self.sparse() {
+            let values = sparse
+                .to_dense_values()
+                .iter()
+                .map(|value| Scalar::Bool(value.is_missing()))
+                .collect();
+            let dtype =
+                SparseDType::new(DType::Bool, Scalar::Bool(sparse.fill_value().is_missing()))?;
+            return SparseColumn::from_dense(dtype, values).map(Self::from_sparse);
+        }
         if self.dtype == DType::Float64 {
             if let Some((data, validity)) = self.as_f64_slice_with_validity() {
                 let out: Vec<bool> = data
@@ -27878,6 +28300,16 @@ impl Column {
     ///
     /// Matches `pd.Series.notna()` / `notnull()`.
     pub fn notnull(&self) -> Result<Self, ColumnError> {
+        if let Some(sparse) = self.sparse() {
+            let values = sparse
+                .to_dense_values()
+                .iter()
+                .map(|value| Scalar::Bool(!value.is_missing()))
+                .collect();
+            let dtype =
+                SparseDType::new(DType::Bool, Scalar::Bool(!sparse.fill_value().is_missing()))?;
+            return SparseColumn::from_dense(dtype, values).map(Self::from_sparse);
+        }
         if self.dtype == DType::Float64 {
             if let Some((data, validity)) = self.as_f64_slice_with_validity() {
                 let out: Vec<bool> = data
@@ -29823,6 +30255,25 @@ impl Column {
     /// Utf8, 0 for Null). The ValidityMask is counted separately.
     #[must_use]
     pub fn memory_usage(&self, deep: bool) -> usize {
+        if let Some(sparse) = self.sparse() {
+            let itemsize = sparse
+                .sparse_dtype()
+                .width
+                .map_or_else(|| sparse.value_dtype().itemsize(), NumericWidth::itemsize);
+            let strings = if deep && sparse.value_dtype() == DType::Utf8 {
+                sparse
+                    .stored_values()
+                    .iter()
+                    .map(|value| match value {
+                        Scalar::Utf8(value) => value.len(),
+                        _ => 0,
+                    })
+                    .sum()
+            } else {
+                0
+            };
+            return sparse.npoints() * (itemsize + 4) + strings;
+        }
         let element_bytes = match &self.dtype {
             DType::Bool => 1,
             DType::Int64 | DType::Float64 | DType::Timedelta64 => 8,
@@ -31723,6 +32174,12 @@ impl Column {
     /// failing conversion. Missing values pass through as the
     /// target dtype's canonical missing representation.
     pub fn astype(&self, target: DType) -> Result<Self, ColumnError> {
+        if target == DType::Sparse && self.dtype != DType::Sparse {
+            return Self::new(DType::Sparse, self.values().to_vec());
+        }
+        if self.sparse().is_some() && target != DType::Sparse {
+            return self.to_dense()?.astype(target);
+        }
         // A float32 column's text is numpy's: each value's shortest float32
         // digits ('0.1'), not those of the float64 its bits read as
         // ('0.10000000149011612'; br-frankenpandas-anux4).
@@ -42913,6 +43370,162 @@ mod tests {
                 Scalar::Null(NullKind::NaN),
             ]
         );
+    }
+
+    #[test]
+    fn sparse_column_backing_survives_gathers_and_snapshots_o1qso() {
+        let dtype = SparseDType::new(DType::Int64, Scalar::Int64(0)).unwrap();
+        let column = Column::from_sparse(
+            SparseColumn::from_dense(
+                dtype.clone(),
+                vec![
+                    Scalar::Int64(0),
+                    Scalar::Int64(7),
+                    Scalar::Int64(0),
+                    Scalar::Int64(9),
+                ],
+            )
+            .unwrap(),
+        );
+        assert_eq!(column.dtype(), DType::Sparse);
+        assert!(!column.values.scalar_cache_is_materialized());
+        let cloned = column.clone();
+        assert!(!cloned.values.scalar_cache_is_materialized());
+        assert_eq!(cloned.sparse().unwrap().indices(), &[1, 3]);
+        let gathered = cloned.take_positions(&[3, 0, 1, 1]);
+        assert_eq!(gathered.sparse().unwrap().indices(), &[0, 2, 3]);
+        assert_eq!(gathered.sparse().unwrap().sparse_dtype(), &dtype);
+        assert!(!column.values.scalar_cache_is_materialized());
+        assert_eq!(
+            column.slice(1, 2).unwrap().sparse().unwrap().indices(),
+            &[0]
+        );
+        assert_eq!(
+            column
+                .slice(100, 2)
+                .unwrap()
+                .sparse()
+                .unwrap()
+                .sparse_dtype(),
+            &dtype
+        );
+        let combined = column.concat(&column).unwrap();
+        assert_eq!(combined.sparse().unwrap().indices(), &[1, 3, 5, 7]);
+        let restored = column_snapshot_roundtrip(&column);
+        assert_eq!(restored.sparse().unwrap().indices(), &[1, 3]);
+        assert_eq!(restored.to_dense().unwrap().values(), column.values());
+        let mut malformed = serde_json::to_value(&column).unwrap();
+        malformed["values"]["sparse"]["indices"] = serde_json::json!([1, 1]);
+        assert!(serde_json::from_value::<Column>(malformed).is_err());
+    }
+
+    #[test]
+    fn sparse_default_constructor_and_legacy_snapshot_o1qso() {
+        let default = Column::new(
+            DType::Sparse,
+            vec![
+                Scalar::Int64(0),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(2),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            default.sparse().unwrap().sparse_dtype().pandas_name(),
+            "Sparse[float64, nan]"
+        );
+        assert_eq!(default.sparse().unwrap().indices(), &[0, 2]);
+        column_snapshot_roundtrip(&default);
+        let values = vec![
+            Scalar::Null(NullKind::Null),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Null(NullKind::NaT),
+        ];
+        let legacy = Column {
+            dtype: DType::Sparse,
+            validity: ValidityMask::from_values(&values),
+            values: ScalarValues::from_vec(values.clone()),
+            data: None,
+            categorical: None,
+            width: None,
+            pandas_string: false,
+        };
+        let restored = column_snapshot_roundtrip(&legacy);
+        assert_eq!(restored.values(), values);
+        let mut invalid = legacy;
+        invalid.values = ScalarValues::from_vec(vec![Scalar::Int64(3)]);
+        invalid.validity = ValidityMask::all_valid(1);
+        assert!(invalid.restore_snapshot().is_err());
+    }
+
+    #[test]
+    fn sparse_fill_comparison_is_exact_and_numeric_o1qso() {
+        let mut dtype = SparseDType::new(DType::Float64, Scalar::Float64(0.0)).unwrap();
+        dtype.fill_value = Scalar::Int64(0);
+        let sparse = SparseColumn::from_dense(
+            dtype,
+            vec![
+                Scalar::Float64(0.0),
+                Scalar::Float64(1e-15),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .unwrap();
+        assert_eq!(sparse.indices(), &[1, 2]);
+        assert_eq!(
+            sparse.to_dense_column().unwrap().values()[0],
+            Scalar::Float64(0.0)
+        );
+        let column = Column::from_sparse(sparse);
+        assert_eq!(column.validity().count_invalid(), 1);
+        let mask = column.isna().unwrap();
+        assert_eq!(mask.sparse().unwrap().fill_value(), &Scalar::Bool(false));
+        assert_eq!(
+            mask.values(),
+            &[Scalar::Bool(false), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+    }
+
+    #[test]
+    fn sparse_arithmetic_and_missing_reindex_preserve_metadata_o1qso() {
+        let dtype = SparseDType::new(DType::Int64, Scalar::Int64(0)).unwrap();
+        let column = Column::from_sparse(
+            SparseColumn::from_dense(
+                dtype,
+                vec![Scalar::Int64(0), Scalar::Int64(3), Scalar::Int64(0)],
+            )
+            .unwrap(),
+        );
+        let sum = column
+            .binary_scalar(&Scalar::Int64(2), ArithmeticOp::Add, false)
+            .unwrap();
+        assert_eq!(sum.sparse().unwrap().fill_value(), &Scalar::Int64(2));
+        assert_eq!(sum.sparse().unwrap().npoints(), 1);
+        assert_eq!(
+            sum.values(),
+            &[Scalar::Int64(2), Scalar::Int64(5), Scalar::Int64(2)]
+        );
+        let doubled = column.binary_numeric(&column, ArithmeticOp::Add).unwrap();
+        assert_eq!(doubled.sparse().unwrap().fill_value(), &Scalar::Int64(0));
+        assert_eq!(
+            doubled.sparse().unwrap().stored_values(),
+            &[Scalar::Int64(6)]
+        );
+        let comparison = column
+            .compare_scalar(&Scalar::Int64(0), ComparisonOp::Eq)
+            .unwrap();
+        assert_eq!(
+            comparison.sparse().unwrap().fill_value(),
+            &Scalar::Bool(true)
+        );
+        assert_eq!(comparison.sparse().unwrap().npoints(), 1);
+        let gathered = column
+            .reindex_by_positions(&[Some(0), None, Some(1)])
+            .unwrap();
+        assert_eq!(gathered.sparse().unwrap().value_dtype(), DType::Float64);
+        assert_eq!(gathered.sparse().unwrap().fill_value(), &Scalar::Int64(0));
+        assert!(gathered.values()[1].is_missing());
+        assert_eq!(gathered.values()[2], Scalar::Float64(3.0));
     }
 
     // === Packed Bitvec ValidityMask Tests ===
