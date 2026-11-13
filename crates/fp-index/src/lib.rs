@@ -2845,6 +2845,14 @@ pub struct Index {
     /// ignores it, as pandas' `equals` does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     freq: Option<String>,
+    /// The calendar and offset carried by a custom business-day frequency.
+    /// A freqstr such as `C` or `2C` cannot describe holidays or a weekmask.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "custom_business_day_serde"
+    )]
+    custom_business_day: Option<Arc<CustomBusinessDaySpec>>,
     /// The `range(start, stop, step)` these labels are when they are a
     /// pandas RangeIndex - a default index (a Series or DataFrame built
     /// without one, reset_index, a matrix) or a slice of one - rather than
@@ -2882,6 +2890,47 @@ pub struct IndexCategories {
     pub ordered: bool,
 }
 
+/// Calendar state behind a custom business-day frequency. Holiday values are
+/// whole days since the Unix epoch; the effective calendar uses sorted, unique
+/// holidays, while the display fields preserve the offset's constructor state.
+/// The frequency count is stored in [`Index::freq`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomBusinessDaySpec {
+    /// Monday through Sunday, with `true` for a business day.
+    pub weekmask: [bool; 7],
+    pub holidays: Vec<i64>,
+    /// `None` represents a seven-element boolean weekmask.
+    pub display_weekmask: Option<String>,
+    /// The constructor's boolean flags, which can differ from the effective
+    /// weekmask when an explicit calendar overrides them.
+    pub display_weekmask_flags: Option<[bool; 7]>,
+    pub display_holidays: Vec<i64>,
+    pub normalize: bool,
+    pub offset_nanos: i64,
+}
+
+mod custom_business_day_serde {
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::CustomBusinessDaySpec;
+
+    pub(super) fn serialize<S: Serializer>(
+        value: &Option<Arc<CustomBusinessDaySpec>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value.as_deref().serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Arc<CustomBusinessDaySpec>>, D::Error> {
+        Ok(Option::<CustomBusinessDaySpec>::deserialize(deserializer)?.map(Arc::new))
+    }
+}
+
 /// A native snapshot of an [`Index`], including metadata omitted by its
 /// historical serde representation. Names are typed labels, so the integer
 /// name `0` remains distinct from the string name `"0"`.
@@ -2905,6 +2954,8 @@ pub struct IndexSnapshot {
     row_multiindex: Option<MultiIndexSnapshot>,
     tz: Option<String>,
     freq: Option<String>,
+    #[serde(default)]
+    custom_business_day: Option<CustomBusinessDaySpec>,
     range: Option<(i64, i64, i64)>,
     declared: Option<DeclaredDtype>,
     categories: Option<IndexCategoriesSnapshot>,
@@ -3046,6 +3097,29 @@ impl IndexSnapshot {
             )));
         }
         validate_snapshot_zone(&self.labels, self.tz.as_deref())?;
+        if let Some(calendar) = &self.custom_business_day {
+            if !is_custom_business_day_freq(self.freq.as_deref())
+                || !self.labels.iter().all(|label| {
+                    matches!(
+                        label,
+                        IndexLabel::Datetime64(_) | IndexLabel::Null(fp_types::NullKind::NaT)
+                    )
+                })
+            {
+                return Err(IndexError::InvalidArgument(
+                    "native custom business-day calendar requires datetime labels and a C frequency"
+                        .to_owned(),
+                ));
+            }
+            if !calendar.weekmask.iter().any(|&day| day)
+                || calendar.holidays.windows(2).any(|pair| pair[0] >= pair[1])
+            {
+                return Err(IndexError::InvalidArgument(
+                    "native custom business-day calendar requires a nonempty weekmask and sorted unique holidays"
+                        .to_owned(),
+                ));
+            }
+        }
         if let Some((start, stop, step)) = self.range {
             let range = RangeIndex::new(start, stop, step)?;
             if range.len() != self.labels.len() {
@@ -3101,6 +3175,7 @@ impl IndexSnapshot {
             .set_names(self.name.map(LabelName::typed))
             .with_tz(self.tz.as_deref())?
             .with_freq(self.freq)
+            .with_custom_business_day(self.custom_business_day)
             .with_range_span(self.range)
             .with_declared_dtype(self.declared)
             .with_categories(self.categories.map(|categories| IndexCategories {
@@ -3328,6 +3403,9 @@ impl fmt::Debug for Index {
         if let Some(freq) = &self.freq {
             out.field("freq", freq);
         }
+        if let Some(calendar) = self.custom_business_day() {
+            out.field("custom_business_day", calendar);
+        }
         if let Some(range) = &self.range {
             out.field("range", range);
         }
@@ -3483,6 +3561,7 @@ impl Index {
                 .transpose()?,
             tz: self.tz().map(str::to_owned),
             freq: self.freq().map(str::to_owned),
+            custom_business_day: self.custom_business_day().cloned(),
             range: self.range,
             declared: self.declared_dtype(),
             categories: self.categories().map(|categories| IndexCategoriesSnapshot {
@@ -3517,6 +3596,7 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            custom_business_day: None,
             range: None,
             declared: None,
             categories: None,
@@ -3580,6 +3660,7 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            custom_business_day: None,
             range: None,
             declared: None,
             categories: None,
@@ -3616,6 +3697,7 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            custom_business_day: None,
             range: None,
             declared: None,
             categories: None,
@@ -3643,6 +3725,7 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            custom_business_day: None,
             range: None,
             declared: None,
             categories: None,
@@ -3681,6 +3764,7 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            custom_business_day: None,
             range: None,
             declared: None,
             categories: None,
@@ -3710,6 +3794,7 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            custom_business_day: None,
             range: None,
             declared: None,
             categories: None,
@@ -3735,6 +3820,7 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            custom_business_day: None,
             range: None,
             declared: None,
             categories: None,
@@ -4008,6 +4094,7 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            custom_business_day: None,
             range: None,
             declared: None,
             categories: None,
@@ -4171,6 +4258,7 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            custom_business_day: None,
             range: None,
             declared: None,
             categories: None,
@@ -4330,6 +4418,11 @@ impl Index {
         other.name.clone_from(&self.name);
         if self.tz.is_some() && other.holds_only_datetimes() {
             other.tz.clone_from(&self.tz);
+        }
+        if is_custom_business_day_freq(other.freq.as_deref()) && other.holds_only_datetimes() {
+            other
+                .custom_business_day
+                .clone_from(&self.custom_business_day);
         }
         if let Some(categories) = &self.categories
             && other.labels_within(categories)
@@ -4549,7 +4642,47 @@ impl Index {
     /// caller vouches that the labels follow it.
     #[must_use]
     pub fn with_freq(mut self, freq: Option<String>) -> Self {
+        if !is_custom_business_day_freq(freq.as_deref()) {
+            self.custom_business_day = None;
+        }
         self.freq = freq;
+        self
+    }
+
+    /// Apply a selected or scaled frequency and retain its source calendar.
+    /// Rebuilding labels drops frequency metadata, so selectors use this after
+    /// computing whether the selected positions still follow a frequency.
+    #[must_use]
+    pub fn with_freq_from(mut self, source: &Self, freq: Option<String>) -> Self {
+        self = self.with_freq(freq);
+        if is_custom_business_day_freq(self.freq.as_deref()) && self.holds_only_datetimes() {
+            self.custom_business_day = source
+                .custom_business_day
+                .as_ref()
+                .filter(|_| source.custom_business_day().is_some())
+                .cloned();
+        }
+        self
+    }
+
+    /// The complete calendar behind a custom business-day frequency.
+    #[must_use]
+    pub fn custom_business_day(&self) -> Option<&CustomBusinessDaySpec> {
+        self.custom_business_day
+            .as_deref()
+            .filter(|_| is_custom_business_day_freq(self.freq.as_deref()))
+    }
+
+    /// Attach calendar state after setting a custom business-day frequency.
+    /// Other frequencies and non-datetime labels cannot carry this metadata.
+    #[must_use]
+    pub fn with_custom_business_day(mut self, calendar: Option<CustomBusinessDaySpec>) -> Self {
+        self.custom_business_day =
+            if is_custom_business_day_freq(self.freq.as_deref()) && self.holds_only_datetimes() {
+                calendar.map(Arc::new)
+            } else {
+                None
+            };
         self
     }
 
@@ -6860,7 +6993,7 @@ impl Index {
         // pandas' getitem keeps it for a slice or a mask selecting a run
         // (pandas' take keeps a steady step too: see `take_freq`).
         if !indices.is_empty() && indices.windows(2).all(|pair| pair[1] == pair[0] + 1) {
-            taken.freq.clone_from(&self.freq);
+            taken = taken.with_freq_from(self, self.freq.clone());
         }
         match self
             .row_multiindex
@@ -7036,10 +7169,13 @@ impl Index {
         if start.max(start.checked_add_signed(reach)?) >= self.len() {
             return None;
         }
+        let freq = self
+            .freq()
+            .and_then(|freq| scale_freq(freq, i64::try_from(step).ok()?));
         if let Some(range) = self.labels.datetime64_affine_range() {
             let step = range.step.checked_mul(i64::try_from(step).ok()?)?;
             let index = Self::from_datetime64_affine_range(range.value_at(start), step, len)?;
-            return Some(self.propagate_name(index));
+            return Some(self.propagate_name(index).with_freq_from(self, freq));
         }
         // An int64 index the same way: an arithmetic range stays one, a
         // typed buffer or a view of one is a view (`idx[::2]` and a run
@@ -7048,7 +7184,7 @@ impl Index {
             let step = range.step.checked_mul(i64::try_from(step).ok()?)?;
             let index =
                 Self::new_known_unique_int64_affine_range(range.value_at(start), step, len)?;
-            return Some(self.propagate_name(index));
+            return Some(self.propagate_name(index).with_freq_from(self, freq));
         }
         let labels =
             if let Some(TypedStridedLabels { kind, view }) = self.labels.typed_strided.as_ref() {
@@ -7061,21 +7197,25 @@ impl Index {
             } else {
                 return None;
             };
-        Some(self.propagate_name(Self {
-            labels,
-            name: None,
-            label_identity: next_index_label_identity(),
-            duplicate_cache: Arc::default(),
-            sort_order_cache: Arc::default(),
-            monotonic_cache: Default::default(),
-            semantic_fingerprint_cache: OnceLock::new(),
-            row_multiindex: None,
-            tz: None,
-            freq: None,
-            range: None,
-            declared: None,
-            categories: None,
-        }))
+        Some(
+            self.propagate_name(Self {
+                labels,
+                name: None,
+                label_identity: next_index_label_identity(),
+                duplicate_cache: Arc::default(),
+                sort_order_cache: Arc::default(),
+                monotonic_cache: Default::default(),
+                semantic_fingerprint_cache: OnceLock::new(),
+                row_multiindex: None,
+                tz: None,
+                freq: None,
+                custom_business_day: None,
+                range: None,
+                declared: None,
+                categories: None,
+            })
+            .with_freq_from(self, freq),
+        )
     }
 
     #[must_use]
@@ -7091,11 +7231,12 @@ impl Index {
             row_multiindex: None,
             tz: None,
             freq: None,
+            custom_business_day: None,
             range: None,
             declared: None,
             categories: None,
         });
-        sliced.freq.clone_from(&self.freq);
+        sliced = sliced.with_freq_from(self, self.freq.clone());
         // A slice of a RangeIndex is one (pandas).
         if self.range.is_some() {
             let first = start.min(self.len());
@@ -8937,6 +9078,12 @@ impl Index {
     /// Pandas dtype string for this flat index.
     #[must_use]
     pub fn dtype(&self) -> &'static str {
+        // Category membership is the logical dtype; the underlying labels
+        // may still have an object or numeric storage declaration. This
+        // also applies to a MultiIndex's categorical level and empty takes.
+        if self.categories.is_some() {
+            return "category";
+        }
         if let Some(declared) = self.declared {
             return declared.name();
         }
@@ -10829,6 +10976,11 @@ pub fn split_freq_count(freqstr: &str) -> Option<(i64, &str)> {
     (!rule.is_empty()).then_some((n, rule))
 }
 
+fn is_custom_business_day_freq(freq: Option<&str>) -> bool {
+    freq.and_then(split_freq_count)
+        .is_some_and(|(_, rule)| rule == "C" || rule.starts_with("C+") || rule.starts_with("C-"))
+}
+
 /// pandas' freqstr for a frequency alias - what `date_range(freq=alias)
 /// .freqstr` reports ('W' -> 'W-SUN', '12H' -> '12h', 'M' -> 'ME', 'Q' ->
 /// 'QE-DEC', 'T' -> 'min', '1D' -> 'D') - or None for an alias this does
@@ -10860,6 +11012,7 @@ pub fn canonical_freq(alias: &str) -> Option<String> {
         "us" | "U" => plain("us")?,
         "ns" | "N" => plain("ns")?,
         "B" => plain("B")?,
+        "C" => plain("C")?,
         "M" | "ME" => plain("ME")?,
         "MS" => plain("MS")?,
         "BM" | "BME" => plain("BME")?,
@@ -11869,7 +12022,9 @@ impl DatetimeIndex {
             return Err(IndexError::OutOfBounds { position, length });
         }
         let freq = take_freq(self.freq(), positions);
-        Ok(self.with_instants(self.nanos_at(positions)).with_freq(freq))
+        Ok(self
+            .with_instants(self.nanos_at(positions))
+            .with_freq_from(self, freq))
     }
 
     /// The instants at `positions` (each in bounds), NaT where a label is
@@ -11926,7 +12081,7 @@ impl DatetimeIndex {
         let freq = take_freq(self.freq(), &positions);
         Ok(self
             .with_instants(self.nanos_at_owned(positions))
-            .with_freq(freq))
+            .with_freq_from(self, freq))
     }
 
     /// [`Self::take_owned`] of numpy's signed positions (negative from the
@@ -11963,7 +12118,7 @@ impl DatetimeIndex {
             self.nanos_at_owned(checked?)
         };
         let freq = signed_take_freq(self.freq(), positions);
-        Some(self.with_instants(nanos).with_freq(freq))
+        Some(self.with_instants(nanos).with_freq_from(self, freq))
     }
 
     /// Repeat each label `repeats` times, matching `pd.DatetimeIndex.repeat()`.
@@ -12073,7 +12228,7 @@ impl DatetimeIndex {
                 .collect()
         };
         // Every label moves by the same span, so the freq holds (pandas).
-        self.with_instants(nanos).with_freq(self.freq())
+        self.with_instants(nanos).with_freq_from(self, self.freq())
     }
 
     /// Positional first differences, matching `pd.DatetimeIndex.diff()`.
@@ -12408,7 +12563,7 @@ impl DatetimeIndex {
             .freq()
             .filter(|_| run && (ordered || sort == Some(false)));
         self.with_instants(nanos)
-            .with_freq(freq)
+            .with_freq_from(self, freq)
             .with_tz_of(joined_tz(&self.index, &other.index))
             .named_for(self, other)
     }
@@ -12508,6 +12663,7 @@ impl DatetimeIndex {
     fn fast_intersection(&self, other: &Self) -> Option<Self> {
         let freq = self.freq()?;
         if other.freq().as_deref() != Some(freq.as_str())
+            || self.custom_business_day() != other.custom_business_day()
             || !self.is_monotonic_increasing()
             || split_freq_count(&freq)?.0 != 1
         {
@@ -12895,7 +13051,10 @@ impl DatetimeIndex {
                 });
                 let localized = Self::new(nanos).rename_index(self.name());
                 Ok(Self {
-                    index: localized.index.with_tz(Some(zone))?.with_freq(freq),
+                    index: localized
+                        .index
+                        .with_tz(Some(zone))?
+                        .with_freq_from(&self.index, freq),
                 })
             }
         }
@@ -12998,12 +13157,12 @@ impl DatetimeIndex {
         if let Some(nanos) = self.wall_nanos() {
             return Self::new(nanos.into_owned())
                 .rename_index(self.name())
-                .with_freq(freq);
+                .with_freq_from(self, freq);
         }
         Self {
             index: Index::new(self.wall_labels().into_owned())
                 .rename_index(self.name())
-                .with_freq(freq),
+                .with_freq_from(&self.index, freq),
         }
     }
 
@@ -13049,6 +13208,28 @@ impl DatetimeIndex {
     pub fn with_freq(self, freq: Option<String>) -> Self {
         Self {
             index: self.index.with_freq(freq),
+        }
+    }
+
+    /// Apply a selected frequency while retaining its source calendar.
+    #[must_use]
+    pub fn with_freq_from(self, source: &Self, freq: Option<String>) -> Self {
+        Self {
+            index: self.index.with_freq_from(&source.index, freq),
+        }
+    }
+
+    /// The complete calendar behind a custom business-day frequency.
+    #[must_use]
+    pub fn custom_business_day(&self) -> Option<&CustomBusinessDaySpec> {
+        self.index.custom_business_day()
+    }
+
+    /// Attach the calendar after setting this index's custom frequency.
+    #[must_use]
+    pub fn with_custom_business_day(self, calendar: Option<CustomBusinessDaySpec>) -> Self {
+        Self {
+            index: self.index.with_custom_business_day(calendar),
         }
     }
 
@@ -24193,6 +24374,8 @@ struct MultiIndexLevelSnapshot {
     declared: bool,
     zone: Option<String>,
     width: Option<NumericWidth>,
+    #[serde(default)]
+    categories: Option<IndexCategoriesSnapshot>,
 }
 
 impl MultiIndexSnapshot {
@@ -24249,6 +24432,19 @@ impl MultiIndexSnapshot {
                     "native MultiIndex snapshot width does not match its level labels".to_owned(),
                 ));
             }
+            if let Some(categories) = &level.categories {
+                let known: FxHashSet<&IndexLabel> = categories.categories.iter().collect();
+                if !level
+                    .catalog
+                    .iter()
+                    .all(|label| label.is_missing() || known.contains(label))
+                {
+                    return Err(IndexError::InvalidArgument(
+                        "native MultiIndex snapshot contains a label outside its categories"
+                            .to_owned(),
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -24275,6 +24471,12 @@ impl MultiIndexSnapshot {
                     .declared(level.declared)
                     .zoned(level.zone.map(Arc::from))
                     .with_width(level.width)
+                    .categorized(level.categories.map(|categories| {
+                        Arc::new(IndexCategories {
+                            categories: categories.categories,
+                            ordered: categories.ordered,
+                        })
+                    }))
             })
             .collect();
         Ok(MultiIndex::from_shared_levels_and_names(levels, names)
@@ -24676,6 +24878,9 @@ struct Level {
     /// level. A zoned column's level was its text (br-frankenpandas-c4v57).
     zone: Option<Arc<str>>,
     width: Option<NumericWidth>,
+    /// A categorical level keeps its complete category catalog and dtype
+    /// through groupby output completion, selection and native snapshots.
+    categories: Option<Arc<IndexCategories>>,
     /// Whether the level's catalog is its codes' uniques in their order -
     /// a stack's levels, factorized unsorted with every label kept as
     /// pandas' are - rather than its labels sorted (br-frankenpandas-33b80).
@@ -24750,6 +24955,7 @@ impl Level {
             codes: Arc::default(),
             zone: None,
             width: None,
+            categories: None,
             declared: false,
         }
     }
@@ -24761,6 +24967,7 @@ impl Level {
             codes: Arc::new(OnceLock::from(Some(LevelCodes { uniques, codes }))),
             zone: None,
             width: None,
+            categories: None,
             declared: false,
         }
     }
@@ -24774,6 +24981,11 @@ impl Level {
     /// This level in narrow numeric `width` (`int32`, `uint8`, `float32`, ...).
     fn with_width(mut self, width: Option<NumericWidth>) -> Self {
         self.width = width;
+        self
+    }
+
+    fn categorized(mut self, categories: Option<Arc<IndexCategories>>) -> Self {
+        self.categories = categories;
         self
     }
 
@@ -24876,6 +25088,7 @@ impl Level {
         }
         .zoned(self.zone.clone())
         .with_width(self.width)
+        .categorized(self.categories.clone())
         .declared(self.declared)
     }
 
@@ -24891,6 +25104,7 @@ impl Level {
         }
         .zoned(self.zone.clone())
         .with_width(self.width)
+        .categorized(self.categories.clone())
         .declared(self.declared)
     }
 }
@@ -24901,8 +25115,15 @@ fn zoned_level_index(index: Index, level: &Level) -> Index {
         Some(zone) => index.clone().with_tz(Some(zone)).unwrap_or(index),
         None => index,
     };
-    match level.width {
+    let index = match level.width {
         Some(width) => index.with_width(width),
+        None => index,
+    };
+    match &level.categories {
+        Some(categories) => index
+            .clone()
+            .with_categories(Some(categories.as_ref().clone()))
+            .unwrap_or(index),
         None => index,
     }
 }
@@ -25031,6 +25252,12 @@ impl MultiIndex {
                     declared: level.declared,
                     zone: level.zone.as_deref().map(str::to_owned),
                     width: level.width,
+                    categories: level.categories.as_ref().map(|categories| {
+                        IndexCategoriesSnapshot {
+                            categories: categories.categories.clone(),
+                            ordered: categories.ordered,
+                        }
+                    }),
                 })
             })
             .collect::<Result<Vec<_>, IndexError>>()?;
@@ -25725,6 +25952,18 @@ impl MultiIndex {
     /// (a stack's: its labels in the frame's order, unused ones kept) less
     /// any missing label, else [`Self::level_catalog`] (br-frankenpandas-33b80).
     fn reported_catalog(level: &Level) -> Vec<IndexLabel> {
+        if let Some(categories) = &level.categories {
+            let present: FxHashMap<&IndexLabel, ()> = level
+                .codes()
+                .map(|coded| coded.uniques.iter().map(|label| (label, ())).collect())
+                .unwrap_or_else(|| level.iter().map(|label| (label, ())).collect());
+            return categories
+                .categories
+                .iter()
+                .filter(|label| present.contains_key(label))
+                .cloned()
+                .collect();
+        }
         match level.declared_catalog() {
             Some(catalog) => catalog
                 .iter()
@@ -25818,6 +26057,48 @@ impl MultiIndex {
             target.width = width;
         }
         self
+    }
+
+    /// The categorical dtype of a level, including categories that have no
+    /// rows. A categorical groupby's result must retain this independently
+    /// from its row codes and the order in which groups appear.
+    #[must_use]
+    pub fn level_categories(&self, level: usize) -> Option<&IndexCategories> {
+        self.levels.get(level)?.categories.as_deref()
+    }
+
+    /// Set a level's categorical dtype without changing its labels or codes.
+    /// Every non-missing catalog label must belong to the categories.
+    pub fn with_level_categories(
+        mut self,
+        level: usize,
+        categories: Option<IndexCategories>,
+    ) -> Result<Self, IndexError> {
+        let nlevels = self.nlevels();
+        let target = self.levels.get_mut(level).ok_or(IndexError::OutOfBounds {
+            position: level,
+            length: nlevels,
+        })?;
+        if let Some(categories) = &categories {
+            let known: FxHashMap<&IndexLabel, ()> = categories
+                .categories
+                .iter()
+                .map(|label| (label, ()))
+                .collect();
+            let labels = target
+                .codes()
+                .map_or_else(|| target.rows(), |coded| coded.uniques.as_slice());
+            if labels
+                .iter()
+                .any(|label| !label.is_missing() && !known.contains_key(label))
+            {
+                return Err(IndexError::InvalidArgument(
+                    "a categorical level's labels must be among its categories".to_owned(),
+                ));
+            }
+        }
+        target.categories = categories.map(Arc::new);
+        Ok(self)
     }
 
     /// Integer level codes for each row, matching `pd.MultiIndex.codes`.
@@ -26455,7 +26736,8 @@ impl MultiIndex {
         let levels = vec![
             Self::stacked_row_level(uniques, &codes, columns.len())
                 .zoned(index.tz().map(Arc::from))
-                .with_width(index.width()),
+                .with_width(index.width())
+                .categorized(index.categories().cloned().map(Arc::new)),
             Self::stacked_column_level(columns, labels.len())?,
         ];
         Some(Self::from_shared_levels_and_names(levels, vec![None; 2]))
@@ -26495,7 +26777,8 @@ impl MultiIndex {
                 CodesWindow::from(positions.repeat(piece_keys.len())),
             )
             .zoned(index.tz().map(Arc::from))
-            .with_width(index.width()),
+            .with_width(index.width())
+            .categorized(index.categories().cloned().map(Arc::new)),
         ];
         Some(Self::from_shared_levels_and_names(levels, vec![None; 2]))
     }
@@ -26520,6 +26803,7 @@ impl MultiIndex {
                 Self::stacked_row_level(Arc::clone(&coded.uniques), &coded.codes, columns.len())
                     .zoned(level.zone.clone())
                     .with_width(level.width)
+                    .categorized(level.categories.clone())
                     .declared(level.declared),
             );
         }
@@ -50060,7 +50344,121 @@ mod native_snapshot_tests {
             );
             assert_eq!(actual.level_zone(level), expected.level_zone(level));
             assert_eq!(actual.level_width(level), expected.level_width(level));
+            assert_eq!(
+                actual.level_categories(level),
+                expected.level_categories(level)
+            );
         }
+    }
+
+    #[test]
+    fn custom_business_calendar_survives_only_frequency_preserving_selection() {
+        let calendar = super::CustomBusinessDaySpec {
+            weekmask: [true, true, true, true, false, false, false],
+            holidays: vec![4, 11],
+            display_weekmask: None,
+            display_weekmask_flags: Some([true, true, true, true, true, false, false]),
+            display_holidays: vec![11, 4, 4],
+            normalize: true,
+            offset_nanos: 7_200_000_000_000,
+        };
+        let day = 86_400_000_000_000;
+        let original = Index::from_datetime64_values(vec![0, day, 5 * day, 6 * day, 7 * day])
+            .with_freq(Some("C+2h".to_owned()))
+            .with_custom_business_day(Some(calendar.clone()));
+        for selected in [
+            original.clone(),
+            original.slice(1, 2),
+            original.take(&[1, 2]),
+        ] {
+            assert_eq!(selected.freq(), Some("C+2h"));
+            assert_eq!(selected.custom_business_day(), Some(&calendar));
+        }
+        let stepped = original.stepped(0, 2, 3).unwrap();
+        assert_eq!(stepped.freq(), Some("2C+2h"));
+        assert_eq!(stepped.custom_business_day(), Some(&calendar));
+        for dropped in [
+            original.take(&[0, 2, 3]),
+            original.relabeled(original.labels().to_vec()),
+            original.clone().with_freq(None),
+            original.clone().with_freq(Some("D".to_owned())),
+            original.clone().with_freq(Some("CBME".to_owned())),
+        ] {
+            assert_eq!(dropped.custom_business_day(), None);
+            assert_eq!(
+                dropped
+                    .with_freq(Some("C".to_owned()))
+                    .custom_business_day(),
+                None,
+                "cleared calendars must not return when a frequency is assigned later"
+            );
+        }
+        let rebuilt = Index::from_datetime64_values(vec![0, 5 * day, 7 * day])
+            .with_freq_from(&original, Some("2C+2h".to_owned()));
+        assert_eq!(rebuilt.custom_business_day(), Some(&calendar));
+        assert_eq!(super::canonical_freq("C"), Some("C".to_owned()));
+        assert_eq!(super::canonical_freq("-2C"), Some("-2C".to_owned()));
+    }
+
+    #[test]
+    fn datetime_custom_business_calendar_survives_scaled_and_empty_takes() {
+        let calendar = super::CustomBusinessDaySpec {
+            weekmask: [true, true, true, true, true, false, false],
+            holidays: vec![7],
+            display_weekmask: Some("Mon Tue Wed Thu Fri".to_owned()),
+            display_weekmask_flags: None,
+            display_holidays: vec![7],
+            normalize: false,
+            offset_nanos: 0,
+        };
+        let original = super::DatetimeIndex::new(vec![0, 1, 2, 3, 4])
+            .with_freq(Some("C".to_owned()))
+            .with_custom_business_day(Some(calendar.clone()));
+        for (positions, freq) in [(vec![0, 2, 4], "2C"), (vec![4, 2, 0], "-2C"), (vec![], "C")] {
+            let taken = original.take(&positions).unwrap();
+            assert_eq!(taken.freq().as_deref(), Some(freq));
+            assert_eq!(taken.custom_business_day(), Some(&calendar));
+            let owned = original.take_owned(positions.clone()).unwrap();
+            assert_eq!(owned.custom_business_day(), Some(&calendar));
+            let signed = original
+                .take_signed(positions.into_iter().map(|position| position as i64))
+                .unwrap();
+            assert_eq!(signed.freq().as_deref(), Some(freq));
+            assert_eq!(signed.custom_business_day(), Some(&calendar));
+        }
+        let irregular = original.take(&[0, 2, 3]).unwrap();
+        assert_eq!(irregular.freq(), None);
+        assert_eq!(irregular.custom_business_day(), None);
+    }
+
+    #[test]
+    fn native_index_snapshot_preserves_and_validates_custom_business_calendar() {
+        let calendar = super::CustomBusinessDaySpec {
+            weekmask: [false, true, true, true, true, false, false],
+            holidays: vec![2, 9],
+            display_weekmask: Some("Tue Wed Thu Fri".to_owned()),
+            display_weekmask_flags: None,
+            display_holidays: vec![9, 2, 2],
+            normalize: true,
+            offset_nanos: -3_600_000_000_000,
+        };
+        let original = Index::from_datetime64_values(vec![0, 1, 2])
+            .with_freq(Some("2C-1h".to_owned()))
+            .with_custom_business_day(Some(calendar.clone()));
+        let snapshot = original.snapshot().unwrap();
+        let restored = snapshot.clone().restore().unwrap();
+        assert_eq!(restored.labels(), original.labels());
+        assert_eq!(restored.freq(), Some("2C-1h"));
+        assert_eq!(restored.custom_business_day(), Some(&calendar));
+        let mut invalid = snapshot.clone();
+        invalid.freq = None;
+        assert!(invalid.restore().is_err());
+        let mut invalid = snapshot.clone();
+        invalid.custom_business_day.as_mut().unwrap().weekmask = [false; 7];
+        assert!(invalid.restore().is_err());
+        let mut invalid = snapshot;
+        invalid.custom_business_day.as_mut().unwrap().holidays = vec![9, 2];
+        assert!(invalid.restore().is_err());
     }
 
     #[test]
@@ -50074,11 +50472,59 @@ mod native_snapshot_tests {
             }))
             .unwrap();
         let restored = original.snapshot().unwrap().restore().unwrap();
+        assert_eq!(original.dtype(), "category");
+        assert_eq!(restored.dtype(), "category");
         assert_eq!(restored.labels(), original.labels());
         assert_eq!(restored.name().unwrap().label(), IndexLabel::Int64(0));
         assert_eq!(restored.categories(), original.categories());
         assert_eq!(restored.declared_dtype(), original.declared_dtype());
         assert_ne!(restored.label_identity, original.label_identity);
+    }
+
+    #[test]
+    fn native_multiindex_snapshot_preserves_categorical_levels() {
+        let original = MultiIndex::from_product(vec![
+            vec![text("b"), text("a"), text("unused")],
+            vec![IndexLabel::Int64(2), IndexLabel::Int64(1)],
+        ])
+        .unwrap()
+        .with_level_categories(
+            0,
+            Some(IndexCategories {
+                categories: vec![text("unused"), text("b"), text("a")],
+                ordered: true,
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            original.levels()[0].labels(),
+            &[text("unused"), text("b"), text("a")]
+        );
+        assert_eq!(original.codes()[0], vec![1, 1, 2, 2, 0, 0]);
+        assert_eq!(original.levels()[0].dtype(), "category");
+        assert_eq!(original.get_level_values(0).unwrap().dtype(), "category");
+        for kept in [
+            original.clone(),
+            original.take(&[0, 2]).unwrap(),
+            original.slice_rows(0, 0).unwrap(),
+            original.stacked_levels(&[text("value")]).unwrap(),
+        ] {
+            assert_eq!(kept.level_categories(0), original.level_categories(0));
+            let restored = kept.snapshot().unwrap().restore().unwrap();
+            assert_multi_metadata(&restored, &kept);
+            assert_eq!(restored.levels()[0].dtype(), "category");
+        }
+        assert!(
+            original
+                .with_level_categories(
+                    0,
+                    Some(IndexCategories {
+                        categories: vec![text("a")],
+                        ordered: false,
+                    }),
+                )
+                .is_err()
+        );
     }
 
     #[test]
