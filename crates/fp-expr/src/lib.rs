@@ -61,11 +61,12 @@
 //!
 //! ## Incremental views
 //!
-//! [`MaterializedView`] + [`Delta`]: the foundation for incremental
-//! `eval`-derived columns. A `MaterializedView` caches the last
-//! result and the input fingerprint; on next call, only re-evaluates
-//! when inputs change. `Delta` records what changed for downstream
-//! consumers.
+//! [`MaterializedView`] caches the last successful result and its input
+//! context. [`Delta`] carries an append hint. Updates validate that hint
+//! and evaluate against the supplied complete context before replacing the
+//! cache. Full re-evaluation is currently intentional: public view fields
+//! and changed input metadata make expression shape alone insufficient
+//! to prove that cached rows can be reused.
 //!
 //! ## Cross-crate relationships
 //!
@@ -1636,7 +1637,10 @@ fn evaluate_comparison(
 
 // ── AG-15: Incremental View Maintenance ────────────────────────────────
 
-/// A delta represents new rows appended to a base series.
+/// An append hint identifying new rows in a base series.
+///
+/// The context supplied to [`MaterializedView::apply_delta`] must contain
+/// the complete updated inputs, including these rows.
 #[derive(Debug, Clone)]
 pub struct Delta {
     pub series_name: String,
@@ -1644,7 +1648,11 @@ pub struct Delta {
     pub new_values: Vec<Scalar>,
 }
 
-/// Cached result of a previous full evaluation, used as base for incremental updates.
+/// The last successful evaluation and its source context.
+///
+/// [`Self::apply_delta`] validates append hints and refreshes the full result
+/// atomically. Publicly mutable cache fields do not establish that a delta
+/// can be evaluated independently.
 #[derive(Debug, Clone)]
 pub struct MaterializedView {
     pub expr: Expr,
@@ -1667,11 +1675,16 @@ impl MaterializedView {
         })
     }
 
-    /// Apply a delta (appended rows) incrementally.
+    /// Refresh the view from the authoritative updated context.
     ///
-    /// For linear expressions (series refs, arithmetic, anchored comparisons), only the new rows
-    /// are computed and concatenated to the existing result. Falls back to
-    /// full re-evaluation for expressions that cannot be incrementally maintained.
+    /// `context` must contain the complete current inputs, including appended
+    /// rows. The delta is a validated append hint, not a replacement context.
+    ///
+    /// The expression and cache fields are publicly mutable, so the hint alone
+    /// cannot prove that previously computed rows remain valid. Recompute the
+    /// full result for now; this costs a full evaluation per update but preserves
+    /// source dtype, index metadata, local bindings, and runtime-policy behavior.
+    /// A failed validation or evaluation leaves both cached fields unchanged.
     pub fn apply_delta(
         &mut self,
         delta: &Delta,
@@ -1679,33 +1692,17 @@ impl MaterializedView {
         policy: &RuntimePolicy,
         ledger: &mut EvidenceLedger,
     ) -> Result<&Series, ExprError> {
-        // Build a context containing only the delta rows
-        let delta_series = Series::from_values(
+        // Preserve the existing malformed-delta error contract.
+        let _ = Series::from_values(
             &delta.series_name,
             delta.new_labels.clone(),
             delta.new_values.clone(),
         )
         .map_err(ExprError::from)?;
 
-        let mut delta_ctx = context.clone();
-        delta_ctx.insert_series(delta_series);
-
-        // Check if the expression can be incrementally maintained
-        if Self::is_linear(&self.expr) {
-            // Evaluate only the delta portion
-            let delta_result = evaluate_delta(&self.expr, &delta_ctx, delta, policy, ledger)?;
-
-            // Concatenate: old result + delta result
-            let combined =
-                fp_frame::concat_series(&[&self.result, &delta_result]).map_err(ExprError::from)?;
-            self.result = combined;
-            self.base_snapshot = context.clone();
-        } else {
-            // Fallback: full re-evaluation
-            self.result = evaluate(&self.expr, context, policy, ledger)?;
-            self.base_snapshot = context.clone();
-        }
-
+        let result = evaluate(&self.expr, context, policy, ledger)?;
+        self.result = result;
+        self.base_snapshot = context.clone();
         Ok(&self.result)
     }
 
@@ -1776,409 +1773,6 @@ impl MaterializedView {
             | Expr::CumMax { expr }
             | Expr::PctChange { expr, .. } => Self::extract_bindings(expr, series_set, local_set),
             Expr::Literal { .. } => {}
-        }
-    }
-
-    fn is_linear(expr: &Expr) -> bool {
-        let mut series_set = std::collections::BTreeSet::new();
-        let mut local_set = std::collections::BTreeSet::new();
-        Self::extract_bindings(expr, &mut series_set, &mut local_set);
-        series_set.len() == 1 && Self::is_append_local(expr)
-    }
-
-    fn is_append_local(expr: &Expr) -> bool {
-        match expr {
-            Expr::Series { .. } | Expr::Local { .. } | Expr::Literal { .. } => true,
-            Expr::Add { left, right }
-            | Expr::Sub { left, right }
-            | Expr::Mul { left, right }
-            | Expr::Div { left, right }
-            | Expr::Modulo { left, right }
-            | Expr::FloorDiv { left, right }
-            | Expr::Pow { left, right }
-            | Expr::And { left, right }
-            | Expr::Or { left, right }
-            | Expr::Compare { left, right, .. } => {
-                Self::is_append_local(left) && Self::is_append_local(right)
-            }
-            Expr::Not { expr }
-            | Expr::Abs { expr }
-            | Expr::Round { expr, .. }
-            | Expr::IsNull { expr, .. }
-            | Expr::FillNa { expr, .. }
-            | Expr::Replace { expr, .. }
-            | Expr::Astype { expr, .. }
-            | Expr::Between { expr, .. }
-            | Expr::Clip { expr, .. }
-            | Expr::IsIn { left: expr, .. } => Self::is_append_local(expr),
-            Expr::Where {
-                expr, cond, other, ..
-            } => {
-                Self::is_append_local(expr)
-                    && Self::is_append_local(cond)
-                    && other.as_deref().is_none_or(Self::is_append_local)
-            }
-            Expr::DropNa { .. }
-            | Expr::SortValues { .. }
-            | Expr::SortIndex { .. }
-            | Expr::ArgSort { .. }
-            | Expr::Mode { .. }
-            | Expr::Duplicated { .. }
-            | Expr::DropDuplicates { .. }
-            | Expr::HeadTail { .. }
-            | Expr::TopN { .. }
-            | Expr::CombineFirst { .. }
-            | Expr::Rank { .. }
-            | Expr::Shift { .. }
-            | Expr::Diff { .. }
-            | Expr::CumSum { .. }
-            | Expr::CumProd { .. }
-            | Expr::CumMin { .. }
-            | Expr::CumMax { .. }
-            | Expr::PctChange { .. } => false,
-        }
-    }
-}
-
-/// Evaluate only the delta rows of an expression.
-///
-/// For `Expr::Series`, returns the delta rows for the named series.
-/// For arithmetic/logical/comparison operators, recursively evaluates delta
-/// operands and applies the operation only on appended rows.
-fn evaluate_delta(
-    expr: &Expr,
-    delta_ctx: &EvalContext,
-    delta: &Delta,
-    policy: &RuntimePolicy,
-    ledger: &mut EvidenceLedger,
-) -> Result<Series, ExprError> {
-    match expr {
-        Expr::Series { name } => {
-            if name.0 == delta.series_name {
-                // This is the series that has the delta
-                Series::from_values(&name.0, delta.new_labels.clone(), delta.new_values.clone())
-                    .map_err(ExprError::from)
-            } else {
-                // Other series: extract the corresponding labels from the full series
-                let full = delta_ctx
-                    .get_series(&name.0)
-                    .ok_or_else(|| ExprError::UnknownSeries(name.0.clone()))?;
-                // For non-delta series in an add, we need the values at the delta labels.
-                // If the other series doesn't have those labels, alignment will fill nulls.
-                let reindexed = full
-                    .reindex(delta.new_labels.clone())
-                    .map_err(ExprError::from)?;
-                Ok(reindexed)
-            }
-        }
-        Expr::Local { name } => {
-            let value = delta_ctx
-                .get_local(name)
-                .cloned()
-                .ok_or_else(|| ExprError::UnknownLocal(name.clone()))?;
-            Series::broadcast(name.as_str(), value, delta.new_labels.clone())
-                .map_err(ExprError::from)
-        }
-        Expr::Add { left, right } => {
-            let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
-            let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
-            lhs.add_with_policy(&rhs, policy, ledger)
-                .map_err(ExprError::from)
-        }
-        Expr::Sub { left, right } => {
-            let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
-            let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
-            lhs.sub_with_policy(&rhs, policy, ledger)
-                .map_err(ExprError::from)
-        }
-        Expr::Mul { left, right } => {
-            let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
-            let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
-            lhs.mul_with_policy(&rhs, policy, ledger)
-                .map_err(ExprError::from)
-        }
-        Expr::Div { left, right } => {
-            let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
-            let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
-            lhs.div_with_policy(&rhs, policy, ledger)
-                .map_err(ExprError::from)
-        }
-        Expr::Modulo { left, right } => {
-            let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
-            let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
-            lhs.modulo_with_policy(&rhs, policy, ledger)
-                .map_err(ExprError::from)
-        }
-        Expr::FloorDiv { left, right } => {
-            let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
-            let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
-            lhs.floordiv_with_policy(&rhs, policy, ledger)
-                .map_err(ExprError::from)
-        }
-        Expr::Pow { left, right } => {
-            let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
-            let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
-            lhs.pow_with_policy(&rhs, policy, ledger)
-                .map_err(ExprError::from)
-        }
-        Expr::And { left, right } => {
-            let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
-            let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
-            lhs.and(&rhs).map_err(ExprError::from)
-        }
-        Expr::Or { left, right } => {
-            let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
-            let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
-            lhs.or(&rhs).map_err(ExprError::from)
-        }
-        Expr::Not { expr } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.not().map_err(ExprError::from)
-        }
-        Expr::Abs { expr } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.abs().map_err(ExprError::from)
-        }
-        Expr::Round { expr, decimals } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.round(*decimals).map_err(ExprError::from)
-        }
-        Expr::IsNull { expr, negated } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            if *negated {
-                input.notna().map_err(ExprError::from)
-            } else {
-                input.isna().map_err(ExprError::from)
-            }
-        }
-        Expr::FillNa { expr, value } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.fillna(value).map_err(ExprError::from)
-        }
-        Expr::DropNa { expr } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.dropna().map_err(ExprError::from)
-        }
-        Expr::SortValues {
-            expr,
-            ascending,
-            na_position,
-        } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input
-                .sort_values_na(*ascending, na_position)
-                .map_err(ExprError::from)
-        }
-        Expr::SortIndex {
-            expr,
-            ascending,
-            ignore_index,
-        } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            sort_index_series(input, *ascending, *ignore_index)
-        }
-        Expr::ArgSort { expr } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.argsort(true).map_err(ExprError::from)
-        }
-        Expr::Mode { expr, dropna } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.mode_with_dropna(*dropna).map_err(ExprError::from)
-        }
-        Expr::Duplicated { expr, keep } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input
-                .duplicated_keep(keep.as_frame_keep())
-                .map_err(ExprError::from)
-        }
-        Expr::DropDuplicates { expr, keep } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input
-                .drop_duplicates_keep(keep.as_frame_keep())
-                .map_err(ExprError::from)
-        }
-        Expr::HeadTail { expr, n, tail } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            if *tail {
-                input.tail(*n).map_err(ExprError::from)
-            } else {
-                input.head(*n).map_err(ExprError::from)
-            }
-        }
-        Expr::TopN {
-            expr,
-            n,
-            keep,
-            largest,
-        } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            if *largest {
-                input.nlargest_keep(*n, keep).map_err(ExprError::from)
-            } else {
-                input.nsmallest_keep(*n, keep).map_err(ExprError::from)
-            }
-        }
-        Expr::Replace {
-            expr,
-            to_replace,
-            value,
-        } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input
-                .replace(&[(to_replace.clone(), value.clone())])
-                .map_err(ExprError::from)
-        }
-        Expr::Astype { expr, dtype } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.astype(dtype.clone()).map_err(ExprError::from)
-        }
-        Expr::CombineFirst { left, right } => {
-            let lhs = evaluate_delta(left, delta_ctx, delta, policy, ledger)?;
-            let rhs = evaluate_delta(right, delta_ctx, delta, policy, ledger)?;
-            lhs.combine_first(&rhs).map_err(ExprError::from)
-        }
-        Expr::Rank {
-            expr,
-            method,
-            ascending,
-            na_option,
-            pct,
-        } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input
-                .rank_with_pct(method, *ascending, na_option, *pct)
-                .map_err(ExprError::from)
-        }
-        Expr::Where {
-            expr,
-            cond,
-            other,
-            mask,
-        } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            let condition = evaluate_delta(cond, delta_ctx, delta, policy, ledger)?;
-            match other.as_deref() {
-                None => {
-                    if *mask {
-                        input.mask(&condition, None).map_err(ExprError::from)
-                    } else {
-                        input.r#where(&condition, None).map_err(ExprError::from)
-                    }
-                }
-                Some(Expr::Literal { value }) => {
-                    if *mask {
-                        input.mask(&condition, Some(value)).map_err(ExprError::from)
-                    } else {
-                        input
-                            .r#where(&condition, Some(value))
-                            .map_err(ExprError::from)
-                    }
-                }
-                Some(other_expr) => {
-                    let replacement = evaluate_delta(other_expr, delta_ctx, delta, policy, ledger)?;
-                    if *mask {
-                        input
-                            .mask_series(&condition, &replacement)
-                            .map_err(ExprError::from)
-                    } else {
-                        input
-                            .where_cond_series(&condition, &replacement)
-                            .map_err(ExprError::from)
-                    }
-                }
-            }
-        }
-        Expr::Between {
-            expr,
-            left,
-            right,
-            inclusive,
-        } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input
-                .between(left, right, inclusive.as_str())
-                .map_err(ExprError::from)
-        }
-        Expr::Clip { expr, lower, upper } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.clip(*lower, *upper).map_err(ExprError::from)
-        }
-        Expr::Shift { expr, periods } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.shift(*periods).map_err(ExprError::from)
-        }
-        Expr::Diff { expr, periods } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.diff(*periods).map_err(ExprError::from)
-        }
-        Expr::CumSum { expr } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.cumsum().map_err(ExprError::from)
-        }
-        Expr::CumProd { expr } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.cumprod().map_err(ExprError::from)
-        }
-        Expr::CumMin { expr } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.cummin().map_err(ExprError::from)
-        }
-        Expr::CumMax { expr } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.cummax().map_err(ExprError::from)
-        }
-        Expr::PctChange { expr, periods } => {
-            let input = evaluate_delta(expr, delta_ctx, delta, policy, ledger)?;
-            input.pct_change(*periods as i64).map_err(ExprError::from)
-        }
-        Expr::Compare { left, right, op } => {
-            evaluate_delta_comparison(left, right, *op, delta_ctx, delta, policy, ledger)
-        }
-        Expr::IsIn {
-            left,
-            values,
-            negated,
-        } => {
-            let out = evaluate_delta(left, delta_ctx, delta, policy, ledger)?
-                .isin(values)
-                .map_err(ExprError::from)?;
-            if *negated {
-                out.not().map_err(ExprError::from)
-            } else {
-                Ok(out)
-            }
-        }
-        Expr::Literal { value } => {
-            Series::broadcast("_literal", value.clone(), delta.new_labels.clone())
-                .map_err(ExprError::from)
-        }
-    }
-}
-
-fn evaluate_delta_comparison(
-    left: &Expr,
-    right: &Expr,
-    op: ComparisonOp,
-    delta_ctx: &EvalContext,
-    delta: &Delta,
-    policy: &RuntimePolicy,
-    ledger: &mut EvidenceLedger,
-) -> Result<Series, ExprError> {
-    match (left, right) {
-        (Expr::Literal { .. }, Expr::Literal { .. }) => Err(ExprError::UnanchoredLiteral),
-        (Expr::Literal { value }, right_expr) => {
-            let rhs = evaluate_delta(right_expr, delta_ctx, delta, policy, ledger)?;
-            rhs.compare_scalar(value, reverse_comparison_op(op))
-                .map_err(ExprError::from)
-        }
-        (left_expr, Expr::Literal { value }) => {
-            let lhs = evaluate_delta(left_expr, delta_ctx, delta, policy, ledger)?;
-            lhs.compare_scalar(value, op).map_err(ExprError::from)
-        }
-        (left_expr, right_expr) => {
-            let lhs = evaluate_delta(left_expr, delta_ctx, delta, policy, ledger)?;
-            let rhs = evaluate_delta(right_expr, delta_ctx, delta, policy, ledger)?;
-            apply_series_comparison(&lhs, &rhs, op)
         }
     }
 }
@@ -6053,130 +5647,261 @@ mod tests {
         );
     }
 
+    fn ivm_snapshot_context(
+        labels: Vec<i64>,
+        values: Vec<Scalar>,
+        limit: Option<Scalar>,
+    ) -> EvalContext {
+        let mut context = EvalContext::new();
+        context.insert_series(make_series("a", labels, values));
+        if let Some(limit) = limit {
+            context.insert_local("limit", limit);
+        }
+        context
+    }
+
+    fn assert_ivm_snapshot_matches_full(
+        view: &MaterializedView,
+        context: &EvalContext,
+        policy: &RuntimePolicy,
+    ) {
+        let full = evaluate(&view.expr, context, policy, &mut EvidenceLedger::new())
+            .expect("full evaluation");
+        assert_eq!(view.result.column(), full.column());
+        assert_eq!(view.result.name(), full.name());
+        assert_eq!(view.result.index(), full.index());
+        // Index equality intentionally ignores its name.
+        assert_eq!(view.result.index().name(), full.index().name());
+    }
+
     #[test]
-    fn ivm_is_linear_detects_expressions() {
-        assert!(MaterializedView::is_linear(&Expr::Series {
-            name: SeriesRef("a".into()),
-        }));
-        assert!(!MaterializedView::is_linear(&Expr::Add {
-            left: Box::new(Expr::Series {
-                name: SeriesRef("a".into()),
-            }),
-            right: Box::new(Expr::Series {
-                name: SeriesRef("b".into()),
-            }),
-        }));
-        assert!(!MaterializedView::is_linear(&Expr::Sub {
-            left: Box::new(Expr::Series {
-                name: SeriesRef("a".into()),
-            }),
-            right: Box::new(Expr::Series {
-                name: SeriesRef("b".into()),
-            }),
-        }));
-        assert!(!MaterializedView::is_linear(&Expr::Mul {
-            left: Box::new(Expr::Series {
-                name: SeriesRef("a".into()),
-            }),
-            right: Box::new(Expr::Series {
-                name: SeriesRef("b".into()),
-            }),
-        }));
-        assert!(!MaterializedView::is_linear(&Expr::Div {
-            left: Box::new(Expr::Series {
-                name: SeriesRef("a".into()),
-            }),
-            right: Box::new(Expr::Series {
-                name: SeriesRef("b".into()),
-            }),
-        }));
-        assert!(!MaterializedView::is_linear(&Expr::Modulo {
-            left: Box::new(Expr::Series {
-                name: SeriesRef("a".into()),
-            }),
-            right: Box::new(Expr::Series {
-                name: SeriesRef("b".into()),
-            }),
-        }));
-        assert!(!MaterializedView::is_linear(&Expr::FloorDiv {
-            left: Box::new(Expr::Series {
-                name: SeriesRef("a".into()),
-            }),
-            right: Box::new(Expr::Series {
-                name: SeriesRef("b".into()),
-            }),
-        }));
-        assert!(!MaterializedView::is_linear(&Expr::Pow {
-            left: Box::new(Expr::Series {
-                name: SeriesRef("a".into()),
-            }),
-            right: Box::new(Expr::Series {
-                name: SeriesRef("b".into()),
-            }),
-        }));
-        assert!(!MaterializedView::is_linear(&Expr::And {
-            left: Box::new(Expr::Series {
-                name: SeriesRef("a".into()),
-            }),
-            right: Box::new(Expr::Series {
-                name: SeriesRef("b".into()),
-            }),
-        }));
-        assert!(!MaterializedView::is_linear(&Expr::Or {
-            left: Box::new(Expr::Series {
-                name: SeriesRef("a".into()),
-            }),
-            right: Box::new(Expr::Series {
-                name: SeriesRef("b".into()),
-            }),
-        }));
-        assert!(MaterializedView::is_linear(&Expr::Not {
-            expr: Box::new(Expr::Series {
-                name: SeriesRef("a".into()),
-            }),
-        }));
-        assert!(!MaterializedView::is_linear(&Expr::Compare {
-            left: Box::new(Expr::Series {
-                name: SeriesRef("a".into()),
-            }),
-            right: Box::new(Expr::Series {
-                name: SeriesRef("b".into()),
-            }),
-            op: ComparisonOp::Ge,
-        }));
-        assert!(MaterializedView::is_linear(&Expr::Compare {
-            left: Box::new(Expr::Series {
-                name: SeriesRef("a".into()),
-            }),
-            right: Box::new(Expr::Literal {
-                value: Scalar::Int64(1),
-            }),
-            op: ComparisonOp::Gt,
-        }));
-        assert!(!MaterializedView::is_linear(&Expr::Compare {
-            left: Box::new(Expr::Literal {
-                value: Scalar::Int64(1),
-            }),
-            right: Box::new(Expr::Literal {
-                value: Scalar::Int64(2),
-            }),
-            op: ComparisonOp::Lt,
-        }));
-        assert!(!MaterializedView::is_linear(&Expr::Literal {
-            value: Scalar::Int64(42),
-        }));
-        assert!(!MaterializedView::is_linear(&Expr::CumSum {
-            expr: Box::new(Expr::Series {
-                name: SeriesRef("a".into()),
-            }),
-        }));
-        assert!(!MaterializedView::is_linear(&Expr::SortValues {
-            expr: Box::new(Expr::Series {
-                name: SeriesRef("a".into()),
-            }),
-            ascending: true,
-            na_position: "last".into(),
-        }));
+    fn ivm_recomputes_unrelated_stale_and_replayed_deltas() {
+        let policy = RuntimePolicy::hardened(Some(10_000));
+        let mut ledger = EvidenceLedger::new();
+        let context = ivm_snapshot_context(
+            vec![0, 1],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            None,
+        );
+        let mut view =
+            MaterializedView::from_full_eval(&col("a"), &context, &policy, &mut ledger)
+                .expect("initial view");
+
+        let unrelated = Delta {
+            series_name: "b".into(),
+            new_labels: vec![1_i64.into()],
+            new_values: vec![Scalar::Int64(99)],
+        };
+        view.apply_delta(&unrelated, &context, &policy, &mut ledger)
+            .expect("unrelated delta");
+        assert_ivm_snapshot_matches_full(&view, &context, &policy);
+        assert_eq!(
+            view.result.values(),
+            &[Scalar::Int64(1), Scalar::Int64(2)]
+        );
+
+        let updated = ivm_snapshot_context(
+            vec![0, 1, 2],
+            vec![Scalar::Int64(100), Scalar::Int64(2), Scalar::Int64(3)],
+            None,
+        );
+        let delta = Delta {
+            series_name: "a".into(),
+            new_labels: vec![2_i64.into()],
+            new_values: vec![Scalar::Int64(3)],
+        };
+        view.apply_delta(&delta, &updated, &policy, &mut ledger)
+            .expect("changed historical row");
+        assert_ivm_snapshot_matches_full(&view, &updated, &policy);
+        assert_eq!(view.result.values()[0], Scalar::Int64(100));
+
+        view.apply_delta(&delta, &updated, &policy, &mut ledger)
+            .expect("replayed delta");
+        assert_ivm_snapshot_matches_full(&view, &updated, &policy);
+        assert_eq!(view.result.values().len(), 3);
+
+        let newest = ivm_snapshot_context(
+            vec![0, 1, 2, 3],
+            vec![
+                Scalar::Int64(100),
+                Scalar::Int64(2),
+                Scalar::Int64(3),
+                Scalar::Int64(4),
+            ],
+            None,
+        );
+        let incorrect_tail = Delta {
+            series_name: "a".into(),
+            new_labels: vec![3_i64.into()],
+            new_values: vec![Scalar::Int64(999)],
+        };
+        view.apply_delta(&incorrect_tail, &newest, &policy, &mut ledger)
+            .expect("authoritative context overrides stale hint values");
+        assert_ivm_snapshot_matches_full(&view, &newest, &policy);
+        assert_eq!(view.result.values()[3], Scalar::Int64(4));
+    }
+
+    #[test]
+    fn ivm_recomputes_changed_locals_and_public_view_fields() {
+        let policy = RuntimePolicy::hardened(Some(10_000));
+        let mut ledger = EvidenceLedger::new();
+        let context = ivm_snapshot_context(
+            vec![0, 1],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            Some(Scalar::Int64(1)),
+        );
+        let expr = col("a").gt(Expr::Local {
+            name: "limit".into(),
+        });
+        let mut view =
+            MaterializedView::from_full_eval(&expr, &context, &policy, &mut ledger)
+                .expect("initial view");
+
+        // Construct a fresh full context so its local broadcast anchor also
+        // contains every current row.
+        let updated = ivm_snapshot_context(
+            vec![0, 1, 2],
+            vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            Some(Scalar::Int64(3)),
+        );
+        let delta = Delta {
+            series_name: "a".into(),
+            new_labels: vec![2_i64.into()],
+            new_values: vec![Scalar::Int64(3)],
+        };
+        view.apply_delta(&delta, &updated, &policy, &mut ledger)
+            .expect("changed local");
+        assert_ivm_snapshot_matches_full(&view, &updated, &policy);
+        assert_eq!(
+            view.result.values(),
+            &[
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+            ]
+        );
+
+        // These fields are public. They must not be treated as trusted
+        // provenance for a subsequent incremental append.
+        view.expr = col("a").lt(lit(2_i64));
+        view.result = make_series("corrupt", vec![99], vec![Scalar::Int64(999)]);
+        view.base_snapshot = EvalContext::new();
+        view.apply_delta(&delta, &updated, &policy, &mut ledger)
+            .expect("changed public view fields");
+        assert_ivm_snapshot_matches_full(&view, &updated, &policy);
+        assert_eq!(
+            view.result.values(),
+            &[
+                Scalar::Bool(true),
+                Scalar::Bool(false),
+                Scalar::Bool(false),
+            ]
+        );
+    }
+
+    #[test]
+    fn ivm_recomputes_signed_zero_dtype_and_index_metadata_changes() {
+        let policy = RuntimePolicy::hardened(Some(10_000));
+        let mut ledger = EvidenceLedger::new();
+        let context = ivm_snapshot_context(vec![0], vec![Scalar::Float64(-0.0)], None);
+        let mut view =
+            MaterializedView::from_full_eval(&col("a"), &context, &policy, &mut ledger)
+                .expect("initial view");
+
+        let updated = ivm_snapshot_context(
+            vec![0, 1],
+            vec![Scalar::Float64(0.0), Scalar::Float64(1.0)],
+            None,
+        );
+        let delta = Delta {
+            series_name: "a".into(),
+            new_labels: vec![1_i64.into()],
+            new_values: vec![Scalar::Float64(1.0)],
+        };
+        view.apply_delta(&delta, &updated, &policy, &mut ledger)
+            .expect("signed-zero change");
+        let Scalar::Float64(first) = &view.result.values()[0] else {
+            panic!("float result");
+        };
+        assert_eq!(first.to_bits(), 0.0_f64.to_bits());
+
+        let source = make_series(
+            "a",
+            vec![0, 1, 2],
+            vec![Scalar::Int64(0), Scalar::Int64(1), Scalar::Int64(2)],
+        );
+        let named = Series::new(
+            source.name().clone(),
+            source.index().set_name("row"),
+            source.column().clone(),
+        )
+        .expect("named source");
+        let mut named_context = EvalContext::new();
+        named_context.insert_series(named);
+        let named_delta = Delta {
+            series_name: "a".into(),
+            new_labels: vec![2_i64.into()],
+            new_values: vec![Scalar::Int64(2)],
+        };
+        view.apply_delta(&named_delta, &named_context, &policy, &mut ledger)
+            .expect("dtype and metadata change");
+        assert_ivm_snapshot_matches_full(&view, &named_context, &policy);
+        assert_eq!(view.result.dtype(), DType::Int64);
+    }
+
+    #[test]
+    fn ivm_failed_validation_or_refresh_preserves_the_cache() {
+        let policy = RuntimePolicy::hardened(Some(10_000));
+        let mut ledger = EvidenceLedger::new();
+        let context = ivm_snapshot_context(
+            vec![0],
+            vec![Scalar::Int64(1)],
+            Some(Scalar::Int64(0)),
+        );
+        let expr = col("a").gt(Expr::Local {
+            name: "limit".into(),
+        });
+        let mut view =
+            MaterializedView::from_full_eval(&expr, &context, &policy, &mut ledger)
+                .expect("initial view");
+
+        let updated = ivm_snapshot_context(
+            vec![0, 1],
+            vec![Scalar::Int64(1), Scalar::Int64(2)],
+            None,
+        );
+        let malformed = Delta {
+            series_name: "a".into(),
+            new_labels: vec![1_i64.into()],
+            new_values: vec![],
+        };
+        assert!(matches!(
+            view.apply_delta(&malformed, &updated, &policy, &mut ledger),
+            Err(ExprError::Frame(_))
+        ));
+        assert_ivm_snapshot_matches_full(&view, &context, &policy);
+
+        let delta = Delta {
+            series_name: "a".into(),
+            new_labels: vec![1_i64.into()],
+            new_values: vec![Scalar::Int64(2)],
+        };
+        assert!(matches!(
+            view.apply_delta(&delta, &updated, &policy, &mut ledger),
+            Err(ExprError::UnknownLocal(name)) if name == "limit"
+        ));
+        assert_ivm_snapshot_matches_full(&view, &context, &policy);
+        assert_eq!(
+            view.base_snapshot
+                .get_series("a")
+                .expect("cached source")
+                .values(),
+            &[Scalar::Int64(1)]
+        );
+        assert_eq!(
+            view.base_snapshot.get_local("limit"),
+            Some(&Scalar::Int64(0))
+        );
     }
 
     // ── Parser tests ──
