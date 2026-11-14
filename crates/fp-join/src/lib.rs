@@ -11173,7 +11173,7 @@ pub enum AsofDirection {
 /// - `allow_exact_matches`: If true (default), allow matching with same key value
 /// - `tolerance`: Maximum distance between keys for a match
 /// - `by`: Columns to match exactly before asof matching
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MergeAsofOptions {
     /// If true (default), allow matching with the same 'on' value.
     /// If false, don't match rows where left key == right key exactly.
@@ -11192,6 +11192,12 @@ pub struct MergeAsofOptions {
     /// Suffixes for overlapping non-shared-key columns, as in `merge`.
     /// `None` uses `("_x", "_y")`.
     pub suffixes: Option<[Option<String>; 2]>,
+}
+
+impl Default for MergeAsofOptions {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MergeAsofOptions {
@@ -11368,19 +11374,21 @@ fn ensure_sorted_non_decreasing_datetime64(
     on: &str,
 ) -> Result<(), JoinError> {
     let mut prev: Option<i64> = None;
+    let mut unsorted = false;
     for i in 0..key.data.len() {
         if !key.is_valid(i) {
-            continue;
-        }
-        let value = key.data[i];
-        if let Some(prev_value) = prev
-            && value < prev_value
-        {
             return Err(JoinError::Frame(FrameError::CompatibilityRejected(
-                format!("merge_asof: {side} column '{on}' must be sorted"),
+                format!("Merge keys contain null values on {side} side"),
             )));
         }
+        let value = key.data[i];
+        unsorted |= prev.is_some_and(|previous| value < previous);
         prev = Some(value);
+    }
+    if unsorted {
+        return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+            format!("merge_asof: {side} column '{on}' must be sorted"),
+        )));
     }
     Ok(())
 }
@@ -11651,12 +11659,19 @@ fn ensure_matching_asof_key_dtypes(
     right_key: &Column,
     on: &str,
 ) -> Result<(), JoinError> {
-    if left_key.dtype() != right_key.dtype() {
+    if left_key.dtype() != right_key.dtype() || left_key.width() != right_key.width() {
+        let dtype_name = |column: &Column| {
+            let dtype = column.dtype();
+            column.width().map_or_else(
+                || dtype.display_name(),
+                |width| width.name(dtype.is_nullable()).to_owned(),
+            )
+        };
         return Err(JoinError::Frame(FrameError::CompatibilityRejected(
             format!(
                 "merge_asof: incompatible merge keys [0] for '{on}': left dtype('{}'), right dtype('{}'), must be the same type",
-                left_key.dtype().name(),
-                right_key.dtype().name(),
+                dtype_name(left_key),
+                dtype_name(right_key),
             ),
         )));
     }
@@ -11665,18 +11680,20 @@ fn ensure_matching_asof_key_dtypes(
 
 fn ensure_sorted_non_decreasing(values: &[f64], side: &str, on: &str) -> Result<(), JoinError> {
     let mut prev: Option<f64> = None;
+    let mut unsorted = false;
     for &value in values {
         if value.is_nan() {
-            continue;
-        }
-        if let Some(prev_value) = prev
-            && value < prev_value
-        {
             return Err(JoinError::Frame(FrameError::CompatibilityRejected(
-                format!("merge_asof: {side} column '{on}' must be sorted"),
+                format!("Merge keys contain null values on {side} side"),
             )));
         }
+        unsorted |= prev.is_some_and(|previous| value < previous);
         prev = Some(value);
+    }
+    if unsorted {
+        return Err(JoinError::Frame(FrameError::CompatibilityRejected(
+            format!("merge_asof: {side} column '{on}' must be sorted"),
+        )));
     }
     Ok(())
 }
@@ -11802,9 +11819,9 @@ fn merge_asof_simple(
         ),
     };
 
-    // With matching key dtypes, pandas accepts NaN keys: the NaN row gets a
-    // null in the joined columns (no match). Dtype incompatibility is rejected
-    // above before this value-level rule is reached.
+    // Matching dtypes are necessary but not sufficient: pandas rejects
+    // missing ordering keys on either side, including NaT. Validation runs
+    // before matching so a missing row cannot silently disappear.
     ensure_sorted_non_decreasing(&left_vals, "left", on)?;
     ensure_sorted_non_decreasing(&right_vals, "right", right_on)?;
 
@@ -11841,6 +11858,7 @@ fn merge_asof_grouped(
                 "merge_asof: 'by' column '{right_col}' not found in right"
             )))
         })?;
+        ensure_matching_asof_key_dtypes(left_column, right_column, col)?;
         validate_object_join_keys(left_column)?;
         validate_object_join_keys(right_column)?;
     }
@@ -11876,11 +11894,10 @@ fn merge_asof_grouped(
         (left_vals, right_vals)
     };
 
-    // Dense u32 group ids over the `by` columns (shared id space for left and
-    // right). The single non-float `by` column case factorizes the column's
-    // scalars with a borrowed typed key — no per-row `format!`/`Vec<String>`
-    // allocation — and is bit-identical to the Debug-string grouping (see
-    // `build_group_ids`). Everything else falls back to the string path.
+    // Factorize both sides in a shared group-id space. The borrowed
+    // single-key path avoids string allocation; the generic path uses the
+    // same canonical equality as ordinary joins, including signed zero and
+    // missing grouping values.
     let (left_ids, right_ids) = build_group_ids(left, right, keys.left_by, keys.right_by)?;
 
     // Group right rows by their `by` group id for asof matching (looked up by
@@ -11972,16 +11989,12 @@ fn merge_asof_grouped(
     build_asof_output(left, right, keys, &right_matches, options)
 }
 
-/// Borrowed, allocation-free `by`-key for the single-column factorize fast
-/// path. Each variant is the typed payload of a `Scalar` whose *derived*
-/// `Debug` is injective and equality-consistent — so two scalars share a
-/// `ByKey` iff their `format!("{val:?}")` strings (the legacy group key) are
-/// equal. `Float64` (`-0.0` vs `0.0`, `NaN`) and `Interval` Debug strings
-/// disagree with value equality, so `from_scalar` returns `None` for them and
-/// the caller falls back to the string path.
+/// Borrowed, allocation-free grouping keys for the single-column path.
+/// Missing representations share one group. Nonmissing floats, intervals
+/// and object values use the ordinary join engine's canonical key path.
 #[derive(PartialEq, Eq, Hash)]
 enum ByKey<'a> {
-    Null(u8),
+    Missing,
     Bool(bool),
     Int(i64),
     Str(&'a str),
@@ -11992,10 +12005,11 @@ enum ByKey<'a> {
 
 impl<'a> ByKey<'a> {
     fn from_scalar(s: &'a Scalar) -> Option<Self> {
+        if s.is_missing() {
+            return Some(ByKey::Missing);
+        }
         Some(match s {
-            Scalar::Null(NullKind::Null) => ByKey::Null(0),
-            Scalar::Null(NullKind::NaN) => ByKey::Null(1),
-            Scalar::Null(NullKind::NaT) => ByKey::Null(2),
+            Scalar::Null(_) => ByKey::Missing,
             Scalar::Bool(b) => ByKey::Bool(*b),
             Scalar::Int64(v) => ByKey::Int(*v),
             Scalar::Utf8(s) => ByKey::Str(s.as_str()),
@@ -12007,9 +12021,8 @@ impl<'a> ByKey<'a> {
     }
 }
 
-/// Factorize a single `by` column over both frames into a shared u32 id space.
-/// Returns `None` (caller falls back to the string path) if any value is a
-/// `Float64`/`Interval` whose Debug string would not agree with typed equality.
+/// Factorize a single grouping column over both frames into a shared id space.
+/// Unsupported borrowed keys fall back to canonical composite join keys.
 fn try_factorize_typed<'a>(
     left: &'a [Scalar],
     right: &'a [Scalar],
@@ -12040,13 +12053,9 @@ fn try_factorize_typed<'a>(
 /// Build dense u32 group ids for the left and right frames over the `by`
 /// columns, sharing one id space. Returns `(left_ids, right_ids)`.
 ///
-/// Fast path (a single non-float `by` column): factorize the column's scalars
-/// directly with the borrowed typed [`ByKey`] — zero per-row string formatting
-/// or allocation. Bit-identical to the `format!("{val:?}")` grouping because
-/// the typed key induces the exact same equality classes. Multi-column or
-/// float/interval `by` keys route to the original Debug-string builder, whose
-/// per-row composite keys are then interned to u32 (one clone per *distinct*
-/// group, not per row).
+/// The single-key fast path borrows its scalar payloads. Other shapes use
+/// canonical composite keys shared with equality joins, so float signed
+/// zeros and different missing representations cannot split a group.
 fn build_group_ids(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
@@ -12065,9 +12074,9 @@ fn build_group_ids(
 
     let left_keys = build_group_keys(left, by_cols)?;
     let right_keys = build_group_keys(right, right_by_cols)?;
-    let mut codes: FxHashMap<Vec<String>, u32> = FxHashMap::default();
+    let mut codes: FxHashMap<CompositeJoinKey, u32> = FxHashMap::default();
     let mut next = 0u32;
-    let mut intern = |k: &Vec<String>, codes: &mut FxHashMap<Vec<String>, u32>| -> u32 {
+    let mut intern = |k: &CompositeJoinKey, codes: &mut FxHashMap<CompositeJoinKey, u32>| {
         if let Some(&id) = codes.get(k) {
             id
         } else {
@@ -12082,26 +12091,14 @@ fn build_group_ids(
     Ok((left_ids, right_ids))
 }
 
-/// Build group keys from the `by` columns.
+/// Build grouping keys with the same equality semantics as an equi-join.
 fn build_group_keys(
     df: &fp_frame::DataFrame,
     by_cols: &[String],
-) -> Result<Vec<Vec<String>>, JoinError> {
-    let n = df.len();
-    let mut keys = vec![Vec::with_capacity(by_cols.len()); n];
-
-    for col_name in by_cols {
-        let col = df.columns().get(col_name).ok_or_else(|| {
-            JoinError::Frame(FrameError::CompatibilityRejected(format!(
-                "merge_asof: column '{col_name}' not found"
-            )))
-        })?;
-        for (i, val) in col.values().iter().enumerate() {
-            keys[i].push(format!("{val:?}"));
-        }
-    }
-
-    Ok(keys)
+) -> Result<Vec<CompositeJoinKey>, JoinError> {
+    let names: Vec<&str> = by_cols.iter().map(String::as_str).collect();
+    let columns = collect_join_key_columns(df, &names, "grouping")?;
+    Ok(collect_composite_keys(&columns))
 }
 
 /// Compute asof matches for a single group or the whole dataset.
@@ -20973,6 +20970,231 @@ mod tests {
     }
 
     #[test]
+    fn merge_asof_default_options_keep_exact_matches() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["t"],
+            vec![("t", vec![Scalar::Int64(1), Scalar::Int64(2)])],
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict(
+            &["t", "v"],
+            vec![
+                ("t", vec![Scalar::Int64(1), Scalar::Int64(2)]),
+                ("v", vec![Scalar::Int64(10), Scalar::Int64(20)]),
+            ],
+        )
+        .unwrap();
+        for options in [
+            super::MergeAsofOptions::default(),
+            super::MergeAsofOptions::new(),
+        ] {
+            let result = super::merge_asof_with_options(
+                &left,
+                &right,
+                "t",
+                super::AsofDirection::Backward,
+                options,
+            )
+            .unwrap();
+            assert_eq!(result.columns["v"].values(), &[10.into(), 20.into()]);
+        }
+        let result = super::merge_asof_with_options(
+            &left,
+            &right,
+            "t",
+            super::AsofDirection::Backward,
+            super::MergeAsofOptions::default().allow_exact_matches(false),
+        )
+        .unwrap();
+        assert!(result.columns["v"].values()[0].is_missing());
+        assert_eq!(result.columns["v"].values()[1], Scalar::Float64(10.0));
+    }
+
+    #[test]
+    fn merge_asof_rejects_missing_ordering_keys_in_every_match_path() {
+        let cases = [
+            (
+                DType::Int64,
+                vec![Scalar::Int64(1), Scalar::Int64(2), Scalar::Int64(3)],
+            ),
+            (
+                DType::Float64,
+                vec![
+                    Scalar::Float64(1.0),
+                    Scalar::Float64(2.0),
+                    Scalar::Float64(3.0),
+                ],
+            ),
+            (
+                DType::datetime64_naive(),
+                vec![
+                    Scalar::Datetime64(1),
+                    Scalar::Datetime64(2),
+                    Scalar::Datetime64(3),
+                ],
+            ),
+            (
+                DType::Timedelta64,
+                vec![
+                    Scalar::Timedelta64(1),
+                    Scalar::Timedelta64(2),
+                    Scalar::Timedelta64(3),
+                ],
+            ),
+        ];
+        for (dtype, values) in cases {
+            let frame = |values: Vec<Scalar>| {
+                let mut columns = ColumnStore::new();
+                columns.insert("t".to_owned(), Column::new(dtype.clone(), values).unwrap());
+                columns.insert("g".to_owned(), Column::from_i64_values(vec![1, 1, 1]));
+                fp_frame::DataFrame::new_with_column_order(
+                    Index::new_known_unique_int64_unit_range(0, 3),
+                    columns,
+                    vec!["t".to_owned(), "g".to_owned()],
+                )
+                .unwrap()
+            };
+            let clean = frame(values.clone());
+            let mut missing = values;
+            // The null diagnostic takes precedence over an earlier inversion.
+            missing.swap(0, 1);
+            missing[2] = Scalar::Null(NullKind::NaN);
+            let invalid = frame(missing);
+            for (side, left, right) in [
+                ("left", &invalid, &clean),
+                ("right", &clean, &invalid),
+            ] {
+                for by in [None, Some(vec!["g".to_owned()])] {
+                    for direction in [
+                        super::AsofDirection::Backward,
+                        super::AsofDirection::Forward,
+                        super::AsofDirection::Nearest,
+                    ] {
+                        let error = super::merge_asof_with_options(
+                            left,
+                            right,
+                            "t",
+                            direction,
+                            super::MergeAsofOptions {
+                                by: by.clone(),
+                                ..Default::default()
+                            },
+                        )
+                        .expect_err("missing ordering keys must fail before matching");
+                        assert!(matches!(
+                            error,
+                            super::JoinError::Frame(
+                                fp_frame::FrameError::CompatibilityRejected(message)
+                            ) if message == format!("Merge keys contain null values on {side} side")
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn merge_asof_group_keys_use_value_equality() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["t", "g", "h"],
+            vec![
+                ("t", vec![2.into(), 4.into(), 6.into(), 8.into()]),
+                (
+                    "g",
+                    vec![
+                        Scalar::Float64(-0.0),
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::NaN),
+                    ],
+                ),
+                ("h", vec![Scalar::Utf8("x".to_owned()); 4]),
+            ],
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict(
+            &["u", "g", "h", "v"],
+            vec![
+                ("u", vec![1.into(), 3.into(), 5.into(), 7.into()]),
+                (
+                    "g",
+                    vec![
+                        Scalar::Float64(0.0),
+                        Scalar::Float64(-0.0),
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::Null),
+                    ],
+                ),
+                ("h", vec![Scalar::Utf8("x".to_owned()); 4]),
+                ("v", vec![10.into(), 30.into(), 50.into(), 70.into()]),
+            ],
+        )
+        .unwrap();
+        for by in [vec!["g".to_owned()], vec!["g".to_owned(), "h".to_owned()]] {
+            let result = super::merge_asof_on_with_options(
+                &left,
+                &right,
+                "t",
+                "u",
+                super::AsofDirection::Backward,
+                super::MergeAsofOptions::default().by(by),
+            )
+            .unwrap();
+            assert_eq!(
+                result.columns["v"].values(),
+                &[10.into(), 30.into(), 50.into(), 70.into()]
+            );
+        }
+    }
+
+    #[test]
+    fn merge_asof_rejects_group_and_numeric_width_mismatches() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["t", "g"],
+            vec![("t", vec![1.into(), 2.into()]), ("g", vec![1.into(), 2.into()])],
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict(
+            &["u", "h"],
+            vec![
+                ("u", vec![1.into(), 2.into()]),
+                ("h", vec![Scalar::Float64(1.0), Scalar::Float64(2.0)]),
+            ],
+        )
+        .unwrap();
+        let error = super::merge_asof_on_with_options(
+            &left,
+            &right,
+            "t",
+            "u",
+            super::AsofDirection::Backward,
+            super::MergeAsofOptions {
+                left_by: Some(vec!["g".to_owned()]),
+                right_by: Some(vec!["h".to_owned()]),
+                ..Default::default()
+            },
+        )
+        .expect_err("asof grouping keys must have matching dtypes");
+        assert!(error.to_string().contains("incompatible merge keys"));
+        let narrow = left
+            .column("t")
+            .unwrap()
+            .cast_to_width(fp_types::NumericWidth::Int32, false)
+            .unwrap();
+        let right = right.with_column("u", narrow).unwrap();
+        let error = super::merge_asof_on_with_options(
+            &left,
+            &right,
+            "t",
+            "u",
+            super::AsofDirection::Backward,
+            super::MergeAsofOptions::default(),
+        )
+        .expect_err("equal storage types must not hide a numeric width mismatch");
+        assert!(error.to_string().contains("right dtype('int32')"));
+    }
+
+    #[test]
     fn merge_asof_distinct_ordering_and_grouping_keys() {
         let left = fp_frame::DataFrame::from_dict(
             &["t", "symbol", "venue", "price"],
@@ -21664,15 +21886,14 @@ mod tests {
         )
         .unwrap();
 
-        // With matching key dtypes, pandas merge_asof accepts NaN keys: the
-        // NaN row gets no match (null in joined columns).
-        let result = super::merge_asof(&left, &right, "time", AsofDirection::Backward).unwrap();
-        assert!(result.columns.get("quote").unwrap().values()[1].is_missing());
-        // time=5 → backward match to time=4 → quote=400
-        assert_eq!(
-            result.columns.get("quote").unwrap().values()[2],
-            Scalar::Float64(400.0)
-        );
+        // pandas 2.2.3 rejects missing ordering keys even when dtypes agree.
+        let error = super::merge_asof(&left, &right, "time", AsofDirection::Backward)
+            .expect_err("missing left ordering keys must be rejected");
+        assert!(matches!(
+            error,
+            super::JoinError::Frame(fp_frame::FrameError::CompatibilityRejected(message))
+                if message == "Merge keys contain null values on left side"
+        ));
     }
 
     #[test]
@@ -21783,9 +22004,8 @@ mod tests {
     fn merge_asof_nan_in_right_key() {
         use super::AsofDirection;
 
-        // Symmetric to merge_asof_nan_in_key: NaN keys on the right side
-        // also get treated as no-candidate (pandas does NOT raise). Other
-        // left rows still match to non-NaN right rows.
+        // A missing ordering key also invalidates the right input; it must
+        // not be skipped while matching the remaining candidates.
         let left = fp_frame::DataFrame::from_dict(
             &["time", "val"],
             vec![
@@ -21828,19 +22048,13 @@ mod tests {
         )
         .unwrap();
 
-        let result = super::merge_asof(&left, &right, "time", AsofDirection::Backward).unwrap();
-        // left time=1 → no right ≤ 1 → null
-        assert!(result.columns.get("quote").unwrap().values()[0].is_missing());
-        // left time=3 → right time=2 → 200.0 (NaN right row never matches)
-        assert_eq!(
-            result.columns.get("quote").unwrap().values()[1],
-            Scalar::Float64(200.0)
-        );
-        // left time=5 → right time=4 → 400.0
-        assert_eq!(
-            result.columns.get("quote").unwrap().values()[2],
-            Scalar::Float64(400.0)
-        );
+        let error = super::merge_asof(&left, &right, "time", AsofDirection::Backward)
+            .expect_err("missing right ordering keys must be rejected");
+        assert!(matches!(
+            error,
+            super::JoinError::Frame(fp_frame::FrameError::CompatibilityRejected(message))
+                if message == "Merge keys contain null values on right side"
+        ));
     }
 
     #[test]
