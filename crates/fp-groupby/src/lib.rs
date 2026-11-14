@@ -608,25 +608,7 @@ fn emit_groupby_result<'a>(
             .remove(key)
             .expect("ordering references only inserted keys");
         let label = &source_keys[source_idx];
-        out_index.push(match label {
-            Scalar::Int64(v) => IndexLabel::Int64(*v),
-            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
-            // Typed null group label (br-frankenpandas-8m6ay): pandas
-            // groupby(dropna=False) keeps ONE collapsed null group labeled
-            // nan (None and nan merge — UNLIKE value_counts' kind-distinct
-            // buckets); NaT keys keep the NaT label. Verified pandas 2.2.3.
-            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
-            Scalar::Null(NullKind::NaN) | Scalar::Null(NullKind::Null) => {
-                IndexLabel::Null(NullKind::NaN)
-            }
-            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
-            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
-            Scalar::Object(object) => IndexLabel::Object(object.clone()),
-        });
+        out_index.push(scalar_group_label(label));
         out_values.push(Scalar::Float64(sum.sum()));
     }
 
@@ -681,14 +663,17 @@ impl<'a> GroupKeyRef<'a> {
             Scalar::Int64(v) => Self::Int64(*v),
             Scalar::Float64(v) => {
                 if v.is_nan() {
-                    Self::FloatBits(f64::NAN.to_bits())
+                    Self::Null(NullKind::NaN)
                 } else {
                     let normalized = if *v == 0.0 { 0.0 } else { *v };
                     Self::FloatBits(normalized.to_bits())
                 }
             }
             Scalar::Utf8(v) => Self::Utf8(v.as_str()),
-            Scalar::Null(kind) => Self::Null(*kind),
+            // None and NaN belong to one group under dropna=false.
+            // Preserve the existing temporal NaT key policy separately.
+            Scalar::Null(NullKind::Null | NullKind::NaN) => Self::Null(NullKind::NaN),
+            Scalar::Null(NullKind::NaT) => Self::Null(NullKind::NaT),
             Scalar::Timedelta64(v) => {
                 if *v == Timedelta::NAT {
                     Self::Null(NullKind::NaT)
@@ -806,25 +791,7 @@ fn groupby_sum_timedelta64(
             .remove(key)
             .expect("ordering references only inserted keys");
         let label = &keys[source_idx];
-        out_index.push(match label {
-            Scalar::Int64(v) => IndexLabel::Int64(*v),
-            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
-            // Typed null group label (br-frankenpandas-8m6ay): pandas
-            // groupby(dropna=False) keeps ONE collapsed null group labeled
-            // nan (None and nan merge — UNLIKE value_counts' kind-distinct
-            // buckets); NaT keys keep the NaT label. Verified pandas 2.2.3.
-            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
-            Scalar::Null(NullKind::NaN) | Scalar::Null(NullKind::Null) => {
-                IndexLabel::Null(NullKind::NaN)
-            }
-            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
-            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
-            Scalar::Object(object) => IndexLabel::Object(object.clone()),
-        });
+        out_index.push(scalar_group_label(label));
         out_values.push(Scalar::Timedelta64(sum));
     }
 
@@ -892,25 +859,7 @@ fn groupby_sum_utf8(
             .remove(key)
             .expect("ordering references only inserted keys");
         let label = &keys[source_idx];
-        out_index.push(match label {
-            Scalar::Int64(v) => IndexLabel::Int64(*v),
-            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
-            // Typed null group label (br-frankenpandas-8m6ay): pandas
-            // groupby(dropna=False) keeps ONE collapsed null group labeled
-            // nan (None and nan merge — UNLIKE value_counts' kind-distinct
-            // buckets); NaT keys keep the NaT label. Verified pandas 2.2.3.
-            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
-            Scalar::Null(NullKind::NaN) | Scalar::Null(NullKind::Null) => {
-                IndexLabel::Null(NullKind::NaN)
-            }
-            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
-            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
-            Scalar::Object(object) => IndexLabel::Object(object.clone()),
-        });
+        out_index.push(scalar_group_label(label));
         out_values.push(joined.map_or(Scalar::Int64(0), Scalar::Utf8));
     }
 
@@ -1004,25 +953,7 @@ fn groupby_sum_int64(
             .remove(key)
             .expect("ordering references only inserted keys");
         let label = &keys[source_idx];
-        out_index.push(match label {
-            Scalar::Int64(v) => IndexLabel::Int64(*v),
-            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
-            // Typed null group label (br-frankenpandas-8m6ay): pandas
-            // groupby(dropna=False) keeps ONE collapsed null group labeled
-            // nan (None and nan merge — UNLIKE value_counts' kind-distinct
-            // buckets); NaT keys keep the NaT label. Verified pandas 2.2.3.
-            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
-            Scalar::Null(NullKind::NaN) | Scalar::Null(NullKind::Null) => {
-                IndexLabel::Null(NullKind::NaN)
-            }
-            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
-            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
-            Scalar::Object(object) => IndexLabel::Object(object.clone()),
-        });
+        out_index.push(scalar_group_label(label));
         out_values.push(match i64::try_from(total) {
             Ok(v) => Scalar::Int64(v),
             Err(_) => Scalar::Float64(total as f64),
@@ -1936,19 +1867,7 @@ fn try_groupby_count_size_counter(
             .get(key)
             .expect("ordering references only inserted keys");
         let label = &keys[*source_idx];
-        out_index.push(match label {
-            Scalar::Int64(v) => IndexLabel::Int64(*v),
-            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
-            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
-            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
-            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
-            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
-            Scalar::Object(object) => IndexLabel::Object(object.clone()),
-        });
+        out_index.push(scalar_group_label(label));
         out_values.push(Scalar::Int64(if matches!(func, AggFunc::Count) {
             *non_missing
         } else {
@@ -2013,19 +1932,7 @@ fn try_groupby_mean_numeric_counter(
             .get(key)
             .expect("ordering references only inserted keys");
         let label = &keys[*source_idx];
-        out_index.push(match label {
-            Scalar::Int64(v) => IndexLabel::Int64(*v),
-            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
-            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
-            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
-            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
-            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
-            Scalar::Object(object) => IndexLabel::Object(object.clone()),
-        });
+        out_index.push(scalar_group_label(label));
         out_values.push(if *count == 0 {
             Scalar::Null(NullKind::NaN)
         } else {
@@ -2106,19 +2013,7 @@ fn try_groupby_var_std_numeric_counter(
             .get(key)
             .expect("ordering references only inserted keys");
         let label = &keys[group.source_idx];
-        out_index.push(match label {
-            Scalar::Int64(v) => IndexLabel::Int64(*v),
-            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
-            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
-            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
-            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
-            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
-            Scalar::Object(object) => IndexLabel::Object(object.clone()),
-        });
+        out_index.push(scalar_group_label(label));
         let spread = if matches!(func, AggFunc::Std) {
             group.moments.std(1)
         } else {
@@ -2130,15 +2025,17 @@ fn try_groupby_var_std_numeric_counter(
     Some((out_index, out_values))
 }
 
+/// Preserve group-key types at every aggregation materialization boundary.
 fn scalar_group_label(label: &Scalar) -> IndexLabel {
     match label {
         Scalar::Int64(v) => IndexLabel::Int64(*v),
         Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-        Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
+        Scalar::Bool(v) => IndexLabel::Bool(*v),
         Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
         Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
-        Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-        Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
+        Scalar::Float64(v) if v.is_nan() => IndexLabel::Null(NullKind::NaN),
+        Scalar::Float64(v) => IndexLabel::Float64(fp_index::OrderedF64(*v)),
+        Scalar::Timedelta64(v) => IndexLabel::Timedelta64(*v),
         Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
         Scalar::Period(v) => IndexLabel::Period(*v),
         Scalar::Interval(iv) => IndexLabel::Interval(*iv),
@@ -2458,19 +2355,7 @@ fn try_groupby_min_max_scalar_slot(
             .get(key)
             .expect("ordering references only inserted keys");
         let label = &keys[*source_idx];
-        out_index.push(match label {
-            Scalar::Int64(v) => IndexLabel::Int64(*v),
-            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
-            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
-            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
-            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
-            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
-            Scalar::Object(object) => IndexLabel::Object(object.clone()),
-        });
+        out_index.push(scalar_group_label(label));
         out_values.push(if *invalid {
             Scalar::Null(NullKind::NaN)
         } else {
@@ -2537,19 +2422,7 @@ fn try_groupby_first_last_scalar_slot(
             .get(key)
             .expect("ordering references only inserted keys");
         let label = &keys[*source_idx];
-        out_index.push(match label {
-            Scalar::Int64(v) => IndexLabel::Int64(*v),
-            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
-            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
-            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
-            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
-            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
-            Scalar::Object(object) => IndexLabel::Object(object.clone()),
-        });
+        out_index.push(scalar_group_label(label));
         out_values.push(slot.clone().unwrap_or(Scalar::Null(NullKind::NaN)));
     }
 
@@ -2643,19 +2516,7 @@ fn try_groupby_sum_prod_integer_counter(
             .get(key)
             .expect("ordering references only inserted keys");
         let label = &keys[group.source_idx];
-        out_index.push(match label {
-            Scalar::Int64(v) => IndexLabel::Int64(*v),
-            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
-            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
-            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
-            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
-            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
-            Scalar::Object(object) => IndexLabel::Object(object.clone()),
-        });
+        out_index.push(scalar_group_label(label));
         out_values.push(if take_sum {
             match i64::try_from(group.sum) {
                 Ok(sum) => Scalar::Int64(sum),
@@ -2739,19 +2600,7 @@ fn try_groupby_sum_prod_float_counter(
             .get(key)
             .expect("ordering references only inserted keys");
         let label = &keys[group.source_idx];
-        out_index.push(match label {
-            Scalar::Int64(v) => IndexLabel::Int64(*v),
-            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
-            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
-            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
-            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
-            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
-            Scalar::Object(object) => IndexLabel::Object(object.clone()),
-        });
+        out_index.push(scalar_group_label(label));
         out_values.push(Scalar::Float64(if take_sum {
             group.sum.sum()
         } else {
@@ -3026,21 +2875,7 @@ pub fn groupby_agg(
             .get(key)
             .expect("ordering references only inserted keys");
         let label = &key_vals[*source_idx];
-        out_index.push(match label {
-            Scalar::Int64(v) => IndexLabel::Int64(*v),
-            Scalar::Utf8(v) => IndexLabel::Utf8(v.clone()),
-            Scalar::Bool(v) => IndexLabel::Utf8(if *v { "True" } else { "False" }.to_string()),
-            // Typed null group label (br-frankenpandas-8m6ay): collapsed nan
-            // group, NaT preserved — see the sum/mean/concat/count maps above.
-            Scalar::Null(NullKind::NaT) => IndexLabel::Null(NullKind::NaT),
-            Scalar::Null(NullKind::NaN | NullKind::Null) => IndexLabel::Null(NullKind::NaN),
-            Scalar::Float64(v) => IndexLabel::Utf8(v.to_string()),
-            Scalar::Timedelta64(v) => IndexLabel::Utf8(Timedelta::format(*v)),
-            Scalar::Datetime64(v) => IndexLabel::Datetime64(*v),
-            Scalar::Period(v) => IndexLabel::Period(*v),
-            Scalar::Interval(iv) => IndexLabel::Interval(*iv),
-            Scalar::Object(object) => IndexLabel::Object(object.clone()),
-        });
+        out_index.push(scalar_group_label(label));
 
         let agg_value = match func {
             AggFunc::Sum if matches!(value_dtype, DType::Int64 | DType::Bool) => {
@@ -5177,6 +5012,226 @@ mod tests {
     }
 
     #[test]
+    fn groupby_agg_preserves_non_string_group_labels() {
+        use super::{AggFunc, groupby_agg};
+
+        for (key, label) in [
+            (Scalar::Bool(true), IndexLabel::Bool(true)),
+            (
+                Scalar::Float64(1.5),
+                IndexLabel::Float64(fp_index::OrderedF64(1.5)),
+            ),
+            (Scalar::Timedelta64(2_500), IndexLabel::Timedelta64(2_500)),
+        ] {
+            let index = Index::new(vec![0_i64.into(), 1_i64.into()]);
+            let keys = Series::new(
+                "key",
+                index.clone(),
+                Column::from_object_values(vec![key.clone(), key]),
+            )
+            .expect("keys");
+            let values = Series::new(
+                "value",
+                index,
+                Column::from_values(vec![Scalar::Int64(2), Scalar::Int64(4)]).expect("column"),
+            )
+            .expect("values");
+
+            for func in [
+                AggFunc::Sum,
+                AggFunc::Mean,
+                AggFunc::Count,
+                AggFunc::Min,
+                AggFunc::Max,
+                AggFunc::First,
+                AggFunc::Last,
+                AggFunc::Std,
+                AggFunc::Var,
+                AggFunc::Median,
+                AggFunc::Nunique,
+                AggFunc::Prod,
+                AggFunc::Size,
+            ] {
+                let out = groupby_agg(
+                    &keys,
+                    &values,
+                    func,
+                    GroupByOptions::default(),
+                    &RuntimePolicy::strict(),
+                    &mut EvidenceLedger::new(),
+                )
+                .expect("groupby");
+                assert_eq!(out.index().labels(), std::slice::from_ref(&label), "{func:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn groupby_agg_collapses_null_and_nan_keys() {
+        use super::{AggFunc, groupby_agg};
+
+        let index = Index::new((0_i64..6).map(IndexLabel::Int64).collect());
+        let keys = Series::new(
+            "key",
+            index.clone(),
+            Column::from_object_values(vec![
+                Scalar::Null(NullKind::Null),
+                Scalar::Utf8("a".to_owned()),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Float64(f64::NAN),
+                Scalar::Float64(f64::from_bits(0x7ff8_0000_0000_0001)),
+                Scalar::Utf8("a".to_owned()),
+            ]),
+        )
+        .expect("keys");
+        let values = Series::new(
+            "value",
+            index,
+            Column::from_values(
+                [1, 10, 2, 3, 4, 20].into_iter().map(Scalar::Int64).collect(),
+            )
+            .expect("column"),
+        )
+        .expect("values");
+        // Four missing-key rows form one group with values [1, 2, 3, 4].
+        // The non-missing group "a" contains [10, 20].
+        let cases = [
+            (AggFunc::Sum, 10.0, 30.0),
+            (AggFunc::Mean, 2.5, 15.0),
+            (AggFunc::Count, 4.0, 2.0),
+            (AggFunc::Min, 1.0, 10.0),
+            (AggFunc::Max, 4.0, 20.0),
+            (AggFunc::First, 1.0, 10.0),
+            (AggFunc::Last, 4.0, 20.0),
+            (AggFunc::Std, (5.0_f64 / 3.0).sqrt(), 50.0_f64.sqrt()),
+            (AggFunc::Var, 5.0 / 3.0, 50.0),
+            (AggFunc::Median, 2.5, 15.0),
+            (AggFunc::Nunique, 4.0, 2.0),
+            (AggFunc::Prod, 24.0, 200.0),
+            (AggFunc::Size, 4.0, 2.0),
+        ];
+        for sort in [false, true] {
+            for dropna in [false, true] {
+                for (func, missing_value, present_value) in cases {
+                    let out = groupby_agg(
+                        &keys,
+                        &values,
+                        func,
+                        GroupByOptions { dropna, sort },
+                        &RuntimePolicy::strict(),
+                        &mut EvidenceLedger::new(),
+                    )
+                    .expect("groupby");
+                    let (labels, expected) = if dropna {
+                        (vec!["a".into()], vec![present_value])
+                    } else if sort {
+                        (
+                            vec!["a".into(), IndexLabel::Null(NullKind::NaN)],
+                            vec![present_value, missing_value],
+                        )
+                    } else {
+                        (
+                            vec![IndexLabel::Null(NullKind::NaN), "a".into()],
+                            vec![missing_value, present_value],
+                        )
+                    };
+                    assert_eq!(out.index().labels(), labels, "{func:?}, {dropna}, {sort}");
+                    for (actual, expected) in out.values().iter().zip(expected) {
+                        let actual = actual.to_f64().expect("numeric aggregate");
+                        assert!(
+                            (actual - expected).abs() < 1e-12,
+                            "{func:?}, {dropna}, {sort}: {actual} != {expected}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn groupby_sum_preserves_labels_across_value_and_allocator_paths() {
+        for (key, label) in [
+            (Scalar::Bool(true), IndexLabel::Bool(true)),
+            (
+                Scalar::Float64(1.5),
+                IndexLabel::Float64(fp_index::OrderedF64(1.5)),
+            ),
+            (Scalar::Timedelta64(2_500), IndexLabel::Timedelta64(2_500)),
+        ] {
+            let index = Index::new((0_i64..5).map(IndexLabel::Int64).collect());
+            let keys = Series::new(
+                "key",
+                index.clone(),
+                Column::from_object_values(vec![
+                    Scalar::Null(NullKind::Null),
+                    key.clone(),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(f64::NAN),
+                    key,
+                ]),
+            )
+            .expect("keys");
+            let value_cases = [
+                (
+                    [1, 10, 2, 3, 20].into_iter().map(Scalar::Int64).collect(),
+                    vec![Scalar::Int64(6), Scalar::Int64(30)],
+                ),
+                (
+                    [1.0, 10.0, 2.0, 3.0, 20.0]
+                        .into_iter()
+                        .map(Scalar::Float64)
+                        .collect(),
+                    vec![Scalar::Float64(6.0), Scalar::Float64(30.0)],
+                ),
+                (
+                    [1, 10, 2, 3, 20]
+                        .into_iter()
+                        .map(Scalar::Timedelta64)
+                        .collect(),
+                    vec![Scalar::Timedelta64(6), Scalar::Timedelta64(30)],
+                ),
+                (
+                    ["a", "x", "b", "c", "y"]
+                        .into_iter()
+                        .map(|value| Scalar::Utf8(value.to_owned()))
+                        .collect(),
+                    vec![Scalar::Utf8("abc".to_owned()), Scalar::Utf8("xy".to_owned())],
+                ),
+            ];
+            for (raw_values, expected) in value_cases {
+                let values = Series::new(
+                    "value",
+                    index.clone(),
+                    Column::from_values(raw_values).expect("column"),
+                )
+                .expect("values");
+                for use_arena in [false, true] {
+                    let out = groupby_sum_with_options(
+                        &keys,
+                        &values,
+                        GroupByOptions {
+                            dropna: false,
+                            sort: false,
+                        },
+                        &RuntimePolicy::strict(),
+                        &mut EvidenceLedger::new(),
+                        GroupByExecutionOptions {
+                            use_arena,
+                            ..GroupByExecutionOptions::default()
+                        },
+                    )
+                    .expect("groupby sum");
+                    assert_eq!(
+                        out.index().labels(),
+                        &[IndexLabel::Null(NullKind::NaN), label.clone()]
+                    );
+                    assert_eq!(out.values(), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn groupby_sum_merges_negative_zero_and_zero_float_keys() {
         let keys = Series::from_values(
             "key",
@@ -5209,8 +5264,13 @@ mod tests {
         )
         .expect("groupby");
 
-        assert_eq!(out.index().labels().len(), 2);
-        assert_eq!(out.index().labels()[1], "1".into());
+        assert_eq!(
+            out.index().labels(),
+            &[
+                IndexLabel::Float64(fp_index::OrderedF64(-0.0)),
+                IndexLabel::Float64(fp_index::OrderedF64(1.0)),
+            ]
+        );
         assert_eq!(out.values(), &[Scalar::Int64(5), Scalar::Int64(2)]);
     }
 
