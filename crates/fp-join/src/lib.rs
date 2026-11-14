@@ -11990,17 +11990,17 @@ fn merge_asof_grouped(
 }
 
 /// Borrowed, allocation-free grouping keys for the single-column path.
-/// Missing representations share one group. Nonmissing floats, intervals
+/// Missing representations share one group, booleans share their integer
+/// value, and periods retain their frequency. Nonmissing floats, intervals
 /// and object values use the ordinary join engine's canonical key path.
 #[derive(PartialEq, Eq, Hash)]
 enum ByKey<'a> {
     Missing,
-    Bool(bool),
     Int(i64),
     Str(&'a str),
     Timedelta(i64),
     Datetime(i64),
-    Period(i64),
+    Period(fp_types::Period),
 }
 
 impl<'a> ByKey<'a> {
@@ -12010,12 +12010,12 @@ impl<'a> ByKey<'a> {
         }
         Some(match s {
             Scalar::Null(_) => ByKey::Missing,
-            Scalar::Bool(b) => ByKey::Bool(*b),
+            Scalar::Bool(b) => ByKey::Int(i64::from(*b)),
             Scalar::Int64(v) => ByKey::Int(*v),
             Scalar::Utf8(s) => ByKey::Str(s.as_str()),
             Scalar::Timedelta64(v) => ByKey::Timedelta(*v),
             Scalar::Datetime64(v) => ByKey::Datetime(*v),
-            Scalar::Period(v) => ByKey::Period(v.ordinal),
+            Scalar::Period(v) => ByKey::Period(*v),
             Scalar::Float64(_) | Scalar::Interval(_) | Scalar::Object(_) => return None,
         })
     }
@@ -21144,6 +21144,153 @@ mod tests {
                 result.columns["v"].values(),
                 &[10.into(), 30.into(), 50.into(), 70.into()]
             );
+        }
+    }
+
+    #[test]
+    fn merge_asof_group_identity_is_independent_of_group_key_count() {
+        use fp_types::{Interval, IntervalClosed, Period, PeriodFreq};
+
+        let period = |ordinal, freq| Scalar::Period(Period::new(ordinal, freq));
+        let interval = |left, right, closed| Scalar::Interval(Interval::new(left, right, closed));
+        let cases = [
+            (
+                "object booleans and integers",
+                vec![
+                    Scalar::Bool(true),
+                    Scalar::Bool(false),
+                    Scalar::Utf8("1".to_owned()),
+                    Scalar::Int64(9_007_199_254_740_993),
+                ],
+                vec![
+                    Scalar::Int64(1),
+                    Scalar::Int64(0),
+                    Scalar::Int64(1),
+                    Scalar::Int64(9_007_199_254_740_992),
+                ],
+                [
+                    [Some(0.0), Some(1.0), None, None],
+                    [Some(0.0), Some(1.0), None, None],
+                    [Some(0.0), Some(1.0), None, None],
+                ],
+            ),
+            (
+                "period frequency",
+                vec![
+                    period(0, PeriodFreq::Monthly),
+                    period(0, PeriodFreq::Daily),
+                    period(1, PeriodFreq::Monthly),
+                    period(2, PeriodFreq::Monthly),
+                ],
+                vec![
+                    period(0, PeriodFreq::Daily),
+                    period(0, PeriodFreq::Monthly),
+                    period(1, PeriodFreq::Monthly),
+                    period(3, PeriodFreq::Monthly),
+                ],
+                [
+                    [None, Some(0.0), Some(2.0), None],
+                    [Some(1.0), None, Some(2.0), None],
+                    [Some(1.0), Some(0.0), Some(2.0), None],
+                ],
+            ),
+            (
+                "interval endpoints and closedness",
+                vec![
+                    Scalar::Interval(
+                        Interval::new(-0.0, 1.0, IntervalClosed::Right).with_int_endpoints(),
+                    ),
+                    interval(0.0, 1.0, IntervalClosed::Left),
+                    interval(2.0, 3.0, IntervalClosed::Right),
+                    interval(4.0, 5.0, IntervalClosed::Right),
+                ],
+                vec![
+                    interval(0.0, 1.0, IntervalClosed::Left),
+                    interval(0.0, 1.0, IntervalClosed::Right),
+                    interval(2.0, 3.0, IntervalClosed::Right),
+                    interval(4.0, 5.0, IntervalClosed::Left),
+                ],
+                [
+                    [None, Some(0.0), Some(2.0), None],
+                    [Some(1.0), None, Some(2.0), None],
+                    [Some(1.0), Some(0.0), Some(2.0), None],
+                ],
+            ),
+        ];
+
+        for (case, left_groups, right_groups, expected) in cases {
+            for float_ordering in [false, true] {
+                let frame = |groups: Vec<Scalar>, value_name: &str| {
+                    let ordering = if float_ordering {
+                        Column::from_f64_values(vec![1.0, 2.0, 3.0, 4.0])
+                    } else {
+                        Column::from_i64_values(vec![1, 2, 3, 4])
+                    };
+                    fp_frame::DataFrame::new_with_column_order(
+                        Index::new_known_unique_int64_unit_range(0, 4),
+                        ColumnStore::from_pairs([
+                            ("t".to_owned(), ordering),
+                            ("g".to_owned(), Column::from_object_values(groups)),
+                            ("h".to_owned(), Column::from_i64_constant(7, 4)),
+                            (
+                                value_name.to_owned(),
+                                Column::from_i64_values(vec![0, 1, 2, 3]),
+                            ),
+                        ]),
+                        vec![
+                            "t".to_owned(),
+                            "g".to_owned(),
+                            "h".to_owned(),
+                            value_name.to_owned(),
+                        ],
+                    )
+                    .unwrap()
+                };
+                let left = frame(left_groups.clone(), "left_row");
+                let right = frame(right_groups.clone(), "right_row");
+                // Exercise object equality without constructor coercion.
+                assert_eq!(left.column("g").unwrap().values(), left_groups.as_slice());
+                assert_eq!(right.column("g").unwrap().values(), right_groups.as_slice());
+
+                for (direction, expected_rows) in [
+                    super::AsofDirection::Backward,
+                    super::AsofDirection::Forward,
+                    super::AsofDirection::Nearest,
+                ]
+                .into_iter()
+                .zip(expected)
+                {
+                    // A constant second grouping key must not change matches.
+                    // Each expected row is an original right-input position;
+                    // the None entries are genuine nonmatching groups.
+                    for by in [vec!["g".to_owned()], vec!["g".to_owned(), "h".to_owned()]] {
+                        let result = super::merge_asof_with_options(
+                            &left,
+                            &right,
+                            "t",
+                            direction,
+                            super::MergeAsofOptions::default().by(by.clone()),
+                        )
+                        .unwrap();
+                        let actual: Vec<Option<f64>> = result.columns["right_row"]
+                            .values()
+                            .iter()
+                            .map(|value| {
+                                if value.is_missing() {
+                                    None
+                                } else {
+                                    Some(value.to_f64().unwrap())
+                                }
+                            })
+                            .collect();
+                        assert_eq!(
+                            actual.as_slice(),
+                            expected_rows.as_slice(),
+                            "{case}, float_ordering={float_ordering}, direction={direction:?}, by={by:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 
