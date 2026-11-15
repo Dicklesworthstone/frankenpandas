@@ -36371,6 +36371,7 @@ impl PySeries {
             dropna,
             group_keys,
             unused: Vec::new(),
+            category_product: None,
             all_categories: false,
             selection: None,
             repeated: None,
@@ -41470,6 +41471,7 @@ impl PySeries {
             as_index: true,
             groups,
             unused,
+            category_product: None,
             all_categories,
             group_keys,
             layout: Arc::default(),
@@ -56166,6 +56168,8 @@ impl PyDataFrame {
             ));
         }
         let unused = check_category_keys(py, &df, &by, observed)?;
+        let category_product =
+            CategoricalGroupProduct::new(&df, &by, &key_names, observed, sort, dropna)?;
         // observed=False over one category key: value_counts answers its every
         // category (br-frankenpandas-oe9l6).
         let all_categories = observed != Some(true)
@@ -56184,6 +56188,7 @@ impl PyDataFrame {
             dropna,
             group_keys,
             unused,
+            category_product,
             all_categories,
             selection: None,
             repeated,
@@ -70789,9 +70794,8 @@ impl PySeriesCategoricalAccessor {
 /// keys, for every combination of the categories with the other keys'
 /// values. The groupby runs over the observed groups: a single category
 /// key's unused categories are returned for the reductions to add as rows
-/// (fvsao.39); over several keys it answers only when no combination is
-/// missing, and raises rather than dropping them otherwise
-/// (br-frankenpandas-hrxn9).
+/// (fvsao.39). Several keys retain their domains separately, materializing
+/// the Cartesian product only for a reduction (fvsao.40).
 fn check_category_keys(
     py: Python<'_>,
     keys: &DataFrame,
@@ -70810,7 +70814,7 @@ fn check_category_keys(
             1,
         )?;
     }
-    if observed == Some(true) {
+    if observed == Some(true) || columns.len() > 1 {
         return Ok(Vec::new());
     }
     let key_refs: Vec<&str> = by.iter().map(String::as_str).collect();
@@ -70832,22 +70836,474 @@ fn check_category_keys(
             .cloned()
             .collect());
     }
-    let mut combinations = 1_usize;
-    for column in &columns {
-        let levels = match column.categorical() {
-            Some(meta) => meta.categories.len(),
-            None => Series::new("", keys.index().clone(), (*column).clone())
-                .map_err(frame_error_to_py)?
-                .nunique(),
-        };
-        combinations = combinations.saturating_mul(levels);
-    }
-    if groups.len() != combinations {
-        return Err(not_implemented(
-            "groupby over several keys, one a category, with observed=False (pandas adds the unused combinations)",
-        ));
-    }
     Ok(Vec::new())
+}
+
+/// The complete domains of several grouping keys under observed=False.
+/// Iteration and transforms still visit observed groups. Only reductions
+/// materialize the product, and the result keeps typed keys, categorical
+/// metadata, and empty level catalogs independently of its row labels.
+struct CategoricalGroupProduct {
+    domains: Vec<Vec<IndexLabel>>,
+    names: Vec<Option<LabelName>>,
+    keys: Vec<String>,
+    sources: Vec<Column>,
+    sorted: bool,
+    index: std::sync::OnceLock<Index>,
+    canonical: std::sync::OnceLock<Index>,
+}
+
+impl CategoricalGroupProduct {
+    fn new(
+        frame: &DataFrame,
+        keys: &[String],
+        names: &[Option<LabelName>],
+        observed: Option<bool>,
+        sort: bool,
+        dropna: bool,
+    ) -> PyResult<Option<Arc<Self>>> {
+        if observed == Some(true) || keys.len() < 2 {
+            return Ok(None);
+        }
+        let sources: Vec<Column> = keys
+            .iter()
+            .map(|key| {
+                frame.column(key).cloned().ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone())
+                })
+            })
+            .collect::<PyResult<_>>()?;
+        if !sources.iter().any(|column| column.categorical().is_some()) {
+            return Ok(None);
+        }
+        let domains = sources
+            .iter()
+            .map(|column| {
+                let mut seen = FxHashSet::default();
+                let mut labels = Vec::new();
+                for value in column.values() {
+                    let label = Self::normalized(&scalar_to_index_label_converter(value));
+                    if (!dropna || !label.is_missing()) && seen.insert(label.clone()) {
+                        labels.push(label);
+                    }
+                }
+                if let Some(meta) = column.categorical() {
+                    let categories = meta.categories.iter().map(scalar_to_index_label_converter);
+                    if sort {
+                        let missing = labels.iter().any(IndexLabel::is_missing);
+                        labels = categories.collect();
+                        if missing {
+                            labels.push(IndexLabel::Null(NullKind::NaN));
+                        }
+                    } else {
+                        for label in categories {
+                            if seen.insert(label.clone()) {
+                                labels.push(label);
+                            }
+                        }
+                    }
+                } else if sort {
+                    labels.sort_by(Self::compare);
+                }
+                labels
+            })
+            .collect();
+        Ok(Some(Arc::new(Self {
+            domains,
+            names: names.to_vec(),
+            keys: keys.to_vec(),
+            sources,
+            sorted: sort,
+            index: std::sync::OnceLock::new(),
+            canonical: std::sync::OnceLock::new(),
+        })))
+    }
+
+    fn normalized(label: &IndexLabel) -> IndexLabel {
+        if label.is_missing() {
+            IndexLabel::Null(NullKind::NaN)
+        } else {
+            label.clone()
+        }
+    }
+
+    /// pandas' safe ordering of mixed keys: numbers before strings and
+    /// missing keys last, with categories ordered by their own catalog.
+    fn compare(left: &IndexLabel, right: &IndexLabel) -> std::cmp::Ordering {
+        let block = |label: &IndexLabel| {
+            if label.is_missing() {
+                2
+            } else {
+                u8::from(matches!(label, IndexLabel::Utf8(_)))
+            }
+        };
+        block(left)
+            .cmp(&block(right))
+            .then_with(|| left.cmp(right))
+    }
+
+    fn cardinality(&self) -> Option<usize> {
+        // An empty ordinary key makes the product empty even if other
+        // domains would overflow when multiplied first.
+        if self.domains.iter().any(Vec::is_empty) {
+            return Some(0);
+        }
+        self.domains
+            .iter()
+            .try_fold(1_usize, |size, domain| size.checked_mul(domain.len()))
+    }
+
+    fn has_unobserved(&self, observed: usize) -> bool {
+        self.cardinality() != Some(observed)
+    }
+
+    fn index(&self) -> PyResult<Index> {
+        if let Some(index) = self.index.get() {
+            return Ok(index.clone());
+        }
+        let memory_error = || {
+            PyErr::new::<pyo3::exceptions::PyMemoryError, _>(
+                "categorical groupby result is too large",
+            )
+        };
+        let len = self.cardinality().ok_or_else(memory_error)?;
+        let mut codes = Vec::with_capacity(self.domains.len());
+        let mut stride = len;
+        for domain in &self.domains {
+            u32::try_from(domain.len()).map_err(|_| memory_error())?;
+            let mut level = Vec::new();
+            level.try_reserve_exact(len).map_err(|_| memory_error())?;
+            if len != 0 {
+                stride /= domain.len();
+                for row in 0..len {
+                    level.push(((row / stride) % domain.len()) as u32);
+                }
+            }
+            codes.push(level);
+        }
+        // A zero-row product still reports each other key's full catalog.
+        // Ordinary levels normally sort their row labels, but with no rows
+        // they need a declared catalog (in the same sorted level order).
+        let mut catalogs = self.domains.clone();
+        if len == 0 {
+            for (catalog, source) in catalogs.iter_mut().zip(&self.sources) {
+                if source.categorical().is_none() {
+                    catalog.sort_by(Self::compare);
+                }
+            }
+        }
+        let mut multi = MultiIndex::from_coded_levels(catalogs, codes)
+            .map_err(index_error_to_py)?
+            .set_names(self.names.clone());
+        for (level, source) in self.sources.iter().enumerate() {
+            multi = multi
+                .with_level_zone(level, source.timezone())
+                .with_level_width(level, source.width())
+                .with_level_order_declared(level, len == 0);
+            if let Some(meta) = source.categorical() {
+                multi = multi
+                    .with_level_categories(
+                        level,
+                        Some(fp_index::IndexCategories {
+                            categories: meta
+                                .categories
+                                .iter()
+                                .map(scalar_to_index_label_converter)
+                                .collect(),
+                            ordered: meta.ordered,
+                        }),
+                    )
+                    .map_err(index_error_to_py)?;
+            }
+        }
+        let index = row_multiindex_axis(multi)?;
+        let _ = self.index.set(index.clone());
+        Ok(index)
+    }
+
+    /// DataFrameGroupBy.nunique sorts the expanded product even with
+    /// sort=False in pandas 2.2; selected Series reductions keep group order.
+    fn output_index(&self, canonical: bool) -> PyResult<Index> {
+        let index = self.index()?;
+        if !canonical || self.sorted {
+            return Ok(index);
+        }
+        if let Some(index) = self.canonical.get() {
+            return Ok(index.clone());
+        }
+        let rows = index_rows(&index);
+        let ranks: Vec<Option<CategoryRanks<'_>>> = self
+            .sources
+            .iter()
+            .map(|source| source.categorical().map(CategoryRanks::new))
+            .collect();
+        let mut positions: Vec<usize> = (0..index.len()).collect();
+        positions.sort_by(|&a, &b| {
+            for (level, rank) in ranks.iter().enumerate() {
+                let order = match rank {
+                    Some(rank) => rank.rank(&rows[a][level]).cmp(&rank.rank(&rows[b][level])),
+                    None => Self::compare(&rows[a][level], &rows[b][level]),
+                };
+                if !order.is_eq() {
+                    return order;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+        let index = taken_groups(&index, &positions);
+        let _ = self.canonical.set(index.clone());
+        Ok(index)
+    }
+
+    fn supports_reduction(op: &str) -> bool {
+        matches!(
+            op,
+            "sum" | "sum(min_count)" | "prod" | "prod(min_count)" | "count" | "size"
+                | "nunique" | "mean" | "median" | "min" | "max" | "first" | "last"
+                | "var" | "std" | "sem" | "any" | "all"
+        )
+    }
+
+    fn positions(
+        &self,
+        index: &Index,
+        rows: Vec<Vec<IndexLabel>>,
+    ) -> PyResult<Vec<Option<usize>>> {
+        let observed_rows = rows.len();
+        let observed: FxHashMap<Vec<IndexLabel>, usize> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(position, row)| (row.iter().map(Self::normalized).collect(), position))
+            .collect();
+        let positions: Vec<Option<usize>> = index_rows(index)
+            .iter()
+            .map(|row| {
+                observed
+                    .get(&row.iter().map(Self::normalized).collect::<Vec<_>>())
+                    .copied()
+            })
+            .collect();
+        // Some legacy kernels label extension values as text. Never
+        // mistake an unalignable observed result for an empty group and
+        // silently replace its actual values with zero or NaN.
+        if observed.len() != observed_rows
+            || positions.iter().flatten().count() != observed_rows
+        {
+            return Err(not_implemented(
+                "categorical multi-key groupby with result keys outside their typed domains",
+            ));
+        }
+        Ok(positions)
+    }
+
+    fn expanded_column(
+        op: &str,
+        column: &Column,
+        source: Option<&Column>,
+        positions: &[Option<usize>],
+    ) -> PyResult<Column> {
+        let mut column = column.clone();
+        if column.is_empty() {
+            if let Some(empty) = source
+                .map(|source| empty_group_reduction(source, op))
+                .transpose()?
+                .flatten()
+            {
+                column = empty;
+            } else if matches!(op, "any" | "all") {
+                let dtype = if source.is_some_and(|source| source.dtype().is_nullable()) {
+                    DType::BoolNullable
+                } else {
+                    DType::Bool
+                };
+                column = Column::new(dtype, Vec::new()).map_err(column_error_to_py)?;
+            }
+        }
+        // Cast before inventing gaps: promoting an Int64 result to float
+        // first would irreversibly round masked integers above 2^53.
+        if let Some(target) = source.and_then(|source| masked_reduction_dtype(&source.dtype(), op))
+            && column.dtype() != target
+        {
+            column = column.astype(target).map_err(column_error_to_py)?;
+        }
+        if positions.iter().all(Option::is_some) {
+            return column
+                .reindex_by_positions(positions)
+                .map_err(column_error_to_py);
+        }
+        let zero = matches!(op, "sum" | "sum(min_count)" | "count" | "size" | "nunique");
+        if zero
+            && source.is_some_and(Column::is_pandas_string)
+            && matches!(op, "sum" | "sum(min_count)")
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "StringArray requires a sequence of strings or pandas.NA",
+            ));
+        }
+        if (zero && matches!(column.dtype(), DType::Utf8 | DType::Timedelta64))
+            || (!zero && column.dtype() == DType::Bool)
+        {
+            let absent = if zero {
+                Scalar::Int64(0)
+            } else {
+                Scalar::Null(NullKind::NaN)
+            };
+            let values = positions
+                .iter()
+                .map(|position| {
+                    position
+                        .and_then(|at| column.scalar_at(at))
+                        .unwrap_or_else(|| absent.clone())
+                })
+                .collect();
+            return Ok(Column::from_object_values(values));
+        }
+        if zero {
+            let absent = if matches!(column.dtype(), DType::Float64 | DType::Float64Nullable) {
+                Scalar::Float64(0.0)
+            } else {
+                Scalar::Int64(0)
+            };
+            column
+                .reindex_by_positions_with_absent_scalar(positions, absent)
+                .map_err(column_error_to_py)
+        } else {
+            fp_frame::reindex_column_with_invented_gaps(&column, positions)
+                .map_err(frame_error_to_py)
+        }
+    }
+
+    fn series(&self, op: &str, result: Series, source: Option<&Column>) -> PyResult<Series> {
+        let index = self.output_index(false)?;
+        let positions = self.positions(&index, index_rows(result.index()))?;
+        let column = Self::expanded_column(op, result.column(), source, &positions)?;
+        Series::new(result.name(), index, column).map_err(frame_error_to_py)
+    }
+
+    fn key_column(&self, level: usize, index: &Index) -> PyResult<Column> {
+        let source = &self.sources[level];
+        let labels = index_rows(index);
+        if let Some(meta) = source.categorical() {
+            let ranks = CategoryRanks::new(meta);
+            let codes = labels
+                .iter()
+                .map(|row| i32::try_from(ranks.rank(&row[level])).unwrap_or(-1))
+                .collect();
+            return Ok(Column::from_categorical_codes(codes, meta.clone()));
+        }
+        let values = labels
+            .iter()
+            .map(|row| index_label_to_scalar(&row[level]))
+            .collect();
+        let mut column = if source.dtype() == DType::Utf8 {
+            let column = Column::from_object_values(values);
+            if source.is_pandas_string() {
+                column.as_pandas_string()
+            } else {
+                column
+            }
+        } else {
+            Column::new(source.dtype(), values).map_err(column_error_to_py)?
+        };
+        if let Some(width) = source.width() {
+            column = column
+                .cast_to_width(width, source.dtype().is_nullable())
+                .map_err(column_error_to_py)?;
+        }
+        Ok(column)
+    }
+
+    fn frame(
+        &self,
+        op: &str,
+        result: DataFrame,
+        source: &DataFrame,
+        as_index: bool,
+    ) -> PyResult<DataFrame> {
+        let index = self.output_index(op == "nunique")?;
+        let rows = if as_index {
+            index_rows(&frame_row_index(&result)?)
+        } else {
+            let key_columns = self
+                .keys
+                .iter()
+                .map(|key| {
+                    result.column(key).ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone())
+                    })
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            (0..result.len())
+                .map(|row| {
+                    key_columns
+                        .iter()
+                        .map(|column| {
+                            Self::normalized(&scalar_to_index_label_converter(&column.values()[row]))
+                        })
+                        .collect()
+                })
+                .collect()
+        };
+        let positions = self.positions(&index, rows)?;
+        if !as_index && op == "nunique" && positions.iter().any(Option::is_none) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Length of values ({}) does not match length of index ({})",
+                result.len(),
+                index.len(),
+            )));
+        }
+        let names: Vec<String> = result.column_names().into_iter().cloned().collect();
+        let columns = names
+            .iter()
+            .enumerate()
+            .map(|(position, name)| {
+                let column = if !as_index
+                    && let Some(level) = self.keys.iter().position(|key| key == name)
+                {
+                    self.key_column(level, &index)?
+                } else {
+                    let column = result.column_at(position).ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(name.clone())
+                    })?;
+                    Self::expanded_column(op, column, source.column(name), &positions)?
+                };
+                Ok((name.clone(), column))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let axis = if as_index {
+            index.clone()
+        } else {
+            Index::default_range(index.len())
+        };
+        let mut frame = DataFrame::new_with_column_order(
+            axis,
+            fp_frame::ColumnStore::from_pairs(columns),
+            names,
+        )
+        .map_err(frame_error_to_py)?
+        .with_typed_labels_of(&result);
+        if as_index && let Some(multi) = index.row_multiindex() {
+            frame = frame
+                .with_row_multiindex(multi.clone())
+                .map_err(frame_error_to_py)?;
+        }
+        if let Some(multi) = result.columns_multiindex() {
+            frame = frame
+                .with_columns_multiindex(Some(multi.clone()))
+                .map_err(frame_error_to_py)?;
+        }
+        Ok(frame)
+    }
+
+    fn reset_keys(&self, mut frame: DataFrame, index: &Index) -> PyResult<DataFrame> {
+        let names: Vec<String> = frame.column_names().into_iter().cloned().collect();
+        for (level, name) in names.iter().take(self.keys.len()).enumerate() {
+            frame = frame
+                .with_column(name, self.key_column(level, index)?)
+                .map_err(frame_error_to_py)?;
+        }
+        Ok(frame)
+    }
 }
 
 /// `series` indexed by a category key's values - a value_counts' (a
@@ -78690,6 +79146,8 @@ pub struct PyGroupBy {
     /// A category key's unused categories under observed=False (pandas'
     /// 2.2 default): the reductions add a row for each (fvsao.39).
     unused: Vec<Scalar>,
+    /// Several keys' full domains; rows are materialized by reductions.
+    category_product: Option<Arc<CategoricalGroupProduct>>,
     /// observed=False (pandas' 2.2 default) over one category key:
     /// value_counts answers every (category, value) pair, zeros too
     /// (br-frankenpandas-oe9l6).
@@ -78883,6 +79341,7 @@ impl PyGroupBy {
             dropna: self.dropna,
             group_keys: self.group_keys,
             unused: self.unused.clone(),
+            category_product: self.category_product.clone(),
             all_categories: self.all_categories,
             selection: self.selection.clone(),
             repeated: self.repeated.clone(),
@@ -79000,6 +79459,9 @@ impl PyGroupBy {
         // The value columns keep their axis: typed labels (fvsao.32), name
         // and MultiIndex levels (sdyhq).
         let df = df.with_typed_labels_of(&self.df);
+        if let Some(product) = &self.category_product {
+            return product.frame(op, df, &self.df, self.as_index);
+        }
         let df = match self.key_zone() {
             Some(zone) => df
                 .with_index(index_in_zone(df.index().clone(), &zone))
@@ -79044,6 +79506,9 @@ impl PyGroupBy {
     /// A per-group reduction Series with the unused categories' rows (see
     /// [`Self::with_unused`]).
     fn with_unused_series(&self, op: &str, s: Series) -> PyResult<Series> {
+        if let Some(product) = &self.category_product {
+            return product.series(op, s, None);
+        }
         let s = match self.key_zone() {
             Some(zone) => Series::new(
                 s.name(),
@@ -79337,7 +79802,26 @@ impl PyGroupBy {
     /// NotImplementedError for a per-group operation that does not add
     /// pandas' rows for unused categories (observed=False) yet.
     fn observed_only(&self, op: &str) -> PyResult<()> {
-        if !self.unused.is_empty() {
+        // ngroup numbers the input rows, so unobserved combinations do
+        // not need rows of their own. Other unmodelled reductions still
+        // refuse instead of silently omitting part of the result.
+        let product_missing = if op != "ngroup"
+            && let Some(product) = &self.category_product
+        {
+            let (_, groups) = self
+                .grouped()
+                .and_then(|grouped| grouped.group_codes())
+                .map_err(frame_error_to_py)?;
+            product.has_unobserved(groups.len())
+        } else {
+            false
+        };
+        if product_missing && matches!(op, "idxmin" | "idxmax") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Can't get {op} of an empty group due to unobserved categories. Specify observed=True in groupby instead."
+            )));
+        }
+        if !self.unused.is_empty() || product_missing {
             return Err(not_implemented(&format!(
                 "DataFrameGroupBy.{op} with observed=False over unused categories (pandas adds their rows)"
             )));
@@ -79659,6 +80143,7 @@ impl PyGroupBy {
                     as_index: self.as_index,
                     groups: Some(groups),
                     unused: Vec::new(),
+                    category_product: self.category_product.clone(),
                     all_categories: self.all_categories,
                     group_keys: self.group_keys,
                     layout: Arc::default(),
@@ -79680,6 +80165,7 @@ impl PyGroupBy {
             as_index: self.as_index,
             groups: None,
             unused: self.unused.clone(),
+            category_product: self.category_product.clone(),
             all_categories: self.all_categories,
             group_keys: self.group_keys,
             // The key column is the same for every selection.
@@ -79968,6 +80454,10 @@ impl PyGroupBy {
         }
         match named.reset_index(false).map_err(frame_error_to_py)? {
             fp_frame::SeriesResetIndexResult::DataFrame(df) => {
+                let df = match &self.category_product {
+                    Some(product) => product.reset_keys(df, named.index())?,
+                    None => df,
+                };
                 Ok(Py::new(py, PyDataFrame { inner: df })?.into_any())
             }
             fp_frame::SeriesResetIndexResult::Series(s) => {
@@ -80414,6 +80904,17 @@ impl PyGroupBy {
         // function adding their rows (the frame-level paths do not).
         if !self.unused.is_empty() {
             return self.agg_per_group(py, given, args, kwargs);
+        }
+        if self.category_product.is_some()
+            && !given.is_some_and(|spec| spec.extract::<String>().is_ok())
+        {
+            // A list/dict/named aggregation reduces each column through
+            // its own method, which knows its unobserved-group fill and
+            // dtype. The native multi-agg kernels visit observed groups.
+            if self.as_index {
+                return self.agg_per_group(py, given, args, kwargs);
+            }
+            self.observed_only("agg with as_index=False")?;
         }
         let renamed_func = match given {
             Some(spec) if agg_spec_has_callable(spec) => {
@@ -81856,6 +82357,7 @@ impl PyGroupBy {
             dropna: self.dropna && dropna,
             group_keys: self.group_keys,
             unused: Vec::new(),
+            category_product: None,
             all_categories: false,
             selection: None,
             repeated: self.repeated.clone(),
@@ -81971,6 +82473,8 @@ pub struct PySeriesGroupBy {
     /// A category key's unused categories under observed=False (pandas'
     /// 2.2 default): the reductions add a row for each (fvsao.39).
     unused: Vec<Scalar>,
+    /// Shared with the frame groupby; selection keeps its full key domains.
+    category_product: Option<Arc<CategoricalGroupProduct>>,
     /// observed=False (pandas' 2.2 default) over one category key:
     /// value_counts answers every (category, value) pair, zeros too
     /// (br-frankenpandas-oe9l6).
@@ -82208,6 +82712,18 @@ impl PySeriesGroupBy {
             },
         };
         let s = self.label_groups_ordered(s, !(op == "value_counts" && !self.sort))?;
+        let s = match &self.category_product {
+            Some(product) if CategoricalGroupProduct::supports_reduction(op) => {
+                product.series(op, s, Some(self.series.column()))?
+            }
+            // Non-scalar results (value_counts, nlargest, ...) have extra
+            // index levels and must not be reindexed as one row per group.
+            Some(_) => {
+                self.observed_only(op)?;
+                s
+            }
+            None => s,
+        };
         // One tz-aware key: the groups are its instants, in its zone (they
         // came back naive UTC, fvsao.60).
         Ok(match (&self.groups, column_zone(self.by.column())) {
@@ -82474,7 +82990,16 @@ impl PySeriesGroupBy {
     /// NotImplementedError for a per-group operation that does not add
     /// pandas' rows for unused categories (observed=False) yet.
     fn observed_only(&self, op: &str) -> PyResult<()> {
-        if !self.unused.is_empty() {
+        let product_missing = op != "ngroup"
+            && self.category_product.as_ref().is_some_and(|product| {
+                product.has_unobserved(self.groups.as_ref().map_or(0, Index::len))
+            });
+        if product_missing && matches!(op, "idxmin" | "idxmax") {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Can't get {op} of an empty group due to unobserved categories. Specify observed=True in groupby instead."
+            )));
+        }
+        if !self.unused.is_empty() || product_missing {
             return Err(not_implemented(&format!(
                 "SeriesGroupBy.{op} with observed=False over unused categories (pandas adds their rows)"
             )));
@@ -82566,6 +83091,10 @@ impl PySeriesGroupBy {
         }
         match res.reset_index(false).map_err(frame_error_to_py)? {
             fp_frame::SeriesResetIndexResult::DataFrame(df) => {
+                let df = match &self.category_product {
+                    Some(product) => product.reset_keys(df, res.index())?,
+                    None => df,
+                };
                 Ok(Py::new(py, PyDataFrame { inner: df })?.into_any())
             }
             fp_frame::SeriesResetIndexResult::Series(s) => {
@@ -82759,6 +83288,11 @@ fn series_groupby_agg<'py>(
             args,
             kwargs,
         );
+    }
+    if this.borrow().category_product.is_some() {
+        // Callable aggregation's empty-combination rules differ from
+        // apply, which only visits observed groups.
+        this.borrow().observed_only("agg with a callable")?;
     }
     let mut apply_args = vec![func.clone()];
     apply_args.extend(args.iter());
@@ -110749,6 +111283,7 @@ mod tests {
             as_index: true,
             groups: None,
             unused: Vec::new(),
+            category_product: None,
             all_categories: false,
             group_keys: true,
             layout: Arc::default(),
@@ -110812,6 +111347,7 @@ mod tests {
             dropna: true,
             group_keys: true,
             unused: Vec::new(),
+            category_product: None,
             all_categories: false,
             selection: None,
             repeated: None,
@@ -113242,6 +113778,7 @@ mod tests {
                 dropna: true,
                 group_keys: true,
                 unused: Vec::new(),
+                category_product: None,
                 all_categories: false,
                 selection: None,
                 repeated: None,

@@ -7453,23 +7453,45 @@ def test_bool_frame_arithmetic_and_binned_categoricals_match_pandas(case: str) -
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
-def test_category_groupby_default_observed_warns_and_unused_combinations_refuse() -> None:
+def test_category_groupby_default_observed_warns_and_unused_combinations_expand() -> None:
     for m in (pd, fpd):
         d = _ages(m)
         with pytest.warns(FutureWarning, match="default of observed=False is deprecated"):
             d.groupby("bin")["v"].sum()
         with pytest.warns(FutureWarning, match="default of observed=False is deprecated"):
             d["v"].groupby(d["bin"]).sum()
-    # Over SEVERAL keys pandas adds every unused (category x value)
-    # combination; frankenpandas does not model that yet and refuses rather
-    # than dropping the rows (a single key's unused categories answer: see
-    # test_unused_categories_and_category_key_methods_match_pandas).
+    # Over several keys pandas adds every unused (category x value)
+    # combination. Interval categories retain their full catalog and the
+    # ordinary key retains every observed value (fvsao.40).
     sparse = {"age": [3, 7, 25], "v": [1, 2, 3]}
     expected = pd.DataFrame(sparse).assign(bin=lambda d: pd.cut(d["age"], [0, 5, 10, 20, 50])).groupby(["bin", "age"], observed=False)["v"].sum()
     assert len(expected) == 12
     frame = fpd.DataFrame(sparse).assign(bin=lambda d: fpd.cut(d["age"], [0, 5, 10, 20, 50]))
-    with pytest.raises(NotImplementedError):
-        frame.groupby(["bin", "age"], observed=False)["v"].sum()
+    # Some core kernels still represent extension-valued keys as text.
+    # Such keys must either align exactly or take the specific honest
+    # refusal; they must never turn observed values into zero-filled rows.
+    try:
+        actual = frame.groupby(["bin", "age"], observed=False)["v"].sum()
+    except NotImplementedError as error:
+        assert "result keys outside their typed domains" in str(error)
+    else:
+        assert _labelled(actual) == _labelled(expected)
+        assert list(actual.index.names) == list(expected.index.names)
+        assert [str(category) for category in actual.index.levels[0].dtype.categories] == [
+            str(category) for category in expected.index.levels[0].dtype.categories
+        ]
+        assert actual.index.levels[0].dtype.ordered == expected.index.levels[0].dtype.ordered
+
+    # Plain categorical keys must produce the full product, with no
+    # blanket refusal. The focused product suite covers the other reducers.
+    def text_product(module: Any) -> Any:
+        return module.DataFrame({
+            "category": module.Categorical(["b", "a"], categories=["c", "b", "a"]),
+            "key": [2, 1],
+            "v": [3, 7],
+        }).groupby(["category", "key"], observed=False)["v"].sum()
+
+    assert _labelled(text_product(fpd)) == _labelled(text_product(pd))
     # The per-group operations without a modelled empty-group answer refuse
     # over unused categories too, rather than dropping the unused rows.
     unmodelled = {
