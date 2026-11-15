@@ -13746,6 +13746,62 @@ impl SparseColumn {
         }
     }
 
+    /// Construct compressed storage without materializing the logical array.
+    ///
+    /// Positions must be strictly increasing, in bounds, and paired with one
+    /// stored value each. Unlike `from_dense`, this preserves explicit entries
+    /// equal to the fill value; sparse casts and arithmetic rely on that
+    /// distinction. Values are converted to the subtype and numeric width,
+    /// while the descriptor's fill value is retained exactly.
+    pub fn from_parts(
+        dtype: SparseDType,
+        len: usize,
+        indices: Vec<usize>,
+        values: Vec<Scalar>,
+    ) -> Result<Self, ColumnError> {
+        if matches!(dtype.value_dtype, DType::Sparse | DType::Null)
+            || dtype
+                .width
+                .is_some_and(|width| !width.fits_storage(&dtype.value_dtype))
+            || indices.len() != values.len()
+            || indices.last().is_some_and(|&last| last >= len)
+            || indices.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(ColumnError::InvalidSnapshot(
+                "invalid sparse storage".to_owned(),
+            ));
+        }
+
+        let value_dtype = dtype.value_dtype.clone();
+        let values = values
+            .into_iter()
+            .map(|value| {
+                if value_dtype == DType::Utf8 {
+                    Ok(value)
+                } else if value.dtype() == value_dtype || value.dtype() == DType::Null {
+                    Ok(Column::normalize_missing_for_dtype(value, value_dtype.clone()))
+                } else {
+                    cast_scalar_owned(value, value_dtype.clone()).map_err(ColumnError::from)
+                }
+            })
+            .collect::<Result<Vec<_>, ColumnError>>()?;
+        let values = match dtype.width {
+            Some(width) => Column::new(value_dtype, values)?
+                .cast_to_width(width, false)?
+                .values()
+                .to_vec(),
+            None => values,
+        };
+        let column = Self {
+            dtype,
+            len,
+            indices,
+            values,
+        };
+        column.validate()?;
+        Ok(column)
+    }
+
     pub fn from_dense(dtype: SparseDType, values: Vec<Scalar>) -> Result<Self, ColumnError> {
         let len = values.len();
         let value_dtype = dtype.value_dtype.clone();
@@ -43276,6 +43332,93 @@ mod tests {
         }
         assert_eq!(rooted.f64_finite_witness(), Some(true));
         assert_eq!(logged.f64_finite_witness(), Some(true));
+    }
+
+    #[test]
+    fn sparse_from_parts_preserves_explicit_fill_and_large_logical_length() {
+        let dtype = SparseDType::new(DType::Int64, Scalar::Int64(0)).expect("sparse dtype");
+        let sparse = SparseColumn::from_parts(
+            dtype,
+            1_000_000_000,
+            vec![1, 999_999_999],
+            vec![Scalar::Int64(0), Scalar::Int64(7)],
+        )
+        .expect("compressed parts");
+        assert_eq!(sparse.len(), 1_000_000_000);
+        assert_eq!(sparse.npoints(), 2);
+        assert_eq!(sparse.indices(), &[1, 999_999_999]);
+        assert_eq!(sparse.cell(0), &Scalar::Int64(0));
+        assert_eq!(sparse.cell(1), &Scalar::Int64(0));
+        assert_eq!(sparse.cell(999_999_999), &Scalar::Int64(7));
+        let column = Column::from_sparse(sparse);
+        assert_eq!(column.len(), 1_000_000_000);
+        assert_eq!(column.sparse().expect("compressed backing").npoints(), 2);
+    }
+
+    #[test]
+    fn sparse_from_parts_rejects_invalid_storage() {
+        let dtype = SparseDType::new(DType::Int64, Scalar::Int64(0)).expect("sparse dtype");
+        for (len, indices, values) in [
+            (3, vec![0], vec![]),
+            (3, vec![], vec![Scalar::Int64(1)]),
+            (3, vec![3], vec![Scalar::Int64(1)]),
+            (0, vec![0], vec![Scalar::Int64(1)]),
+            (3, vec![1, 1], vec![Scalar::Int64(1), Scalar::Int64(2)]),
+            (3, vec![2, 1], vec![Scalar::Int64(1), Scalar::Int64(2)]),
+        ] {
+            assert!(SparseColumn::from_parts(dtype.clone(), len, indices, values).is_err());
+        }
+        let empty = SparseColumn::from_parts(dtype.clone(), 0, vec![], vec![])
+            .expect("empty compressed storage");
+        assert!(empty.is_empty());
+        assert_eq!(empty.npoints(), 0);
+        let mut invalid_width = dtype;
+        invalid_width.width = Some(NumericWidth::Float32);
+        assert!(SparseColumn::from_parts(invalid_width, 1, vec![], vec![]).is_err());
+    }
+
+    #[test]
+    fn sparse_from_parts_normalizes_width_and_preserves_fill_scalar() {
+        let dtype = SparseDType {
+            value_dtype: DType::Int64,
+            fill_value: Scalar::Float64(0.5),
+            width: Some(NumericWidth::Int8),
+        };
+        let sparse = SparseColumn::from_parts(
+            dtype,
+            3,
+            vec![1, 2],
+            vec![Scalar::Int64(200), Scalar::Int64(0)],
+        )
+        .expect("narrow compressed storage");
+        assert_eq!(sparse.stored_values(), &[Scalar::Int64(-56), Scalar::Int64(0)]);
+        assert_eq!(sparse.fill_value(), &Scalar::Float64(0.5));
+        assert_eq!(sparse.npoints(), 2);
+        assert_eq!(sparse.sparse_dtype().width, Some(NumericWidth::Int8));
+    }
+
+    #[test]
+    fn sparse_from_parts_preserves_object_scalars_and_missing_values() {
+        let object = SparseDType::new(DType::Utf8, Scalar::Null(NullKind::NaN))
+            .expect("object sparse dtype");
+        let sparse = SparseColumn::from_parts(
+            object,
+            4,
+            vec![0, 1, 3],
+            vec![
+                Scalar::Int64(5),
+                Scalar::Utf8("five".to_owned()),
+                Scalar::Null(NullKind::NaN),
+            ],
+        )
+        .expect("object compressed storage");
+        assert_eq!(sparse.cell(0), &Scalar::Int64(5));
+        assert_eq!(sparse.cell(1), &Scalar::Utf8("five".to_owned()));
+        assert!(sparse.cell(2).is_missing());
+        assert!(sparse.cell(3).is_missing());
+        assert_eq!(sparse.npoints(), 3);
+        let column = Column::from_sparse(sparse);
+        assert_eq!(column.validity().count_valid(), 2);
     }
 
     #[test]
