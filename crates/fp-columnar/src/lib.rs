@@ -13807,24 +13807,18 @@ impl SparseColumn {
 
     pub fn from_dense(dtype: SparseDType, values: Vec<Scalar>) -> Result<Self, ColumnError> {
         let len = values.len();
-        let value_dtype = dtype.value_dtype.clone();
-        let fill_value = dtype.fill_value.clone();
         let mut indices = Vec::new();
         let mut sparse_values = Vec::new();
 
         for (idx, value) in values.into_iter().enumerate() {
-            let value = if value_dtype == DType::Utf8 {
-                value
-            } else if value.dtype() == value_dtype || value.dtype() == DType::Null {
-                Column::normalize_missing_for_dtype(value, value_dtype.clone())
+            // pandas selects stored positions before casting the subtype.
+            // A non-fill value that casts to the fill remains explicitly
+            // stored; the fill itself can have a different scalar type.
+            let is_fill = if dtype.value_dtype == DType::Utf8 {
+                (value.is_missing() && dtype.fill_value.is_missing())
+                    || value == dtype.fill_value
             } else {
-                cast_scalar_owned(value, value_dtype.clone())?
-            };
-
-            let is_fill = if value_dtype == DType::Utf8 {
-                (value.is_missing() && fill_value.is_missing()) || value == fill_value
-            } else {
-                sparse_fill_matches(&value, &fill_value)
+                sparse_fill_matches(&value, &dtype.fill_value)
             };
             if !is_fill {
                 indices.push(idx);
@@ -13832,12 +13826,9 @@ impl SparseColumn {
             }
         }
 
-        Ok(Self {
-            dtype,
-            len,
-            indices,
-            values: sparse_values,
-        })
+        // The compressed constructor applies subtype casts and width
+        // normalization without dropping any explicitly stored positions.
+        Self::from_parts(dtype, len, indices, sparse_values)
     }
 
     pub fn from_dense_column(dtype: SparseDType, column: &Column) -> Result<Self, ColumnError> {
@@ -40237,7 +40228,7 @@ mod tests {
     }
 
     use fp_types::{
-        DType, Interval, IntervalClosed, NullKind, Period, PeriodFreq, Scalar, SparseDType,
+        DType, Interval, IntervalClosed, NullKind, NumericWidth, Period, PeriodFreq, Scalar, SparseDType,
     };
 
     use super::{
@@ -43662,6 +43653,93 @@ mod tests {
                 Scalar::Null(NullKind::NaN),
             ]
         );
+    }
+
+    #[test]
+    fn sparse_constructor_keeps_positions_before_cast_o1qso() {
+        let dtype = SparseDType::new(DType::Int64, Scalar::Int64(0)).expect("sparse dtype");
+        let sparse = SparseColumn::from_dense(
+            dtype,
+            vec![Scalar::Float64(0.2), Scalar::Int64(0), Scalar::Float64(1.9)],
+        )
+        .expect("sparse integer cast");
+
+        // pandas keeps the first entry even though its cast value is zero.
+        assert_eq!(sparse.indices(), &[0, 2]);
+        assert_eq!(sparse.stored_values(), &[Scalar::Int64(0), Scalar::Int64(1)]);
+        assert_eq!(sparse.npoints(), 2);
+        assert_eq!(
+            sparse.to_dense_values(),
+            vec![Scalar::Int64(0), Scalar::Int64(0), Scalar::Int64(1)]
+        );
+    }
+
+    #[test]
+    fn sparse_constructor_normalizes_width_without_dropping_points_o1qso() {
+        let dtype = SparseDType {
+            value_dtype: DType::Float64,
+            fill_value: Scalar::Float64(1.0),
+            width: Some(NumericWidth::Float32),
+        };
+        let sparse = SparseColumn::from_dense(
+            dtype,
+            vec![Scalar::Float64(1.0), Scalar::Float64(1.0 + 2.0_f64.powi(-25))],
+        )
+        .expect("sparse float32 cast");
+        assert_eq!(sparse.indices(), &[1]);
+        assert_eq!(sparse.stored_values(), &[Scalar::Float64(1.0)]);
+        assert_eq!(sparse.sparse_dtype().width, Some(NumericWidth::Float32));
+        assert_eq!(
+            sparse.to_dense_column().expect("dense float32").width(),
+            Some(NumericWidth::Float32)
+        );
+
+        let dtype = SparseDType {
+            value_dtype: DType::Int64,
+            fill_value: Scalar::Int64(0),
+            width: Some(NumericWidth::Int8),
+        };
+        let sparse = SparseColumn::from_dense(
+            dtype,
+            vec![Scalar::Int64(0), Scalar::Int64(256), Scalar::Int64(257)],
+        )
+        .expect("sparse int8 cast");
+        assert_eq!(sparse.indices(), &[1, 2]);
+        assert_eq!(sparse.stored_values(), &[Scalar::Int64(0), Scalar::Int64(1)]);
+    }
+
+    #[test]
+    fn sparse_constructor_compares_original_fill_before_cast_o1qso() {
+        let dtype = SparseDType {
+            value_dtype: DType::Int64,
+            fill_value: Scalar::Float64(0.5),
+            width: Some(NumericWidth::Int64),
+        };
+        let sparse = SparseColumn::from_dense(
+            dtype,
+            vec![Scalar::Float64(0.5), Scalar::Float64(2.5)],
+        )
+        .expect("sparse custom fill");
+        assert_eq!(sparse.indices(), &[1]);
+        assert_eq!(sparse.stored_values(), &[Scalar::Int64(2)]);
+        assert_eq!(sparse.fill_value(), &Scalar::Float64(0.5));
+
+        let dtype = SparseDType {
+            value_dtype: DType::Float64,
+            fill_value: Scalar::Null(NullKind::NaN),
+            width: Some(NumericWidth::Float32),
+        };
+        let sparse = SparseColumn::from_dense(
+            dtype,
+            vec![
+                Scalar::Float64(f64::NAN),
+                Scalar::Float64(0.1),
+                Scalar::Null(NullKind::Null),
+            ],
+        )
+        .expect("sparse missing fill");
+        assert_eq!(sparse.indices(), &[1]);
+        assert_eq!(sparse.stored_values(), &[Scalar::Float64(f64::from(0.1_f32))]);
     }
 
     #[test]
