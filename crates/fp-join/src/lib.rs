@@ -11135,6 +11135,23 @@ pub fn merge_ordered_with_options(
     fill_method: Option<&str>,
     mut options: MergeExecutionOptions,
 ) -> Result<MergedDataFrame, JoinError> {
+    validate_ordered_merge_options(how, fill_method)?;
+    options.sort = true;
+    merge_dataframes_on_with_fill(
+        left,
+        right,
+        left_on,
+        right_on,
+        how,
+        options,
+        fill_method.is_some(),
+    )
+}
+
+fn validate_ordered_merge_options(
+    how: JoinType,
+    fill_method: Option<&str>,
+) -> Result<(), JoinError> {
     if let Some(method) = fill_method
         && method != "ffill"
     {
@@ -11147,16 +11164,205 @@ pub fn merge_ordered_with_options(
             "merge_ordered: how must be 'left', 'right', 'inner' or 'outer'".to_owned(),
         )));
     }
-    options.sort = true;
-    merge_dataframes_on_with_fill(
-        left,
-        right,
-        left_on,
-        right_on,
-        how,
-        options,
-        fill_method.is_some(),
-    )
+    Ok(())
+}
+
+/// The side whose groups drive an ordered merge (pandas' left_by or right_by).
+///
+/// Only one side may drive the operation. If the other frame also holds
+/// every grouping column, only its corresponding group participates;
+/// otherwise its entire frame participates in each group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeOrderedGroupBy {
+    Left(Vec<String>),
+    Right(Vec<String>),
+}
+
+struct OrderedMergeGroup {
+    key: CompositeJoinKey,
+    labels: Vec<Scalar>,
+    rows: Vec<usize>,
+}
+
+/// Observed groups in first-appearance order, excluding rows with a missing
+/// group key. A single categorical grouper also visits its unused categories
+/// after the observed ones, as pandas' groupby(sort=False, observed=False).
+fn ordered_merge_groups(
+    frame: &fp_frame::DataFrame,
+    by: &[String],
+) -> Result<Vec<OrderedMergeGroup>, JoinError> {
+    if by.is_empty() {
+        return Err(FrameError::CompatibilityRejected("No group keys passed!".to_owned()).into());
+    }
+    let keys = build_group_keys(frame, by)?;
+    let columns: Vec<&Column> = by
+        .iter()
+        .map(|name| frame.column(name).expect("group key was validated"))
+        .collect();
+    let mut groups: Vec<OrderedMergeGroup> = Vec::new();
+    let mut positions: FxHashMap<CompositeJoinKey, usize> = FxHashMap::default();
+    for (row, key) in keys.into_iter().enumerate() {
+        if key
+            .iter()
+            .any(|value| matches!(value, JoinKeyComponent::Missing))
+        {
+            continue;
+        }
+        if let Some(&position) = positions.get(&key) {
+            groups[position].rows.push(row);
+        } else {
+            positions.insert(key.clone(), groups.len());
+            groups.push(OrderedMergeGroup {
+                key,
+                labels: columns
+                    .iter()
+                    .map(|column| column.scalar_at(row).expect("group row is in bounds"))
+                    .collect(),
+                rows: vec![row],
+            });
+        }
+    }
+    if let [column] = columns.as_slice()
+        && let Some(meta) = column.categorical()
+    {
+        for value in &meta.categories {
+            let key = CompositeJoinKey::from_vec(vec![scalar_to_key_component(value)]);
+            if let std::collections::hash_map::Entry::Vacant(entry) = positions.entry(key.clone()) {
+                entry.insert(groups.len());
+                groups.push(OrderedMergeGroup {
+                    key,
+                    labels: vec![value.clone()],
+                    rows: Vec::new(),
+                });
+            }
+        }
+    }
+    Ok(groups)
+}
+
+/// Merge each group's ordered rows independently, then concatenate the groups.
+///
+/// Matches pandas merge_ordered(left_by=...) / merge_ordered(right_by=...):
+/// group order is first appearance on the selected side; sorting and forward
+/// filling happen inside each group. Forward fill uses the same source-row
+/// position kernel as an ungrouped ordered merge, so it neither crosses groups
+/// nor fills an actual missing input cell. With grouping columns on both sides,
+/// a group absent from the other side is kept in its source order (including
+/// for how="inner"), following pandas' grouped-merge contract.
+#[allow(clippy::too_many_arguments)]
+pub fn merge_ordered_grouped_with_options(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &[&str],
+    right_on: &[&str],
+    how: JoinType,
+    fill_method: Option<&str>,
+    by: &MergeOrderedGroupBy,
+    options: MergeExecutionOptions,
+) -> Result<MergedDataFrame, JoinError> {
+    validate_ordered_merge_options(how, fill_method)?;
+    let (grouped, other, names, on_left) = match by {
+        MergeOrderedGroupBy::Left(names) => (left, right, names, true),
+        MergeOrderedGroupBy::Right(names) => (right, left, names, false),
+    };
+    let groups = ordered_merge_groups(grouped, names)?;
+    if groups.is_empty() {
+        return Err(
+            FrameError::CompatibilityRejected("No objects to concatenate".to_owned()).into(),
+        );
+    }
+    let other_groups = if names.iter().all(|name| other.column(name).is_some()) {
+        Some(
+            ordered_merge_groups(other, names)?
+                .into_iter()
+                .map(|group| (group.key, group.rows))
+                .collect::<FxHashMap<_, _>>(),
+        )
+    } else {
+        None
+    };
+    let mut pieces = Vec::with_capacity(groups.len());
+    for group in groups {
+        let piece = grouped.take_rows(&group.rows)?;
+        let counterpart = match &other_groups {
+            Some(groups) => match groups.get(&group.key) {
+                Some(rows) => Some(other.take_rows(rows)?),
+                None => {
+                    // pandas keeps an unmatched group's original columns,
+                    // appending the other side's absent columns as NaN. The
+                    // first piece determines the final output column axis.
+                    let mut columns = piece.column_names();
+                    columns.extend(
+                        other
+                            .column_names()
+                            .into_iter()
+                            .filter(|name| piece.column(name).is_none()),
+                    );
+                    let columns: Vec<&str> = columns.into_iter().map(String::as_str).collect();
+                    pieces.push(piece.reindex_columns(&columns)?);
+                    continue;
+                }
+            },
+            None => None,
+        };
+        let counterpart = counterpart.as_ref().unwrap_or(other);
+        let (left_piece, right_piece) = if on_left {
+            (&piece, counterpart)
+        } else {
+            (counterpart, &piece)
+        };
+        let merged = merge_ordered_with_options(
+            left_piece,
+            right_piece,
+            left_on,
+            right_on,
+            how,
+            fill_method,
+            options.clone(),
+        )?;
+        let mut merged = fp_frame::DataFrame::new_with_column_order(
+            merged.index,
+            merged.columns,
+            merged.column_order,
+        )?;
+        for (name, label) in names.iter().zip(group.labels) {
+            // Assigning the group label fills even leading outer-join gaps
+            // and adds an unsuffixed column when both inputs carry this name.
+            // A categorical / nullable key becomes the scalar's plain dtype;
+            // zoned datetimes retain their zone.
+            let dtype = label.dtype();
+            let values = vec![label; merged.len()];
+            let source = grouped.column(name).expect("group key was validated");
+            let mut column = if matches!(source.dtype(), DType::Datetime64 { .. }) {
+                Column::new(source.dtype(), values)?
+            } else {
+                Column::new(dtype, values)?
+            };
+            // Nullable numpy scalars retain their width when assigned as a
+            // group label; numpy-backed group labels are ordinary Python
+            // scalars and therefore use the default 64-bit width.
+            if matches!(source.dtype(), DType::Int64Nullable | DType::Float64Nullable) {
+                column = column.keeping_dtype_of(source);
+            }
+            merged = merged.with_column(name, column)?;
+        }
+        pieces.push(merged);
+    }
+    let frames: Vec<&fp_frame::DataFrame> = pieces.iter().collect();
+    let concatenated = fp_frame::concat_dataframes_with_ignore_index(&frames, true)?;
+    // pandas fixes the schema to its first piece, including when that piece
+    // is an unmatched group whose overlapping columns were not suffixed.
+    let names: Vec<&str> = pieces[0]
+        .column_names()
+        .into_iter()
+        .map(String::as_str)
+        .collect();
+    let result = concatenated.reindex_columns(&names)?;
+    Ok(MergedDataFrame {
+        index: result.index().clone(),
+        columns: result.columns().clone(),
+        column_order: result.column_names().into_iter().cloned().collect(),
+    })
 }
 
 /// Direction for asof merge matching.
@@ -23000,6 +23206,350 @@ mod tests {
                 assert!(result.columns["b"].values()[0].is_missing());
                 assert_eq!(result.columns["b"].values()[1], Scalar::Float64(2.0));
             }
+        }
+    }
+
+    #[test]
+    fn merge_ordered_grouped_ffill_is_local_and_preserves_source_nulls_u6p7i() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["g", "t", "value"],
+            vec![
+                (
+                    "g",
+                    vec![
+                        Scalar::Utf8("b".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                    ],
+                ),
+                ("t", vec![3.into(), 1.into(), 1.into()]),
+                (
+                    "value",
+                    vec![
+                        Scalar::Float64(30.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Float64(10.0),
+                    ],
+                ),
+            ],
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict(
+            &["t", "other"],
+            vec![
+                ("t", vec![2.into(), 4.into()]),
+                ("other", vec![200.into(), 400.into()]),
+            ],
+        )
+        .unwrap();
+        let result = super::merge_ordered_grouped_with_options(
+            &left,
+            &right,
+            &["t"],
+            &["t"],
+            JoinType::Outer,
+            Some("ffill"),
+            &super::MergeOrderedGroupBy::Left(vec!["g".to_owned()]),
+            super::MergeExecutionOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(result.column_order, ["g", "t", "value", "other"]);
+        assert_eq!(
+            result.columns["t"].values(),
+            &[1.into(), 2.into(), 3.into(), 4.into(), 1.into(), 2.into(), 4.into()]
+        );
+        assert_eq!(
+            result.columns["g"]
+                .values()
+                .iter()
+                .map(Scalar::as_str)
+                .collect::<Vec<_>>(),
+            vec![Some("b"), Some("b"), Some("b"), Some("b"), Some("a"), Some("a"), Some("a")]
+        );
+        let values = result.columns["value"].values();
+        assert_eq!(
+            &values[..4],
+            &[
+                Scalar::Float64(10.0),
+                Scalar::Float64(10.0),
+                Scalar::Float64(30.0),
+                Scalar::Float64(30.0),
+            ]
+        );
+        assert!(values[4..].iter().all(Scalar::is_missing));
+        let other = result.columns["other"].values();
+        assert!(other[0].is_missing());
+        assert!(other[4].is_missing(), "forward fill must restart for group a");
+        assert_eq!(other[1], Scalar::Float64(200.0));
+        assert_eq!(other[2], Scalar::Float64(200.0));
+        assert_eq!(other[3], Scalar::Float64(400.0));
+        assert_eq!(other[5], Scalar::Float64(200.0));
+        assert_eq!(other[6], Scalar::Float64(400.0));
+        assert_eq!(result.columns["value"].dtype(), DType::Float64);
+        assert_eq!(result.columns["other"].dtype(), DType::Float64);
+    }
+
+    #[test]
+    fn merge_ordered_grouped_unmatched_first_keeps_source_order_u6p7i() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["g", "t", "v"],
+            vec![
+                (
+                    "g",
+                    vec![
+                        Scalar::Utf8("z".to_owned()),
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("z".to_owned()),
+                    ],
+                ),
+                ("t", vec![5.into(), 1.into(), 3.into()]),
+                ("v", vec![50.into(), 10.into(), 30.into()]),
+            ],
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict(
+            &["g", "t", "w"],
+            vec![
+                (
+                    "g",
+                    vec![Scalar::Utf8("a".to_owned()), Scalar::Utf8("b".to_owned())],
+                ),
+                ("t", vec![2.into(), 4.into()]),
+                ("w", vec![20.into(), 40.into()]),
+            ],
+        )
+        .unwrap();
+        let result = super::merge_ordered_grouped_with_options(
+            &left,
+            &right,
+            &["t"],
+            &["t"],
+            JoinType::Inner,
+            Some("ffill"),
+            &super::MergeOrderedGroupBy::Left(vec!["g".to_owned()]),
+            super::MergeExecutionOptions::default(),
+        )
+        .unwrap();
+        // pandas preserves an unmatched group even for an inner merge.
+        // Its unsuffixed columns define the schema of the whole result.
+        assert_eq!(result.column_order, ["g", "t", "v", "w"]);
+        assert_eq!(result.columns["t"].values(), &[5.into(), 3.into()]);
+        assert_eq!(result.columns["v"].values(), &[50.into(), 30.into()]);
+        assert!(
+            result.columns["g"]
+                .values()
+                .iter()
+                .all(|value| value.as_str() == Some("z"))
+        );
+        assert!(result.columns["w"].values().iter().all(Scalar::is_missing));
+        assert_eq!(result.columns["w"].dtype(), DType::Float64);
+    }
+
+    #[test]
+    fn merge_ordered_right_groups_match_composite_keys_u6p7i() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["g", "h", "lk", "v"],
+            vec![
+                (
+                    "g",
+                    vec![Scalar::Utf8("x".to_owned()), Scalar::Utf8("x".to_owned())],
+                ),
+                ("h", vec![1.into(), 2.into()]),
+                ("lk", vec![2.into(), 4.into()]),
+                ("v", vec![20.into(), 40.into()]),
+            ],
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict(
+            &["g", "h", "rk", "v"],
+            vec![
+                (
+                    "g",
+                    vec![Scalar::Utf8("x".to_owned()), Scalar::Utf8("x".to_owned())],
+                ),
+                ("h", vec![2.into(), 1.into()]),
+                ("rk", vec![3.into(), 1.into()]),
+                ("v", vec![300.into(), 100.into()]),
+            ],
+        )
+        .unwrap();
+        let result = super::merge_ordered_grouped_with_options(
+            &left,
+            &right,
+            &["lk"],
+            &["rk"],
+            JoinType::Outer,
+            Some("ffill"),
+            &super::MergeOrderedGroupBy::Right(vec!["g".to_owned(), "h".to_owned()]),
+            super::MergeExecutionOptions {
+                suffixes: Some([Some("_l".to_owned()), Some("_r".to_owned())]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.column_order,
+            ["g_l", "h_l", "lk", "v_l", "g_r", "h_r", "rk", "v_r", "g", "h"]
+        );
+        assert_eq!(
+            result.columns["h"].values(),
+            &[2.into(), 2.into(), 1.into(), 1.into()]
+        );
+        assert_eq!(
+            result.columns["rk"].values(),
+            &[3.into(), 3.into(), 1.into(), 1.into()]
+        );
+        assert_eq!(
+            result.columns["v_r"].values(),
+            &[300.into(), 300.into(), 100.into(), 100.into()]
+        );
+        let left_values = result.columns["v_l"].values();
+        assert!(left_values[0].is_missing());
+        assert_eq!(left_values[1], Scalar::Float64(40.0));
+        assert!(left_values[2].is_missing());
+        assert_eq!(left_values[3], Scalar::Float64(20.0));
+        assert_eq!(result.columns["h"].dtype(), DType::Int64);
+        assert_eq!(result.columns["v_r"].dtype(), DType::Int64);
+    }
+
+    #[test]
+    fn merge_ordered_grouped_empty_inner_keeps_schema_and_dtypes_u6p7i() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["g", "t", "v"],
+            vec![
+                (
+                    "g",
+                    vec![Scalar::Utf8("b".to_owned()), Scalar::Utf8("a".to_owned())],
+                ),
+                ("t", vec![1.into(), 3.into()]),
+                ("v", vec![10.into(), 30.into()]),
+            ],
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict(
+            &["t", "w"],
+            vec![
+                ("t", vec![2.into(), 4.into()]),
+                ("w", vec![20.into(), 40.into()]),
+            ],
+        )
+        .unwrap();
+        let result = super::merge_ordered_grouped_with_options(
+            &left,
+            &right,
+            &["t"],
+            &["t"],
+            JoinType::Inner,
+            None,
+            &super::MergeOrderedGroupBy::Left(vec!["g".to_owned()]),
+            super::MergeExecutionOptions::default(),
+        )
+        .unwrap();
+        assert!(result.index.is_empty());
+        assert_eq!(result.column_order, ["g", "t", "v", "w"]);
+        assert_eq!(result.columns["g"].dtype(), DType::Utf8);
+        for name in ["t", "v", "w"] {
+            assert_eq!(result.columns[name].dtype(), DType::Int64);
+            assert!(result.columns[name].is_empty());
+        }
+    }
+
+    #[test]
+    fn merge_ordered_grouped_visits_unused_categories_after_observed_u6p7i() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["g", "t", "v"],
+            vec![
+                (
+                    "g",
+                    vec![Scalar::Utf8("b".to_owned()), Scalar::Utf8("a".to_owned())],
+                ),
+                ("t", vec![1.into(), 2.into()]),
+                ("v", vec![10.into(), 20.into()]),
+            ],
+        )
+        .unwrap()
+        .with_column(
+            "g",
+            Column::from_categorical_codes(
+                vec![1, 0],
+                fp_types::CategoricalMetadata {
+                    categories: vec![
+                        Scalar::Utf8("a".to_owned()),
+                        Scalar::Utf8("b".to_owned()),
+                        Scalar::Utf8("c".to_owned()),
+                    ],
+                    ordered: false,
+                },
+            ),
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict(
+            &["t", "w"],
+            vec![
+                ("t", vec![2.into(), 3.into()]),
+                ("w", vec![200.into(), 300.into()]),
+            ],
+        )
+        .unwrap();
+        let result = super::merge_ordered_grouped_with_options(
+            &left,
+            &right,
+            &["t"],
+            &["t"],
+            JoinType::Outer,
+            None,
+            &super::MergeOrderedGroupBy::Left(vec!["g".to_owned()]),
+            super::MergeExecutionOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            result.columns["g"]
+                .values()
+                .iter()
+                .map(Scalar::as_str)
+                .collect::<Vec<_>>(),
+            vec![Some("b"), Some("b"), Some("b"), Some("a"), Some("a"), Some("c"), Some("c")]
+        );
+        assert_eq!(
+            result.columns["t"].values(),
+            &[1.into(), 2.into(), 3.into(), 2.into(), 3.into(), 2.into(), 3.into()]
+        );
+        assert_eq!(result.columns["g"].dtype(), DType::Utf8);
+        assert!(result.columns["v"].values()[5..].iter().all(Scalar::is_missing));
+    }
+
+    #[test]
+    fn merge_ordered_grouped_rejects_absent_or_empty_groups_u6p7i() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["g", "t"],
+            vec![
+                (
+                    "g",
+                    vec![Scalar::Null(NullKind::Null), Scalar::Null(NullKind::NaN)],
+                ),
+                ("t", vec![1.into(), 3.into()]),
+            ],
+        )
+        .unwrap();
+        let right =
+            fp_frame::DataFrame::from_dict(&["t"], vec![("t", vec![2.into()])]).unwrap();
+        for (names, expected) in [
+            (vec!["g".to_owned()], "No objects to concatenate"),
+            (vec![], "No group keys passed!"),
+            (vec!["missing".to_owned()], "missing key column 'missing'"),
+        ] {
+            let error = super::merge_ordered_grouped_with_options(
+                &left,
+                &right,
+                &["t"],
+                &["t"],
+                JoinType::Outer,
+                None,
+                &super::MergeOrderedGroupBy::Left(names),
+                super::MergeExecutionOptions::default(),
+            )
+            .expect_err("invalid group selection");
+            assert!(error.to_string().contains(expected), "{error}");
         }
     }
 
