@@ -75,7 +75,7 @@ use fp_columnar::{
 };
 use fp_frame::{ColumnStore, FrameError, Series};
 use fp_index::{Index, IndexLabel};
-use fp_types::{DType, NullKind, Scalar, TypeError};
+use fp_types::{DType, Scalar, TypeError};
 // Join build maps key on &IndexLabel / &CompositeJoinKey and are LOOKUP-only:
 // output row order comes from probe-side iteration and per-key insertion-order
 // position Vecs, never from map iteration. So SipHash -> FxHash (rustc-hash,
@@ -11341,7 +11341,10 @@ pub fn merge_ordered_grouped_with_options(
             // Nullable numpy scalars retain their width when assigned as a
             // group label; numpy-backed group labels are ordinary Python
             // scalars and therefore use the default 64-bit width.
-            if matches!(source.dtype(), DType::Int64Nullable | DType::Float64Nullable) {
+            if matches!(
+                source.dtype(),
+                DType::Int64Nullable | DType::Float64Nullable
+            ) {
                 column = column.keeping_dtype_of(source);
             }
             merged = merged.with_column(name, column)?;
@@ -11947,6 +11950,25 @@ pub fn merge_asof_on_with_options(
     direction: AsofDirection,
     options: MergeAsofOptions,
 ) -> Result<MergedDataFrame, JoinError> {
+    merge_asof_on_with_indexer(left, right, left_on, right_on, direction, options)
+        .map(|(merged, _)| merged)
+}
+
+/// An asof merge together with the source right-row position for every result row.
+///
+/// The indexer is produced by the same matching pass as the merged columns;
+/// `None` identifies an unmatched left row. Index/column adapters can use it
+/// to preserve the exact source key dtype and fill an unmatched key from the
+/// left index, without re-running the join or round-tripping integers through
+/// a float-promoted output column.
+pub fn merge_asof_on_with_indexer(
+    left: &fp_frame::DataFrame,
+    right: &fp_frame::DataFrame,
+    left_on: &str,
+    right_on: &str,
+    direction: AsofDirection,
+    options: MergeAsofOptions,
+) -> Result<(MergedDataFrame, Vec<Option<usize>>), JoinError> {
     let invalid =
         |message: &str| JoinError::Frame(FrameError::CompatibilityRejected(message.to_owned()));
     let (left_by, right_by) = match (&options.by, &options.left_by, &options.right_by) {
@@ -11966,10 +11988,13 @@ pub fn merge_asof_on_with_options(
         left_by,
         right_by,
     };
-    if !left_by.is_empty() {
-        return merge_asof_grouped(left, right, keys, direction, &options);
-    }
-    merge_asof_simple(left, right, keys, direction, &options)
+    let right_matches = if left_by.is_empty() {
+        asof_simple_matches(left, right, keys, direction, &options)?
+    } else {
+        asof_grouped_matches(left, right, keys, direction, &options)?
+    };
+    let merged = build_asof_output(left, right, keys, &right_matches, &options)?;
+    Ok((merged, right_matches))
 }
 
 #[derive(Clone, Copy)]
@@ -11981,13 +12006,13 @@ struct AsofKeys<'a> {
 }
 
 /// Simple asof merge without grouping.
-fn merge_asof_simple(
+fn asof_simple_matches(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
     keys: AsofKeys<'_>,
     direction: AsofDirection,
     options: &MergeAsofOptions,
-) -> Result<MergedDataFrame, JoinError> {
+) -> Result<Vec<Option<usize>>, JoinError> {
     let on = keys.left_on;
     let right_on = keys.right_on;
     let left_key = left.columns().get(on).ok_or_else(|| {
@@ -12011,8 +12036,7 @@ fn merge_asof_simple(
         options.allow_exact_matches,
         options.tolerance,
     ) {
-        let right_matches = integer_matches?;
-        return build_asof_output(left, right, keys, &right_matches, options);
+        return integer_matches;
     }
 
     // Float keys retain their native f64 ordering. The datetime shift is a
@@ -12039,17 +12063,17 @@ fn merge_asof_simple(
         options.tolerance,
     );
 
-    build_asof_output(left, right, keys, &right_matches, options)
+    Ok(right_matches)
 }
 
 /// Grouped asof merge: match on `by` columns first, then asof within groups.
-fn merge_asof_grouped(
+fn asof_grouped_matches(
     left: &fp_frame::DataFrame,
     right: &fp_frame::DataFrame,
     keys: AsofKeys<'_>,
     direction: AsofDirection,
     options: &MergeAsofOptions,
-) -> Result<MergedDataFrame, JoinError> {
+) -> Result<Vec<Option<usize>>, JoinError> {
     let on = keys.left_on;
     let right_on = keys.right_on;
     // Validate by columns exist
@@ -12192,7 +12216,7 @@ fn merge_asof_grouped(
         }
     }
 
-    build_asof_output(left, right, keys, &right_matches, options)
+    Ok(right_matches)
 }
 
 /// Borrowed, allocation-free grouping keys for the single-column path.
@@ -21266,10 +21290,7 @@ mod tests {
             missing.swap(0, 1);
             missing[2] = Scalar::Null(NullKind::NaN);
             let invalid = frame(missing);
-            for (side, left, right) in [
-                ("left", &invalid, &clean),
-                ("right", &clean, &invalid),
-            ] {
+            for (side, left, right) in [("left", &invalid, &clean), ("right", &clean, &invalid)] {
                 for by in [None, Some(vec!["g".to_owned()])] {
                     for direction in [
                         super::AsofDirection::Backward,
@@ -21504,7 +21525,10 @@ mod tests {
     fn merge_asof_rejects_group_and_numeric_width_mismatches() {
         let left = fp_frame::DataFrame::from_dict(
             &["t", "g"],
-            vec![("t", vec![1.into(), 2.into()]), ("g", vec![1.into(), 2.into()])],
+            vec![
+                ("t", vec![1.into(), 2.into()]),
+                ("g", vec![1.into(), 2.into()]),
+            ],
         )
         .unwrap();
         let right = fp_frame::DataFrame::from_dict(
@@ -23256,7 +23280,15 @@ mod tests {
         assert_eq!(result.column_order, ["g", "t", "value", "other"]);
         assert_eq!(
             result.columns["t"].values(),
-            &[1.into(), 2.into(), 3.into(), 4.into(), 1.into(), 2.into(), 4.into()]
+            &[
+                1.into(),
+                2.into(),
+                3.into(),
+                4.into(),
+                1.into(),
+                2.into(),
+                4.into()
+            ]
         );
         assert_eq!(
             result.columns["g"]
@@ -23264,7 +23296,15 @@ mod tests {
                 .iter()
                 .map(Scalar::as_str)
                 .collect::<Vec<_>>(),
-            vec![Some("b"), Some("b"), Some("b"), Some("b"), Some("a"), Some("a"), Some("a")]
+            vec![
+                Some("b"),
+                Some("b"),
+                Some("b"),
+                Some("b"),
+                Some("a"),
+                Some("a"),
+                Some("a")
+            ]
         );
         let values = result.columns["value"].values();
         assert_eq!(
@@ -23279,7 +23319,10 @@ mod tests {
         assert!(values[4..].iter().all(Scalar::is_missing));
         let other = result.columns["other"].values();
         assert!(other[0].is_missing());
-        assert!(other[4].is_missing(), "forward fill must restart for group a");
+        assert!(
+            other[4].is_missing(),
+            "forward fill must restart for group a"
+        );
         assert_eq!(other[1], Scalar::Float64(200.0));
         assert_eq!(other[2], Scalar::Float64(200.0));
         assert_eq!(other[3], Scalar::Float64(400.0));
@@ -23389,7 +23432,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             result.column_order,
-            ["g_l", "h_l", "lk", "v_l", "g_r", "h_r", "rk", "v_r", "g", "h"]
+            [
+                "g_l", "h_l", "lk", "v_l", "g_r", "h_r", "rk", "v_r", "g", "h"
+            ]
         );
         assert_eq!(
             result.columns["h"].values(),
@@ -23508,14 +23553,34 @@ mod tests {
                 .iter()
                 .map(Scalar::as_str)
                 .collect::<Vec<_>>(),
-            vec![Some("b"), Some("b"), Some("b"), Some("a"), Some("a"), Some("c"), Some("c")]
+            vec![
+                Some("b"),
+                Some("b"),
+                Some("b"),
+                Some("a"),
+                Some("a"),
+                Some("c"),
+                Some("c")
+            ]
         );
         assert_eq!(
             result.columns["t"].values(),
-            &[1.into(), 2.into(), 3.into(), 2.into(), 3.into(), 2.into(), 3.into()]
+            &[
+                1.into(),
+                2.into(),
+                3.into(),
+                2.into(),
+                3.into(),
+                2.into(),
+                3.into()
+            ]
         );
         assert_eq!(result.columns["g"].dtype(), DType::Utf8);
-        assert!(result.columns["v"].values()[5..].iter().all(Scalar::is_missing));
+        assert!(
+            result.columns["v"].values()[5..]
+                .iter()
+                .all(Scalar::is_missing)
+        );
     }
 
     #[test]
@@ -23531,8 +23596,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let right =
-            fp_frame::DataFrame::from_dict(&["t"], vec![("t", vec![2.into()])]).unwrap();
+        let right = fp_frame::DataFrame::from_dict(&["t"], vec![("t", vec![2.into()])]).unwrap();
         for (names, expected) in [
             (vec!["g".to_owned()], "No objects to concatenate"),
             (vec![], "No group keys passed!"),
@@ -24750,5 +24814,107 @@ mod extension_join_key_tests {
             row_pairs(&merged),
             vec![(Some(1.0), Some(0.0)), (Some(2.0), Some(1.0))]
         );
+    }
+}
+
+#[cfg(test)]
+mod asof_indexer_contract_tests {
+    use std::collections::BTreeMap;
+
+    use fp_columnar::Column;
+    use fp_frame::DataFrame;
+    use fp_index::Index;
+    use fp_types::Scalar;
+
+    use super::{AsofDirection, MergeAsofOptions, merge_asof_on_with_indexer};
+
+    #[test]
+    fn source_indexer_matches_emitted_rows_for_simple_and_grouped_exact_integer_keys() {
+        let base = (1_i64 << 53) + 1;
+        let left = DataFrame::new(
+            Index::from_range(0, 3, 1),
+            BTreeMap::from([
+                (
+                    "time".to_owned(),
+                    Column::from_i64_values_owned(vec![base + 1, base + 3, base + 5]),
+                ),
+                (
+                    "group".to_owned(),
+                    Column::from_values(vec![
+                        Scalar::from("a"),
+                        Scalar::from("b"),
+                        Scalar::from("a"),
+                    ])
+                    .unwrap(),
+                ),
+            ]),
+        )
+        .unwrap();
+        let right = DataFrame::new(
+            Index::from_range(0, 3, 1),
+            BTreeMap::from([
+                (
+                    "tick".to_owned(),
+                    Column::from_i64_values_owned(vec![base + 2, base + 3, base + 4]),
+                ),
+                (
+                    "bucket".to_owned(),
+                    Column::from_values(vec![
+                        Scalar::from("a"),
+                        Scalar::from("a"),
+                        Scalar::from("b"),
+                    ])
+                    .unwrap(),
+                ),
+                (
+                    "right_row".to_owned(),
+                    Column::from_i64_values_owned(vec![100, 101, 102]),
+                ),
+            ]),
+        )
+        .unwrap();
+        for grouped in [false, true] {
+            for (direction, simple, groups) in [
+                (
+                    AsofDirection::Backward,
+                    [None, Some(1), Some(2)],
+                    [None, None, Some(1)],
+                ),
+                (
+                    AsofDirection::Forward,
+                    [Some(0), Some(1), None],
+                    [Some(0), Some(2), None],
+                ),
+                (
+                    AsofDirection::Nearest,
+                    [Some(0), Some(1), Some(2)],
+                    [Some(0), Some(2), Some(1)],
+                ),
+            ] {
+                let options = MergeAsofOptions {
+                    left_by: grouped.then(|| vec!["group".to_owned()]),
+                    right_by: grouped.then(|| vec!["bucket".to_owned()]),
+                    ..MergeAsofOptions::new()
+                };
+                let (merged, positions) =
+                    merge_asof_on_with_indexer(&left, &right, "time", "tick", direction, options)
+                        .unwrap();
+                assert_eq!(
+                    positions.as_slice(),
+                    if grouped { &groups } else { &simple }
+                );
+                assert_eq!(merged.columns["time"], left.columns()["time"]);
+                for (row, position) in positions.iter().enumerate() {
+                    let actual = merged.columns["right_row"].scalar_at(row).unwrap();
+                    match position {
+                        Some(source) => assert_eq!(
+                            actual.to_f64().unwrap(),
+                            100.0 + f64::from(u32::try_from(*source).unwrap())
+                        ),
+                        None => assert!(actual.is_missing()),
+                    }
+                }
+            }
+        }
     }
 }
