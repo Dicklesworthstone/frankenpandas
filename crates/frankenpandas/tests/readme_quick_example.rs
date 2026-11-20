@@ -3973,7 +3973,7 @@ fn readme_serialization_compiles_and_runs() -> Result<(), Box<dyn std::error::Er
     assert_eq!(sparse.fill_value(), &Scalar::Float64(0.0));
     let _np = sparse.npoints(); // count of non-fill values
     let _den = sparse.density(); // npoints / len
-    let _dense = sparse.to_dense(); // returns Series directly (no ?)
+    let _dense = sparse.to_dense()?;
 
     // fd90.205: round-trip the remaining 7 types from the README's
     // Serialization list at line 1567:

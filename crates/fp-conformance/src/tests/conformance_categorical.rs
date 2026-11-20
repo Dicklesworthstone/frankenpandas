@@ -863,7 +863,7 @@ print(json.dumps(res))
     );
     assert_eq!(sp_acc.sp_index(), vec![1, 3]);
     assert_eq!(
-        ser_opt_f64(&sp_acc.to_dense()),
+        ser_opt_f64(&sp_acc.to_dense().unwrap()),
         parse_opt_f64(&oracle["sp_dense"])
     );
     let sp_empty = Series::from_sparse_dense(
