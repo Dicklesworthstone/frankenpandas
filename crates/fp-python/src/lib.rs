@@ -71832,6 +71832,203 @@ impl PySparseAccessor {
     }
 }
 
+/// Every cross-column window moment, laid out as pandas' pairwise result:
+/// left columns across the output, and (aligned row, right column) down it.
+/// The individual Series kernels do the numerical work. Pairing by position
+/// keeps repeated column labels distinct and avoids synthesizing pair names
+/// that can collide when a label itself contains `__`.
+fn frame_pairwise_window(
+    py: Python<'_>,
+    left: &DataFrame,
+    right: &DataFrame,
+    op: impl Fn(&Series, &Series) -> Result<Series, FrameError>,
+) -> PyResult<Py<PyAny>> {
+    if left.index().row_multiindex().is_some() || right.index().row_multiindex().is_some() {
+        // pandas' pairwise window layout cannot factorize a MultiIndex as
+        // its first level either.
+        return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "isna is not defined for MultiIndex",
+        ));
+    }
+    let (left_width, right_width) = (left.num_columns(), right.num_columns());
+    let both_empty = left.index().is_empty() && right.index().is_empty();
+    let right_multi = right.columns_multiindex();
+    let right_labels = right.column_labels();
+    if both_empty {
+        if right_multi.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                "isna is not defined for MultiIndex",
+            ));
+        }
+        if right_labels.iter().collect::<HashSet<_>>().len() != right_labels.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Level values must be unique",
+            ));
+        }
+        if let Some(multi) = left.columns_multiindex() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Length of new names must be 1, got {}",
+                multi.nlevels()
+            )));
+        }
+    }
+    if !both_empty && (left_width == 0 || right_width == 0) {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "No objects to concatenate",
+        ));
+    }
+
+    let mut rows = left.index().clone();
+    let mut columns = Vec::with_capacity(left_width);
+    for left_pos in 0..left_width {
+        let left_name = left.column_name_at(left_pos).expect("column in bounds");
+        let left_series = Series::new(
+            &left_name,
+            left.index().clone(),
+            left.column_at(left_pos).expect("column in bounds").clone(),
+        )
+        .map_err(frame_error_to_py)?;
+        let mut pairs = Vec::with_capacity(right_width);
+        for right_pos in 0..right_width {
+            let right_name = right.column_name_at(right_pos).expect("column in bounds");
+            let right_series = Series::new(
+                &right_name,
+                right.index().clone(),
+                right
+                    .column_at(right_pos)
+                    .expect("column in bounds")
+                    .clone(),
+            )
+            .map_err(frame_error_to_py)?;
+            let (a, b) = if left.index() == right.index() {
+                (left_series.clone(), right_series)
+            } else {
+                left_series
+                    .align(&right_series, AlignMode::Outer)
+                    .map_err(frame_error_to_py)?
+            };
+            rows = a.index().clone();
+            pairs.push(op(&a, &b).map_err(frame_error_to_py)?);
+        }
+        let height = rows.len().checked_mul(right_width).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("pairwise result is too large")
+        })?;
+        let mut values = Vec::with_capacity(height);
+        for row in 0..rows.len() {
+            for pair in &pairs {
+                values.push(pair.column().values()[row].clone());
+            }
+        }
+        columns.push((
+            left_name,
+            Column::new(DType::Float64, values).map_err(column_error_to_py)?,
+        ));
+    }
+
+    // pandas' empty pairwise branch keeps the right-hand column labels,
+    // while the output column-axis name still comes from the left.
+    let column_source = if both_empty { right } else { left };
+    if both_empty {
+        columns = right
+            .column_names()
+            .into_iter()
+            .map(|name| (name.clone(), Column::from_f64_values(Vec::new())))
+            .collect();
+    }
+    let height = rows.len().checked_mul(right_width).ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>("pairwise result is too large")
+    })?;
+    let depth = right_multi.map_or(1, MultiIndex::nlevels);
+    let mut levels = vec![Vec::with_capacity(height); depth + 1];
+    for row_label in rows.labels() {
+        for (position, label) in right_labels.iter().enumerate() {
+            levels[0].push(row_label.clone());
+            if let Some(multi) = right_multi {
+                for level in 0..depth {
+                    levels[level + 1].push(multi.label_at(level, position).clone());
+                }
+            } else {
+                levels[1].push(label.clone());
+            }
+        }
+    }
+    let mut names = vec![if left.index().name() == right.index().name() {
+        left.index().name().cloned()
+    } else {
+        None
+    }];
+    names.extend(match right_multi {
+        Some(multi) => multi.names().to_vec(),
+        None => vec![right.columns_name().cloned()],
+    });
+    let mut multi = if both_empty {
+        // Empty output still exposes every right-column label in its
+        // level catalog, in the declared order rather than sorted order.
+        MultiIndex::from_declared_levels(
+            vec![Vec::new(), right_labels],
+            vec![Vec::new(), Vec::new()],
+        )
+    } else {
+        MultiIndex::from_arrays(levels)
+    }
+    .map_err(index_error_to_py)?
+    .set_names(names)
+    .with_level_zone(0, rows.tz().as_deref());
+    if let Some(right_multi) = right_multi {
+        for level in 0..depth {
+            multi = multi
+                .with_level_zone(level + 1, right_multi.level_zone(level))
+                .with_level_width(level + 1, right_multi.level_width(level));
+        }
+    } else {
+        multi = multi.with_level_zone(1, right.columns_tz());
+    }
+    // With MultiIndex columns pandas sorts the expanded row levels after
+    // placing each covariance/correlation value beside its full label.
+    let sorted_rows = right_multi
+        .map(|_| multiindex_sort_rows(&multi, None, None, true, "last"))
+        .transpose()?;
+    let order: Vec<String> = columns.iter().map(|(name, _)| name.clone()).collect();
+    let result = DataFrame::new_with_column_order(
+        Index::default_range(height),
+        fp_frame::ColumnStore::from_pairs(columns),
+        order,
+    )
+    .map_err(frame_error_to_py)?
+    .with_row_multiindex(multi)
+    .map_err(frame_error_to_py)?
+    .with_labels_of(column_source)
+    .with_columns_name(left.columns_name().cloned());
+    let result = match sorted_rows {
+        Some(rows) => frame_rows_keeping_multiindex(&result, &rows)?,
+        None => result,
+    };
+    PyDataFrame { inner: result }.into_py_any(py)
+}
+
+/// The cross-frame pairwise path, absent when the caller requested matched
+/// columns or supplied a Series. `numeric_only` applies to both frames.
+fn explicit_pairwise_window(
+    py: Python<'_>,
+    left: Option<&DataFrame>,
+    other: Option<&Bound<'_, PyAny>>,
+    pairwise: Option<bool>,
+    numeric_only: bool,
+    op: impl Fn(&Series, &Series) -> Result<Series, FrameError>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if pairwise != Some(true) {
+        return Ok(None);
+    }
+    let (Some(left), Some(other)) = (left, other.filter(|other| !other.is_none())) else {
+        return Ok(None);
+    };
+    let Ok(right) = other.extract::<PyRef<'_, PyDataFrame>>() else {
+        return Ok(None);
+    };
+    let right = window_frame_input(&right.inner, None, numeric_only, false)?;
+    frame_pairwise_window(py, left, &right, op).map(Some)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_window_bivariate<F, G>(
     py: Python<'_>,
@@ -71898,7 +72095,8 @@ where
                     .map_err(frame_error_to_py)?
             } else {
                 DataFrame::from_series(out_series_list).map_err(frame_error_to_py)?
-            };
+            }
+            .with_labels_of(&o_df.inner);
             return Ok(Py::new(py, PyDataFrame { inner: res_df })?.into_any());
         } else {
             let res = op(s, s).map_err(frame_error_to_py)?;
@@ -71932,7 +72130,8 @@ where
                 DataFrame::new(df.index().clone(), BTreeMap::new()).map_err(frame_error_to_py)?
             } else {
                 DataFrame::from_series(out_series_list).map_err(frame_error_to_py)?
-            };
+            }
+            .with_labels_of(df);
             return Ok(Py::new(py, PyDataFrame { inner: res_df })?.into_any());
         } else if let Some(ref o_df) = other_df {
             let (a1, a2) = df
@@ -71964,7 +72163,8 @@ where
                 DataFrame::new(a1.index().clone(), BTreeMap::new()).map_err(frame_error_to_py)?
             } else {
                 DataFrame::from_series(out_series_list).map_err(frame_error_to_py)?
-            };
+            }
+            .with_labels_of(df);
             return Ok(Py::new(py, PyDataFrame { inner: res_df })?.into_any());
         } else if let Some(pairwise) = df_none_pairwise {
             let res = pairwise(df).map_err(frame_error_to_py)?;
@@ -73150,30 +73350,40 @@ impl PyRolling {
             .as_ref()
             .map(|df| window_frame_input(df, None, numeric_only, false))
             .transpose()?;
-        let other = window_pairwise_other(py, frame.as_deref(), other, pairwise)?;
         let (window, min_periods, center) = (self.window, self.min_periods, self.center);
         let closed = self.closed();
         // A time-based window over the index, as the aggregations' (it was
         // refused).
         let offset = self.offset.as_deref();
+        let op = |s1: &Series, s2: &Series| {
+            let windows = match offset {
+                Some(offset) => s1.rolling_offset_centered(offset, min_periods, closed, center)?,
+                None => s1.rolling_closed(window, min_periods, center, closed)?,
+            };
+            if want_corr {
+                windows.corr_ddof(s2, ddof)
+            } else {
+                windows.cov_ddof(s2, ddof)
+            }
+        };
+        if let Some(frame) = frame.as_deref()
+            && other.is_none_or(|other| other.is_none())
+            && pairwise != Some(false)
+        {
+            return frame_pairwise_window(py, frame, frame, op);
+        }
+        if let Some(result) =
+            explicit_pairwise_window(py, frame.as_deref(), other, pairwise, numeric_only, op)?
+        {
+            return Ok(result);
+        }
+        let other = window_pairwise_other(py, frame.as_deref(), other, pairwise)?;
         let result = execute_window_bivariate(
             py,
             series.as_deref(),
             frame.as_deref(),
             other.as_ref(),
-            |s1, s2| {
-                let windows = match offset {
-                    Some(offset) => {
-                        s1.rolling_offset_centered(offset, min_periods, closed, center)?
-                    }
-                    None => s1.rolling_closed(window, min_periods, center, closed)?,
-                };
-                if want_corr {
-                    windows.corr_ddof(s2, ddof)
-                } else {
-                    windows.cov_ddof(s2, ddof)
-                }
-            },
+            op,
             Some(|df: &DataFrame| {
                 let windows = match offset {
                     Some(offset) => {
@@ -74924,21 +75134,33 @@ impl PyExpanding {
             .as_ref()
             .map(|df| window_frame_input(df, None, numeric_only, false))
             .transpose()?;
-        let other = window_pairwise_other(py, frame.as_deref(), other, pairwise)?;
         let min_periods = self.min_periods;
+        let op = |s1: &Series, s2: &Series| {
+            let windows = s1.expanding(min_periods);
+            if want_corr {
+                windows.corr_ddof(s2, ddof)
+            } else {
+                windows.cov_ddof(s2, ddof)
+            }
+        };
+        if let Some(frame) = frame.as_deref()
+            && other.is_none_or(|other| other.is_none())
+            && pairwise != Some(false)
+        {
+            return frame_pairwise_window(py, frame, frame, op);
+        }
+        if let Some(result) =
+            explicit_pairwise_window(py, frame.as_deref(), other, pairwise, numeric_only, op)?
+        {
+            return Ok(result);
+        }
+        let other = window_pairwise_other(py, frame.as_deref(), other, pairwise)?;
         let result = execute_window_bivariate(
             py,
             series.as_deref(),
             frame.as_deref(),
             other.as_ref(),
-            |s1, s2| {
-                let windows = s1.expanding(min_periods);
-                if want_corr {
-                    windows.corr_ddof(s2, ddof)
-                } else {
-                    windows.cov_ddof(s2, ddof)
-                }
-            },
+            op,
             // A frame's pairwise corr / cov (it was refused): an expanding
             // window is a rolling one as long as the frame, as pandas'
             // ExpandingIndexer.
@@ -75555,8 +75777,8 @@ impl PyExponentialMovingWindow {
         ))
     }
 
-    /// pandas' EWM corr / cov (`bias` for cov; see [`PyRolling::bivariate`];
-    /// a frame's every-pair result without `other` is refused, as before).
+    /// pandas' EWM corr / cov (`bias` for cov; see [`PyRolling::bivariate`]),
+    /// including every column pair with or without an explicit other frame.
     fn bivariate(
         &self,
         py: Python<'_>,
@@ -75577,20 +75799,32 @@ impl PyExponentialMovingWindow {
             .as_ref()
             .map(|df| window_frame_input(df, None, numeric_only, false))
             .transpose()?;
+        let op = |s1: &Series, s2: &Series| {
+            let windows = self.series_ewm(s1);
+            if want_corr {
+                windows.corr(s2)
+            } else {
+                windows.cov_bias(s2, bias)
+            }
+        };
+        if let Some(frame) = frame.as_deref()
+            && other.is_none_or(|other| other.is_none())
+            && pairwise != Some(false)
+        {
+            return frame_pairwise_window(py, frame, frame, op);
+        }
+        if let Some(result) =
+            explicit_pairwise_window(py, frame.as_deref(), other, pairwise, numeric_only, op)?
+        {
+            return Ok(result);
+        }
         let other = window_pairwise_other(py, frame.as_deref(), other, pairwise)?;
         execute_window_bivariate(
             py,
             series.as_deref(),
             frame.as_deref(),
             other.as_ref(),
-            |s1, s2| {
-                let windows = self.series_ewm(s1);
-                if want_corr {
-                    windows.corr(s2)
-                } else {
-                    windows.cov_bias(s2, bias)
-                }
-            },
+            op,
             None::<fn(&DataFrame) -> Result<DataFrame, FrameError>>,
             "Empty ewm object",
             "DataFrame EWM corr / cov without other is not supported",
