@@ -79482,6 +79482,17 @@ pub fn concat_dataframes_with_ignore_index(
         }
         let column = match nullable_dtype {
             Some(dtype) => Column::new(dtype, values)?,
+            // Missing rows do not erase a declared floating dtype. In
+            // particular, an all-NaN float column beside a frame lacking
+            // that column remains float, rather than being inferred as
+            // object from its missing cells alone.
+            None if frames
+                .iter()
+                .filter_map(|frame| frame.column(col_name))
+                .all(|column| column.dtype() == DType::Float64) =>
+            {
+                Column::new(DType::Float64, values)?
+            }
             None => column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
         };
         columns.insert(
@@ -91859,6 +91870,18 @@ impl DataFrame {
         // as well (an int32 column's index is int32, an Int64 one's Int64;
         // they were int64 / object; br-frankenpandas-vqjvd, 05cm6).
         let index = indexed_like_column(index, source);
+        // With no labels, a default-width numeric column cannot have its
+        // dtype inferred. Preserve it just as narrow and masked columns
+        // preserve their declared dtype above.
+        let index = if source.is_empty()
+            && source.width().is_none()
+            && source.categorical().is_none()
+            && matches!(source.dtype(), DType::Int64 | DType::Float64 | DType::Bool)
+        {
+            index.astype(&source.dtype().display_name())?
+        } else {
+            index
+        };
 
         if verify_integrity && index.has_duplicates() {
             return Err(FrameError::CompatibilityRejected(
@@ -147233,6 +147256,29 @@ mod tests {
             out.column("v").unwrap().values(),
             &[Scalar::Int64(1), Scalar::Int64(2)]
         );
+    }
+
+    #[test]
+    fn dataframe_set_index_preserves_empty_default_numeric_dtype() {
+        for (dtype, expected) in [
+            (DType::Int64, "int64"),
+            (DType::Float64, "float64"),
+            (DType::Bool, "bool"),
+        ] {
+            let frame = DataFrame::new_with_column_order(
+                Index::default_range(0),
+                BTreeMap::from([("key".to_owned(), Column::new(dtype, Vec::new()).unwrap())]),
+                vec!["key".to_owned()],
+            )
+            .unwrap();
+            for drop in [false, true] {
+                let result = frame.set_index("key", drop).unwrap();
+                assert_eq!(result.index().dtype(), expected);
+                assert_eq!(result.index().name().map(|name| name.as_str()), Some("key"));
+                assert!(result.index().is_empty());
+                assert_eq!(result.column("key").is_none(), drop);
+            }
+        }
     }
 
     #[test]
@@ -203673,6 +203719,35 @@ mod tests {
             Column::new(DType::Utf8, vec![Scalar::Utf8("x".into())]).unwrap(),
         )]);
         assert!(super::concat_number_gaps(&[&text, &a], "i", 3).is_none());
+    }
+
+    #[test]
+    fn concat_all_missing_floats_with_absent_column_keeps_declared_dtype() {
+        for width in [None, Some(fp_types::NumericWidth::Float32)] {
+            let source = Column::new(
+                DType::Float64,
+                vec![Scalar::Null(NullKind::Null), Scalar::Null(NullKind::NaN)],
+            )
+            .unwrap();
+            let source = match width {
+                Some(width) => source.cast_to_width(width, false).unwrap(),
+                None => source,
+            };
+            let left = DataFrame::new_with_column_order(
+                Index::default_range(2),
+                BTreeMap::from([("value".to_owned(), source)]),
+                vec!["value".to_owned()],
+            )
+            .unwrap();
+            let right = DataFrame::from_dict(&["other"], vec![("other", vec![1.into()])]).unwrap();
+            let result =
+                super::concat_dataframes_with_ignore_index(&[&left, &right], true).unwrap();
+            let column = result.column("value").unwrap();
+            assert_eq!(column.dtype(), DType::Float64);
+            assert_eq!(column.width(), width);
+            assert_eq!(column.len(), 3);
+            assert!(column.values().iter().all(Scalar::is_missing));
+        }
     }
 
     #[test]

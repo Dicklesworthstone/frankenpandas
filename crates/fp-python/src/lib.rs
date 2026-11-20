@@ -104259,145 +104259,372 @@ fn merge_asof_tolerance(
     direction="backward"
 ))]
 fn merge_asof(
-    left: PyRef<'_, PyDataFrame>,
-    right: PyRef<'_, PyDataFrame>,
-    on: Option<&str>,
-    left_on: Option<&str>,
-    right_on: Option<&str>,
+    left: &Bound<'_, PyAny>,
+    right: &Bound<'_, PyAny>,
+    on: Option<&Bound<'_, PyAny>>,
+    left_on: Option<&Bound<'_, PyAny>>,
+    right_on: Option<&Bound<'_, PyAny>>,
     left_index: bool,
     right_index: bool,
     by: Option<&Bound<'_, PyAny>>,
     left_by: Option<&Bound<'_, PyAny>>,
     right_by: Option<&Bound<'_, PyAny>>,
-    suffixes: Option<(&str, &str)>,
+    suffixes: Option<&Bound<'_, PyAny>>,
     tolerance: Option<&Bound<'_, PyAny>>,
     allow_exact_matches: bool,
     direction: &str,
 ) -> PyResult<PyDataFrame> {
-    // Both sides on their index: the indexes join as a stand-in key column
-    // and the result is under the left index - one row per left row, as
-    // merge_asof answers (joining on the index was refused, fvsao.5 /
-    // br-frankenpandas-u6p7i). One side's index with the other's column is
-    // still refused.
-    if left_index || right_index {
-        if !(left_index && right_index) || on.or(left_on).or(right_on).is_some() {
-            return Err(not_implemented(
-                "merge_asof with one side on its index and the other on a column",
-            ));
-        }
-        const KEY: &str = "\u{1}asof-index";
-        let py = left.py();
-        let keyed = |frame: &DataFrame| -> PyResult<Bound<'_, PyDataFrame>> {
-            let labels = frame
-                .index()
-                .labels()
-                .iter()
-                .map(index_label_to_scalar)
-                .collect();
-            let column = Column::from_values(labels).map_err(column_error_to_py)?;
-            let inner = frame.with_column(KEY, column).map_err(frame_error_to_py)?;
-            Bound::new(py, PyDataFrame { inner })
-        };
-        let (keyed_left, keyed_right) = (keyed(&left.inner)?, keyed(&right.inner)?);
-        let merged = merge_asof(
-            keyed_left.borrow(),
-            keyed_right.borrow(),
-            Some(KEY),
-            None,
-            None,
-            false,
-            false,
-            by,
-            left_by,
-            right_by,
-            suffixes,
-            tolerance,
-            allow_exact_matches,
-            direction,
-        )?;
-        let frame = merged
-            .inner
-            .drop_column(KEY)
-            .and_then(|frame| frame.with_index(left.inner.index().clone()))
-            .map_err(frame_error_to_py)?;
-        let frame = match left.inner.row_multiindex() {
-            Some(levels) => frame
-                .with_row_multiindex(levels.clone())
-                .map_err(frame_error_to_py)?,
-            None => frame,
-        };
-        return Ok(PyDataFrame { inner: frame });
-    }
-    let on_col = on.or(left_on).or(right_on).ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "merge_asof requires an `on` or `left_on`/`right_on` column",
-        )
-    })?;
-
+    let (left, right) = (merge_side_frame(left)?, merge_side_frame(right)?);
     let dir = match direction {
         "backward" => fp_join::AsofDirection::Backward,
         "forward" => fp_join::AsofDirection::Forward,
         "nearest" => fp_join::AsofDirection::Nearest,
-        other => {
-            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "invalid direction '{other}'; expected 'backward', 'forward', or 'nearest'"
-            )));
-        }
+        other => return Err(MergeError::new_err(format!("direction invalid: {other}"))),
     };
-
+    let (by, left_by, right_by) = (
+        by.filter(|value| !value.is_none()),
+        left_by.filter(|value| !value.is_none()),
+        right_by.filter(|value| !value.is_none()),
+    );
     let mut opts = fp_join::MergeAsofOptions::new();
     opts.allow_exact_matches = allow_exact_matches;
-    opts.tolerance = match left.inner.column(on_col) {
-        Some(key) => merge_asof_tolerance(&key.dtype(), tolerance)?,
-        None => None,
+    let (left_groups, right_groups) = match (by, left_by, right_by) {
+        (Some(by), None, None) => (merge_key_names(&left, by)?, merge_key_names(&right, by)?),
+        (None, Some(left_by), Some(right_by)) => (
+            merge_key_names(&left, left_by)?,
+            merge_key_names(&right, right_by)?,
+        ),
+        (None, None, None) => (Vec::new(), Vec::new()),
+        (Some(_), _, _) => {
+            return Err(MergeError::new_err(
+                "Can only pass by OR left_by and right_by",
+            ));
+        }
+        (None, Some(_), None) => return Err(MergeError::new_err("missing right_by")),
+        (None, None, Some(_)) => return Err(MergeError::new_err("missing left_by")),
     };
-
-    let by_target = by.or(left_by).or(right_by);
-    if let Some(by_val) = by_target {
-        if let Ok(s) = by_val.extract::<String>() {
-            opts.by = Some(vec![s]);
-        } else if let Ok(list) = by_val.extract::<Vec<String>>() {
-            opts.by = Some(list);
+    if left_groups.len() != right_groups.len() {
+        return Err(MergeError::new_err(
+            "left_by and right_by must be the same length",
+        ));
+    }
+    let (mut left_keys, mut right_keys) = temporal_merge_keys(
+        &left,
+        &right,
+        on,
+        left_on,
+        right_on,
+        left_index,
+        right_index,
+    )?;
+    for (side, frame, keys, indexed) in [
+        ("left", &left, &left_keys, left_index),
+        ("right", &right, &right_keys, right_index),
+    ] {
+        if indexed && frame.row_multiindex().is_some() {
+            return Err(MergeError::new_err(format!(
+                "{side} can only have one index"
+            )));
+        }
+        if !indexed && keys.len() != 1 {
+            return Err(MergeError::new_err(format!(
+                "can only asof on a key for {side}"
+            )));
         }
     }
-
-    // The columns both sides carry besides the keys: fp-join suffixes them
-    // `_x` / `_y`; other `suffixes` rename exactly those.
-    let keys: Vec<&str> = std::iter::once(on_col)
-        .chain(opts.by.iter().flatten().map(String::as_str))
-        .collect();
-    let overlap: Vec<String> = left
-        .inner
-        .column_names()
-        .into_iter()
-        .filter(|name| !keys.contains(&name.as_str()) && right.inner.column(name).is_some())
-        .cloned()
-        .collect();
-
-    let merged = fp_join::merge_asof_with_options(&left.inner, &right.inner, on_col, dir, opts)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
-    let mut frame =
-        DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    if let Some((left_suffix, right_suffix)) = suffixes.filter(|given| *given != ("_x", "_y")) {
-        let renames: Vec<(String, String)> = overlap
-            .iter()
-            .flat_map(|name| {
-                [
-                    (format!("{name}_x"), format!("{name}{left_suffix}")),
-                    (format!("{name}_y"), format!("{name}{right_suffix}")),
-                ]
-            })
-            .collect();
-        let pairs: Vec<(&str, &str)> = renames
-            .iter()
-            .map(|(from, to)| (from.as_str(), to.as_str()))
-            .collect();
-        frame = frame.rename_columns(&pairs).map_err(frame_error_to_py)?;
+    for name in left.column_names() {
+        refuse_label_clash(&right, name, &left.column_label(name))?;
     }
-
+    // Temporary names must not overwrite a real column, including a user
+    // column named after an earlier version's internal key.
+    let mut temporary = "\u{1}asof-index".to_owned();
+    while left.column(&temporary).is_some() || right.column(&temporary).is_some() {
+        temporary.push('_');
+    }
+    let with_index_key = |frame: &DataFrame| -> PyResult<DataFrame> {
+        frame
+            .with_column(&temporary, asof_index_key_column(frame.index())?)
+            .map_err(frame_error_to_py)
+    };
+    let keyed_left = if left_index {
+        Some(with_index_key(&left)?)
+    } else {
+        None
+    };
+    let keyed_right = if right_index {
+        Some(with_index_key(&right)?)
+    } else {
+        None
+    };
+    if left_index {
+        left_keys.push(temporary.clone());
+    }
+    if right_index {
+        right_keys.push(temporary.clone());
+    }
+    let (input_left, input_right) = (
+        keyed_left.as_ref().unwrap_or(&left),
+        keyed_right.as_ref().unwrap_or(&right),
+    );
+    let (left_key, right_key) = (&left_keys[0], &right_keys[0]);
+    let key_column = input_left
+        .column(left_key)
+        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(left_key.clone()))?;
+    opts.tolerance = merge_asof_tolerance(&key_column.dtype(), tolerance)?;
+    opts.suffixes = suffixes
+        .filter(|value| !value.is_none())
+        .map(|value| value.extract::<[Option<String>; 2]>())
+        .transpose()?;
+    if !left_groups.is_empty() {
+        opts.left_by = Some(left_groups.clone());
+        opts.right_by = Some(right_groups.clone());
+    }
+    for (position, (left_name, right_name)) in left_groups
+        .iter()
+        .zip(&right_groups)
+        .chain(std::iter::once((left_key, right_key)))
+        .enumerate()
+    {
+        let l = input_left
+            .column(left_name)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(left_name.clone()))?;
+        let r = input_right
+            .column(right_name)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(right_name.clone()))?;
+        if l.dtype() != r.dtype() || l.width() != r.width() {
+            return Err(MergeError::new_err(format!(
+                "incompatible merge keys [{position}] dtype('{}') and dtype('{}'), must be the same type",
+                column_pandas_dtype_name(l),
+                column_pandas_dtype_name(r),
+            )));
+        }
+    }
+    let (merged, matches) = fp_join::merge_asof_on_with_indexer(
+        input_left,
+        input_right,
+        left_key,
+        right_key,
+        dir,
+        opts,
+    )
+    .map_err(asof_merge_error_to_py)?;
+    let (mut all_left_keys, mut all_right_keys) = (left_keys.clone(), right_keys.clone());
+    all_left_keys.extend(left_groups);
+    all_right_keys.extend(right_groups);
+    let mut frame = temporal_merge_frame(
+        merged,
+        input_left,
+        input_right,
+        &all_left_keys,
+        &all_right_keys,
+    )?;
+    if left_index || right_index {
+        let result_index = if right_index && !left_index {
+            if left.index().is_empty() {
+                right.index().take(&[])
+            } else {
+                left.index().clone().with_range_span(None)
+            }
+        } else {
+            left.index().clone()
+        };
+        frame = frame
+            .drop_column(&temporary)
+            .and_then(|frame| frame.with_index(result_index))
+            .map_err(frame_error_to_py)?;
+        if let Some(levels) = left
+            .row_multiindex()
+            .filter(|_| left_index || !left.index().is_empty())
+        {
+            frame = frame
+                .with_row_multiindex(levels.clone())
+                .map_err(frame_error_to_py)?;
+        }
+    }
+    if left_index != right_index {
+        let (name, source, other) = if left_index {
+            (right_key, &right, &left)
+        } else {
+            (left_key, &left, &right)
+        };
+        let label = source.column_label(name);
+        // pandas exposes the unsuffixed join key when overlap suffixes
+        // removed it. A missing right match in a non-overlapping
+        // left-index merge makes the entire visible key the left index.
+        // Read the original key, never the float-promoted gathered column:
+        // doing so would corrupt integers above 2^53 and nanosecond times.
+        let missing_key =
+            frame.column(name).is_none() && (!left_index || other.column(name).is_none());
+        let fill_index_key =
+            left_index && other.column(name).is_none() && matches.iter().any(Option::is_none);
+        if missing_key || fill_index_key {
+            let key = if left_index {
+                key_column.clone()
+            } else {
+                source.column(name).expect("key was validated").clone()
+            };
+            frame = if missing_key {
+                frame.insert_allow_duplicates(0, name.clone(), key, false)
+            } else {
+                frame.with_column(name, key)
+            }
+            .map_err(frame_error_to_py)?;
+            frame = frame.with_recorded_column_labels([label]);
+        }
+    }
     Ok(PyDataFrame { inner: frame })
+}
+
+/// Index merge keys retain their declared dtype, width and timezone even
+/// when empty. Inferring solely from labels loses all three.
+fn asof_index_key_column(index: &Index) -> PyResult<Column> {
+    let mut column = index_key_column(index).map_err(column_error_to_py)?;
+    if index.dtype().starts_with("datetime64") {
+        column = column.with_dtype(DType::Datetime64 {
+            tz: index.tz().map(str::to_owned),
+        });
+    } else if let Some((width, nullable)) = NumericWidth::parse(index.dtype()) {
+        column = column
+            .cast_to_width(width, nullable)
+            .map_err(column_error_to_py)?;
+    } else {
+        column = column.with_dtype(parse_dtype(index.dtype())?);
+    }
+    Ok(column)
+}
+
+fn asof_merge_error_to_py(error: fp_join::JoinError) -> PyErr {
+    if let fp_join::JoinError::Frame(FrameError::CompatibilityRejected(message)) = &error {
+        for side in ["left", "right"] {
+            if message.starts_with(&format!("merge_asof: {side} column"))
+                && message.ends_with("must be sorted")
+            {
+                return PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "{side} keys must be sorted"
+                ));
+            }
+        }
+        if message.starts_with("Merge keys contain null values") {
+            return PyErr::new::<pyo3::exceptions::PyValueError, _>(message.clone());
+        }
+        if message.contains("must be numeric") || message.contains("incompatible merge keys") {
+            return MergeError::new_err(message.clone());
+        }
+    }
+    merge_error_to_py(error)
+}
+
+/// Resolve both sides independently. In particular, `left_on` must never
+/// stand in for `right_on`: the other frame can contain both names, making
+/// that shortcut silently join on the wrong data.
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+fn temporal_merge_keys(
+    left: &DataFrame,
+    right: &DataFrame,
+    on: Option<&Bound<'_, PyAny>>,
+    left_on: Option<&Bound<'_, PyAny>>,
+    right_on: Option<&Bound<'_, PyAny>>,
+    left_index: bool,
+    right_index: bool,
+) -> PyResult<(Vec<String>, Vec<String>)> {
+    let (on, left_on, right_on) = (
+        on.filter(|value| !value.is_none()),
+        left_on.filter(|value| !value.is_none()),
+        right_on.filter(|value| !value.is_none()),
+    );
+    if let Some(on) = on {
+        if left_on.is_some() || right_on.is_some() {
+            return Err(MergeError::new_err(
+                "Can only pass argument \"on\" OR \"left_on\" and \"right_on\", not a combination of both.",
+            ));
+        }
+        if left_index || right_index {
+            return Err(MergeError::new_err(
+                "Can only pass argument \"on\" OR \"left_index\" and \"right_index\", not a combination of both.",
+            ));
+        }
+        return Ok((merge_key_names(left, on)?, merge_key_names(right, on)?));
+    }
+    if left_index && left_on.is_some() {
+        return Err(MergeError::new_err(
+            "Can only pass argument \"left_on\" OR \"left_index\" not both.",
+        ));
+    }
+    if right_index && right_on.is_some() && (left_index || left_on.is_none()) {
+        return Err(MergeError::new_err(
+            "Can only pass argument \"right_on\" OR \"right_index\" not both.",
+        ));
+    }
+    if left_on.is_none() && right_on.is_none() && !left_index && !right_index {
+        let common: Vec<String> = left
+            .column_names()
+            .into_iter()
+            .filter(|name| right.column(name).is_some())
+            .cloned()
+            .collect();
+        if common.is_empty() {
+            return Err(MergeError::new_err(
+                "No common columns to perform merge on. Merge options: left_on=None, right_on=None, left_index=False, right_index=False",
+            ));
+        }
+        return Ok((common.clone(), common));
+    }
+    let left_keys = match left_on {
+        Some(keys) => merge_key_names(left, keys)?,
+        None if left_index => Vec::new(),
+        None => {
+            return Err(MergeError::new_err(
+                "Must pass \"left_on\" OR \"left_index\".",
+            ));
+        }
+    };
+    let right_keys = match right_on {
+        // pandas 2.2.3's left_on/right_index path reads the right index
+        // even when right_on is also supplied. Its index/index path rejects
+        // the same redundant selector, checked above.
+        _ if right_index => Vec::new(),
+        Some(keys) => merge_key_names(right, keys)?,
+        None => {
+            return Err(MergeError::new_err(
+                "Must pass \"right_on\" OR \"right_index\".",
+            ));
+        }
+    };
+    Ok((left_keys, right_keys))
+}
+
+/// Keep the public column labels of an ordered/asof result. Shared keys
+/// appear once; an overlapping payload receives a string suffix, as in
+/// ordinary merge. The engine's row numbering is exposed as a RangeIndex.
+fn temporal_merge_frame(
+    merged: fp_join::MergedDataFrame,
+    left: &DataFrame,
+    right: &DataFrame,
+    left_keys: &[String],
+    right_keys: &[String],
+) -> PyResult<DataFrame> {
+    let shared = |name: &String| {
+        left_keys
+            .iter()
+            .zip(right_keys)
+            .any(|(left_key, right_key)| left_key == name && right_key == name)
+    };
+    let labels = |frame: &DataFrame, other: &DataFrame| {
+        frame
+            .column_names()
+            .into_iter()
+            .filter(|name| other.column(name).is_none() || shared(name))
+            .map(|name| frame.column_label(name))
+            .collect::<Vec<_>>()
+    };
+    let span = merged.index.int64_range_span();
+    Ok(DataFrame::new_with_column_order(
+        merged.index.with_range_span(span),
+        merged.columns,
+        merged.column_order,
+    )
+    .map_err(frame_error_to_py)?
+    .with_recorded_column_labels(labels(left, right).into_iter().chain(labels(right, left))))
 }
 
 #[pyfunction]
@@ -104415,74 +104642,116 @@ fn merge_asof(
     how="outer"
 ))]
 fn merge_ordered(
-    left: PyRef<'_, PyDataFrame>,
-    right: PyRef<'_, PyDataFrame>,
+    left: &Bound<'_, PyAny>,
+    right: &Bound<'_, PyAny>,
     on: Option<&Bound<'_, PyAny>>,
     left_on: Option<&Bound<'_, PyAny>>,
     right_on: Option<&Bound<'_, PyAny>>,
     left_by: Option<&Bound<'_, PyAny>>,
     right_by: Option<&Bound<'_, PyAny>>,
     fill_method: Option<&str>,
-    suffixes: Option<(&str, &str)>,
-    how: Option<&str>,
+    suffixes: Option<&Bound<'_, PyAny>>,
+    how: &str,
 ) -> PyResult<PyDataFrame> {
-    // This computes pandas' default outer ordered merge; the by-groups and
-    // other join types were dropped (fvsao.5) and are refused. `suffixes`
-    // rename the columns both sides carry (it was refused;
-    // br-frankenpandas-u6p7i).
-    unsupported_params(
-        "merge_ordered",
-        &[
-            ("left_by", left_by.is_none()),
-            ("right_by", right_by.is_none()),
-            ("how", how.is_none_or(|h| h == "outer")),
-        ],
-    )?;
-    let on_target = on.or(left_on).or(right_on).ok_or_else(|| {
-        PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "merge_ordered requires `on` or `left_on` / `right_on`",
-        )
-    })?;
-
-    let on_cols: Vec<String> = if let Ok(s) = on_target.extract::<String>() {
-        vec![s]
-    } else if let Ok(list) = on_target.extract::<Vec<String>>() {
-        list
-    } else {
+    let (left, right) = (merge_side_frame(left)?, merge_side_frame(right)?);
+    let (left_by, right_by) = (
+        left_by.filter(|value| !value.is_none()),
+        right_by.filter(|value| !value.is_none()),
+    );
+    if left_by.is_some() && right_by.is_some() {
         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-            "`on` must be a string or list of strings",
+            "Can only group either left or right frames",
         ));
-    };
-
-    let on_refs: Vec<&str> = on_cols.iter().map(String::as_str).collect();
-    let merged = fp_join::merge_ordered(&left.inner, &right.inner, &on_refs, fill_method)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-
-    let mut frame =
-        DataFrame::new_with_column_order(merged.index, merged.columns, merged.column_order)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    if let Some((left_suffix, right_suffix)) = suffixes.filter(|given| *given != ("_x", "_y")) {
-        // fp-join suffixes the columns both sides carry `_x` / `_y`.
-        let renames: Vec<(String, String)> = left
-            .inner
-            .column_names()
-            .into_iter()
-            .filter(|name| !on_cols.contains(name) && right.inner.column(name).is_some())
-            .flat_map(|name| {
-                [
-                    (format!("{name}_x"), format!("{name}{left_suffix}")),
-                    (format!("{name}_y"), format!("{name}{right_suffix}")),
-                ]
-            })
-            .collect();
-        let pairs: Vec<(&str, &str)> = renames
-            .iter()
-            .map(|(from, to)| (from.as_str(), to.as_str()))
-            .collect();
-        frame = frame.rename_columns(&pairs).map_err(frame_error_to_py)?;
     }
-
-    Ok(PyDataFrame { inner: frame })
+    let (left_keys, right_keys) =
+        temporal_merge_keys(&left, &right, on, left_on, right_on, false, false)?;
+    if left_keys.len() != right_keys.len() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "len(right_on) must equal len(left_on)",
+        ));
+    }
+    if left_keys.is_empty() {
+        return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+            "list index out of range",
+        ));
+    }
+    for (frame, names) in [(&left, &left_keys), (&right, &right_keys)] {
+        for name in names {
+            if frame.column(name).is_none() {
+                return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(name.clone()));
+            }
+        }
+    }
+    let how = match how {
+        "left" => fp_join::JoinType::Left,
+        "right" => fp_join::JoinType::Right,
+        "inner" => fp_join::JoinType::Inner,
+        "outer" => fp_join::JoinType::Outer,
+        other => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "do not recognize join method {other}"
+            )));
+        }
+    };
+    let options = fp_join::MergeExecutionOptions {
+        suffixes: suffixes
+            .filter(|value| !value.is_none())
+            .map(|value| value.extract::<[Option<String>; 2]>())
+            .transpose()?,
+        ..fp_join::MergeExecutionOptions::default()
+    };
+    let group = match (left_by, right_by) {
+        (Some(by), None) => Some(fp_join::MergeOrderedGroupBy::Left(merge_key_names(
+            &left, by,
+        )?)),
+        (None, Some(by)) => Some(fp_join::MergeOrderedGroupBy::Right(merge_key_names(
+            &right, by,
+        )?)),
+        _ => None,
+    };
+    if let Some(group) = &group {
+        let (frame, names) = match group {
+            fp_join::MergeOrderedGroupBy::Left(names) => (&left, names),
+            fp_join::MergeOrderedGroupBy::Right(names) => (&right, names),
+        };
+        for name in names {
+            if frame.column(name).is_none() {
+                return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(name.clone()));
+            }
+        }
+    }
+    for name in left.column_names() {
+        refuse_label_clash(&right, name, &left.column_label(name))?;
+    }
+    let (left_refs, right_refs): (Vec<&str>, Vec<&str>) = (
+        left_keys.iter().map(String::as_str).collect(),
+        right_keys.iter().map(String::as_str).collect(),
+    );
+    let merged = match group {
+        Some(ref group) => fp_join::merge_ordered_grouped_with_options(
+            &left,
+            &right,
+            &left_refs,
+            &right_refs,
+            how,
+            fill_method,
+            group,
+            options,
+        ),
+        None => fp_join::merge_ordered_with_options(
+            &left,
+            &right,
+            &left_refs,
+            &right_refs,
+            how,
+            fill_method,
+            options,
+        ),
+    }
+    .map_err(merge_error_to_py)?;
+    Ok(PyDataFrame {
+        inner: temporal_merge_frame(merged, &left, &right, &left_keys, &right_keys)?,
+    })
 }
 
 #[pyfunction]
@@ -114041,13 +114310,12 @@ mod tests {
         Python::initialize();
         Python::attach(|py| {
             let np = py.import("numpy").expect("numpy"); // ubs:ignore — test fixture
-            let mi_cls = py.get_type::<PyMultiIndex>();
 
             // 13bjo: mi[0] returns numpy scalars, list(mi) returns Python scalars.
             let arr_i = PyList::new(py, [1_i64, 2]).expect("list"); // ubs:ignore — test fixture
             let arr_s = PyList::new(py, ["a", "b"]).expect("list"); // ubs:ignore — test fixture
             let arrays = PyList::new(py, [&arr_i, &arr_s]).expect("arrays"); // ubs:ignore — test fixture
-            let mi = PyMultiIndex::from_arrays(&mi_cls, py, arrays.as_any(), None).expect("mi"); // ubs:ignore — test assertion
+            let mi = PyMultiIndex::from_arrays(arrays.as_any(), None, None).expect("mi"); // ubs:ignore — test assertion
             let idx0 = 0_isize.into_pyobject(py).expect("0").into_any(); // ubs:ignore — test fixture
             let item0 = mi.__getitem__(py, &idx0).expect("mi[0]"); // ubs:ignore — test assertion
             let tup0 = item0.bind(py).cast::<PyTuple>().expect("tuple"); // ubs:ignore — test assertion
@@ -114061,8 +114329,9 @@ mod tests {
             );
             let lst = mi.to_list(py).expect("to_list"); // ubs:ignore — test assertion
             assert_eq!(
-                lst[0]
-                    .bind(py)
+                lst.bind(py)
+                    .get_item(0)
+                    .expect("first tuple") // ubs:ignore — test assertion
                     .get_item(0)
                     .expect("0") // ubs:ignore — test assertion
                     .get_type()
@@ -114084,7 +114353,7 @@ mod tests {
             let ints3 = PyList::new(py, [1_i64, 2, 3]).expect("ints3"); // ubs:ignore — test fixture
             let arr_none = PyList::new(py, [&text_none, &ints3]).expect("arr_none"); // ubs:ignore — test fixture
             let mi_none =
-                PyMultiIndex::from_arrays(&mi_cls, py, arr_none.as_any(), None).expect("mi_none"); // ubs:ignore — test assertion
+                PyMultiIndex::from_arrays(arr_none.as_any(), None, None).expect("mi_none"); // ubs:ignore — test assertion
             assert_eq!(mi_none.inner.codes()[0], &[-1, 1, 0]);
             let mixed_obj = np
                 .call_method1(
@@ -114105,7 +114374,7 @@ mod tests {
                 .expect("mixed_obj"); // ubs:ignore — test fixture
             let arr_mixed = PyList::new(py, [&mixed_obj, ints3.as_any()]).expect("arr_mixed"); // ubs:ignore — test fixture
             let mi_mixed =
-                PyMultiIndex::from_arrays(&mi_cls, py, arr_mixed.as_any(), None).expect("mi_mixed"); // ubs:ignore — test assertion
+                PyMultiIndex::from_arrays(arr_mixed.as_any(), None, None).expect("mi_mixed"); // ubs:ignore — test assertion
             assert_eq!(mi_mixed.inner.codes()[0], &[0, 0, 1]);
             assert_eq!(mi_mixed.inner.levels()[0].values().len(), 2);
 

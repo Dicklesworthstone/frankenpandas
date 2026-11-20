@@ -10809,12 +10809,12 @@ fn merge_dataframes_on_with_options_storage(
                 } else {
                     reindex_join_column_with_invented_gap(col, left_data_positions)?
                 };
-                insert_merged_output_column(
-                    &mut columns,
-                    &mut column_order,
-                    name.clone(),
-                    key_column,
-                )?;
+                let out_name = if right_col_names.contains(name) {
+                    apply_merge_suffix(name, suffixes.left.as_deref())
+                } else {
+                    name.clone()
+                };
+                insert_merged_output_column(&mut columns, &mut column_order, out_name, key_column)?;
             }
             continue;
         }
@@ -23231,6 +23231,41 @@ mod tests {
                 assert_eq!(result.columns["b"].values()[1], Scalar::Float64(2.0));
             }
         }
+    }
+
+    #[test]
+    fn merge_ordered_suffixes_distinct_key_overlapping_right_payload() {
+        let left = fp_frame::DataFrame::from_dict(
+            &["lk", "rk"],
+            vec![
+                ("lk", vec![1.into(), 3.into()]),
+                ("rk", vec![100.into(), 200.into()]),
+            ],
+        )
+        .unwrap();
+        let right = fp_frame::DataFrame::from_dict(
+            &["lk", "rk"],
+            vec![
+                ("lk", vec![90.into(), 91.into()]),
+                ("rk", vec![2.into(), 3.into()]),
+            ],
+        )
+        .unwrap();
+        let result = super::merge_ordered_with_options(
+            &left,
+            &right,
+            &["lk"],
+            &["rk"],
+            JoinType::Outer,
+            None,
+            super::MergeExecutionOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(result.column_order, ["lk_x", "rk_x", "lk_y", "rk_y"]);
+        assert_eq!(result.columns["lk_x"].values()[0], Scalar::Float64(1.0));
+        assert!(result.columns["lk_x"].values()[1].is_missing());
+        assert_eq!(result.columns["lk_y"].values()[1], Scalar::Float64(90.0));
+        assert_eq!(result.columns["rk_y"].values()[1], Scalar::Float64(2.0));
     }
 
     #[test]
