@@ -16802,6 +16802,125 @@ impl Column {
         )
     }
 
+    /// Select from a masked float column without re-inferring missingness
+    /// from the selected payloads. A computed NaN is a value; only its
+    /// source's validity bit decides whether the selected row is NA.
+    fn replace_masked_f64(
+        &self,
+        keep: impl Fn(usize) -> bool,
+        mut replacement: impl FnMut(usize) -> Result<(f64, bool), ColumnError>,
+    ) -> Result<Option<Self>, ColumnError> {
+        let Some((data, validity)) = self.as_masked_f64_slice() else {
+            return Ok(None);
+        };
+        let mut values = data.to_vec();
+        let mut validity = validity.clone();
+        for (row, value) in values.iter_mut().enumerate() {
+            if !keep(row) {
+                let (fill, present) = replacement(row)?;
+                *value = fill;
+                validity.set(row, present);
+            }
+        }
+        Ok(Some(
+            Self::from_nullable_f64_values_with_validity(values, validity)
+                .keeping_dtype_of(self)
+                .confined(),
+        ))
+    }
+
+    /// A replacement cell read in the receiving float column's domain.
+    /// Masked float NaNs stay present; numpy float NaNs and explicit nulls
+    /// remain missing. Cast only cells actually selected by the caller.
+    fn float_fill_cell(&self, row: usize) -> Result<(f64, bool), ColumnError> {
+        if !self.validity.get(row) {
+            return Ok((f64::NAN, false));
+        }
+        if let Some((data, _)) = self.as_masked_f64_slice() {
+            return Ok((data[row], true));
+        }
+        if let Some((data, _)) = self.as_f64_slice_with_validity() {
+            return Ok((data[row], !data[row].is_nan()));
+        }
+        if let Some((data, _)) = self
+            .as_i64_slice_with_validity()
+            .or_else(|| self.as_masked_i64_slice())
+        {
+            return Ok((data[row] as f64, true));
+        }
+        let value = &self.values[row];
+        if value.is_missing() {
+            return Ok((f64::NAN, false));
+        }
+        let value = cast_scalar(value, DType::Float64Nullable)?.to_f64()?;
+        Ok((value, !value.is_nan()))
+    }
+
+    fn condition_keeps(&self, row: usize, keep_when: bool) -> bool {
+        if !self.validity.get(row) {
+            return false;
+        }
+        if let Some(values) = self.as_bool_slice() {
+            return values[row] == keep_when;
+        }
+        if let Some((values, _)) = self.as_nullable_bool_slice() {
+            return values[row] == keep_when;
+        }
+        matches!(self.values[row], Scalar::Bool(value) if value == keep_when)
+    }
+
+    fn select_masked_f64_scalar(
+        &self,
+        cond: &Self,
+        other: &Scalar,
+        keep_when: bool,
+    ) -> Result<Option<Self>, ColumnError> {
+        let mut fill = None;
+        self.replace_masked_f64(
+            |row| cond.condition_keeps(row, keep_when),
+            |_| {
+                if let Some(fill) = fill {
+                    return Ok(fill);
+                }
+                let selected = if other.is_missing() {
+                    (f64::NAN, false)
+                } else {
+                    (cast_scalar(other, DType::Float64Nullable)?.to_f64()?, true)
+                };
+                fill = Some(selected);
+                Ok(selected)
+            },
+        )
+    }
+
+    /// Forward/backward fill for pandas' masked Float64/Float32 arrays.
+    /// A present NaN is also a valid donor and resets a limited fill run.
+    fn fill_masked_f64(&self, limit: Option<usize>, backwards: bool) -> Option<Self> {
+        let (data, validity) = self.as_masked_f64_slice()?;
+        let mut values = data.to_vec();
+        let mut filled = validity.clone();
+        let mut donor = None;
+        let mut run = 0;
+        for offset in 0..data.len() {
+            let row = if backwards {
+                data.len() - 1 - offset
+            } else {
+                offset
+            };
+            if validity.get(row) {
+                donor = Some(data[row]);
+                run = 0;
+            } else if let Some(value) = donor
+                && limit.is_none_or(|cap| run < cap)
+            {
+                values[row] = value;
+                filled.set(row, true);
+                run += 1;
+            }
+        }
+        Some(Self::from_nullable_f64_values_with_validity(values, filled).keeping_dtype_of(self))
+    }
+
     /// Int64 analogue of [`Self::as_f64_slice_with_validity`]: the contiguous i64
     /// buffer plus its validity (works for an all-valid OR a `LazyNullableInt64`
     /// backing). Missingness is the validity bit alone (no NaN sentinel).
@@ -27934,6 +28053,9 @@ impl Column {
     /// until the first non-missing value is seen. `limit=None` means
     /// unbounded; `limit=Some(k)` caps each missing run to `k` fills.
     pub fn ffill(&self, limit: Option<usize>) -> Result<Self, ColumnError> {
+        if let Some(filled) = self.fill_masked_f64(limit, false) {
+            return Ok(filled);
+        }
         let len = self.values.len();
         // Typed fast paths: carry the last present value forward over the raw
         // buffer + validity, no Scalar materialization. A still-missing slot (no
@@ -28023,6 +28145,9 @@ impl Column {
     /// Matches `pd.Series.bfill(limit=None)`. Trailing nulls stay null
     /// if no subsequent non-missing value is observed.
     pub fn bfill(&self, limit: Option<usize>) -> Result<Self, ColumnError> {
+        if let Some(filled) = self.fill_masked_f64(limit, true) {
+            return Ok(filled);
+        }
         let len = self.values.len();
         // Typed fast paths: carry the next present value backward over the raw
         // buffer + validity (the Scalar loop's `Null(NaN)` init is dead — every
@@ -30675,6 +30800,12 @@ impl Column {
                 right: other.values.len(),
             });
         }
+        if let Some(filled) = self.replace_masked_f64(
+            |row| self.validity.get(row),
+            |row| other.float_fill_cell(row),
+        )? {
+            return Ok(filled);
+        }
         if let Some(filled) = self.float_filled_from(other) {
             return Ok(filled);
         }
@@ -30815,7 +30946,7 @@ impl Column {
     /// Null(NaN). The result dtype is `self.dtype`; if `other`'s dtype
     /// differs, values coming from `other` are cast via `cast_scalar`.
     pub fn where_cond_series(&self, cond: &Self, other: &Self) -> Result<Self, ColumnError> {
-        if cond.dtype != DType::Bool {
+        if !matches!(cond.dtype, DType::Bool | DType::BoolNullable) {
             return Err(ColumnError::InvalidMaskType {
                 dtype: cond.dtype.clone(),
             });
@@ -30825,6 +30956,12 @@ impl Column {
                 left: self.values.len(),
                 right: cond.values.len().max(other.values.len()),
             });
+        }
+        if let Some(selected) = self.replace_masked_f64(
+            |row| cond.condition_keeps(row, true),
+            |row| other.float_fill_cell(row),
+        )? {
+            return Ok(selected);
         }
         // Typed branchless select: all-valid Bool cond and same-typed all-valid
         // numeric self/other compute the result straight over the contiguous
@@ -30922,7 +31059,7 @@ impl Column {
     ///
     /// Matches `pd.Series.mask(cond, other)` when `other` is a Series.
     pub fn mask_series(&self, cond: &Self, other: &Self) -> Result<Self, ColumnError> {
-        if cond.dtype != DType::Bool {
+        if !matches!(cond.dtype, DType::Bool | DType::BoolNullable) {
             return Err(ColumnError::InvalidMaskType {
                 dtype: cond.dtype.clone(),
             });
@@ -30932,6 +31069,12 @@ impl Column {
                 left: self.values.len(),
                 right: cond.values.len().max(other.values.len()),
             });
+        }
+        if let Some(selected) = self.replace_masked_f64(
+            |row| cond.condition_keeps(row, false),
+            |row| other.float_fill_cell(row),
+        )? {
+            return Ok(selected);
         }
         // Typed branchless select (inverse of where_cond_series): cond true picks
         // other, false picks self. Same isomorphism argument.
@@ -31266,7 +31409,7 @@ impl Column {
     /// column of the same length (otherwise `LengthMismatch`). Missing
     /// positions in `cond` propagate as Null(NaN) in the result.
     pub fn where_cond(&self, cond: &Self, other: &Scalar) -> Result<Self, ColumnError> {
-        if cond.dtype != DType::Bool {
+        if !matches!(cond.dtype, DType::Bool | DType::BoolNullable) {
             return Err(ColumnError::InvalidMaskType {
                 dtype: cond.dtype.clone(),
             });
@@ -31276,6 +31419,9 @@ impl Column {
                 left: self.values.len(),
                 right: cond.values.len(),
             });
+        }
+        if let Some(selected) = self.select_masked_f64_scalar(cond, other, true)? {
+            return Ok(selected);
         }
         // Typed branchless select against a scalar `other`. For Float64 self,
         // Column::new coerces other to Float64, so other.to_f64() (non-missing)
@@ -33082,7 +33228,7 @@ impl Column {
     /// Matches `pd.Series.mask(cond, other)` — the logical inverse of
     /// `where_cond`. Same validation rules apply.
     pub fn mask(&self, cond: &Self, other: &Scalar) -> Result<Self, ColumnError> {
-        if cond.dtype != DType::Bool {
+        if !matches!(cond.dtype, DType::Bool | DType::BoolNullable) {
             return Err(ColumnError::InvalidMaskType {
                 dtype: cond.dtype.clone(),
             });
@@ -33092,6 +33238,9 @@ impl Column {
                 left: self.values.len(),
                 right: cond.values.len(),
             });
+        }
+        if let Some(selected) = self.select_masked_f64_scalar(cond, other, false)? {
+            return Ok(selected);
         }
         // Typed branchless select (inverse of where_cond scalar): cond true picks
         // the scalar other, false picks self. Same isomorphism argument.
@@ -43713,7 +43862,7 @@ mod tests {
         let dtype = SparseDType {
             value_dtype: DType::Int64,
             fill_value: Scalar::Float64(0.5),
-            width: Some(NumericWidth::Int64),
+            width: None,
         };
         let sparse = SparseColumn::from_dense(
             dtype,

@@ -29441,6 +29441,11 @@ fn limited_fill(
     filled: &Column,
     limit: usize,
 ) -> Result<Column, fp_frame::FrameError> {
+    // pandas' masked floating arrays fill every mask bit even with a limit.
+    // Keep the filled buffer: rebuilding Scalars would erase present NaNs.
+    if col.dtype() == DType::Float64Nullable {
+        return Ok(filled.clone());
+    }
     let vals = col.values();
     let filled_vals = filled.values();
     let mut out = Vec::with_capacity(vals.len());

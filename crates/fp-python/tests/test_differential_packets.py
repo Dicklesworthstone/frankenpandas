@@ -46458,3 +46458,171 @@ def test_nullable_ufunc_6f379_scalar_access_and_iteration_keep_present_nan() -> 
         _nullable_ufunc_6f379_scalar_equal(got, want)
     for position in range(len(expected)):
         _nullable_ufunc_6f379_scalar_equal(actual.iloc[position], expected.iloc[position])
+
+
+def _nullable_fill_6f379_source(m: Any, dtype: str) -> Any:
+    source = m.Series(
+        [None, 4.0, None, None, -4.0, None, None, -0.0],
+        index=m.Index([f"r{i}" for i in range(8)], name="rows"),
+        dtype=dtype,
+        name="data",
+    )
+    return np.sqrt(source)
+
+
+def _nullable_fill_6f379_other(m: Any, kind: str, aligned: bool = True) -> Any:
+    if kind == "scalar":
+        return 1.25
+    if kind == "nan":
+        return np.nan
+    if kind == "dict":
+        return {"r0": 1.0, "r2": np.nan, "r3": 3.0, "r5": 5.0, "r6": 6.0}
+    labels = [f"r{i}" for i in range(8)]
+    if not aligned:
+        labels = ["r6", "r5", "r4", "r3", "r2", "r1", "r0", "extra"]
+    if kind == "integer":
+        return m.Series([1, 2, None, 4, 5, 6, 7, 8], index=labels, dtype="Int64")
+    if kind == "boolean":
+        return m.Series([True, False, None, True, True, False, True, False], index=labels, dtype="boolean")
+    other = m.Series(
+        [16.0, -1.0, -1.0, 9.0, 25.0, None, 49.0, 64.0],
+        index=labels,
+        dtype="float64" if kind == "numpy" else "Float64",
+    )
+    return np.sqrt(other)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("dtype", ["Float64", "Float32"])
+@pytest.mark.parametrize("kind", ["scalar", "nan", "dict", "masked", "numpy", "integer", "boolean"])
+@pytest.mark.parametrize("limit", [None, 1, 2])
+def test_nullable_fill_6f379_fillna_keeps_source_and_replacement_masks(
+    dtype: str, kind: str, limit: Any
+) -> None:
+    def run(m: Any) -> Any:
+        source = _nullable_fill_6f379_source(m, dtype)
+        return source.fillna(_nullable_fill_6f379_other(m, kind), limit=limit)
+
+    with np.errstate(all="ignore"):
+        expected = run(pd)
+        actual = run(fpd)
+    _nullable_ufunc_6f379_equal(actual, expected)
+    assert actual.index.name == expected.index.name
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("dtype", ["Float64", "Float32"])
+@pytest.mark.parametrize("operation", ["ffill", "bfill"])
+@pytest.mark.parametrize("limit", [None, 1, 2])
+@pytest.mark.parametrize("frame", [False, True])
+def test_nullable_fill_6f379_directional_fill_uses_present_nan_donors(
+    dtype: str, operation: str, limit: Any, frame: bool
+) -> None:
+    def run(m: Any) -> Any:
+        source = _nullable_fill_6f379_source(m, dtype)
+        if frame:
+            result = getattr(m.DataFrame({"data": source}), operation)(limit=limit)
+            return result["data"]
+        return getattr(source, operation)(limit=limit)
+
+    with np.errstate(all="ignore"):
+        expected = run(pd)
+        actual = run(fpd)
+    _nullable_ufunc_6f379_equal(actual, expected)
+    assert actual.index.name == expected.index.name
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("dtype", ["Float64", "Float32"])
+@pytest.mark.parametrize("kind", ["scalar", "nan", "masked", "numpy", "integer", "boolean"])
+@pytest.mark.parametrize("operation", ["where", "mask"])
+@pytest.mark.parametrize("aligned", [False, True])
+@pytest.mark.parametrize("frame", [False, True])
+def test_nullable_fill_6f379_selection_keeps_selected_mask_and_dtype(
+    dtype: str, kind: str, operation: str, aligned: bool, frame: bool
+) -> None:
+    def run(m: Any) -> Any:
+        source = _nullable_fill_6f379_source(m, dtype)
+        condition = m.Series(
+            [True, False, None, True, True, False, None, False],
+            index=[f"r{i}" for i in range(8)] if aligned else [f"r{i}" for i in range(7, -1, -1)],
+            dtype="boolean",
+        )
+        other = _nullable_fill_6f379_other(m, kind, aligned)
+        if frame:
+            source = m.DataFrame({"data": source})
+            condition = m.DataFrame({"data": condition})
+            if kind not in ("scalar", "nan"):
+                other = m.DataFrame({"data": other})
+            return getattr(source, operation)(condition, other)["data"]
+        return getattr(source, operation)(condition, other)
+
+    with np.errstate(all="ignore"):
+        expected = run(pd)
+        actual = run(fpd)
+    _nullable_ufunc_6f379_equal(actual, expected)
+    assert actual.index.name == expected.index.name
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("dtype", ["Float64", "Float32"])
+@pytest.mark.parametrize("frame", [False, True])
+def test_nullable_fill_6f379_aligned_replacement_and_absent_columns(
+    dtype: str, frame: bool
+) -> None:
+    def run(m: Any) -> list:
+        source = _nullable_fill_6f379_source(m, dtype)
+        other = _nullable_fill_6f379_other(m, "masked", aligned=False)
+        if not frame:
+            return [source.fillna(other), source.fillna(other, limit=1)]
+        source = m.DataFrame({"data": source, "unmatched": source})
+        other = m.DataFrame({"data": other})
+        condition = m.DataFrame({"data": m.Series([True] * 8, index=source.index)})
+        return [
+            source.fillna(other)["data"],
+            source.where(condition, other)["unmatched"],
+            source.mask(condition, other)["unmatched"],
+        ]
+
+    with np.errstate(all="ignore"):
+        expected = run(pd)
+        actual = run(fpd)
+    for got, want in zip(actual, expected):
+        _nullable_ufunc_6f379_equal(got, want)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("dtype", ["Float64", "Float32"])
+def test_nullable_fill_6f379_empty_operations_keep_dtype(dtype: str) -> None:
+    def run(m: Any) -> list:
+        source = m.Series([], dtype=dtype, name="data")
+        condition = m.Series([], dtype="boolean")
+        return [
+            source.fillna(source), source.fillna(1.25, limit=1),
+            source.ffill(), source.bfill(), source.where(condition),
+            source.mask(condition, source),
+        ]
+
+    expected = run(pd)
+    actual = run(fpd)
+    for got, want in zip(actual, expected):
+        _nullable_ufunc_6f379_equal(got, want)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("dtype", ["float64", "Int64", "boolean"])
+@pytest.mark.parametrize("operation", ["ffill", "bfill", "where", "mask", "fillna"])
+def test_nullable_fill_6f379_other_dtypes_keep_their_missing_rules(
+    dtype: str, operation: str
+) -> None:
+    def run(m: Any) -> Any:
+        values = [None, True, None, False] if dtype == "boolean" else [None, 4, None, 0]
+        source = m.Series(values, dtype=dtype, name="data")
+        fill = False if dtype == "boolean" else 7
+        if operation in ("ffill", "bfill"):
+            return getattr(source, operation)(limit=1)
+        if operation == "fillna":
+            return source.fillna(fill, **({"limit": 1} if dtype == "float64" else {}))
+        return getattr(source, operation)([True, False, False, True], fill)
+
+    _nullable_ufunc_6f379_equal(run(fpd), run(pd))

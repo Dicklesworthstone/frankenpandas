@@ -18312,6 +18312,13 @@ impl Series {
         if !self.column.has_any_missing() {
             return Series::new(self.name.clone(), self.index.clone(), self.column.clone());
         }
+        if self.column.dtype() == DType::Float64Nullable {
+            return Self::new(
+                self.name.clone(),
+                self.index.clone(),
+                self.column.ffill(limit)?,
+            );
+        }
         // Typed Float64 fast path (br-frankenpandas-m69y5): read raw f64 +
         // validity and carry the last valid value forward into a typed output +
         // validity, skipping the per-element Scalar clone, the Vec<Scalar>, and
@@ -18497,6 +18504,13 @@ impl Series {
         // ⇒ O(1) clone (mirror of ffill). Bit-identical.
         if !self.column.has_any_missing() {
             return Series::new(self.name.clone(), self.index.clone(), self.column.clone());
+        }
+        if self.column.dtype() == DType::Float64Nullable {
+            return Self::new(
+                self.name.clone(),
+                self.index.clone(),
+                self.column.bfill(limit)?,
+            );
         }
         // Typed Float64 fast path (br-frankenpandas-m69y5): reverse carry of the
         // next valid value into a typed output + validity. Bit-identical mirror
@@ -28992,8 +29006,52 @@ impl Series {
         ))
     }
 
+    /// Align before selecting masked float buffers, so an operation-produced
+    /// NaN retains the validity bit of the operand it came from (6f379).
+    fn masked_float_selection(
+        &self,
+        cond: &Self,
+        other: Option<&Self>,
+        fill: &Scalar,
+        keep_when: bool,
+    ) -> Result<Self, FrameError> {
+        let (data, condition, index) = if self.index == cond.index {
+            (self.column.clone(), cond.column.clone(), self.index.clone())
+        } else {
+            let plan = align_left_or_positional(&self.index, &cond.index);
+            validate_alignment_plan(&plan)?;
+            (
+                self.column.reindex_by_positions(&plan.left_positions)?,
+                cond.column.reindex_by_positions(&plan.right_positions)?,
+                plan.union_index.rename_index(self.index.name()),
+            )
+        };
+        let column = if let Some(other) = other {
+            let replacement = if index == other.index {
+                other.column.clone()
+            } else {
+                let plan = align_left_or_positional(&index, &other.index);
+                validate_alignment_plan(&plan)?;
+                other.column.reindex_by_positions(&plan.right_positions)?
+            };
+            if keep_when {
+                data.where_cond_series(&condition, &replacement)?
+            } else {
+                data.mask_series(&condition, &replacement)?
+            }
+        } else if keep_when {
+            data.where_cond(&condition, fill)?
+        } else {
+            data.mask(&condition, fill)?
+        };
+        Self::new(self.name.clone(), index, column)
+    }
+
     fn where_cond_selected(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
         let fill = other.cloned().unwrap_or(Scalar::Null(NullKind::NaN));
+        if self.column.dtype() == DType::Float64Nullable {
+            return self.masked_float_selection(cond, None, &fill, true);
+        }
 
         // Identity fast path (br-frankenpandas-whident): when self and cond share the same
         // index, alignment is a 1:1 identity — the general `align()` + two
@@ -29189,6 +29247,14 @@ impl Series {
     ///
     /// Matches `series.where(cond, other=series)`.
     pub fn where_cond_series(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
+        if self.column.dtype() == DType::Float64Nullable {
+            return self.masked_float_selection(
+                cond,
+                Some(other),
+                &Scalar::Null(NullKind::Null),
+                true,
+            );
+        }
         // Identity fast path: when self/cond/other share the same index, both
         // alignments are 1:1 (left positions = 0..n, union = self's index), so the
         // result is a per-row typed select between self and other driven by the Bool
@@ -29341,6 +29407,14 @@ impl Series {
     ///
     /// Matches `series.mask(cond, other=series)`.
     pub fn mask_series(&self, cond: &Self, other: &Self) -> Result<Self, FrameError> {
+        if self.column.dtype() == DType::Float64Nullable {
+            return self.masked_float_selection(
+                cond,
+                Some(other),
+                &Scalar::Null(NullKind::Null),
+                false,
+            );
+        }
         // Identity fast path (mirror of where_cond_series): same index for
         // self/cond/other ⇒ 1:1 typed select, cond true ⇒ other, false ⇒ self.
         // Avoids the two align()+reindex passes and the per-element
@@ -29486,6 +29560,9 @@ impl Series {
 
     fn mask_selected(&self, cond: &Self, other: Option<&Scalar>) -> Result<Self, FrameError> {
         let fill = other.cloned().unwrap_or(Scalar::Null(NullKind::NaN));
+        if self.column.dtype() == DType::Float64Nullable {
+            return self.masked_float_selection(cond, None, &fill, false);
+        }
 
         // Identity fast path (br-frankenpandas-whident): same-index ⇒ 1:1 alignment, skip the
         // unconditional align()/reindex/union-materialize (~110× slower than pandas). Mirror of
@@ -96606,6 +96683,14 @@ impl DataFrame {
                 data_col.len(),
             )?;
 
+            if data_col.dtype() == DType::Float64Nullable {
+                let condition = Column::from_bool_values(
+                    cond_cells.iter().map(|cell| *cell == Some(true)).collect(),
+                );
+                new_columns.push(data_col.where_cond(&condition, &fill)?);
+                continue;
+            }
+
             let values: Vec<Scalar> = data_col
                 .values()
                 .iter()
@@ -96659,6 +96744,14 @@ impl DataFrame {
                 &plan.right_positions,
                 data_col.len(),
             )?;
+
+            if data_col.dtype() == DType::Float64Nullable {
+                let condition = Column::from_bool_values(
+                    cond_cells.iter().map(|cell| *cell == Some(false)).collect(),
+                );
+                new_columns.push(data_col.where_cond(&condition, &fill)?);
+                continue;
+            }
 
             let values: Vec<Scalar> = data_col
                 .values()
@@ -96867,6 +96960,19 @@ impl DataFrame {
                 .map(|col| col.reindex_by_positions(&other_plan.right_positions))
                 .transpose()?;
 
+            if data_col.dtype() == DType::Float64Nullable {
+                let condition = Column::from_bool_values(
+                    cond_cells.iter().map(|cell| *cell == Some(true)).collect(),
+                );
+                let column = if let Some(other) = aligned_other {
+                    data_col.where_cond_series(&condition, &other)?
+                } else {
+                    data_col.where_cond(&condition, &Scalar::Null(NullKind::Null))?
+                };
+                new_columns.push(column);
+                continue;
+            }
+
             let values: Vec<Scalar> = data_col
                 .values()
                 .iter()
@@ -96970,6 +97076,19 @@ impl DataFrame {
                 .partner_column(other, pos, col_name)
                 .map(|col| col.reindex_by_positions(&other_plan.right_positions))
                 .transpose()?;
+
+            if data_col.dtype() == DType::Float64Nullable {
+                let condition = Column::from_bool_values(
+                    cond_cells.iter().map(|cell| *cell == Some(false)).collect(),
+                );
+                let column = if let Some(other) = aligned_other {
+                    data_col.where_cond_series(&condition, &other)?
+                } else {
+                    data_col.where_cond(&condition, &Scalar::Null(NullKind::Null))?
+                };
+                new_columns.push(column);
+                continue;
+            }
 
             let values: Vec<Scalar> = data_col
                 .values()
