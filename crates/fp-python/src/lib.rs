@@ -22,7 +22,7 @@ use std::{
     sync::{Arc, LazyLock, Mutex},
 };
 
-use fp_columnar::{ArithmeticOp, Column, ComparisonOp};
+use fp_columnar::{ArithmeticOp, Column, ComparisonOp, SparseColumn};
 use fp_expr::DataFrameExprExt;
 use fp_frame::{
     DataFrame, DropNaHow, FrameError, LabelName, PlotKind, Series, concat_dataframes, concat_series,
@@ -33,7 +33,7 @@ use fp_index::{
 };
 use fp_types::{
     CategoricalMetadata, DType, IntervalClosed, NullKind, NumericWidth, Period, PeriodFreq, Scalar,
-    Timedelta, Timestamp,
+    SparseDType, Timedelta, Timestamp,
 };
 use mimalloc::MiMalloc;
 use pyo3::{
@@ -312,6 +312,14 @@ fn n_method_refused_dtype(column: &Column) -> Option<String> {
 }
 
 fn column_pandas_dtype_name(column: &Column) -> String {
+    if let Some(sparse) = column.sparse() {
+        if sparse.sparse_dtype().fill_numpy_dtype.is_some() {
+            return Python::attach(|py| {
+                PySparseDtype { inner: sparse.sparse_dtype().clone() }.name(py)
+            }).unwrap_or_else(|_| sparse.sparse_dtype().pandas_name());
+        }
+        return sparse.sparse_dtype().pandas_name();
+    }
     let dtype = column.dtype();
     // A narrow numpy dtype, or its masked form (int32 / Int32; fvsao.23).
     if let Some(width) = column.width() {
@@ -553,6 +561,12 @@ fn shifted_periods(series: &Series, n: &Bound<'_, PyAny>, sign: i64) -> PyResult
 /// raised); the extension dtype classes for the nullable, categorical and
 /// tz-aware ones; the name for anything else.
 fn column_pandas_dtype<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<'py, PyAny>> {
+    if let Some(sparse) = column.sparse() {
+        return PySparseDtype {
+            inner: sparse.sparse_dtype().clone(),
+        }
+        .into_bound_py_any(py);
+    }
     if let Some(name) = column_numpy_dtype_name(column) {
         return py.import("numpy")?.call_method1("dtype", (name,));
     }
@@ -30817,6 +30831,14 @@ fn operand_zone(operand: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
 /// against floats is that float); None for any other operand or column - a
 /// numpy scalar, a bool, an int past i64, a float against narrow ints.
 fn plain_number_operand(like: &Series, other: &Bound<'_, PyAny>) -> Option<Scalar> {
+    if let Some(sparse) = like.column().sparse()
+        && matches!(sparse.value_dtype(), DType::Int64 | DType::Float64 | DType::Bool)
+    {
+        return match py_to_scalar(other.py(), other).ok()? {
+            scalar @ (Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Bool(_)) => Some(scalar),
+            _ => None,
+        };
+    }
     let dtype = like.column().dtype();
     // A masked Int64 column (no narrower width) by an int or a float: the
     // column's masked kernels answer it, a missing row NA (the broadcast and
@@ -31016,6 +31038,24 @@ fn scalar_comparison(
     other: &Bound<'_, PyAny>,
     op: ComparisonOp,
 ) -> Option<PyResult<PySeries>> {
+    // Sparse comparisons must apply the actual scalar to implicit fills,
+    // rather than infer a fill for a broadcast dense right-hand column.
+    if like.column().sparse().is_some()
+        && (other.is_none()
+            || other.is_instance_of::<pyo3::types::PyBool>()
+            || other.is_instance_of::<pyo3::types::PyInt>()
+            || other.is_instance_of::<pyo3::types::PyFloat>()
+            || other.is_instance_of::<pyo3::types::PyString>())
+    {
+        if other.is_none() && !matches!(op, ComparisonOp::Eq | ComparisonOp::Ne) {
+            return Some(Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Invalid ordering comparison with NoneType",
+            )));
+        }
+        return Some(py_to_scalar(other.py(), other).and_then(|scalar| {
+            wrap_series(like.compare_scalar(&scalar, op))
+        }));
+    }
     if like
         .column()
         .width()
@@ -35379,6 +35419,12 @@ impl PySeries {
     }
 
     fn check_numeric_only(&self, name: &str) -> PyResult<()> {
+        if let Some(sparse) = self.inner.column().sparse() {
+            self.refuse_extension_reduction(name)?;
+            if matches!(sparse.value_dtype(), DType::Int64 | DType::Float64 | DType::Bool) {
+                return Ok(());
+            }
+        }
         if !numpy_numeric(self.inner.column()) {
             Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
                 "Series.{name} does not allow numeric_only=True with non-numeric dtypes."
@@ -35509,6 +35555,9 @@ impl PySeries {
     /// (br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.17).
     fn require_numeric(&self, name: &str) -> PyResult<()> {
         self.refuse_extension_reduction(name)?;
+        if name == "mean" && self.inner.column().sparse().is_some() {
+            return Ok(());
+        }
         let temporal_reduction = matches!(name, "mean" | "median" | "std");
         let array = match self.inner.dtype() {
             // The nullable extension dtypes reduce too (Int64 mean raised).
@@ -35540,6 +35589,14 @@ impl PySeries {
     /// text; a categorical's cumsum concatenated its values, its any / all
     /// answered; br-frankenpandas-76kq0).
     fn refuse_extension_reduction(&self, name: &str) -> PyResult<()> {
+        if self.inner.column().sparse().is_some()
+            && matches!(name, "median" | "std" | "var" | "prod" | "skew" | "kurt" | "sem")
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                "cannot perform {name} with type {}",
+                self.dtype_name()
+            )));
+        }
         // A period Series orders (min / max / median / cummin / cummax) and
         // nothing else: pandas' TypeError (its any / all answered;
         // br-frankenpandas-76kq0).
@@ -36688,7 +36745,7 @@ impl PySeries {
         // stay exact (br-frankenpandas-lqss7).
         let object_values = match (data, dtype) {
             (Some(data), Some(dtype))
-                if ((is_object_dtype_arg(dtype) || is_string_dtype_arg(dtype))
+                if ((is_object_dtype_arg(dtype) || is_string_dtype_arg(dtype) || is_sparse_dtype_arg(dtype))
                     && (data.is_instance_of::<PyList>() || data.is_instance_of::<PyTuple>()))
                     || (is_nullable_integer_dtype_arg(dtype) && int_list_with_missing(data)?) =>
             {
@@ -37992,6 +38049,9 @@ impl PySeries {
         if numeric_only {
             self.check_numeric_only("sum")?;
         }
+        if let Some(sparse) = self.inner.column().sparse() {
+            return Python::attach(|py| sparse_reduce(py, sparse, "sum", min_count));
+        }
         // Python-object cells sum with their own + (they were joined as
         // text, ''; br-frankenpandas-8dqrn), and so does text beside a
         // missing value (8rzgf).
@@ -38069,6 +38129,9 @@ impl PySeries {
             }
             self.require_numeric("mean")?;
         }
+        if let Some(sparse) = self.inner.column().sparse() {
+            return Python::attach(|py| sparse_reduce(py, sparse, "mean", 0));
+        }
         Python::attach(|py| {
             let result = if !skipna {
                 self.inner.mean_skipna(false)
@@ -38109,6 +38172,9 @@ impl PySeries {
         if numeric_only {
             self.check_numeric_only("min")?;
         }
+        if let Some(sparse) = self.inner.column().sparse() {
+            return Python::attach(|py| sparse_reduce(py, sparse, "min", 0));
+        }
         Python::attach(|py| {
             if compares_as_objects(&self.inner) {
                 return object_extreme(py, &self.inner, false, false, skipna)?
@@ -38137,6 +38203,9 @@ impl PySeries {
         check_series_axis(axis)?;
         if numeric_only {
             self.check_numeric_only("max")?;
+        }
+        if let Some(sparse) = self.inner.column().sparse() {
+            return Python::attach(|py| sparse_reduce(py, sparse, "max", 0));
         }
         Python::attach(|py| {
             if compares_as_objects(&self.inner) {
@@ -38201,6 +38270,12 @@ impl PySeries {
     /// Return values as a Python list.
     fn tolist(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let column = self.inner.column();
+        if let Some(sparse) = column.sparse() {
+            let values = (0..sparse.len())
+                .map(|position| sparse_element_to_py(py, sparse, position))
+                .collect::<PyResult<Vec<_>>>()?;
+            return PyList::new(py, values)?.into_py_any(py);
+        }
         if let Some(list) = typed_column_list(py, column)? {
             return Ok(list);
         }
@@ -38215,6 +38290,9 @@ impl PySeries {
     /// back to `s[i]`, whose elements are numpy scalars.
     fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let column = self.inner.column();
+        if column.sparse().is_some() {
+            return self.tolist(py)?.bind(py).call_method0("__iter__").map(Bound::unbind);
+        }
         if let Some(list) = typed_column_list(py, column)? {
             return Ok(list.bind(py).try_iter()?.into_any().unbind());
         }
@@ -38764,6 +38842,9 @@ impl PySeries {
         // column's its IntegerArray / StringArray ... (they were numpy
         // arrays, Int64's float64; br-frankenpandas-5y62q).
         let source = self.inner.column();
+        if let Some(sparse) = source.sparse() {
+            return extension_array(py, sparse_unique_column(sparse)?);
+        }
         // A datetime / duration column's distinct values off its nanos
         // (br-frankenpandas-vk7y9).
         if let Some(distinct) = self.inner.unique_temporal_column() {
@@ -40286,6 +40367,19 @@ impl PySeries {
         } else {
             dtype.clone()
         };
+        if is_sparse_dtype_arg(&spec) {
+            let converted = sparse_column_from_dtype(self.inner.column(), &spec);
+            return match converted {
+                Ok(Some(column)) => Series::new(self.inner.name(), self.inner.index().clone(), column)
+                    .map(|inner| PySeries { inner })
+                    .map_err(frame_error_to_py),
+                Err(_) if errors == "ignore" => Ok(self.clone()),
+                Err(error) => Err(error),
+                Ok(None) => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Sparse dtype was not understood",
+                )),
+            };
+        }
         if is_object_dtype_arg(&spec) {
             return Ok(PySeries {
                 inner: object_series(&self.inner)?,
@@ -41623,6 +41717,9 @@ impl PySeries {
         self.refuse_extension_reduction("any")?;
         self.check_logical_reduction(py, "any", axis, kwargs)?;
         let column = self.inner.column();
+        if let Some(sparse) = column.sparse() {
+            return sparse_reduce(py, sparse, "any", 0);
+        }
         let result = if skipna || !column.has_nulls() {
             self.inner.any().map_err(frame_error_to_py)?
         } else if kleene_decided(column, false) == Some(false) {
@@ -41653,6 +41750,9 @@ impl PySeries {
         self.refuse_extension_reduction("all")?;
         self.check_logical_reduction(py, "all", axis, kwargs)?;
         let column = self.inner.column();
+        if let Some(sparse) = column.sparse() {
+            return sparse_reduce(py, sparse, "all", 0);
+        }
         let result = if skipna || !column.has_nulls() {
             self.inner.all().map_err(frame_error_to_py)?
         } else if kleene_decided(column, true) == Some(false) {
@@ -44290,6 +44390,11 @@ impl PySeries {
 
     #[getter]
     fn sparse(&self) -> PyResult<PySparseAccessor> {
+        if self.inner.column().sparse().is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                "Can only use the '.sparse' accessor with Sparse data.",
+            ));
+        }
         Ok(PySparseAccessor {
             series: Some(self.inner.clone()),
             df: None,
@@ -45111,6 +45216,9 @@ fn masked_int64_ndarray<'py>(
 /// timedelta64[ns] from one byte buffer, else an object array of the
 /// Python values (they were Python lists, fvsao.7).
 fn column_ndarray<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<'py, PyAny>> {
+    if let Some(sparse) = column.sparse() {
+        return sparse_ndarray(py, sparse, false);
+    }
     let np = py.import("numpy")?;
     if let Some(kind) = numpy_kind(column) {
         let array = match typed_ndarray(&np, column, kind)? {
@@ -45158,6 +45266,222 @@ fn column_ndarray<'py>(py: Python<'py>, column: &Column) -> PyResult<Bound<'py, 
         return Ok(array);
     }
     object_ndarray(py, &np, &materialized_values(column))
+}
+
+/// Sparse iteration returns the raw fill in implicit positions and numpy
+/// scalars of the subtype in stored positions, even explicit fill values.
+fn sparse_element_to_py(
+    py: Python<'_>,
+    sparse: &SparseColumn,
+    position: usize,
+) -> PyResult<Py<PyAny>> {
+    let Ok(stored) = sparse.indices().binary_search(&position) else {
+        return PySparseDtype { inner: sparse.sparse_dtype().clone() }.fill_value(py);
+    };
+    let value = &sparse.stored_values()[stored];
+    match sparse.value_dtype() {
+        DType::Int64 | DType::Float64 | DType::Bool => {
+            numpy_scalar_of(py, value, sparse.sparse_dtype().width)
+        }
+        DType::Datetime64 { .. } => match value {
+            Scalar::Datetime64(nanos) => Ok(py.import("numpy")?.getattr("datetime64")?
+                .call1((*nanos, "ns"))?.unbind()),
+            _ => scalar_to_py(py, value),
+        },
+        DType::Timedelta64 => match value {
+            Scalar::Timedelta64(nanos) => Ok(py.import("numpy")?.getattr("timedelta64")?
+                .call1((*nanos, "ns"))?.unbind()),
+            _ => scalar_to_py(py, value),
+        },
+        _ => scalar_to_py(py, value),
+    }
+}
+
+fn sparse_stored_ndarray<'py>(
+    py: Python<'py>,
+    sparse: &SparseColumn,
+) -> PyResult<Bound<'py, PyAny>> {
+    let column = if sparse.value_dtype() == DType::Utf8 {
+        Column::from_object_values(sparse.stored_values().to_vec())
+    } else {
+        Column::new(sparse.value_dtype(), sparse.stored_values().to_vec())
+            .map_err(column_error_to_py)?
+    };
+    let column = match sparse.sparse_dtype().width {
+        Some(width) => column.cast_to_width(width, false).map_err(column_error_to_py)?,
+        None => column,
+    };
+    column_ndarray(py, &column)
+}
+
+/// Reduce the compressed values and account for implicit fill positions
+/// separately. NumPy keeps integer totals exact and float32 results narrow;
+/// no logical-length dense array is needed. Sparse reductions in pandas
+/// ignore missing numeric entries even when Series passes skipna=False.
+fn sparse_reduce(
+    py: Python<'_>,
+    sparse: &SparseColumn,
+    op: &str,
+    min_count: usize,
+) -> PyResult<Py<PyAny>> {
+    let stored = sparse_stored_ndarray(py, sparse)?;
+    let gaps = sparse.len() - sparse.npoints();
+    let descriptor = PySparseDtype {
+        inner: sparse.sparse_dtype().clone(),
+    };
+    let fill = descriptor.fill_value(py)?.into_bound(py);
+    if op == "any" {
+        let result = (gaps > 0 && fill.is_truthy()?)
+            || stored.call_method0("any")?.is_truthy()?;
+        return result.into_py_any(py);
+    }
+    if op == "all" {
+        if gaps > 0 && !fill.is_truthy()? {
+            return false.into_py_any(py);
+        }
+        return Ok(stored.call_method0("all")?.unbind());
+    }
+    let present: Vec<i64> = sparse
+        .stored_values()
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| !value.is_missing())
+        .map(|(position, _)| position as i64)
+        .collect();
+    let count = present.len()
+        + if sparse.fill_value().is_missing() { 0 } else { gaps };
+    if count < min_count || (count == 0 && matches!(op, "min" | "max")) {
+        return f64::NAN.into_py_any(py);
+    }
+    let values = stored.get_item(i64_ndarray(py, &present, "int64")?)?;
+    if matches!(op, "min" | "max") {
+        let has_fill = gaps > 0 && !sparse.fill_value().is_missing();
+        if present.is_empty() {
+            return Ok(fill.unbind());
+        }
+        let extreme = values.call_method0(op)?;
+        if has_fill
+            && if op == "min" { fill.lt(&extreme)? } else { fill.gt(&extreme)? }
+        {
+            return Ok(fill.unbind());
+        }
+        return Ok(extreme.unbind());
+    }
+    let operator = py.import("operator")?;
+    let mut total = values.call_method0("sum")?;
+    if !sparse.fill_value().is_missing() && gaps > 0 {
+        let contribution = operator.call_method1("mul", (&fill, gaps))?;
+        total = operator.call_method1("add", (&total, contribution))?;
+    }
+    if op == "mean" {
+        total = operator.call_method1("truediv", (&total, count))?;
+    }
+    Ok(total.unbind())
+}
+
+/// `to_numpy` promotes the subtype with the fill's dtype only when there
+/// are implicit positions. `to_dense` instead always keeps the subtype.
+fn sparse_ndarray<'py>(
+    py: Python<'py>,
+    sparse: &SparseColumn,
+    keep_subtype: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let stored = sparse_stored_ndarray(py, sparse)?;
+    if sparse.npoints() == sparse.len() {
+        return Ok(stored);
+    }
+    let dtype = PySparseDtype { inner: sparse.sparse_dtype().clone() };
+    let fill = dtype.fill_value(py)?;
+    let numpy = py.import("numpy")?;
+    let output_dtype = if keep_subtype {
+        dtype.subtype(py)?
+    } else {
+        let fill_dtype = numpy.call_method1("asarray", (fill.bind(py),))?.getattr("dtype")?;
+        numpy.call_method1("result_type", (dtype.subtype(py)?, fill_dtype))?
+    };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", output_dtype)?;
+    let result = numpy.call_method("full", (sparse.len(), fill.bind(py)), Some(&kwargs))?;
+    if !sparse.indices().is_empty() {
+        let positions = sparse.indices().iter().map(|&position| position as i64).collect::<Vec<_>>();
+        result.set_item(i64_ndarray(py, &positions, "int64")?, stored)?;
+    }
+    Ok(result)
+}
+
+/// Sparse unique first deduplicates the stored values, then inserts an
+/// implicit fill at its first occurrence. This preserves pandas' ordering
+/// even when a cast left an explicitly stored value equal to the fill.
+fn sparse_unique_column(sparse: &SparseColumn) -> PyResult<Column> {
+    let unique = |values: &[Scalar]| -> PyResult<Vec<Scalar>> {
+        let column = Column::from_object_values(values.to_vec());
+        let series = Series::new(LabelName::default(), Index::default_range(values.len()), column)
+            .map_err(frame_error_to_py)?;
+        Ok(series.unique())
+    };
+    let mut distinct = unique(sparse.stored_values())?;
+    if sparse.npoints() != sparse.len() {
+        let first_fill = sparse.indices().iter().enumerate()
+            .position(|(ordinal, &position)| ordinal != position)
+            .unwrap_or(sparse.npoints());
+        let insertion = unique(&sparse.stored_values()[..first_fill])?.len();
+        distinct.insert(insertion, sparse.fill_value().clone());
+    }
+    SparseColumn::from_dense(sparse.sparse_dtype().clone(), distinct)
+        .map(Column::from_sparse)
+        .map_err(column_error_to_py)
+}
+
+/// A sparse take with new missing slots may promote the stored subtype.
+/// Only the selected rows are materialized, while the original fill is
+/// carried into the recompressed result.
+fn sparse_take_with_fill(
+    py: Python<'_>,
+    sparse: &SparseColumn,
+    positions: &[Option<usize>],
+    fill_value: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Column> {
+    let numpy = py.import("numpy")?;
+    let descriptor = PySparseDtype { inner: sparse.sparse_dtype().clone() };
+    let old_fill = descriptor.fill_value(py)?;
+    let new_fill = match fill_value.filter(|fill| !fill.is_none()) {
+        Some(fill) => fill.clone(),
+        None => f64::NAN.into_bound_py_any(py)?,
+    };
+    let has_old_fill = positions.iter().flatten()
+        .any(|position| sparse.indices().binary_search(position).is_err());
+    let has_new_fill = positions.iter().any(Option::is_none);
+    let mut subtype = descriptor.subtype(py)?;
+    if sparse.npoints() == 0 {
+        if has_new_fill {
+            subtype = numpy.call_method1("result_type", (&subtype, new_fill.get_type()))?;
+        }
+    } else {
+        if has_old_fill {
+            subtype = numpy.call_method1("result_type", (&subtype, old_fill.bind(py).get_type()))?;
+        }
+        if has_new_fill {
+            subtype = numpy.call_method1("result_type", (&subtype, new_fill.get_type()))?;
+        }
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", &subtype)?;
+    let taken = numpy.call_method("full", (positions.len(), old_fill.bind(py)), Some(&kwargs))?;
+    for (row, position) in positions.iter().enumerate() {
+        match position {
+            Some(position) => {
+                if let Ok(stored) = sparse.indices().binary_search(position) {
+                    taken.set_item(row, scalar_to_py(py, &sparse.stored_values()[stored])?)?;
+                }
+            }
+            None => taken.set_item(row, &new_fill)?,
+        }
+    }
+    let source = py_array_like_column(py, &taken)?.ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyTypeError, _>("sparse take did not produce an array")
+    })?;
+    let dtype = sparse_dtype_from_parts(py, Some(&subtype), Some(old_fill.bind(py)))?;
+    sparse_column_with_dtype(&source, dtype)
 }
 
 /// The object ndarray of a text column held as one byte buffer whose values
@@ -51936,6 +52260,9 @@ impl PyDataFrame {
                     }
                     frame
                 }
+                Some(dtype) if sparse_dtype_arg(dtype)?.is_some() => {
+                    sparse_frame_from_dtype(&built, dtype)?.expect("sparse dtype was checked")
+                }
                 Some(dtype) => match py_width_arg(dtype) {
                     Some((width, nullable)) => {
                         // A frame's columns cast as the Series constructor's
@@ -55655,6 +55982,70 @@ impl PyDataFrame {
         errors: &str,
     ) -> PyResult<PyDataFrame> {
         let _ = copy; // pandas' copy= does not change the result
+        if let Ok(mapping) = dtype.cast::<PyDict>() {
+            if mapping.values().iter().any(|spec| is_sparse_dtype_arg(&spec)) {
+                // A mapping names every occurrence of a repeated label, but
+                // each occurrence must cast its own values. with_column
+                // would broadcast the first converted column to all of them.
+                let py = dtype.py();
+                let axis = self.columns(py)?;
+                for (key, spec) in mapping.iter() {
+                    if !axis.bind(py).contains(&key)? {
+                        return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                            "Only a column name can be used for the key in a dtype mappings argument. '{}' not found in columns.",
+                            key.str()?
+                        )));
+                    }
+                    // A malformed dtype is invalid even with errors='ignore';
+                    // that option applies to casting the column's values.
+                    if is_sparse_dtype_arg(&spec) {
+                        sparse_dtype_arg(&spec)?;
+                    }
+                }
+                let labels = axis.bind(py).try_iter()?.collect::<PyResult<Vec<_>>>()?;
+                let mut columns = Vec::with_capacity(self.inner.num_columns());
+                for (position, (column, label)) in self
+                    .inner
+                    .columns()
+                    .ordered_columns()
+                    .zip(labels)
+                    .enumerate()
+                {
+                    let converted = match mapping.get_item(label)? {
+                        Some(spec) => {
+                            let inner = Series::new(
+                                self.inner.column_name_at(position).unwrap_or_default(),
+                                self.inner.index().clone(),
+                                column.clone(),
+                            )
+                            .map_err(frame_error_to_py)?;
+                            PySeries { inner }.astype(&spec, copy, errors)?.inner.column().clone()
+                        }
+                        None => column.clone(),
+                    };
+                    columns.push(converted);
+                }
+                return Ok(PyDataFrame {
+                    inner: self.inner.with_columns_at_positions(columns),
+                });
+            }
+        } else if let Some(descriptor) = sparse_dtype_arg(dtype)? {
+            // errors='ignore' is per column: a failed text column does not
+            // undo successful sparse casts of the numeric columns beside it.
+            let columns = self
+                .inner
+                .columns()
+                .ordered_columns()
+                .map(|column| match sparse_column_with_dtype(column, descriptor.clone()) {
+                    Ok(converted) => Ok(converted),
+                    Err(_) if errors == "ignore" => Ok(column.clone()),
+                    Err(error) => Err(error),
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            return Ok(PyDataFrame {
+                inner: self.inner.with_columns_at_positions(columns),
+            });
+        }
         // pandas' integer-cast refusals column by column, and the string
         // columns' integers as int() reads them (15crl).
         let casts: Vec<(String, Bound<'_, PyAny>)> = if let Ok(mapping) = dtype.cast::<PyDict>() {
@@ -55697,9 +56088,12 @@ impl PyDataFrame {
             }
             .and_then(|zoned| match zoned {
                 Some(column) => Ok(Some(column)),
-                None => match frame_categorical_cast(&self.inner, name, column, spec)? {
+                None => match sparse_column_from_dtype(column, spec)? {
                     Some(column) => Ok(Some(column)),
-                    None => pandas_astype_int_source(column, spec),
+                    None => match frame_categorical_cast(&self.inner, name, column, spec)? {
+                        Some(column) => Ok(Some(column)),
+                        None => pandas_astype_int_source(column, spec),
+                    },
                 },
             });
             match converted {
@@ -62948,6 +63342,16 @@ impl PyDataFrame {
 
     #[getter]
     fn sparse(&self) -> PyResult<PySparseAccessor> {
+        if self
+            .inner
+            .columns()
+            .ordered_columns()
+            .any(|column| column.sparse().is_none())
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                "Can only use the '.sparse' accessor with Sparse data.",
+            ));
+        }
         Ok(PySparseAccessor {
             series: None,
             df: Some(self.inner.clone()),
@@ -71813,22 +72217,397 @@ pub struct PySparseAccessor {
     df: Option<DataFrame>,
 }
 
+/// Cast columns by position so sparse metadata, repeated labels, and both
+/// axes survive construction and DataFrame.astype together.
+fn sparse_frame_from_dtype(
+    frame: &DataFrame,
+    spec: &Bound<'_, PyAny>,
+) -> PyResult<Option<DataFrame>> {
+    let Some(dtype) = sparse_dtype_arg(spec)? else {
+        return Ok(None);
+    };
+    let columns = frame
+        .columns()
+        .ordered_columns()
+        .map(|column| sparse_column_with_dtype(column, dtype.clone()))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(Some(frame.with_columns_at_positions(columns)))
+}
+
+/// Resolve the level selectors of Series.sparse.to_coo, keeping their
+/// order and repetitions. Names take precedence over integer positions.
+fn sparse_coo_levels(multi: &MultiIndex, levels: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
+    levels
+        .try_iter()?
+        .map(|level| {
+            let level = level?;
+            let name = py_axis_name(&level)?;
+            let matches: Vec<usize> = multi
+                .names()
+                .iter()
+                .enumerate()
+                .filter_map(|(position, candidate)| (candidate == &name).then_some(position))
+                .collect();
+            match matches.as_slice() {
+                [position] => return Ok(*position),
+                [_, _, ..] => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "The name {} occurs multiple times, use a level number",
+                        level.str()?
+                    )));
+                }
+                _ => {}
+            }
+            if !level.is_instance_of::<pyo3::types::PyBool>() && level.extract::<i64>().is_ok() {
+                return multiindex_level_position(multi, &level);
+            }
+            Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(format!(
+                "Level {} not found",
+                level.str()?
+            )))
+        })
+        .collect()
+}
+
+/// COO coordinates and public labels for one partition of a MultiIndex.
+/// The unsorted path factors observed tuples in first-seen order. A sorted
+/// single level uses its complete declared catalog, including unused labels,
+/// while several levels factor and sort the observed tuples.
+fn sparse_coo_axis<'py>(
+    py: Python<'py>,
+    multi: &MultiIndex,
+    levels: &[usize],
+    sort_labels: bool,
+) -> PyResult<(Vec<i64>, Bound<'py, PyList>)> {
+    if levels.is_empty() {
+        return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+            "list index out of range",
+        ));
+    }
+    if sort_labels && levels.len() == 1 {
+        let level = levels[0];
+        let catalog = multi.levels();
+        let labels = catalog[level]
+            .labels()
+            .iter()
+            .map(|label| level_label_to_py(py, multi, level, label))
+            .collect::<PyResult<Vec<_>>>()?;
+        let codes = multi.codes()[level]
+            .iter()
+            .map(|&code| code as i64)
+            .collect();
+        return Ok((codes, PyList::new(py, labels)?));
+    }
+    let axes: Vec<Vec<IndexLabel>> = levels
+        .iter()
+        .map(|&level| {
+            let labels = multi.level_labels(level).unwrap_or_default();
+            // get_level_values promotes an integer level with missing labels
+            // to float64; categorical integer labels retain their values.
+            let float_labels = multi.level_categories(level).is_none()
+                && labels.iter().any(IndexLabel::is_missing)
+                && labels.iter().all(|label| {
+                    label.is_missing() || matches!(label, IndexLabel::Int64(_))
+                });
+            labels
+                .iter()
+                .map(|label| match label {
+                    IndexLabel::Int64(value) if float_labels => {
+                        IndexLabel::Float64(fp_index::OrderedF64(*value as f64))
+                    }
+                    _ => label.clone(),
+                })
+                .collect()
+        })
+        .collect();
+    let mut positions = HashMap::new();
+    let mut labels = Vec::new();
+    let mut codes = Vec::with_capacity(multi.len());
+    for row in 0..multi.len() {
+        let key: Vec<IndexLabel> = axes.iter().map(|axis| axis[row].clone()).collect();
+        let next = labels.len();
+        let position = *positions.entry(key.clone()).or_insert_with(|| {
+            labels.push(key);
+            next
+        });
+        codes.push(position as i64);
+    }
+    if sort_labels {
+        let unsorted = labels.clone();
+        labels.sort();
+        let sorted: HashMap<&Vec<IndexLabel>, i64> = labels
+            .iter()
+            .enumerate()
+            .map(|(position, label)| (label, position as i64))
+            .collect();
+        for code in &mut codes {
+            *code = sorted[&unsorted[*code as usize]];
+        }
+    }
+    let labels = labels
+        .iter()
+        .map(|labels| {
+            let tuple = labels
+                .iter()
+                .zip(levels)
+                .map(|(label, &level)| level_label_to_py(py, multi, level, label))
+                .collect::<PyResult<Vec<_>>>()?;
+            PyTuple::new(py, tuple)
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok((codes, PyList::new(py, labels)?))
+}
+
+/// Build a SciPy COO matrix from compressed entries. NumPy arrays retain
+/// the sparse subtype and let SciPy validate its supported numeric dtypes.
+fn sparse_coo_matrix<'py>(
+    py: Python<'py>,
+    values: Bound<'py, PyAny>,
+    rows: &[i64],
+    columns: &[i64],
+    shape: (usize, usize),
+) -> PyResult<Bound<'py, PyAny>> {
+    let coordinates = PyTuple::new(
+        py,
+        [
+            int_ndarray(py, rows, "int64")?,
+            int_ndarray(py, columns, "int64")?,
+        ],
+    )?;
+    let entries = PyTuple::new(py, [values, coordinates.into_any()])?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("shape", shape)?;
+    py.import("scipy.sparse")?
+        .getattr("coo_matrix")?
+        .call((entries,), Some(&kwargs))
+}
+
 #[pymethods]
 impl PySparseAccessor {
     #[getter]
-    fn density(&self) -> f64 {
-        1.0
+    fn density(&self) -> PyResult<f64> {
+        if let Some(ref series) = self.series {
+            if series.is_empty() {
+                return Err(PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>(
+                    "division by zero",
+                ));
+            }
+            return Ok(series.sparse().expect("sparse accessor validated").density());
+        }
+        let frame = self.df.as_ref().expect("sparse accessor has an owner");
+        if frame.num_columns() == 0 {
+            return Ok(f64::NAN);
+        }
+        if frame.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>(
+                "division by zero",
+            ));
+        }
+        Ok(frame.sparse().density())
     }
 
     #[getter]
-    fn npoints(&self) -> usize {
-        if let Some(ref s) = self.series {
-            s.len()
-        } else if let Some(ref d) = self.df {
-            d.len() * d.num_columns()
-        } else {
-            0
+    fn npoints(&self) -> PyResult<usize> {
+        self.series
+            .as_ref()
+            .map(|series| series.sparse().expect("sparse accessor validated").npoints())
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                    "'SparseFrameAccessor' object has no attribute 'npoints'",
+                )
+            })
+    }
+
+    #[getter]
+    fn fill_value(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let series = self.series.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                "'SparseFrameAccessor' object has no attribute 'fill_value'",
+            )
+        })?;
+        PySparseDtype {
+            inner: series.column().sparse().expect("sparse accessor validated").sparse_dtype().clone(),
+        }.fill_value(py)
+    }
+
+    #[getter]
+    fn sp_values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let series = self.series.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
+                "'SparseFrameAccessor' object has no attribute 'sp_values'",
+            )
+        })?;
+        let sparse = series.column().sparse().expect("sparse accessor validated");
+        sparse_stored_ndarray(py, sparse)
+    }
+
+    /// Export compressed values directly to SciPy. A frame uses its row
+    /// and column positions; a Series partitions its actual MultiIndex.
+    #[pyo3(signature = (*args, **kwargs))]
+    fn to_coo(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        if let Some(frame) = &self.df {
+            if !args.is_empty() || kwargs.is_some_and(|kwargs| !kwargs.is_empty()) {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "SparseFrameAccessor.to_coo() takes no arguments",
+                ));
+            }
+            if frame.num_columns() == 0 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "no types given",
+                ));
+            }
+            let mut values = Vec::with_capacity(frame.num_columns());
+            let mut rows = Vec::new();
+            let mut columns = Vec::new();
+            for (position, column) in frame.columns().ordered_columns().enumerate() {
+                let sparse = column.sparse().expect("sparse accessor validated");
+                let zero_fill = match sparse.fill_value() {
+                    Scalar::Int64(0) | Scalar::Bool(false) => true,
+                    Scalar::Float64(value) => *value == 0.0,
+                    _ => false,
+                };
+                if !zero_fill {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "fill value must be 0 when converting to COO matrix",
+                    ));
+                }
+                values.push(sparse_stored_ndarray(py, sparse)?);
+                rows.extend(sparse.indices().iter().map(|&row| row as i64));
+                columns.extend(std::iter::repeat_n(position as i64, sparse.npoints()));
+            }
+            let values = py
+                .import("numpy")?
+                .call_method1("concatenate", (PyList::new(py, values)?,))?;
+            return sparse_coo_matrix(
+                py,
+                values,
+                &rows,
+                &columns,
+                (frame.len(), frame.num_columns()),
+            )
+            .map(Bound::unbind);
         }
+        let series = self.series.as_ref().expect("sparse accessor has an owner");
+        let multi = series
+            .index()
+            .row_multiindex()
+            .filter(|multi| multi.nlevels() >= 2)
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "to_coo requires MultiIndex with nlevels >= 2.",
+                )
+            })?;
+        if !multi.is_unique() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Duplicate index entries are not allowed in to_coo transformation.",
+            ));
+        }
+        let names = ["row_levels", "column_levels", "sort_labels"];
+        if args.len() > names.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "SparseAccessor.to_coo() takes at most 3 arguments",
+            ));
+        }
+        let mut options: [Option<Bound<'_, PyAny>>; 3] = [None, None, None];
+        for (position, value) in args.iter().enumerate() {
+            options[position] = Some(value);
+        }
+        if let Some(kwargs) = kwargs {
+            for (key, value) in kwargs.iter() {
+                let name = key.extract::<String>()?;
+                let position = names
+                    .iter()
+                    .position(|candidate| *candidate == name)
+                    .ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                            "SparseAccessor.to_coo() got an unexpected keyword argument '{name}'",
+                        ))
+                    })?;
+                if options[position].is_some() {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                        "SparseAccessor.to_coo() got multiple values for argument '{name}'",
+                    )));
+                }
+                options[position] = Some(value);
+            }
+        }
+        let row_levels = options[0]
+            .as_ref()
+            .map_or_else(|| Ok(vec![0]), |levels| sparse_coo_levels(multi, levels))?;
+        let column_levels = options[1]
+            .as_ref()
+            .map_or_else(|| Ok(vec![1]), |levels| sparse_coo_levels(multi, levels))?;
+        let sort_labels = options[2]
+            .as_ref()
+            .map_or(Ok(false), |value| value.is_truthy())?;
+        if row_levels.iter().any(|level| column_levels.contains(level)) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Is not a partition because intersection is not null.",
+            ));
+        }
+        if (0..multi.nlevels())
+            .any(|level| !row_levels.contains(&level) && !column_levels.contains(&level))
+        {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Is not a partition because union is not the whole.",
+            ));
+        }
+        let (row_codes, row_labels) = sparse_coo_axis(py, multi, &row_levels, sort_labels)?;
+        let (column_codes, column_labels) = sparse_coo_axis(py, multi, &column_levels, sort_labels)?;
+        let sparse = series.column().sparse().expect("sparse accessor validated");
+        let selected: Vec<i64> = sparse
+            .stored_values()
+            .iter()
+            .enumerate()
+            .filter_map(|(position, value)| (!value.is_missing()).then_some(position as i64))
+            .collect();
+        let rows: Vec<i64> = selected
+            .iter()
+            .map(|&position| row_codes[sparse.indices()[position as usize]])
+            .collect();
+        let columns: Vec<i64> = selected
+            .iter()
+            .map(|&position| column_codes[sparse.indices()[position as usize]])
+            .collect();
+        let values = sparse_stored_ndarray(py, sparse)?
+            .call_method1("take", (int_ndarray(py, &selected, "int64")?,))?;
+        let matrix = sparse_coo_matrix(
+            py,
+            values,
+            &rows,
+            &columns,
+            (row_labels.len(), column_labels.len()),
+        )?;
+        PyTuple::new(py, [matrix, row_labels.into_any(), column_labels.into_any()])
+            .map(|result| result.into_any().unbind())
+    }
+
+    fn to_dense(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(ref series) = self.series {
+            return PySeries {
+                inner: series
+                    .sparse()
+                    .expect("sparse accessor validated")
+                    .to_dense()
+                    .map_err(frame_error_to_py)?,
+            }
+            .into_py_any(py);
+        }
+        PyDataFrame {
+            inner: self
+                .df
+                .as_ref()
+                .expect("sparse accessor has an owner")
+                .sparse()
+                .to_dense()
+                .map_err(frame_error_to_py)?,
+        }
+        .into_py_any(py)
     }
 }
 
@@ -88435,6 +89214,172 @@ fn py_width_arg(obj: &Bound<'_, PyAny>) -> Option<(NumericWidth, bool)> {
         .and_then(|name| NumericWidth::parse(&name))
 }
 
+/// Whether an argument names a sparse dtype. Parsing its subtype and fill
+/// belongs to `sparse_dtype_arg`, rather than the payload-free DType::Sparse.
+fn is_sparse_dtype_arg(spec: &Bound<'_, PyAny>) -> bool {
+    spec.is_instance_of::<PySparseDtype>()
+        || dtype_arg_text(spec)
+            .is_ok_and(|name| name == "Sparse" || name.starts_with("Sparse["))
+}
+
+fn sparse_fill_numpy_dtype(fill: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    let numpy = fill.py().import("numpy")?;
+    if fill.is_instance(&numpy.getattr("generic")?)? {
+        return fill.getattr("dtype")?.getattr("name")?.extract().map(Some);
+    }
+    Ok(None)
+}
+
+/// A sparse descriptor from a numpy subtype and an optional fill value.
+/// The fill is deliberately not cast to the subtype: pandas keeps the
+/// integer 0 in Sparse[float64, 0], and casts only the stored values.
+fn sparse_dtype_from_parts(
+    py: Python<'_>,
+    subtype: Option<&Bound<'_, PyAny>>,
+    fill_value: Option<&Bound<'_, PyAny>>,
+) -> PyResult<SparseDType> {
+    if let Some(subtype) = subtype
+        && let Ok(existing) = subtype.extract::<PyRef<'_, PySparseDtype>>()
+    {
+        let mut dtype = existing.inner.clone();
+        if let Some(fill) = fill_value.filter(|fill| !fill.is_none()) {
+            if !is_scalar_impl(fill) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "fill_value must be a scalar. Got {} instead", fill.str()?
+                )));
+            }
+            dtype.fill_value = py_to_cell(py, fill)?;
+            dtype.fill_numpy_dtype = sparse_fill_numpy_dtype(fill)?;
+        }
+        return Ok(dtype);
+    }
+    let numpy = py.import("numpy")?;
+    let default = pyo3::types::PyString::new(py, "float64").into_any();
+    let subtype = numpy
+        .call_method1("dtype", (subtype.filter(|value| !value.is_none()).unwrap_or(&default),))
+        .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "SparseDtype subtype must be a numpy dtype",
+        ))?;
+    let kind: String = subtype.getattr("kind")?.extract()?;
+    let name: String = if matches!(kind.as_str(), "S" | "U") {
+        "object".to_owned()
+    } else {
+        subtype.getattr("name")?.extract()?
+    };
+    let width = NumericWidth::parse(&name).map(|(width, _)| width);
+    let value_dtype = match width {
+        Some(width) => width.storage(false),
+        None => parse_dtype(&name)?,
+    };
+    let fill_numpy_dtype = fill_value.filter(|fill| !fill.is_none())
+        .map(sparse_fill_numpy_dtype).transpose()?.flatten();
+    let fill_value = match fill_value.filter(|fill| !fill.is_none()) {
+        Some(fill) => {
+            if !is_scalar_impl(fill) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "fill_value must be a scalar. Got {} instead", fill.str()?
+                )));
+            }
+            py_to_cell(py, fill)?
+        }
+        None => match value_dtype {
+            DType::Int64 => Scalar::Int64(0),
+            DType::Bool => Scalar::Bool(false),
+            DType::Datetime64 { .. } => Scalar::Datetime64(Timestamp::NAT),
+            DType::Timedelta64 => Scalar::Timedelta64(Timedelta::NAT),
+            _ => Scalar::Float64(f64::NAN),
+        },
+    };
+    Ok(SparseDType { value_dtype, fill_value, width, fill_numpy_dtype })
+}
+
+/// Parse sparse strings and dtype objects without losing their metadata.
+/// pandas accepts a string's explicit fill only when it is the subtype's
+/// default; custom fills are represented by SparseDtype objects.
+fn sparse_dtype_arg(spec: &Bound<'_, PyAny>) -> PyResult<Option<SparseDType>> {
+    if let Ok(dtype) = spec.extract::<PyRef<'_, PySparseDtype>>() {
+        return Ok(Some(dtype.inner.clone()));
+    }
+    // Accept a pandas SparseDtype supplied by a caller, without importing
+    // pandas or asking it to perform any production operation.
+    if spec.get_type().name().is_ok_and(|name| name == "SparseDtype")
+        && let (Ok(subtype), Ok(fill)) = (spec.getattr("subtype"), spec.getattr("fill_value"))
+    {
+        return sparse_dtype_from_parts(spec.py(), Some(&subtype), Some(&fill)).map(Some);
+    }
+    let Ok(name) = spec.extract::<String>() else {
+        return Ok(None);
+    };
+    if name == "Sparse" {
+        return sparse_dtype_from_parts(spec.py(), None, None).map(Some);
+    }
+    if !name.starts_with("Sparse[") {
+        return Ok(None);
+    }
+    let invalid = || PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        "data type '{name}' not understood"
+    ));
+    let parts = name.strip_prefix("Sparse[")
+        .and_then(|rest| rest.strip_suffix(']')).ok_or_else(invalid)?;
+    let mut parts = parts.split(',');
+    let subtype = parts.next().unwrap_or_default().trim();
+    if subtype.is_empty() {
+        return Err(invalid());
+    }
+    let subtype = pyo3::types::PyString::new(spec.py(), subtype).into_any();
+    let dtype = sparse_dtype_from_parts(spec.py(), Some(&subtype), None)?;
+    if let Some(fill) = parts.next() {
+        let expected = scalar_to_py(spec.py(), &dtype.fill_value)?
+            .bind(spec.py()).str()?.to_string();
+        if fill.trim() != expected || parts.next().is_some() {
+            return Err(invalid());
+        }
+    }
+    Ok(Some(dtype))
+}
+
+/// Cast stored sparse values while retaining their positions. Changing a
+/// sparse fill changes the implicit cells, as pandas' sparse astype does.
+fn sparse_column_with_dtype(column: &Column, dtype: SparseDType) -> PyResult<Column> {
+    if dtype.value_dtype == DType::Int64 {
+        let invalid = |value: &Scalar| {
+            value.is_missing() || matches!(value, Scalar::Float64(value) if !value.is_finite())
+        };
+        let has_invalid = match column.sparse() {
+            Some(sparse) => sparse.stored_values().iter().any(invalid),
+            None => column.values().iter().any(|value| {
+                invalid(value)
+                    && !((value.is_missing() && dtype.fill_value.is_missing())
+                        || value.semantic_eq(&dtype.fill_value))
+            }),
+        };
+        if has_invalid {
+            return Err(IntCastingNaNError::new_err(
+                "Cannot convert non-finite values (NA or inf) to integer",
+            ));
+        }
+    }
+    let sparse = match column.sparse() {
+        Some(source) => SparseColumn::from_parts(
+            dtype,
+            source.len(),
+            source.indices().to_vec(),
+            source.stored_values().to_vec(),
+        ),
+        None => SparseColumn::from_dense_column(dtype, column),
+    }.map_err(column_error_to_py)?;
+    Ok(Column::from_sparse(sparse))
+}
+
+fn sparse_column_from_dtype(
+    column: &Column,
+    spec: &Bound<'_, PyAny>,
+) -> PyResult<Option<Column>> {
+    sparse_dtype_arg(spec)?
+        .map(|dtype| sparse_column_with_dtype(column, dtype))
+        .transpose()
+}
+
 /// `series` cast to the dtype argument `dtype`: a numpy width narrower
 /// than 64 bits by [`Series::astype_width`] (fvsao.23; it was "data type
 /// 'int32' not understood"), any other dtype by [`Series::astype`]. The
@@ -88444,6 +89389,9 @@ fn series_astype_arg(
     series: &Series,
     dtype: &Bound<'_, PyAny>,
 ) -> PyResult<Result<Series, fp_frame::FrameError>> {
+    if let Some(column) = sparse_column_from_dtype(series.column(), dtype)? {
+        return Ok(Series::new(series.name(), series.index().clone(), column));
+    }
     if let Some((width, nullable)) = py_width_arg(dtype) {
         return Ok(series.astype_width(width, nullable));
     }
@@ -95886,6 +96834,9 @@ fn api_union_categoricals(
 #[pyfunction(name = "pandas_dtype")]
 fn api_pandas_dtype<'py>(dtype: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     let py = dtype.py();
+    if let Some(inner) = sparse_dtype_arg(dtype)? {
+        return PySparseDtype { inner }.into_bound_py_any(py);
+    }
     let module = py.import("frankenpandas")?;
     let numpy_dtype = |spec: &Bound<'py, PyAny>| py.import("numpy")?.call_method1("dtype", (spec,));
     if dtype.is_none() {
@@ -95933,11 +96884,6 @@ fn api_pandas_dtype<'py>(dtype: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny
         let subtype = parts.first().copied();
         let closed = parts.get(1).copied();
         return module.getattr("IntervalDtype")?.call1((subtype, closed));
-    }
-    if let Some(parts) = bracketed("Sparse[") {
-        return module
-            .getattr("SparseDtype")?
-            .call1((parts.first().copied(),));
     }
     numpy_dtype(dtype)
 }
@@ -96244,6 +97190,37 @@ impl DummyCells {
             other => return Err(not_implemented(&format!("get_dummies with dtype={other}"))),
         })
     }
+
+    fn sparse_dtype(self) -> PyResult<(fp_types::SparseDType, Scalar)> {
+        let (value_dtype, fill_value, one, width) = match self {
+            Self::Bool => (DType::Bool, Scalar::Bool(false), Scalar::Bool(true), None),
+            Self::Int(false) => (DType::Int64, Scalar::Int64(0), Scalar::Int64(1), None),
+            Self::Float(false) => (
+                DType::Float64,
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                None,
+            ),
+            Self::Narrow(width, false) if width.is_float() => (
+                DType::Float64,
+                Scalar::Float64(0.0),
+                Scalar::Float64(1.0),
+                Some(width),
+            ),
+            Self::Narrow(width, false) => (
+                DType::Int64,
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Some(width),
+            ),
+            // pandas' sparse indicators require a numpy subtype, including
+            // when a string extension column picks BooleanDtype by default.
+            _ => return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Cannot interpret extension dtype as a data type",
+            )),
+        };
+        Ok((fp_types::SparseDType { value_dtype, fill_value, width, fill_numpy_dtype: None }, one))
+    }
 }
 
 /// get_dummies of one column, as pandas' `_get_dummies_1d`: its levels - a
@@ -96264,6 +97241,7 @@ fn dummy_levels(
     dummy_na: bool,
     drop_first: bool,
     cells: Option<DummyCells>,
+    sparse: bool,
 ) -> PyResult<Vec<(IndexLabel, Column)>> {
     const MISSING: u32 = u32::MAX;
     if column.len() >= MISSING as usize {
@@ -96392,6 +97370,31 @@ fn dummy_levels(
     } else {
         DummyCells::Bool
     });
+    if sparse {
+        let (dtype, one) = cells.sparse_dtype()?;
+        // Scatter positions directly into compressed columns. Constructing
+        // every dense indicator first would allocate rows * levels cells,
+        // defeating the purpose of sparse one-hot encoding.
+        let mut positions = vec![Vec::new(); count - first];
+        for (row, &code) in codes.iter().enumerate() {
+            if let Some(points) = (code as usize)
+                .checked_sub(first)
+                .and_then(|at| positions.get_mut(at))
+            {
+                points.push(row);
+            }
+        }
+        let columns = positions
+            .into_iter()
+            .map(|points| {
+                let values = vec![one.clone(); points.len()];
+                fp_columnar::SparseColumn::from_parts(dtype.clone(), codes.len(), points, values)
+                    .map(Column::from_sparse)
+                    .map_err(column_error_to_py)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        return Ok(labels.into_iter().skip(first).zip(columns).collect());
+    }
     let ints = || {
         scatter_dummies(&codes, first, count, 0_i64, 1)
             .into_iter()
@@ -96494,7 +97497,7 @@ fn frame_of_labelled_columns(
 
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (data, prefix=None, prefix_sep="_", dummy_na=false, columns=None, drop_first=false, dtype=None))]
+#[pyo3(signature = (data, prefix=None, prefix_sep="_", dummy_na=false, columns=None, sparse=false, drop_first=false, dtype=None))]
 fn get_dummies(
     py: Python<'_>,
     data: &Bound<'_, PyAny>,
@@ -96502,9 +97505,13 @@ fn get_dummies(
     prefix_sep: &str,
     dummy_na: bool,
     columns: Option<&Bound<'_, PyAny>>,
+    sparse: bool,
     drop_first: bool,
     dtype: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyDataFrame> {
+    if sparse && let Some(dtype) = dtype.filter(|dtype| !dtype.is_none()) {
+        py.import("numpy")?.call_method1("dtype", (dtype,))?;
+    }
     // A type (dtype=int, float, bool) as well as its name; a type raised
     // TypeError.
     let dtype = dtype
@@ -96520,10 +97527,26 @@ fn get_dummies(
             .transpose()?;
         // pandas encodes the object, string and category columns (a bool
         // column was encoded too; br-frankenpandas-jjoxr).
-        let target_cols: Vec<String> = columns.unwrap_or_else(|| {
-            df.inner
-                .column_names()
-                .into_iter()
+        let source_names = df.inner.column_names();
+        let target_positions: Vec<usize> = if let Some(columns) = columns {
+            let mut positions = Vec::new();
+            for name in columns {
+                let start = positions.len();
+                positions.extend(
+                    source_names
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, source)| source.as_str() == name.as_str())
+                        .map(|(position, _)| position),
+                );
+                if positions.len() == start {
+                    return Err(PyErr::new::<pyo3::exceptions::PyKeyError, _>(name));
+                }
+            }
+            positions
+        } else {
+            source_names
+                .iter()
                 .enumerate()
                 .filter(|(at, _)| {
                     df.inner.column_at(*at).is_some_and(|column| {
@@ -96534,20 +97557,20 @@ fn get_dummies(
                             )
                     })
                 })
-                .map(|(_, name)| name.clone())
+                .map(|(at, _)| at)
                 .collect()
-        });
+        };
         // pandas' prefix for a frame: one string for every column, a list by
         // position, a dict by column (it was ignored; fvsao.30), either as
         // long as the columns encoded (br-frankenpandas-jjoxr).
         if let Some(prefix) =
             prefix.filter(|prefix| !prefix.is_instance_of::<pyo3::types::PyString>())
             && let Ok(given) = prefix.len()
-            && given != target_cols.len()
+            && given != target_positions.len()
         {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Length of 'prefix' ({given}) did not match the length of the columns being encoded ({}).",
-                target_cols.len()
+                target_positions.len()
             )));
         }
         let prefix_of = |position: usize, column: &str| -> PyResult<String> {
@@ -96564,17 +97587,18 @@ fn get_dummies(
         };
         // The other columns first, then each encoded column's indicators,
         // as pandas.
-        let targets: HashSet<&String> = target_cols.iter().collect();
+        let targets: HashSet<usize> = target_positions.iter().copied().collect();
         let mut out: Vec<(IndexLabel, Column)> = Vec::new();
-        for (at, name) in df.inner.column_names().into_iter().enumerate() {
-            if let Some(column) = df.inner.column_at(at).filter(|_| !targets.contains(name)) {
+        for (at, name) in source_names.iter().enumerate() {
+            if let Some(column) = df.inner.column_at(at).filter(|_| !targets.contains(&at)) {
                 out.push((df.inner.column_label(name), column.clone()));
             }
         }
-        for (position, name) in target_cols.iter().enumerate() {
+        for (position, &source_position) in target_positions.iter().enumerate() {
+            let name = source_names[source_position];
             let label = prefix_of(position, name)?;
-            if let Some(column) = df.inner.column(name) {
-                for (level, indicator) in dummy_levels(column, dummy_na, drop_first, dtype)? {
+            if let Some(column) = df.inner.column_at(source_position) {
+                for (level, indicator) in dummy_levels(column, dummy_na, drop_first, dtype, sparse)? {
                     let text = dummy_level_text(py, &level)?;
                     out.push((
                         IndexLabel::Utf8(format!("{label}{prefix_sep}{text}")),
@@ -96598,7 +97622,7 @@ fn get_dummies(
         ));
     }
     let mut out = Vec::new();
-    for (level, indicator) in dummy_levels(s.inner.column(), dummy_na, drop_first, dtype)? {
+    for (level, indicator) in dummy_levels(s.inner.column(), dummy_na, drop_first, dtype, sparse)? {
         let label = match &prefix {
             Some(prefix) => IndexLabel::Utf8(format!(
                 "{prefix}{prefix_sep}{}",
@@ -97759,37 +98783,24 @@ impl PyIntervalDtype {
 }
 
 #[pyclass(name = "SparseDtype", from_py_object)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct PySparseDtype {
-    #[pyo3(get)]
-    pub dtype: String,
-    #[pyo3(get)]
-    pub fill_value: String,
+    inner: SparseDType,
 }
 
 #[pymethods]
 impl PySparseDtype {
     #[new]
-    #[pyo3(signature = (dtype="float64", fill_value=None))]
-    fn new(dtype: Option<&str>, fill_value: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        let fv_str = match fill_value {
-            Some(v) => {
-                if v.is_none() {
-                    "nan".to_string()
-                } else {
-                    v.str()?.to_str()?.to_string()
-                }
-            }
-            None => "nan".to_string(),
-        };
-        Ok(Self {
-            dtype: dtype.unwrap_or("float64").to_string(),
-            fill_value: fv_str,
-        })
+    #[pyo3(signature = (dtype=None, fill_value=None))]
+    fn new(
+        py: Python<'_>,
+        dtype: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
+        sparse_dtype_from_parts(py, dtype, fill_value).map(|inner| Self { inner })
     }
 
-    /// Pickles (and deep-copies) as `SparseDtype(dtype, fill_value)`, the
-    /// fill value as the text it keeps ([`restore`]; fvsao.58).
+    /// A typed fill survives pickling instead of becoming the text "0".
     fn __reduce__<'py>(
         &self,
         py: Python<'py>,
@@ -97797,8 +98808,8 @@ impl PySparseDtype {
         let payload = constructor_payload(
             py,
             vec![
-                self.dtype.as_str().into_bound_py_any(py)?,
-                self.fill_value.as_str().into_bound_py_any(py)?,
+                self.subtype(py)?,
+                self.fill_value(py)?.into_bound(py),
             ],
             &[],
         )?;
@@ -97806,31 +98817,106 @@ impl PySparseDtype {
     }
 
     #[getter]
-    fn name(&self) -> String {
-        format!("Sparse[{}, {}]", self.dtype, self.fill_value)
+    fn name(&self, py: Python<'_>) -> PyResult<String> {
+        if self.inner.fill_numpy_dtype.is_some() {
+            return Ok(format!("Sparse[{}, {}]", self.subtype(py)?.str()?, self.fill_value(py)?.bind(py).repr()?));
+        }
+        Ok(self.inner.pandas_name())
+    }
+
+    #[getter]
+    fn subtype<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let name = self.inner.width.map_or_else(
+            || pandas_dtype_name(&self.inner.value_dtype),
+            |width| width.name(false).to_owned(),
+        );
+        py.import("numpy")?.call_method1("dtype", (name,))
+    }
+
+    #[getter]
+    fn fill_value(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(name) = &self.inner.fill_numpy_dtype {
+            let scalar = match (&self.inner.fill_value, name.as_str()) {
+                (Scalar::Int64(value), "uint64") => (*value as u64).into_py_any(py)?,
+                (value, _) => scalar_to_py(py, value)?,
+            };
+            return Ok(py.import("numpy")?.call_method1("dtype", (name,))?
+                .getattr("type")?.call1((scalar,))?.unbind());
+        }
+        match &self.inner.fill_value {
+            Scalar::Datetime64(value) if *value == Timestamp::NAT => Ok(py
+                .import("numpy")?.getattr("datetime64")?.call1(("NaT", "ns"))?.unbind()),
+            Scalar::Timedelta64(value) if *value == Timedelta::NAT => Ok(py
+                .import("numpy")?.getattr("timedelta64")?.call1(("NaT", "ns"))?.unbind()),
+            value => scalar_to_py(py, value),
+        }
     }
 
     #[getter]
     fn kind(&self) -> &'static str {
-        "f"
-    }
-
-    fn __repr__(&self) -> String {
-        self.name()
-    }
-
-    fn __str__(&self) -> String {
-        self.name()
-    }
-
-    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
-        if let Ok(other_dt) = other.extract::<Self>() {
-            return *self == other_dt;
+        match self.inner.value_dtype {
+            DType::Int64 if self.inner.width.is_some_and(|width| width.name(false).starts_with('u')) => "u",
+            DType::Int64 => "i",
+            DType::Float64 => "f",
+            DType::Bool => "b",
+            DType::Datetime64 { .. } => "M",
+            DType::Timedelta64 => "m",
+            _ => "O",
         }
-        if let Ok(s) = other.extract::<String>() {
-            return s == self.name() || s == "Sparse";
+    }
+
+    #[getter]
+    fn r#type<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.subtype(py)?.getattr("type")
+    }
+
+    #[getter]
+    fn na_value(&self) -> f64 {
+        f64::NAN
+    }
+
+    #[classmethod]
+    fn construct_from_string(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        string: &Bound<'_, PyAny>,
+    ) -> PyResult<Self> {
+        sparse_dtype_arg(string)?.map(|inner| Self { inner }).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Cannot construct a 'SparseDtype' from the given string",
+            )
+        })
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        self.name(py)
+    }
+
+    fn __str__(&self, py: Python<'_>) -> PyResult<String> {
+        self.name(py)
+    }
+
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let Ok(Some(other_dtype)) = sparse_dtype_arg(other) else {
+            return Ok(false);
+        };
+        if self.inner.value_dtype != other_dtype.value_dtype || self.inner.width != other_dtype.width {
+            return Ok(false);
         }
-        false
+        if self.inner.fill_value.is_missing() && other_dtype.fill_value.is_missing() {
+            return Ok(true);
+        }
+        let py = other.py();
+        scalar_to_py(py, &self.inner.fill_value)?.bind(py)
+            .eq(scalar_to_py(py, &other_dtype.fill_value)?.bind(py))
+    }
+
+    fn __hash__(&self, py: Python<'_>) -> PyResult<isize> {
+        let fill = if self.inner.fill_value.is_missing() {
+            "sparse-missing-fill".into_py_any(py)?
+        } else {
+            scalar_to_py(py, &self.inner.fill_value)?
+        };
+        PyTuple::new(py, [self.subtype(py)?, fill.into_bound(py)])?.hash()
     }
 }
 
@@ -100304,6 +101390,7 @@ enum ArrayKind {
     Timedelta,
     Period,
     Interval,
+    Sparse,
     Numpy,
 }
 
@@ -100318,6 +101405,7 @@ impl ArrayKind {
             DType::Timedelta64 => Self::Timedelta,
             DType::Period => Self::Period,
             DType::Interval => Self::Interval,
+            DType::Sparse => Self::Sparse,
             _ => Self::Numpy,
         }
     }
@@ -100327,7 +101415,7 @@ impl ArrayKind {
     const fn is_values_array(self) -> bool {
         matches!(
             self,
-            Self::Integer | Self::Floating | Self::Boolean | Self::String
+            Self::Integer | Self::Floating | Self::Boolean | Self::String | Self::Sparse
         )
     }
 
@@ -100345,7 +101433,7 @@ impl ArrayKind {
                 item.is_instance_of::<PyNAType>()
             }
             Self::Datetime | Self::Timedelta | Self::Period => item.is_instance_of::<PyNaTType>(),
-            Self::Interval | Self::Numpy => {
+            Self::Interval | Self::Sparse | Self::Numpy => {
                 item.is_instance_of::<pyo3::types::PyFloat>()
                     && item.extract::<f64>().is_ok_and(f64::is_nan)
             }
@@ -100381,6 +101469,198 @@ define_extension_array!(PyTimedeltaArray, "TimedeltaArray");
 define_extension_array!(PyPeriodArray, "PeriodArray");
 define_extension_array!(PyIntervalArray, "IntervalArray");
 define_extension_array!(PyNumpyExtensionArray, "NumpyExtensionArray");
+
+/// Sparse arrays share extension-array arithmetic, slicing and conversion.
+#[pyclass(name = "SparseArray", extends = PyExtensionArray)]
+pub struct PySparseArray;
+
+#[pymethods]
+impl PySparseArray {
+    #[new]
+    #[pyo3(signature = (data, sparse_index=None, fill_value=None, kind="integer", dtype=None, copy=false))]
+    fn new(
+        py: Python<'_>,
+        data: &Bound<'_, PyAny>,
+        sparse_index: Option<&Bound<'_, PyAny>>,
+        fill_value: Option<&Bound<'_, PyAny>>,
+        kind: &str,
+        dtype: Option<&Bound<'_, PyAny>>,
+        copy: bool,
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        let _ = copy; // immutable shared storage isolates subsequent mutations
+        if kind != "integer" {
+            return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+                "SparseArray currently supports kind='integer'",
+            ));
+        }
+        let dtype = dtype.filter(|dtype| !dtype.is_none());
+        let source = if dtype.is_some()
+            && (data.is_instance_of::<PyList>() || data.is_instance_of::<PyTuple>())
+        {
+            // Keep exact cells until sparse selection precedes the cast.
+            let values = data.try_iter()?.map(|value| py_to_cell(py, &value?))
+                .collect::<PyResult<Vec<_>>>()?;
+            Column::from_object_values(values)
+        } else {
+            PySeries::new(py, Some(data), None, None, None, None)?.inner.column().clone()
+        };
+        let mut descriptor = match dtype {
+            Some(spec) => match sparse_dtype_arg(spec)? {
+                Some(descriptor) => descriptor,
+                None => sparse_dtype_from_parts(py, Some(spec), None)?,
+            },
+            None => match source.sparse() {
+                Some(sparse) => sparse.sparse_dtype().clone(),
+                None => {
+                    let name = if source.is_empty() && source.dtype() == DType::Null {
+                        "float64".to_owned()
+                    } else {
+                        column_pandas_dtype_name(&source)
+                    };
+                    let subtype = pyo3::types::PyString::new(py, &name).into_any();
+                    sparse_dtype_from_parts(py, Some(&subtype), None)?
+                }
+            },
+        };
+        if let Some(fill) = fill_value.filter(|fill| !fill.is_none()) {
+            if !is_scalar_impl(fill) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "fill_value must be a scalar. Got {} instead", fill.str()?
+                )));
+            }
+            descriptor.fill_value = py_to_cell(py, fill)?;
+            descriptor.fill_numpy_dtype = sparse_fill_numpy_dtype(fill)?;
+        }
+        let column = match sparse_index.filter(|index| !index.is_none()) {
+            Some(index) => {
+                let index = index.call_method0("to_int_index")?;
+                let len: usize = index.getattr("length")?.extract()?;
+                let positions = index.getattr("indices")?.try_iter()?
+                    .map(|position| position?.extract::<usize>())
+                    .collect::<PyResult<Vec<_>>>()?;
+                if descriptor.value_dtype == DType::Int64 && source.values().iter().any(|value| {
+                    value.is_missing() || matches!(value, Scalar::Float64(value) if !value.is_finite())
+                }) {
+                    return Err(IntCastingNaNError::new_err(
+                        "Cannot convert non-finite values (NA or inf) to integer",
+                    ));
+                }
+                Column::from_sparse(SparseColumn::from_parts(
+                    descriptor, len, positions, source.values().to_vec(),
+                ).map_err(column_error_to_py)?)
+            }
+            None => sparse_column_with_dtype(&source, descriptor)?,
+        };
+        let inner = Series::new(LabelName::default(), Index::default_range(column.len()), column)
+            .map_err(frame_error_to_py)?;
+        Ok(pyo3::PyClassInitializer::from(PyExtensionArray { inner }).add_subclass(Self))
+    }
+
+    #[getter]
+    fn fill_value(slf: PyRef<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let array: &PyExtensionArray = slf.as_ref();
+        PySparseDtype {
+            inner: array.inner.column().sparse().expect("sparse array backing").sparse_dtype().clone(),
+        }.fill_value(py)
+    }
+
+    #[getter]
+    fn npoints(slf: PyRef<'_, Self>) -> usize {
+        let array: &PyExtensionArray = slf.as_ref();
+        array.inner.column().sparse().expect("sparse array backing").npoints()
+    }
+
+    #[getter]
+    fn density(slf: PyRef<'_, Self>) -> PyResult<f64> {
+        let array: &PyExtensionArray = slf.as_ref();
+        let sparse = array.inner.column().sparse().expect("sparse array backing");
+        if sparse.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>("division by zero"));
+        }
+        Ok(sparse.npoints() as f64 / sparse.len() as f64)
+    }
+
+    #[getter]
+    fn sp_values(slf: PyRef<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let array: &PyExtensionArray = slf.as_ref();
+        sparse_stored_ndarray(py, array.inner.column().sparse().expect("sparse array backing"))
+            .map(Bound::unbind)
+    }
+
+    #[getter]
+    fn sp_index(slf: PyRef<'_, Self>) -> PySparseIndex {
+        let array: &PyExtensionArray = slf.as_ref();
+        let sparse = array.inner.column().sparse().expect("sparse array backing");
+        PySparseIndex { length: sparse.len(), indices: sparse.indices().to_vec() }
+    }
+
+    #[getter]
+    fn kind(&self) -> &'static str {
+        "integer"
+    }
+
+    fn to_dense(slf: PyRef<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let array: &PyExtensionArray = slf.as_ref();
+        sparse_ndarray(py, array.inner.column().sparse().expect("sparse array backing"), true)
+            .map(Bound::unbind)
+    }
+
+    fn __getitem__(slf: PyRef<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let array: &PyExtensionArray = slf.as_ref();
+        if !key.is_instance_of::<pyo3::types::PyBool>() && let Ok(position) = key.extract::<i64>() {
+            let len = i64::try_from(array.inner.len()).unwrap_or(i64::MAX);
+            let resolved = if position < 0 { position + len } else { position };
+            if !(0..len).contains(&resolved) {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                    format!("index {position} is out of bounds for axis 0 with size {len}"),
+                ));
+            }
+            return sparse_element_to_py(py, array.inner.column().sparse().expect("sparse array backing"), resolved as usize);
+        }
+        array.__getitem__(py, key)
+    }
+
+    fn __setitem__(&self, _key: &Bound<'_, PyAny>, _value: &Bound<'_, PyAny>) -> PyResult<()> {
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "SparseArray does not support item assignment via setitem",
+        ))
+    }
+}
+
+/// Integer sparse positions exposed without constructing a dense mask.
+#[pyclass(name = "IntIndex", from_py_object)]
+#[derive(Clone)]
+pub struct PySparseIndex {
+    #[pyo3(get)]
+    length: usize,
+    indices: Vec<usize>,
+}
+
+#[pymethods]
+impl PySparseIndex {
+    #[getter]
+    fn indices(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let values = self.indices.iter().map(|&position| position as i64).collect::<Vec<_>>();
+        i64_ndarray(py, &values, "int64")?.call_method1("astype", ("int32",)).map(Bound::unbind)
+    }
+
+    #[getter]
+    fn npoints(&self) -> usize {
+        self.indices.len()
+    }
+
+    fn to_int_index(&self) -> Self {
+        self.clone()
+    }
+
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(format!("IntIndex\nIndices: {}\n", self.indices(py)?.bind(py).repr()?))
+    }
+}
 
 /// pandas' `DatetimeArray`, which carries its zone.
 #[pyclass(name = "DatetimeArray", extends = PyExtensionArray)]
@@ -100423,6 +101703,7 @@ fn extension_array(py: Python<'_>, column: Column) -> PyResult<Py<PyAny>> {
         ArrayKind::Timedelta => Py::new(py, base.add_subclass(PyTimedeltaArray))?.into_any(),
         ArrayKind::Period => Py::new(py, base.add_subclass(PyPeriodArray))?.into_any(),
         ArrayKind::Interval => Py::new(py, base.add_subclass(PyIntervalArray))?.into_any(),
+        ArrayKind::Sparse => Py::new(py, base.add_subclass(PySparseArray))?.into_any(),
         ArrayKind::Numpy => Py::new(py, base.add_subclass(PyNumpyExtensionArray))?.into_any(),
     })
 }
@@ -100615,7 +101896,7 @@ impl PyExtensionArray {
                     _ => "NaT".to_owned(),
                 },
                 ArrayKind::Interval if missing => "nan".to_owned(),
-                ArrayKind::Interval => element.str()?.to_string(),
+                ArrayKind::Interval | ArrayKind::Sparse => element.str()?.to_string(),
             });
         }
         Ok(items)
@@ -100784,6 +102065,9 @@ impl PyExtensionArray {
     /// kept), an array of this kind.
     fn unique(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let column = self.inner.column();
+        if let Some(sparse) = column.sparse() {
+            return extension_array(py, sparse_unique_column(sparse)?);
+        }
         let distinct = Column::new(column.dtype(), self.inner.unique())
             .map_err(column_error_to_py)?
             .keeping_dtype_of(column);
@@ -100849,6 +102133,33 @@ impl PyExtensionArray {
             .collect::<PyResult<_>>()?;
         let column = self.inner.column();
         let len = i64::try_from(column.len()).unwrap_or(i64::MAX);
+        if let Some(sparse) = column.sparse() {
+            let mut selected = Vec::with_capacity(positions.len());
+            for &position in &positions {
+                if allow_fill && position == -1 {
+                    selected.push(None);
+                    continue;
+                }
+                if allow_fill && position < -1 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "Invalid value in 'indices'. Must be between -1 and the length of the array.",
+                    ));
+                }
+                let resolved = if position < 0 { position + len } else { position };
+                if !(0..len).contains(&resolved) {
+                    return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
+                        "out of bounds value in 'indices'.",
+                    ));
+                }
+                selected.push(Some(resolved as usize));
+            }
+            if !allow_fill || positions.is_empty() {
+                let selected = selected.into_iter().flatten().collect::<Vec<_>>();
+                return extension_array(py, column.take_positions(&selected));
+            }
+            let taken = sparse_take_with_fill(py, sparse, &selected, fill_value)?;
+            return extension_array(py, taken);
+        }
         let fill = match fill_value.filter(|fill| !fill.is_none()) {
             Some(fill) => py_to_cell(py, fill)?,
             None => Scalar::missing_for_dtype(column.dtype()),
@@ -110054,6 +111365,7 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPeriodDtype>()?;
     m.add_class::<PyIntervalDtype>()?;
     m.add_class::<PySparseDtype>()?;
+    m.add_class::<PySparseArray>()?;
     m.add_class::<PyArrowDtype>()?;
     m.add_class::<PyIndexSlice>()?;
     m.add("IndexSlice", PyIndexSlice::new())?;
@@ -110405,7 +111717,7 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // frankenpandas.arrays: the array classes (they were Series / index
     // classes under the arrays' names, so isinstance(series, IntegerArray)
-    // held; the Arrow and Sparse arrays, which do not exist here, went with
+    // held; the Arrow arrays, which do not exist here, went with
     // them; br-frankenpandas-5y62q).
     let arrays = PyModule::new(m.py(), "arrays")?;
     arrays.add("Categorical", m.py().get_type::<PyCategorical>())?;
@@ -110419,6 +111731,7 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<PyNumpyExtensionArray>(),
     )?;
     arrays.add("PeriodArray", m.py().get_type::<PyPeriodArray>())?;
+    arrays.add("SparseArray", m.py().get_type::<PySparseArray>())?;
     arrays.add("StringArray", m.py().get_type::<PyStringArray>())?;
     arrays.add("TimedeltaArray", m.py().get_type::<PyTimedeltaArray>())?;
     m.add_submodule(&arrays)?;

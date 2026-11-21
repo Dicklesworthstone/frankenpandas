@@ -2057,6 +2057,12 @@ pub struct SparseDType {
     pub fill_value: Scalar,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<NumericWidth>,
+    /// Numpy scalar type of the fill, when it is not a Python scalar.
+    /// Kept with the descriptor so arithmetic, snapshots and gathers retain
+    /// the fill's boxing and numpy promotion behavior independently of the
+    /// stored subtype (e.g. float32 values with a numpy.float64 fill).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_numpy_dtype: Option<String>,
 }
 
 impl SparseDType {
@@ -2080,6 +2086,7 @@ impl SparseDType {
             value_dtype,
             fill_value,
             width: None,
+            fill_numpy_dtype: None,
         })
     }
 

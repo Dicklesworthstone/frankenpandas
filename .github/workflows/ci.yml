@@ -862,7 +862,8 @@ jobs:
 
       - name: Run differential pytest suite
         run: |
-          "$FP_PYTHON_BIN" -m pytest crates/fp-python/tests/test_differential_packets.py -v
+          "$FP_PYTHON_BIN" -m pytest crates/fp-python/tests/test_differential_packets.py \
+            crates/fp-python/tests/test_sparse.py -v
 
       # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.5: fails when a
       # binding accepts a pandas parameter and drops it (it prints the

@@ -83470,25 +83470,24 @@ impl<'a> SparseDataFrameView<'a> {
 
     fn total_cells(&self) -> usize {
         self.df
-            .column_order
-            .iter()
-            .map(|name| self.df.columns[name].values().len())
+            .columns()
+            .ordered_columns()
+            .map(Column::len)
             .sum()
     }
 
-    /// Count non-fill values across all columns.
-    ///
-    /// Dense-backed DataFrames do not yet store per-column `SparseDType`
-    /// descriptors, so the default fill value is each column dtype's missing
-    /// marker.
+    /// Count stored sparse values across all columns. Dense columns use their
+    /// dtype's missing marker as the fill value.
     #[must_use]
     pub fn npoints(&self) -> usize {
         self.df
-            .column_order
-            .iter()
-            .map(|name| {
-                let column = &self.df.columns[name];
-                Self::column_npoints_for(column, &Self::default_fill_value(column))
+            .columns()
+            .ordered_columns()
+            .map(|column| {
+                column.sparse().map_or_else(
+                    || Self::column_npoints_for(column, &Self::default_fill_value(column)),
+                    SparseColumn::npoints,
+                )
             })
             .sum()
     }
@@ -83509,7 +83508,10 @@ impl<'a> SparseDataFrameView<'a> {
                 let column = &self.df.columns[name];
                 (
                     name.clone(),
-                    Self::column_npoints_for(column, &Self::default_fill_value(column)),
+                    column.sparse().map_or_else(
+                        || Self::column_npoints_for(column, &Self::default_fill_value(column)),
+                        SparseColumn::npoints,
+                    ),
                 )
             })
             .collect()
@@ -83523,10 +83525,13 @@ impl<'a> SparseDataFrameView<'a> {
             .iter()
             .map(|name| {
                 let column = &self.df.columns[name];
-                let npoints = Self::column_npoints_for(column, &Self::default_fill_value(column));
+                let npoints = column.sparse().map_or_else(
+                    || Self::column_npoints_for(column, &Self::default_fill_value(column)),
+                    SparseColumn::npoints,
+                );
                 (
                     name.clone(),
-                    Self::density_for(npoints, column.values().len()),
+                    Self::density_for(npoints, column.len()),
                 )
             })
             .collect()
@@ -83585,11 +83590,19 @@ impl<'a> SparseDataFrameView<'a> {
 
     /// Materialize the sparse view as a dense DataFrame.
     ///
-    /// Current DataFrame storage is already dense; this returns a clone while
-    /// preserving DataFrame metadata such as duplicate-label policy.
-    #[must_use]
-    pub fn to_dense(&self) -> DataFrame {
-        self.df.clone()
+    /// Expand compressed columns to their declared subtypes while preserving
+    /// both axes, repeated column labels, and the duplicate-label policy.
+    pub fn to_dense(&self) -> Result<DataFrame, FrameError> {
+        let columns = self
+            .df
+            .columns()
+            .ordered_columns()
+            .map(|column| match column.sparse() {
+                Some(sparse) => sparse.to_dense_column(),
+                None => Ok(column.clone()),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self.df.with_columns_at_positions(columns))
     }
 }
 
@@ -96334,8 +96347,8 @@ impl DataFrame {
     /// Sparse accessor for DataFrame density and dense materialization helpers.
     ///
     /// Matches `pd.DataFrame.sparse` as a typed accessor over the current
-    /// DataFrame. The current dense-backed implementation exposes non-fill
-    /// counts, density metrics, caller-provided fill-value variants, and
+    /// DataFrame. The view exposes stored-value counts, density metrics,
+    /// caller-provided fill-value variants, and
     /// [`SparseDataFrameView::to_dense`].
     #[must_use]
     pub fn sparse(&self) -> SparseDataFrameView<'_> {
@@ -171612,6 +171625,7 @@ mod tests {
             value_dtype: DType::Int64,
             fill_value: Scalar::Int64(0),
             width: Some(fp_types::NumericWidth::Int16),
+            fill_numpy_dtype: None,
         };
         let column = fp_columnar::SparseColumn::from_parts(
             dtype,
@@ -224145,9 +224159,58 @@ mod tests {
         );
         assert!((sparse.density_with_fill_value(&Scalar::Int64(0)) - 0.5).abs() < f64::EPSILON);
 
-        let dense = sparse.to_dense();
+        let dense = sparse.to_dense()?;
         assert_eq!(dense, df);
         assert!(!dense.flags().allows_duplicate_labels());
+        Ok(())
+    }
+
+    #[test]
+    fn sparse_dataframe_counts_compressed_points_and_expands_by_position()
+    -> Result<(), FrameError> {
+        let first = Column::from_sparse(SparseColumn::from_parts(
+            SparseDType::new(DType::Int64, Scalar::Int64(0))
+                .map_err(|error| FrameError::CompatibilityRejected(error.to_string()))?,
+            4,
+            vec![1, 3],
+            // Arithmetic can retain an explicitly stored fill value. It is
+            // still a point, even though counting nonzero values loses it.
+            vec![Scalar::Int64(5), Scalar::Int64(0)],
+        )?);
+        let second = Column::from_sparse(SparseColumn::from_dense(
+            SparseDType::new(DType::Float64, Scalar::Float64(7.0))
+                .map_err(|error| FrameError::CompatibilityRejected(error.to_string()))?,
+            vec![
+                Scalar::Float64(7.0),
+                Scalar::Float64(7.0),
+                Scalar::Float64(2.5),
+                Scalar::Float64(7.0),
+            ],
+        )?);
+        let frame = DataFrame::new_with_column_order(
+            Index::default_range(4).rename_index(Some("row")),
+            ColumnStore::from_pairs(vec![("x".to_owned(), first)]),
+            vec!["x".to_owned()],
+        )?
+        .insert_allow_duplicates(1, "x", second, true)?
+        .with_columns_name(Some("feature"));
+
+        assert_eq!(frame.sparse().npoints(), 3);
+        assert_eq!(frame.sparse().density(), 3.0 / 8.0);
+        let dense = frame.sparse().to_dense()?;
+        assert_eq!(dense.column_labels(), frame.column_labels());
+        assert_eq!(dense.index(), frame.index());
+        assert_eq!(dense.columns_name(), frame.columns_name());
+        assert_eq!(dense.column_at(0).unwrap().dtype(), DType::Int64);
+        assert_eq!(dense.column_at(1).unwrap().dtype(), DType::Float64);
+        assert_eq!(dense.column_at(0).unwrap().values(), &[
+            Scalar::Int64(0), Scalar::Int64(5), Scalar::Int64(0), Scalar::Int64(0),
+        ]);
+        assert_eq!(dense.column_at(1).unwrap().values(), &[
+            Scalar::Float64(7.0), Scalar::Float64(7.0), Scalar::Float64(2.5), Scalar::Float64(7.0),
+        ]);
+        assert!(frame.column_at(0).unwrap().sparse().is_some());
+        assert!(dense.column_at(0).unwrap().sparse().is_none());
         Ok(())
     }
 

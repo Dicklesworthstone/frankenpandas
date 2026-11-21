@@ -65,6 +65,10 @@ fn sparse_arithmetic_and_serialization_keep_explicit_fill_entries() {
     let json = serde_json::to_string(&result).unwrap();
     let restored: Series = serde_json::from_str(&json).unwrap();
     assert_eq!(restored.dtype_name(), "Sparse[int64, 0]");
+    assert_eq!(
+        restored.column().sparse().unwrap().sparse_dtype().fill_numpy_dtype.as_deref(),
+        Some("int64")
+    );
     let sparse = restored.sparse().unwrap();
     assert_eq!(sparse.npoints(), 1);
     assert_eq!(sparse.sp_index(), vec![1]);
@@ -78,6 +82,7 @@ fn sparse_scalar_arithmetic_updates_the_fill_and_keeps_numeric_width() {
         value_dtype: DType::Int64,
         fill_value: Scalar::Int64(0),
         width: Some(NumericWidth::Int16),
+        fill_numpy_dtype: None,
     };
     let column = Column::from_sparse(
         SparseColumn::from_parts(
@@ -98,6 +103,10 @@ fn sparse_scalar_arithmetic_updates_the_fill_and_keeps_numeric_width() {
     )
     .unwrap();
     assert_eq!(series.dtype_name(), "Sparse[int16, 2]");
+    assert_eq!(
+        series.column().sparse().unwrap().sparse_dtype().fill_numpy_dtype.as_deref(),
+        Some("int64")
+    );
     let sparse = series.sparse().unwrap();
     assert_eq!(sparse.fill_value(), &Scalar::Int64(2));
     assert_eq!(sparse.sp_index(), vec![1, 3]);
@@ -142,6 +151,7 @@ fn sparse_dense_conversion_reports_an_incompatible_fill_without_panicking() {
                 value_dtype: DType::Int64,
                 fill_value: Scalar::Utf8("missing".into()),
                 width: None,
+                fill_numpy_dtype: None,
             },
             2,
             vec![1],

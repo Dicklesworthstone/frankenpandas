@@ -13893,6 +13893,7 @@ impl SparseColumn {
             value_dtype: result.dtype(),
             fill_value,
             width: result.width(),
+            fill_numpy_dtype: self.dtype.fill_numpy_dtype.clone(),
         };
         Ok(self.with_stored_result(dtype, &result, true))
     }
@@ -22467,6 +22468,10 @@ impl Column {
             };
             let mut dtype = SparseDType::new(out.dtype(), fill.values()[0].clone()).ok()?;
             dtype.width = out.width();
+            dtype.fill_numpy_dtype = Some(fill.width().map_or_else(
+                || fill.dtype().name().to_owned(),
+                |width| width.name(false).to_owned(),
+            ));
             return Some(Self::from_sparse(
                 sparse.with_stored_result(dtype, &out, false),
             ));
@@ -23181,6 +23186,15 @@ impl Column {
             let left_dense = self.to_dense()?;
             let right_dense = right.to_dense()?;
             let out = left_dense.binary_numeric(&right_dense, op)?;
+            let width = NumpyNumeric::of(&left_dense.dtype(), left_dense.width())
+                .zip(NumpyNumeric::of(&right_dense.dtype(), right_dense.width()))
+                .map(|(left, right)| left.result_type(right))
+                .and_then(NumpyNumeric::width)
+                .filter(|width| width.fits_storage(&out.dtype()));
+            let out = match width {
+                Some(width) => out.cast_to_width(width, false)?,
+                None => out,
+            };
             let default_fill = |column: &Self, other: &Self| {
                 column.sparse().map_or_else(
                     || {
@@ -23196,8 +23210,16 @@ impl Column {
             let left_fill = Self::new(left_dense.dtype(), vec![default_fill(self, right)])?;
             let right_fill = Self::new(right_dense.dtype(), vec![default_fill(right, self)])?;
             let fill = left_fill.binary_numeric(&right_fill, op)?;
+            let fill = match width {
+                Some(width) => fill.cast_to_width(width, false)?,
+                None => fill,
+            };
             let mut dtype = SparseDType::new(out.dtype(), fill.values()[0].clone())?;
             dtype.width = out.width();
+            dtype.fill_numpy_dtype = Some(fill.width().map_or_else(
+                || fill.dtype().name().to_owned(),
+                |width| width.name(false).to_owned(),
+            ));
             return Ok(Self::from_sparse(
                 self.sparse_binary_result(right, dtype, &out),
             ));
@@ -24707,7 +24729,12 @@ impl Column {
             };
             let fill =
                 fill_column(self, right)?.binary_comparison(&fill_column(right, self)?, op)?;
-            let dtype = SparseDType::new(DType::Bool, fill.values()[0].clone())?;
+            let mut dtype = SparseDType::new(DType::Bool, fill.values()[0].clone())?;
+            if [self, right].iter().any(|column| {
+                column.sparse().is_some_and(|sparse| sparse.sparse_dtype().fill_numpy_dtype.is_some())
+            }) {
+                dtype.fill_numpy_dtype = Some("bool".to_owned());
+            }
             return Ok(Self::from_sparse(
                 self.sparse_binary_result(right, dtype, &dense),
             ));
@@ -25179,10 +25206,19 @@ impl Column {
     /// [`binary_comparison`](Self::binary_comparison); br-frankenpandas-zwfz3).
     pub fn compare_scalar(&self, scalar: &Scalar, op: ComparisonOp) -> Result<Self, ColumnError> {
         if let Some(sparse) = self.sparse() {
-            let result = sparse.stored_column()?.compare_scalar(scalar, op)?;
+            let stored_scalar = match (sparse.sparse_dtype().width, scalar) {
+                (Some(NumericWidth::Float32), Scalar::Float64(value)) => {
+                    Scalar::Float64(f64::from(*value as f32))
+                }
+                _ => scalar.clone(),
+            };
+            let result = sparse.stored_column()?.compare_scalar(&stored_scalar, op)?;
             let fill = Self::new(sparse.value_dtype(), vec![sparse.fill_value().clone()])?
                 .compare_scalar(scalar, op)?;
-            let dtype = SparseDType::new(DType::Bool, fill.values()[0].clone())?;
+            let mut dtype = SparseDType::new(DType::Bool, fill.values()[0].clone())?;
+            if sparse.sparse_dtype().fill_numpy_dtype.is_some() {
+                dtype.fill_numpy_dtype = Some("bool".to_owned());
+            }
             return Ok(Self::from_sparse(
                 sparse.with_stored_result(dtype, &result, true),
             ));
@@ -26496,6 +26532,7 @@ impl Column {
             value_dtype,
             fill_value: first.fill_value().clone(),
             width: numeric.and_then(NumpyNumeric::width),
+            fill_numpy_dtype: first.sparse_dtype().fill_numpy_dtype.clone(),
         };
         let cast_values = |values: &[Scalar]| -> Result<Column, ColumnError> {
             let column = if dtype.value_dtype == DType::Utf8 {
@@ -43669,6 +43706,7 @@ mod tests {
             value_dtype: DType::Int64,
             fill_value: Scalar::Float64(0.5),
             width: Some(NumericWidth::Int8),
+            fill_numpy_dtype: None,
         };
         let sparse = SparseColumn::from_parts(
             dtype,
@@ -43829,6 +43867,7 @@ mod tests {
             value_dtype: DType::Float64,
             fill_value: Scalar::Float64(1.0),
             width: Some(NumericWidth::Float32),
+            fill_numpy_dtype: None,
         };
         let sparse = SparseColumn::from_dense(
             dtype,
@@ -43847,6 +43886,7 @@ mod tests {
             value_dtype: DType::Int64,
             fill_value: Scalar::Int64(0),
             width: Some(NumericWidth::Int8),
+            fill_numpy_dtype: None,
         };
         let sparse = SparseColumn::from_dense(
             dtype,
@@ -43863,6 +43903,7 @@ mod tests {
             value_dtype: DType::Int64,
             fill_value: Scalar::Float64(0.5),
             width: None,
+            fill_numpy_dtype: None,
         };
         let sparse = SparseColumn::from_dense(
             dtype,
@@ -43877,6 +43918,7 @@ mod tests {
             value_dtype: DType::Float64,
             fill_value: Scalar::Null(NullKind::NaN),
             width: Some(NumericWidth::Float32),
+            fill_numpy_dtype: None,
         };
         let sparse = SparseColumn::from_dense(
             dtype,
@@ -44080,6 +44122,7 @@ mod tests {
                     value_dtype: DType::Float64,
                     fill_value: Scalar::Int64(-1),
                     width: Some(NumericWidth::Float32),
+                    fill_numpy_dtype: None,
                 },
                 vec![
                     Scalar::Float64(-1.0),
