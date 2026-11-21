@@ -17765,13 +17765,143 @@ def test_resample_apply_rows_like_pandas_jno5s(case: str) -> None:
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_resample_apply_rows_fp_refuses_jno5s() -> None:
-    # pandas answers these; fp refuses: rows over a tz-aware index, and a
-    # value in one bin beside rows in another.
-    zoned = _ra_series(fpd).tz_localize("UTC")
-    with pytest.raises(NotImplementedError):
-        zoned.resample("D").apply(lambda g: g.head(2))
+    # A value in one bin beside rows in another still has no shared
+    # concatenation contract. Zoned row answers are covered below.
     with pytest.raises(NotImplementedError):
         _ra_series(fpd).resample("D").apply(lambda g: g.head(2) if len(g) != 2 else g.sum())
+
+
+def _ra_zoned(m: Any, start: str, frame: bool = False) -> Any:
+    index = m.date_range(start, periods=12, freq="6h", tz="America/New_York", name="when")
+    result = m.Series(np.arange(12, dtype=np.float64), index=index, name="v")
+    if frame:
+        result = result.to_frame()
+        result["w"] = np.arange(12, dtype=np.int64) * 3
+    return result
+
+
+def _ra_axis_contract(index: Any) -> tuple:
+    # Check actual label values, timezone dtypes and names, including both
+    # keyed levels. Formatting alone can hide an incorrectly naive axis.
+    return (
+        type(index).__name__,
+        list(index.names),
+        [str(index.get_level_values(level).dtype) for level in range(index.nlevels)],
+        [repr(label) for label in index.tolist()],
+    )
+
+
+def _ra_assert_result(actual: Any, expected: Any) -> None:
+    assert type(actual).__name__ == type(expected).__name__
+    assert _ra_axis_contract(actual.index) == _ra_axis_contract(expected.index)
+    assert getattr(actual.index, "freqstr", None) == getattr(expected.index, "freqstr", None)
+    if hasattr(expected, "columns"):
+        assert list(actual.columns) == list(expected.columns)
+        assert [str(dtype) for dtype in actual.dtypes] == [str(dtype) for dtype in expected.dtypes]
+    else:
+        assert actual.name == expected.name
+        assert str(actual.dtype) == str(expected.dtype)
+    np.testing.assert_array_equal(actual.to_numpy(), expected.to_numpy())
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("start", ["2024-03-09 12:00", "2024-11-02 12:00"])
+@pytest.mark.parametrize("rule", ["D", "12h"])
+@pytest.mark.parametrize("group_keys", [False, True])
+@pytest.mark.parametrize("frame", [False, True])
+def test_resample_apply_timezone_rows_like_pandas_jno5s(
+    start: str, rule: str, group_keys: bool, frame: bool
+) -> None:
+    def run(m: Any) -> Any:
+        return _ra_zoned(m, start, frame).resample(rule, group_keys=group_keys).apply(lambda g: g.head(2))
+
+    _ra_assert_result(run(fpd), run(pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("rule", ["D", "12h"])
+@pytest.mark.parametrize("group_keys", [False, True])
+@pytest.mark.parametrize("frame", [False, True])
+@pytest.mark.parametrize("operation", ["zone", "hours", "reset", "convert"])
+def test_resample_apply_callback_sees_source_index_jno5s(
+    rule: str, group_keys: bool, frame: bool, operation: str
+) -> None:
+    def run(m: Any) -> Any:
+        func = {
+            "zone": lambda g: str(g.index.tz),
+            "hours": lambda g: str(g.index.hour.tolist()),
+            "reset": lambda g: g.reset_index(drop=True),
+            "convert": lambda g: g.tz_convert("UTC"),
+        }[operation]
+        return _ra_zoned(m, "2024-03-09 12:00", frame).resample(rule, group_keys=group_keys).apply(func)
+
+    _ra_assert_result(run(fpd), run(pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("group_keys", [False, True])
+@pytest.mark.parametrize("zoned", [False, True])
+def test_resample_apply_rows_with_new_multiindex_jno5s(group_keys: bool, zoned: bool) -> None:
+    def run(m: Any) -> Any:
+        frame = _ra_zoned(m, "2024-03-09 12:00", True) if zoned else _ra_frame(m)
+        frame["payload"] = np.arange(len(frame), dtype=np.int64)
+        return frame.resample("D", group_keys=group_keys).apply(lambda g: g.set_index(["v", "w"]))
+
+    _ra_assert_result(run(fpd), run(pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("dtype", ["int64", "float64", "float32", "bool"])
+@pytest.mark.parametrize("group_keys", [False, True])
+@pytest.mark.parametrize("zoned", [False, True])
+def test_resample_apply_empty_series_keeps_bin_axis_jno5s(dtype: str, group_keys: bool, zoned: bool) -> None:
+    def run(m: Any) -> Any:
+        series = _ra_series(m).astype(dtype)
+        if zoned:
+            series = series.tz_localize("America/New_York")
+        return series.resample("D", group_keys=group_keys).apply(lambda g: g.head(0))
+
+    actual, expected = run(fpd), run(pd)
+    _ra_assert_result(actual, expected)
+    assert actual.index.freqstr == expected.index.freqstr == "D"
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("dtype", ["int64", "float32", "bool"])
+@pytest.mark.parametrize("zone", [None, "America/New_York"])
+def test_resample_apply_empty_source_keeps_dtype_jno5s(dtype: str, zone: str | None) -> None:
+    def run(m: Any) -> Any:
+        source = m.Series([], dtype=dtype, index=m.DatetimeIndex([], tz=zone, name="when"), name="v")
+        return source.resample("D").apply(lambda g: g.head(0))
+
+    actual, expected = run(fpd), run(pd)
+    _ra_assert_result(actual, expected)
+    assert actual.index.freqstr == expected.index.freqstr == "D"
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("dtype", ["int64", "float64", "float32", "bool"])
+@pytest.mark.parametrize("group_keys", [False, True])
+@pytest.mark.parametrize("frame", [False, True])
+def test_resample_apply_singleton_and_empty_cells_jno5s(dtype: str, group_keys: bool, frame: bool) -> None:
+    def run(m: Any) -> Any:
+        series = _ra_series(m).astype(dtype)
+        source = series.to_frame() if frame else series
+        result = source.resample("D", group_keys=group_keys).apply(lambda g: g.head(1))
+        return result["v"] if frame else result
+
+    actual, expected = run(fpd), run(pd)
+    assert _ra_axis_contract(actual.index) == _ra_axis_contract(expected.index)
+    assert actual.name == expected.name
+    assert str(actual.dtype) == str(expected.dtype) == "object"
+    assert actual.index.freqstr == expected.index.freqstr == "D"
+    for got, want in zip(actual.tolist(), expected.tolist(), strict=True):
+        assert type(got) is type(want)
+        if isinstance(want, np.ndarray):
+            assert got.dtype == want.dtype
+            np.testing.assert_array_equal(got, want)
+        else:
+            assert got == want
 
 
 # br-frankenpandas-bqci7 (part): a DataFrame's row reductions (axis=1) over

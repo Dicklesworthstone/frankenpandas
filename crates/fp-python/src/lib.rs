@@ -85441,10 +85441,18 @@ impl PyResampler {
         );
         let bins = resampler.size().map_err(frame_error_to_py)?;
         let indices = resampler.indices().map_err(frame_error_to_py)?;
+        // Binning may use a naive wall clock, but the callable sees the
+        // original instants and timezone, just as transform/get_group do.
+        // Restoring the zone after the callable would be too late: it may
+        // inspect the index or replace it with its own labels.
+        let axis = self.source_rows_series(&axis)?;
+        let frame = frame
+            .map(|frame| self.source_rows_frame(frame))
+            .transpose()?;
         let mut answers = Vec::with_capacity(bins.len());
         for label in bins.index().labels() {
             let rows = indices.get(label).cloned().unwrap_or_default();
-            let window = match frame {
+            let window = match frame.as_ref() {
                 None => {
                     let at: Vec<i64> = rows
                         .iter()
@@ -85475,13 +85483,47 @@ impl PyResampler {
         bins: &Index,
         answers: &[Bound<'_, PyAny>],
     ) -> PyResult<Py<PyAny>> {
+        if answers.is_empty()
+            && let ResampleTarget::Series(source) = &self.target
+        {
+            let empty = source.take(&[]).map_err(frame_error_to_py)?;
+            let inner = Series::new(
+                source.name(),
+                self.bin_index(bins)?,
+                empty.column().clone(),
+            )
+            .map_err(frame_error_to_py)?;
+            return PySeries { inner }.into_py_any(py);
+        }
         if answers.first().is_some_and(answer_is_rows) {
             return self.concat_bin_rows(py, bins, answers);
         }
         // An answer no scalar holds - a list, tuple or dict - is an object
         // cell, as pandas keeps it (it raised "Cannot convert list to
         // Scalar"; br-frankenpandas-jno5s).
-        let values = answers
+        // A Series reduction is its one element, or its array when a
+        // later bin returns zero/many rows after the first bin reduced.
+        // Keep these Python values until the result dtype is known: a
+        // numpy scalar beside an empty array must remain a numpy scalar
+        // in the resulting object column (br-frankenpandas-jno5s).
+        let extracted = answers
+            .iter()
+            .map(|answer| {
+                if let Ok(series) = answer.extract::<PyRef<'_, PySeries>>() {
+                    if series.inner.len() == 1 {
+                        return element_to_py(
+                            py,
+                            series.inner.column(),
+                            &series.inner.column().values()[0],
+                        )
+                        .map(|value| value.into_bound(py));
+                    }
+                    return series.values(py);
+                }
+                Ok(answer.clone())
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let values = extracted
             .iter()
             .map(|answer| py_to_cell(py, answer))
             .collect::<PyResult<Vec<_>>>()?;
@@ -85489,6 +85531,24 @@ impl PyResampler {
             .iter()
             .any(|value| matches!(value, Scalar::Object(_)))
         {
+            let values = values
+                .into_iter()
+                .zip(&extracted)
+                .map(|(value, object)| {
+                    let numpy_scalar = object
+                        .get_type()
+                        .module()
+                        .is_ok_and(|module| module == "numpy")
+                        && !matches!(value, Scalar::Object(_));
+                    if numpy_scalar {
+                        Scalar::Object(fp_types::ObjectValue::Host(fp_types::HostValue::new(
+                            PyHost::new(object.clone().unbind()),
+                        )))
+                    } else {
+                        value
+                    }
+                })
+                .collect();
             Column::from_object_values(values)
         } else {
             Column::from_values(values).map_err(column_error_to_py)?
@@ -85532,28 +85592,61 @@ impl PyResampler {
         Ok(Some(concat_side_by_side(py, results, keys)?.unbind()))
     }
 
+    /// Concatenating adjacent datetime slices keeps their shared frequency
+    /// only when the joined labels still follow it. Sub-day ticks advance
+    /// in absolute time across DST; daily/calendar rules use wall time.
+    fn concatenated_bin_index(index: &Index, pieces: &[Index]) -> PyResult<Index> {
+        let Some(first) = pieces.iter().find(|piece| !piece.is_empty()) else {
+            return Ok(index.clone());
+        };
+        let Some(freq) = first.freq() else {
+            return Ok(index.clone());
+        };
+        if index.row_multiindex().is_some()
+            || pieces
+                .iter()
+                .filter(|piece| !piece.is_empty())
+                .any(|piece| piece.freq() != Some(freq))
+        {
+            return Ok(index.clone());
+        }
+        let Ok(datetime) = DatetimeIndex::from_index(index.clone()) else {
+            return Ok(index.clone());
+        };
+        let unit = freq.trim_start_matches(|c: char| c.is_ascii_digit());
+        let follows = if let Ok(step) = parse_freq_to_nanos(freq)
+            && unit != "D"
+        {
+            let nanos = datetime.asi8();
+            !nanos.contains(&Timestamp::NAT)
+                && nanos
+                    .windows(2)
+                    .all(|pair| pair[1].checked_sub(pair[0]) == Some(step))
+        } else {
+            datetime_labels_follow(&datetime, freq)?
+        };
+        Ok(if follows {
+            index.clone().with_freq_from(first, Some(freq.to_owned()))
+        } else {
+            index.clone()
+        })
+    }
+
     /// The bins' row answers of a callable that does not reduce, as pandas'
     /// apply joins them: in bin order under their own labels, or - under
     /// group_keys - under (bin, label); Series answers give a Series, frame
-    /// answers a frame. A value beside rows and rows over a tz-aware index
-    /// are refused (br-frankenpandas-jno5s).
+    /// answers a frame. The bin keys and returned indexes retain their
+    /// own timezones; a callable may replace its input index entirely.
     fn concat_bin_rows(
         &self,
         py: Python<'_>,
         bins: &Index,
         answers: &[Bound<'_, PyAny>],
     ) -> PyResult<Py<PyAny>> {
-        if self.zone.is_some() {
-            return Err(not_implemented(
-                "Resampler.apply answering rows over a tz-aware index",
-            ));
-        }
         let mut series_parts: Vec<Series> = Vec::new();
         let mut frame_parts: Vec<DataFrame> = Vec::new();
-        let mut outer: Vec<IndexLabel> = Vec::new();
-        let mut inner: Vec<IndexLabel> = Vec::new();
-        let mut inner_name: Option<Option<LabelName>> = None;
-        for (bin, answer) in bins.labels().iter().zip(answers) {
+        let mut indexes = Vec::with_capacity(answers.len());
+        for answer in answers {
             let index = if let Ok(series) = answer.extract::<PyRef<'_, PySeries>>() {
                 series_parts.push(series.inner.clone());
                 series.inner.index().clone()
@@ -85565,36 +85658,56 @@ impl PyResampler {
                     "Resampler.apply whose bins answer a value beside rows",
                 ));
             };
-            if index.row_multiindex().is_some() {
-                return Err(not_implemented(
-                    "Resampler.apply whose bins answer rows under a MultiIndex",
-                ));
-            }
-            inner_name.get_or_insert_with(|| index.name().cloned());
-            for label in index.labels() {
-                outer.push(bin.clone());
-                inner.push(label.clone());
-            }
+            indexes.push(index);
         }
         if !series_parts.is_empty() && !frame_parts.is_empty() {
             return Err(not_implemented(
                 "Resampler.apply whose bins answer a Series beside a frame",
             ));
         }
-        let keyed = if self.group_keys {
-            let source_name = match &self.target {
-                ResampleTarget::Series(s) => s.index().name().cloned(),
-                ResampleTarget::DataFrame(df) => df.index().name().cloned(),
-            };
-            let flat: Vec<IndexLabel> = outer
+        // pandas restores the bin axis on an all-empty Series result,
+        // including its frequency and zone, even with group_keys=True.
+        let empty_series_index = (!series_parts.is_empty()
+            && series_parts.iter().all(Series::is_empty))
+        .then(|| self.bin_index(&bins.slice(0, 0)))
+        .transpose()?;
+        let keyed = if self.group_keys && empty_series_index.is_none() {
+            let bins = self.bin_index(bins)?;
+            let keys: Vec<Vec<IndexLabel>> = bins
+                .labels()
                 .iter()
-                .zip(&inner)
-                .map(|(bin, label)| IndexLabel::Utf8(format!("{bin}|{label}")))
+                .map(|label| vec![label.clone()])
                 .collect();
-            let levels = fp_index::MultiIndex::from_arrays(vec![outer, inner])
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?
-                .set_names(vec![source_name, inner_name.flatten()]);
-            Some((flat, levels))
+            let pieces: Vec<&Index> = indexes.iter().collect();
+            // Reuse concat's level assembly, including empty bins and a
+            // callback returning a MultiIndex instead of a flat index.
+            let (_, mut levels) = keyed_rows(&keys, &pieces, Some(vec![bins.name().cloned()]))?;
+            levels = levels.with_level_zone(0, bins.tz());
+            if let Some(first) = indexes.first() {
+                let depth = first.row_multiindex().map_or(1, MultiIndex::nlevels);
+                for level in 0..depth {
+                    let zone = |index: &Index| {
+                        index
+                            .row_multiindex()
+                            .map_or_else(|| index.tz(), |multi| multi.level_zone(level))
+                            .map(str::to_owned)
+                    };
+                    let width = |index: &Index| {
+                        index
+                            .row_multiindex()
+                            .map_or_else(|| index.width(), |multi| multi.level_width(level))
+                    };
+                    let first_zone = zone(first);
+                    let first_width = width(first);
+                    if indexes.iter().all(|index| zone(index) == first_zone) {
+                        levels = levels.with_level_zone(level + 1, first_zone.as_deref());
+                    }
+                    if indexes.iter().all(|index| width(index) == first_width) {
+                        levels = levels.with_level_width(level + 1, first_width);
+                    }
+                }
+            }
+            Some(row_multiindex_axis(levels)?)
         } else {
             None
         };
@@ -85603,10 +85716,15 @@ impl PyResampler {
             let mut out =
                 fp_frame::concat_dataframes_with_axis_join(&refs, 0, fp_frame::ConcatJoin::Outer)
                     .map_err(frame_error_to_py)?;
-            if let Some((flat, levels)) = keyed {
+            if let Some(index) = keyed {
+                out = out.with_index(index).map_err(frame_error_to_py)?;
+            } else if let Some(levels) =
+                concat_row_multiindexes(indexes.iter().map(Index::row_multiindex))?
+            {
+                out = out.with_row_multiindex(levels).map_err(frame_error_to_py)?;
+            } else {
                 out = out
-                    .set_axis(flat, 0)
-                    .and_then(|out| out.with_row_multiindex(levels))
+                    .with_index(Self::concatenated_bin_index(out.index(), &indexes)?)
                     .map_err(frame_error_to_py)?;
             }
             return PyDataFrame { inner: out }.into_py_any(py);
@@ -85614,14 +85732,18 @@ impl PyResampler {
         let refs: Vec<&Series> = series_parts.iter().collect();
         let out =
             fp_frame::concat_series_with_ignore_index(&refs, false).map_err(frame_error_to_py)?;
-        let out = match keyed {
-            Some((flat, levels)) => {
-                let index = Index::new(flat)
-                    .with_row_multiindex(levels)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let out = match empty_series_index.or(keyed) {
+            Some(index) => {
                 Series::new(out.name(), index, out.column().clone()).map_err(frame_error_to_py)?
             }
-            None => out,
+            None => {
+                let index =
+                    match concat_row_multiindexes(indexes.iter().map(Index::row_multiindex))? {
+                        Some(levels) => row_multiindex_axis(levels)?,
+                        None => Self::concatenated_bin_index(out.index(), &indexes)?,
+                    };
+                Series::new(out.name(), index, out.column().clone()).map_err(frame_error_to_py)?
+            }
         };
         PySeries { inner: out }.into_py_any(py)
     }
