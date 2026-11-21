@@ -51,6 +51,23 @@ def test_sparse_reductions_preserve_compressed_semantics(subtype, fill, values, 
     assert type(got) is type(want)
 
 
+@pytest.mark.parametrize("subtype,fill,values", [
+    ("float32", 0, [0, np.nan, 0]),
+    ("float32", np.nan, [np.nan, np.nan]),
+    ("object", "", [None, "x"]),
+    ("object", "", [None, None]),
+])
+@pytest.mark.parametrize("operation", ["any", "all"])
+@pytest.mark.parametrize("skipna", [False, True])
+def test_sparse_logical_missing_values_follow_pinned_pandas(subtype, fill, values, operation, skipna):
+    actual = fpd.Series(values, dtype=fpd.SparseDtype(subtype, fill))
+    expected = pd.Series(values, dtype=pd.SparseDtype(subtype, fill))
+    got = getattr(actual, operation)(skipna=skipna)
+    want = getattr(expected, operation)(skipna=skipna)
+    assert got == want
+    assert type(got) is type(want)
+
+
 @pytest.mark.parametrize("subtype,fill", [("int64", 0), ("float32", np.nan)])
 @pytest.mark.parametrize("min_count", [0, 1, 3, 4])
 def test_sparse_sum_min_count(subtype, fill, min_count):
@@ -159,6 +176,31 @@ def test_sparse_custom_fill_and_exact_values(subtype, fill, values):
         if not pd.isna(want):
             assert got == want
             assert type(got) is type(want)
+
+
+@pytest.mark.parametrize("constructor", ["series", "array"])
+@pytest.mark.parametrize("source", ["list", "tuple", "object_array", "object_series", "inferred_series"])
+@pytest.mark.parametrize("subtype", ["int64", "object"])
+def test_sparse_constructor_respects_initial_source_dtype(constructor, source, subtype):
+    values = [2**53 + 1, None, 2**53 + 3]
+
+    def build(mod):
+        if source == "tuple":
+            data = tuple(values)
+        elif source == "object_array":
+            data = np.array(values, dtype=object)
+        elif source == "object_series":
+            data = mod.Series(values, dtype=object)
+        elif source == "inferred_series":
+            data = mod.Series(values)
+        else:
+            data = values
+        dtype = mod.SparseDtype(subtype, np.nan)
+        if constructor == "array":
+            return mod.Series(mod.arrays.SparseArray(data, dtype=dtype))
+        return mod.Series(data, dtype=dtype)
+
+    assert_sparse_series(build(fpd), build(pd))
 
 
 @pytest.mark.parametrize("subtype", ["int64", "int8", "uint16", "float64", "float32", "bool", "object"])
@@ -298,10 +340,20 @@ def assert_sparse_frame(actual, expected):
     assert actual.index.tolist() == expected.index.tolist()
     assert actual.index.name == expected.index.name
     assert actual.sparse.density == expected.sparse.density
-    actual_dense, expected_dense = actual.sparse.to_dense(), expected.sparse.to_dense()
+    actual_dense = actual.sparse.to_dense()
+    # DISC-035: pandas 2.2.3 frame densification overwrites distinct physical
+    # columns that share a label. For that case only, compare against each
+    # pandas Series' dense values; these assertions protect data integrity,
+    # rather than claiming whole-frame parity with the upstream data loss.
+    expected_dense = None if expected.columns.has_duplicates else expected.sparse.to_dense()
     for position in range(expected.shape[1]):
         assert_sparse_series(actual.iloc[:, position], expected.iloc[:, position])
-        got, want = actual_dense.iloc[:, position], expected_dense.iloc[:, position]
+        got = actual_dense.iloc[:, position]
+        want = (
+            expected.iloc[:, position].sparse.to_dense()
+            if expected_dense is None
+            else expected_dense.iloc[:, position]
+        )
         assert str(got.dtype) == str(want.dtype)
         assert got.index.tolist() == want.index.tolist()
         if isinstance(want.name, float) and np.isnan(want.name):
@@ -309,6 +361,37 @@ def assert_sparse_frame(actual, expected):
         else:
             assert got.name == want.name
         assert_sparse_values(got.to_numpy(), want.to_numpy())
+
+
+def test_pandas_223_duplicate_sparse_to_dense_bug_witness_disc035():
+    assert pd.__version__ == "2.2.3", "Review DISC-035 when the pinned pandas oracle changes"
+    values = [[0, 1], [2, 0], [0, 3]]
+    sparse = pd.DataFrame(values, columns=["same", "same"]).astype("Sparse[int]")
+    np.testing.assert_array_equal(sparse.to_numpy(), values)
+    np.testing.assert_array_equal(
+        np.column_stack([sparse.iloc[:, position].sparse.to_dense() for position in range(2)]),
+        values,
+    )
+    # Negative control: the frame accessor duplicates the last column even
+    # though both physical sparse columns still contain the original data.
+    np.testing.assert_array_equal(sparse.sparse.to_dense().to_numpy(), [[1, 1], [0, 0], [3, 3]])
+
+
+@pytest.mark.parametrize("labels", ["text", "numeric", "multiindex"])
+def test_sparse_duplicate_to_dense_preserves_physical_columns_disc035(labels):
+    values = [[0, 1], [2, 0], [0, 3]]
+    columns = ["same", "same"] if labels == "text" else [7, 7]
+    if labels == "multiindex":
+        columns = fpd.MultiIndex.from_tuples([("kind", "same"), ("kind", "same")])
+    sparse = fpd.DataFrame(values, columns=columns, index=fpd.Index([3, 1, 2], name="row"))
+    sparse = sparse.astype("Sparse[int]")
+    dense = sparse.sparse.to_dense()
+    assert dense.columns.tolist() == sparse.columns.tolist()
+    assert dense.index.tolist() == [3, 1, 2]
+    assert dense.index.name == "row"
+    assert [str(dtype) for dtype in dense.dtypes] == ["int64", "int64"]
+    np.testing.assert_array_equal(dense.to_numpy(), values)
+    np.testing.assert_array_equal(sparse.to_numpy(), values)
 
 
 @pytest.mark.parametrize("dtype", ["Sparse[int]", "Sparse[float32]", "Sparse[bool]"])

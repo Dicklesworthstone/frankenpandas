@@ -9,7 +9,7 @@
 > real citation did. The duplicates were renumbered to DISC-022/023/024, keeping the
 > number on whichever entry the existing in-tree citations actually meant. DISC-032
 > was skipped (DISC-033 was taken past it and is cited as such). The next free
-> number is DISC-035. To see every ID in use:
+> number is DISC-036. To see every ID in use:
 > `grep -n '^### DISC-' crates/fp-conformance/DISCREPANCIES.md`
 
 ## Active Divergences
@@ -62,13 +62,13 @@
 - **Tests affected:** `crates/fp-python/tests/test_differential_packets.py` (996 pytest functions against live pandas 2.2.3).
 - **Review date:** 2026-10-13 (was 2026-04-23)
 
-### DISC-009: Sparse dtype descriptor exists before compressed sparse storage
+### DISC-009: Compressed sparse workflows are available; full API and performance qualification remain
 - **Reference:** pandas `SparseDtype` pairs an underlying value dtype with a fill value and stores only non-fill positions in `SparseArray`.
-- **Our impl:** `fp-types::SparseDType` records the dtype/fill-value contract and `DType::Sparse` marks the logical dtype (`SparseDType::pandas_name()` renders `Sparse[<subtype>, <fill>]`, see resolved `DISC-026`). `fp-columnar` still stores columns densely, and in `fp-python` constructing `Series(..., dtype='Sparse[int]')` or `pd.arrays.SparseArray` is not yet supported.
-- **Impact:** Rust code can describe sparse dtype metadata and query `Series.sparse` metrics over dense storage, but memory usage is dense and Python `SparseArray` construction fails.
-- **Resolution:** WILL-FIX - compressed physical sparse column storage is tracked by `br-frankenpandas-rc0923-sparse-storage-iphl5`, and Python `Sparse` construction / `SparseArray` parity is tracked by `br-frankenpandas-o1qso` and `br-frankenpandas-at95d`.
-- **Tests affected:** Sparse storage/accessor conformance tests not yet enabled.
-- **Review date:** 2026-10-13 (was 2026-04-24)
+- **Our impl:** `fp-columnar::SparseColumn` stores positions and values with a parameterized `SparseDType`, including fill scalar metadata and numeric widths. The Python binding exposes `SparseDtype`, `arrays.SparseArray`, sparse Series/DataFrame construction and casts, accessors, common scalar operations and reductions, direct compressed dummy encoding, and SciPy COO export. Casts and arithmetic retain explicitly stored entries that become equal to the fill.
+- **Impact:** The formerly blocked Python entry points now reach compressed storage. Complete sparse API coverage, including block indexes and COO/sparse-matrix factory entry points, remains unfinished. The large-scale memory/performance acceptance contract has not been certified. Duplicate-label frame densification deliberately preserves distinct columns; see the separately witnessed DISC-035.
+- **Resolution:** NARROWED / WILL-FIX — compressed storage and the common Python workflows are implemented; do not infer complete sparse parity or a measured performance win. Physical-storage qualification remains tracked by `br-frankenpandas-rc0923-sparse-storage-iphl5`, and Python coverage by `br-frankenpandas-o1qso` and `br-frankenpandas-at95d`.
+- **Tests affected:** `crates/fp-frame/tests/sparse_storage_conformance.rs` and `crates/fp-python/tests/test_sparse.py`; the Python suite runs in the existing differential CI job and includes explicit DISC-035 integrity cases rather than counting those as exact frame parity.
+- **Review date:** 2026-11-20
 
 ### DISC-010: Rust GroupBy.apply uses explicit output-shape APIs
 - **Reference:** pandas `DataFrameGroupBy.apply` dynamically dispatches scalar, Series, and DataFrame return values from one Python callable.
@@ -185,6 +185,14 @@
 - **Impact:** code testing `type(v) is str` (or `isinstance(v, np.str_)`) on the cell. Holding the numpy scalar would make the cell a host object, which the core's string kernels cannot read (`.str.upper()` would skip it) - a worse divergence than the type.
 - **Resolution:** ACCEPTED (br-frankenpandas-76kq0 and br-frankenpandas-n3ktr's censuses: their only difference left of this kind).
 - **Review date:** 2026-10-10
+
+### DISC-035: Sparse frame densification preserves distinct columns with repeated labels
+- **Reference:** MEASURED, live pandas 2.2.3 on 2026-11-20: `pd.DataFrame([[0, 1], [2, 0], [0, 3]], columns=["same", "same"]).astype("Sparse[int]")` retains the original matrix `[[0, 1], [2, 0], [0, 3]]`. Densifying each physical Series with `.iloc[:, position].sparse.to_dense()` also retains it. However, the frame's `.sparse.to_dense().to_numpy()` returns `[[1, 1], [0, 0], [3, 3]]`, replacing both columns with the final column's values.
+- **Our impl:** Frame densification preserves physical column positions, values, labels, dtypes, and row metadata. The same input returns `[[0, 1], [2, 0], [0, 3]]`, including for repeated numeric labels and repeated MultiIndex tuples.
+- **Impact:** Whole-frame values deliberately differ from pandas 2.2.3 when repeated column labels identify different physical sparse columns. Unique-label frames continue to compare directly against pandas' frame accessor. Repeated-label tests compare each dense result column against the corresponding pandas Series and are data-integrity checks, not evidence of exact whole-frame pandas parity.
+- **Resolution:** ACCEPTED — preserve distinct input columns instead of reproducing upstream data loss (`br-frankenpandas-o1qso`, `br-frankenpandas-at95d`). The explicit pandas-version witness must be reviewed when the oracle pin changes; no broad parity fixture or gate is waived.
+- **Tests affected:** `crates/fp-python/tests/test_sparse.py::test_pandas_223_duplicate_sparse_to_dense_bug_witness_disc035` pins the upstream negative control; `test_sparse_duplicate_to_dense_preserves_physical_columns_disc035` asserts native integrity for text, numeric, and MultiIndex labels; `test_sparse_dataframe_custom_dtypes_and_repeated_columns` and `test_sparse_dataframe_mapping_casts_repeated_columns_by_position` use per-column dense references only for repeated labels.
+- **Review date:** 2026-11-20
 
 ## Resolved Divergences
 

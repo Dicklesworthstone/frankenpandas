@@ -224168,6 +224168,11 @@ mod tests {
     #[test]
     fn sparse_dataframe_counts_compressed_points_and_expands_by_position()
     -> Result<(), FrameError> {
+        use fp_columnar::SparseColumn;
+        use fp_types::SparseDType;
+
+        use super::ColumnStore;
+
         let first = Column::from_sparse(SparseColumn::from_parts(
             SparseDType::new(DType::Int64, Scalar::Int64(0))
                 .map_err(|error| FrameError::CompatibilityRejected(error.to_string()))?,

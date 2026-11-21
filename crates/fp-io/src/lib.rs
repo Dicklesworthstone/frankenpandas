@@ -15409,7 +15409,6 @@ impl SqlConnection for rusqlite::Connection {
             .map_err(|e| IoError::Sql(format!("prepare failed: {e}")))?;
         Ok(stmt
             .columns()
-            .into_iter()
             .map(|column| column.decl_type().and_then(sqlite_decl_type_to_dtype))
             .collect())
     }

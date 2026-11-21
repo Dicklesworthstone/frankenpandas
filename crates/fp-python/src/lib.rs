@@ -315,8 +315,12 @@ fn column_pandas_dtype_name(column: &Column) -> String {
     if let Some(sparse) = column.sparse() {
         if sparse.sparse_dtype().fill_numpy_dtype.is_some() {
             return Python::attach(|py| {
-                PySparseDtype { inner: sparse.sparse_dtype().clone() }.name(py)
-            }).unwrap_or_else(|_| sparse.sparse_dtype().pandas_name());
+                PySparseDtype {
+                    inner: sparse.sparse_dtype().clone(),
+                }
+                .name(py)
+            })
+            .unwrap_or_else(|_| sparse.sparse_dtype().pandas_name());
         }
         return sparse.sparse_dtype().pandas_name();
     }
@@ -21073,6 +21077,152 @@ impl PyMultiIndex {
 
 #[pymethods]
 impl PyMultiIndex {
+    /// Build from declared catalogs rather than refactorizing the rows:
+    /// unused labels and catalog order also matter for an empty index.
+    #[allow(clippy::too_many_arguments)]
+    #[new]
+    #[pyo3(signature = (levels=None, codes=None, sortorder=None, names=None, dtype=None, copy=false, name=None, verify_integrity=true))]
+    fn new(
+        py: Python<'_>,
+        levels: Option<&Bound<'_, PyAny>>,
+        codes: Option<&Bound<'_, PyAny>>,
+        sortorder: Option<i64>,
+        names: Option<&Bound<'_, PyAny>>,
+        dtype: Option<&Bound<'_, PyAny>>,
+        copy: bool,
+        name: Option<&Bound<'_, PyAny>>,
+        verify_integrity: bool,
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        let _ = copy; // catalogs and codes are owned in either mode
+        if sortorder.is_some() {
+            return Err(not_implemented("MultiIndex constructor with sortorder"));
+        }
+        if !verify_integrity {
+            return Err(not_implemented(
+                "MultiIndex constructor with verify_integrity=False",
+            ));
+        }
+        if dtype.is_some_and(|dtype| !dtype.is_none() && !is_object_dtype_arg(dtype)) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "MultiIndex only supports dtype=object",
+            ));
+        }
+        let levels = levels.filter(|value| !value.is_none()).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>("Must pass both levels and codes")
+        })?;
+        let codes = codes.filter(|value| !value.is_none()).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>("Must pass both levels and codes")
+        })?;
+        if is_scalar_impl(levels) || is_scalar_impl(codes) {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "levels and codes must be sequences of one-dimensional arrays",
+            ));
+        }
+        let supplied_levels = levels.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+        let supplied_codes = codes.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+        if supplied_levels.len() != supplied_codes.len() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Length of levels and codes must be the same",
+            ));
+        }
+        if supplied_levels.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Must pass non-zero number of levels/codes",
+            ));
+        }
+        let numpy = py.import("numpy")?;
+        let mut catalogs = Vec::with_capacity(supplied_levels.len());
+        let mut row_codes = Vec::with_capacity(supplied_levels.len());
+        let mut length = None;
+        for (axis, (level, codes)) in supplied_levels.iter().zip(&supplied_codes).enumerate() {
+            if is_scalar_impl(level)
+                || level
+                    .getattr("ndim")
+                    .and_then(|ndim| ndim.extract::<usize>())
+                    .is_ok_and(|ndim| ndim != 1)
+            {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Each level must be one-dimensional",
+                ));
+            }
+            let mut catalog = extract_index_labels(Some(level), 0)?;
+            if catalog.iter().any(IndexLabel::is_missing) {
+                return Err(not_implemented(
+                    "MultiIndex declared levels containing missing labels",
+                ));
+            }
+            let catalog_values = catalog
+                .iter()
+                .map(|label| index_label_to_py(py, label))
+                .collect::<PyResult<Vec<_>>>()?;
+            if PySet::new(py, &catalog_values)?.len() != catalog.len() {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Level values must be unique on level {axis}"
+                )));
+            }
+            let codes = numpy.call_method1("asarray", (codes, "int64"))?;
+            if codes.getattr("ndim")?.extract::<usize>()? != 1 {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Each code array must be one-dimensional",
+                ));
+            }
+            let codes = codes
+                .try_iter()?
+                .map(|code| code?.extract::<i64>())
+                .collect::<PyResult<Vec<_>>>()?;
+            if length.is_some_and(|length| length != codes.len()) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Unequal code lengths",
+                ));
+            }
+            length = Some(codes.len());
+            let missing = u32::try_from(catalog.len()).map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyOverflowError, _>("MultiIndex level is too large")
+            })?;
+            let mut parsed_codes = Vec::with_capacity(codes.len());
+            for code in codes {
+                if code < -1 || code >= i64::from(missing) {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Code {code} is out of bounds for level {axis} with {} labels",
+                        catalog.len()
+                    )));
+                }
+                parsed_codes.push(if code == -1 { missing } else { code as u32 });
+            }
+            if parsed_codes.contains(&missing) {
+                // Native catalogs use a missing sentinel, while public
+                // levels omit it and public codes report it as -1.
+                catalog.push(IndexLabel::Null(NullKind::NaN));
+            }
+            catalogs.push(catalog);
+            row_codes.push(parsed_codes);
+        }
+        let mut inner =
+            MultiIndex::from_declared_levels(catalogs, row_codes).map_err(index_error_to_py)?;
+        for (axis, level) in supplied_levels.iter().enumerate() {
+            inner = inner
+                .with_level_zone(axis, array_zone(level).as_deref())
+                .with_level_width(axis, array_width(level));
+        }
+        let names = names.filter(|value| !value.is_none());
+        let name = name.filter(|value| !value.is_none());
+        if names.is_some() && name.is_some() {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Can only provide one of names and name",
+            ));
+        }
+        if let Some(names) = names.or(name) {
+            if is_scalar_impl(names) {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "Names should be list-like for a MultiIndex",
+                ));
+            }
+            let names = multiindex_names_arg(&inner, names)?;
+            inner = inner.set_names(names);
+        }
+        Ok(Self { inner }.into())
+    }
+
     /// Pickles (and deep-copies) as `MultiIndex.from_arrays(level values,
     /// names=)` ([`restore`]; it came back a plain Index of joined labels,
     /// br-frankenpandas-uch5o).
@@ -30832,7 +30982,10 @@ fn operand_zone(operand: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
 /// numpy scalar, a bool, an int past i64, a float against narrow ints.
 fn plain_number_operand(like: &Series, other: &Bound<'_, PyAny>) -> Option<Scalar> {
     if let Some(sparse) = like.column().sparse()
-        && matches!(sparse.value_dtype(), DType::Int64 | DType::Float64 | DType::Bool)
+        && matches!(
+            sparse.value_dtype(),
+            DType::Int64 | DType::Float64 | DType::Bool
+        )
     {
         return match py_to_scalar(other.py(), other).ok()? {
             scalar @ (Scalar::Int64(_) | Scalar::Float64(_) | Scalar::Bool(_)) => Some(scalar),
@@ -31052,9 +31205,10 @@ fn scalar_comparison(
                 "Invalid ordering comparison with NoneType",
             )));
         }
-        return Some(py_to_scalar(other.py(), other).and_then(|scalar| {
-            wrap_series(like.compare_scalar(&scalar, op))
-        }));
+        return Some(
+            py_to_scalar(other.py(), other)
+                .and_then(|scalar| wrap_series(like.compare_scalar(&scalar, op))),
+        );
     }
     if like
         .column()
@@ -35421,7 +35575,10 @@ impl PySeries {
     fn check_numeric_only(&self, name: &str) -> PyResult<()> {
         if let Some(sparse) = self.inner.column().sparse() {
             self.refuse_extension_reduction(name)?;
-            if matches!(sparse.value_dtype(), DType::Int64 | DType::Float64 | DType::Bool) {
+            if matches!(
+                sparse.value_dtype(),
+                DType::Int64 | DType::Float64 | DType::Bool
+            ) {
                 return Ok(());
             }
         }
@@ -35590,7 +35747,10 @@ impl PySeries {
     /// answered; br-frankenpandas-76kq0).
     fn refuse_extension_reduction(&self, name: &str) -> PyResult<()> {
         if self.inner.column().sparse().is_some()
-            && matches!(name, "median" | "std" | "var" | "prod" | "skew" | "kurt" | "sem")
+            && matches!(
+                name,
+                "median" | "std" | "var" | "prod" | "skew" | "kurt" | "sem"
+            )
         {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
                 "cannot perform {name} with type {}",
@@ -36745,7 +36905,7 @@ impl PySeries {
         // stay exact (br-frankenpandas-lqss7).
         let object_values = match (data, dtype) {
             (Some(data), Some(dtype))
-                if ((is_object_dtype_arg(dtype) || is_string_dtype_arg(dtype) || is_sparse_dtype_arg(dtype))
+                if ((is_object_dtype_arg(dtype) || is_string_dtype_arg(dtype))
                     && (data.is_instance_of::<PyList>() || data.is_instance_of::<PyTuple>()))
                     || (is_nullable_integer_dtype_arg(dtype) && int_list_with_missing(data)?) =>
             {
@@ -38050,7 +38210,7 @@ impl PySeries {
             self.check_numeric_only("sum")?;
         }
         if let Some(sparse) = self.inner.column().sparse() {
-            return Python::attach(|py| sparse_reduce(py, sparse, "sum", min_count));
+            return Python::attach(|py| sparse_reduce(py, sparse, "sum", min_count, skipna));
         }
         // Python-object cells sum with their own + (they were joined as
         // text, ''; br-frankenpandas-8dqrn), and so does text beside a
@@ -38130,7 +38290,7 @@ impl PySeries {
             self.require_numeric("mean")?;
         }
         if let Some(sparse) = self.inner.column().sparse() {
-            return Python::attach(|py| sparse_reduce(py, sparse, "mean", 0));
+            return Python::attach(|py| sparse_reduce(py, sparse, "mean", 0, skipna));
         }
         Python::attach(|py| {
             let result = if !skipna {
@@ -38173,7 +38333,7 @@ impl PySeries {
             self.check_numeric_only("min")?;
         }
         if let Some(sparse) = self.inner.column().sparse() {
-            return Python::attach(|py| sparse_reduce(py, sparse, "min", 0));
+            return Python::attach(|py| sparse_reduce(py, sparse, "min", 0, skipna));
         }
         Python::attach(|py| {
             if compares_as_objects(&self.inner) {
@@ -38205,7 +38365,7 @@ impl PySeries {
             self.check_numeric_only("max")?;
         }
         if let Some(sparse) = self.inner.column().sparse() {
-            return Python::attach(|py| sparse_reduce(py, sparse, "max", 0));
+            return Python::attach(|py| sparse_reduce(py, sparse, "max", 0, skipna));
         }
         Python::attach(|py| {
             if compares_as_objects(&self.inner) {
@@ -38249,6 +38409,11 @@ impl PySeries {
     /// keeps every element.
     #[pyo3(signature = (n=Some(5)))]
     fn head(&self, n: Option<i64>) -> PyResult<PySeries> {
+        if self.inner.is_empty() {
+            // Slicing an already empty column must retain its width and
+            // extension metadata, including callbacks over empty bins.
+            return Ok(self.clone());
+        }
         let n = n.unwrap_or(i64::MAX);
         let result = self
             .inner
@@ -38291,7 +38456,11 @@ impl PySeries {
     fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let column = self.inner.column();
         if column.sparse().is_some() {
-            return self.tolist(py)?.bind(py).call_method0("__iter__").map(Bound::unbind);
+            return self
+                .tolist(py)?
+                .bind(py)
+                .call_method0("__iter__")
+                .map(Bound::unbind);
         }
         if let Some(list) = typed_column_list(py, column)? {
             return Ok(list.bind(py).try_iter()?.into_any().unbind());
@@ -40370,9 +40539,11 @@ impl PySeries {
         if is_sparse_dtype_arg(&spec) {
             let converted = sparse_column_from_dtype(self.inner.column(), &spec);
             return match converted {
-                Ok(Some(column)) => Series::new(self.inner.name(), self.inner.index().clone(), column)
-                    .map(|inner| PySeries { inner })
-                    .map_err(frame_error_to_py),
+                Ok(Some(column)) => {
+                    Series::new(self.inner.name(), self.inner.index().clone(), column)
+                        .map(|inner| PySeries { inner })
+                        .map_err(frame_error_to_py)
+                }
                 Err(_) if errors == "ignore" => Ok(self.clone()),
                 Err(error) => Err(error),
                 Ok(None) => Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
@@ -41718,7 +41889,7 @@ impl PySeries {
         self.check_logical_reduction(py, "any", axis, kwargs)?;
         let column = self.inner.column();
         if let Some(sparse) = column.sparse() {
-            return sparse_reduce(py, sparse, "any", 0);
+            return sparse_reduce(py, sparse, "any", 0, skipna);
         }
         let result = if skipna || !column.has_nulls() {
             self.inner.any().map_err(frame_error_to_py)?
@@ -41751,7 +41922,7 @@ impl PySeries {
         self.check_logical_reduction(py, "all", axis, kwargs)?;
         let column = self.inner.column();
         if let Some(sparse) = column.sparse() {
-            return sparse_reduce(py, sparse, "all", 0);
+            return sparse_reduce(py, sparse, "all", 0, skipna);
         }
         let result = if skipna || !column.has_nulls() {
             self.inner.all().map_err(frame_error_to_py)?
@@ -45276,7 +45447,10 @@ fn sparse_element_to_py(
     position: usize,
 ) -> PyResult<Py<PyAny>> {
     let Ok(stored) = sparse.indices().binary_search(&position) else {
-        return PySparseDtype { inner: sparse.sparse_dtype().clone() }.fill_value(py);
+        return PySparseDtype {
+            inner: sparse.sparse_dtype().clone(),
+        }
+        .fill_value(py);
     };
     let value = &sparse.stored_values()[stored];
     match sparse.value_dtype() {
@@ -45284,13 +45458,19 @@ fn sparse_element_to_py(
             numpy_scalar_of(py, value, sparse.sparse_dtype().width)
         }
         DType::Datetime64 { .. } => match value {
-            Scalar::Datetime64(nanos) => Ok(py.import("numpy")?.getattr("datetime64")?
-                .call1((*nanos, "ns"))?.unbind()),
+            Scalar::Datetime64(nanos) => Ok(py
+                .import("numpy")?
+                .getattr("datetime64")?
+                .call1((*nanos, "ns"))?
+                .unbind()),
             _ => scalar_to_py(py, value),
         },
         DType::Timedelta64 => match value {
-            Scalar::Timedelta64(nanos) => Ok(py.import("numpy")?.getattr("timedelta64")?
-                .call1((*nanos, "ns"))?.unbind()),
+            Scalar::Timedelta64(nanos) => Ok(py
+                .import("numpy")?
+                .getattr("timedelta64")?
+                .call1((*nanos, "ns"))?
+                .unbind()),
             _ => scalar_to_py(py, value),
         },
         _ => scalar_to_py(py, value),
@@ -45308,7 +45488,9 @@ fn sparse_stored_ndarray<'py>(
             .map_err(column_error_to_py)?
     };
     let column = match sparse.sparse_dtype().width {
-        Some(width) => column.cast_to_width(width, false).map_err(column_error_to_py)?,
+        Some(width) => column
+            .cast_to_width(width, false)
+            .map_err(column_error_to_py)?,
         None => column,
     };
     column_ndarray(py, &column)
@@ -45323,6 +45505,7 @@ fn sparse_reduce(
     sparse: &SparseColumn,
     op: &str,
     min_count: usize,
+    skipna: bool,
 ) -> PyResult<Py<PyAny>> {
     let stored = sparse_stored_ndarray(py, sparse)?;
     let gaps = sparse.len() - sparse.npoints();
@@ -45330,17 +45513,6 @@ fn sparse_reduce(
         inner: sparse.sparse_dtype().clone(),
     };
     let fill = descriptor.fill_value(py)?.into_bound(py);
-    if op == "any" {
-        let result = (gaps > 0 && fill.is_truthy()?)
-            || stored.call_method0("any")?.is_truthy()?;
-        return result.into_py_any(py);
-    }
-    if op == "all" {
-        if gaps > 0 && !fill.is_truthy()? {
-            return false.into_py_any(py);
-        }
-        return Ok(stored.call_method0("all")?.unbind());
-    }
     let present: Vec<i64> = sparse
         .stored_values()
         .iter()
@@ -45348,8 +45520,31 @@ fn sparse_reduce(
         .filter(|(_, value)| !value.is_missing())
         .map(|(position, _)| position as i64)
         .collect();
+    if matches!(op, "any" | "all") {
+        // The pinned pandas sparse logical reducers remove missing cells
+        // with skipna=False; their default retains NaN/None truth values.
+        let logical_values = if skipna {
+            stored.clone()
+        } else {
+            stored.get_item(i64_ndarray(py, &present, "int64")?)?
+        };
+        let has_fill = gaps > 0 && (skipna || !sparse.fill_value().is_missing());
+        if op == "any" {
+            let result = (has_fill && fill.is_truthy()?)
+                || logical_values.call_method0("any")?.is_truthy()?;
+            return result.into_py_any(py);
+        }
+        if has_fill && !fill.is_truthy()? {
+            return false.into_py_any(py);
+        }
+        return Ok(logical_values.call_method0("all")?.unbind());
+    }
     let count = present.len()
-        + if sparse.fill_value().is_missing() { 0 } else { gaps };
+        + if sparse.fill_value().is_missing() {
+            0
+        } else {
+            gaps
+        };
     if count < min_count || (count == 0 && matches!(op, "min" | "max")) {
         return f64::NAN.into_py_any(py);
     }
@@ -45361,7 +45556,11 @@ fn sparse_reduce(
         }
         let extreme = values.call_method0(op)?;
         if has_fill
-            && if op == "min" { fill.lt(&extreme)? } else { fill.gt(&extreme)? }
+            && if op == "min" {
+                fill.lt(&extreme)?
+            } else {
+                fill.gt(&extreme)?
+            }
         {
             return Ok(fill.unbind());
         }
@@ -45390,20 +45589,28 @@ fn sparse_ndarray<'py>(
     if sparse.npoints() == sparse.len() {
         return Ok(stored);
     }
-    let dtype = PySparseDtype { inner: sparse.sparse_dtype().clone() };
+    let dtype = PySparseDtype {
+        inner: sparse.sparse_dtype().clone(),
+    };
     let fill = dtype.fill_value(py)?;
     let numpy = py.import("numpy")?;
     let output_dtype = if keep_subtype {
         dtype.subtype(py)?
     } else {
-        let fill_dtype = numpy.call_method1("asarray", (fill.bind(py),))?.getattr("dtype")?;
+        let fill_dtype = numpy
+            .call_method1("asarray", (fill.bind(py),))?
+            .getattr("dtype")?;
         numpy.call_method1("result_type", (dtype.subtype(py)?, fill_dtype))?
     };
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", output_dtype)?;
     let result = numpy.call_method("full", (sparse.len(), fill.bind(py)), Some(&kwargs))?;
     if !sparse.indices().is_empty() {
-        let positions = sparse.indices().iter().map(|&position| position as i64).collect::<Vec<_>>();
+        let positions = sparse
+            .indices()
+            .iter()
+            .map(|&position| position as i64)
+            .collect::<Vec<_>>();
         result.set_item(i64_ndarray(py, &positions, "int64")?, stored)?;
     }
     Ok(result)
@@ -45415,13 +45622,20 @@ fn sparse_ndarray<'py>(
 fn sparse_unique_column(sparse: &SparseColumn) -> PyResult<Column> {
     let unique = |values: &[Scalar]| -> PyResult<Vec<Scalar>> {
         let column = Column::from_object_values(values.to_vec());
-        let series = Series::new(LabelName::default(), Index::default_range(values.len()), column)
-            .map_err(frame_error_to_py)?;
+        let series = Series::new(
+            LabelName::default(),
+            Index::default_range(values.len()),
+            column,
+        )
+        .map_err(frame_error_to_py)?;
         Ok(series.unique())
     };
     let mut distinct = unique(sparse.stored_values())?;
     if sparse.npoints() != sparse.len() {
-        let first_fill = sparse.indices().iter().enumerate()
+        let first_fill = sparse
+            .indices()
+            .iter()
+            .enumerate()
             .position(|(ordinal, &position)| ordinal != position)
             .unwrap_or(sparse.npoints());
         let insertion = unique(&sparse.stored_values()[..first_fill])?.len();
@@ -45442,13 +45656,17 @@ fn sparse_take_with_fill(
     fill_value: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Column> {
     let numpy = py.import("numpy")?;
-    let descriptor = PySparseDtype { inner: sparse.sparse_dtype().clone() };
+    let descriptor = PySparseDtype {
+        inner: sparse.sparse_dtype().clone(),
+    };
     let old_fill = descriptor.fill_value(py)?;
     let new_fill = match fill_value.filter(|fill| !fill.is_none()) {
         Some(fill) => fill.clone(),
         None => f64::NAN.into_bound_py_any(py)?,
     };
-    let has_old_fill = positions.iter().flatten()
+    let has_old_fill = positions
+        .iter()
+        .flatten()
         .any(|position| sparse.indices().binary_search(position).is_err());
     let has_new_fill = positions.iter().any(Option::is_none);
     let mut subtype = descriptor.subtype(py)?;
@@ -45458,7 +45676,8 @@ fn sparse_take_with_fill(
         }
     } else {
         if has_old_fill {
-            subtype = numpy.call_method1("result_type", (&subtype, old_fill.bind(py).get_type()))?;
+            subtype =
+                numpy.call_method1("result_type", (&subtype, old_fill.bind(py).get_type()))?;
         }
         if has_new_fill {
             subtype = numpy.call_method1("result_type", (&subtype, new_fill.get_type()))?;
@@ -55983,7 +56202,11 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         let _ = copy; // pandas' copy= does not change the result
         if let Ok(mapping) = dtype.cast::<PyDict>() {
-            if mapping.values().iter().any(|spec| is_sparse_dtype_arg(&spec)) {
+            if mapping
+                .values()
+                .iter()
+                .any(|spec| is_sparse_dtype_arg(&spec))
+            {
                 // A mapping names every occurrence of a repeated label, but
                 // each occurrence must cast its own values. with_column
                 // would broadcast the first converted column to all of them.
@@ -56019,7 +56242,11 @@ impl PyDataFrame {
                                 column.clone(),
                             )
                             .map_err(frame_error_to_py)?;
-                            PySeries { inner }.astype(&spec, copy, errors)?.inner.column().clone()
+                            PySeries { inner }
+                                .astype(&spec, copy, errors)?
+                                .inner
+                                .column()
+                                .clone()
                         }
                         None => column.clone(),
                     };
@@ -56036,11 +56263,13 @@ impl PyDataFrame {
                 .inner
                 .columns()
                 .ordered_columns()
-                .map(|column| match sparse_column_with_dtype(column, descriptor.clone()) {
-                    Ok(converted) => Ok(converted),
-                    Err(_) if errors == "ignore" => Ok(column.clone()),
-                    Err(error) => Err(error),
-                })
+                .map(
+                    |column| match sparse_column_with_dtype(column, descriptor.clone()) {
+                        Ok(converted) => Ok(converted),
+                        Err(_) if errors == "ignore" => Ok(column.clone()),
+                        Err(error) => Err(error),
+                    },
+                )
                 .collect::<PyResult<Vec<_>>>()?;
             return Ok(PyDataFrame {
                 inner: self.inner.with_columns_at_positions(columns),
@@ -71277,9 +71506,10 @@ impl CategoricalGroupProduct {
         let sources: Vec<Column> = keys
             .iter()
             .map(|key| {
-                frame.column(key).cloned().ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone())
-                })
+                frame
+                    .column(key)
+                    .cloned()
+                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone()))
             })
             .collect::<PyResult<_>>()?;
         if !sources.iter().any(|column| column.categorical().is_some()) {
@@ -71346,9 +71576,7 @@ impl CategoricalGroupProduct {
                 u8::from(matches!(label, IndexLabel::Utf8(_)))
             }
         };
-        block(left)
-            .cmp(&block(right))
-            .then_with(|| left.cmp(right))
+        block(left).cmp(&block(right)).then_with(|| left.cmp(right))
     }
 
     fn cardinality(&self) -> Option<usize> {
@@ -71467,17 +71695,28 @@ impl CategoricalGroupProduct {
     fn supports_reduction(op: &str) -> bool {
         matches!(
             op,
-            "sum" | "sum(min_count)" | "prod" | "prod(min_count)" | "count" | "size"
-                | "nunique" | "mean" | "median" | "min" | "max" | "first" | "last"
-                | "var" | "std" | "sem" | "any" | "all"
+            "sum"
+                | "sum(min_count)"
+                | "prod"
+                | "prod(min_count)"
+                | "count"
+                | "size"
+                | "nunique"
+                | "mean"
+                | "median"
+                | "min"
+                | "max"
+                | "first"
+                | "last"
+                | "var"
+                | "std"
+                | "sem"
+                | "any"
+                | "all"
         )
     }
 
-    fn positions(
-        &self,
-        index: &Index,
-        rows: Vec<Vec<IndexLabel>>,
-    ) -> PyResult<Vec<Option<usize>>> {
+    fn positions(&self, index: &Index, rows: Vec<Vec<IndexLabel>>) -> PyResult<Vec<Option<usize>>> {
         let observed_rows = rows.len();
         let observed: FxHashMap<Vec<IndexLabel>, usize> = rows
             .into_iter()
@@ -71495,9 +71734,7 @@ impl CategoricalGroupProduct {
         // Some legacy kernels label extension values as text. Never
         // mistake an unalignable observed result for an empty group and
         // silently replace its actual values with zero or NaN.
-        if observed.len() != observed_rows
-            || positions.iter().flatten().count() != observed_rows
-        {
+        if observed.len() != observed_rows || positions.iter().flatten().count() != observed_rows {
             return Err(not_implemented(
                 "categorical multi-key groupby with result keys outside their typed domains",
             ));
@@ -71637,9 +71874,9 @@ impl CategoricalGroupProduct {
                 .keys
                 .iter()
                 .map(|key| {
-                    result.column(key).ok_or_else(|| {
-                        PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone())
-                    })
+                    result
+                        .column(key)
+                        .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyKeyError, _>(key.clone()))
                 })
                 .collect::<PyResult<Vec<_>>>()?;
             (0..result.len())
@@ -71647,7 +71884,9 @@ impl CategoricalGroupProduct {
                     key_columns
                         .iter()
                         .map(|column| {
-                            Self::normalized(&scalar_to_index_label_converter(&column.values()[row]))
+                            Self::normalized(&scalar_to_index_label_converter(
+                                &column.values()[row],
+                            ))
                         })
                         .collect()
                 })
@@ -72302,16 +72541,31 @@ fn sparse_coo_axis<'py>(
         .iter()
         .map(|&level| {
             let labels = multi.level_labels(level).unwrap_or_default();
+            let temporal = labels.iter().any(|label| !label.is_missing())
+                && labels.iter().all(|label| {
+                    label.is_missing()
+                        || matches!(
+                            label,
+                            IndexLabel::Datetime64(_)
+                                | IndexLabel::Timedelta64(_)
+                                | IndexLabel::Period(_)
+                        )
+                });
             // get_level_values promotes an integer level with missing labels
             // to float64; categorical integer labels retain their values.
             let float_labels = multi.level_categories(level).is_none()
                 && labels.iter().any(IndexLabel::is_missing)
-                && labels.iter().all(|label| {
-                    label.is_missing() || matches!(label, IndexLabel::Int64(_))
-                });
+                && labels
+                    .iter()
+                    .all(|label| label.is_missing() || matches!(label, IndexLabel::Int64(_)));
             labels
                 .iter()
                 .map(|label| match label {
+                    label if label.is_missing() => IndexLabel::Null(if temporal {
+                        NullKind::NaT
+                    } else {
+                        NullKind::NaN
+                    }),
                     IndexLabel::Int64(value) if float_labels => {
                         IndexLabel::Float64(fp_index::OrderedF64(*value as f64))
                     }
@@ -72392,7 +72646,10 @@ impl PySparseAccessor {
                     "division by zero",
                 ));
             }
-            return Ok(series.sparse().expect("sparse accessor validated").density());
+            return Ok(series
+                .sparse()
+                .expect("sparse accessor validated")
+                .density());
         }
         let frame = self.df.as_ref().expect("sparse accessor has an owner");
         if frame.num_columns() == 0 {
@@ -72403,14 +72660,36 @@ impl PySparseAccessor {
                 "division by zero",
             ));
         }
-        Ok(frame.sparse().density())
+        // pandas averages each physical column's density. Keep that
+        // floating-point reduction order instead of dividing total points
+        // by total cells, which can differ by one ULP.
+        let densities: Vec<f64> = frame
+            .columns()
+            .ordered_columns()
+            .map(|column| {
+                column
+                    .sparse()
+                    .expect("sparse accessor validated")
+                    .density()
+            })
+            .collect();
+        Python::attach(|py| {
+            py.import("numpy")?
+                .call_method1("mean", (densities,))?
+                .extract()
+        })
     }
 
     #[getter]
     fn npoints(&self) -> PyResult<usize> {
         self.series
             .as_ref()
-            .map(|series| series.sparse().expect("sparse accessor validated").npoints())
+            .map(|series| {
+                series
+                    .sparse()
+                    .expect("sparse accessor validated")
+                    .npoints()
+            })
             .ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyAttributeError, _>(
                     "'SparseFrameAccessor' object has no attribute 'npoints'",
@@ -72426,8 +72705,14 @@ impl PySparseAccessor {
             )
         })?;
         PySparseDtype {
-            inner: series.column().sparse().expect("sparse accessor validated").sparse_dtype().clone(),
-        }.fill_value(py)
+            inner: series
+                .column()
+                .sparse()
+                .expect("sparse accessor validated")
+                .sparse_dtype()
+                .clone(),
+        }
+        .fill_value(py)
     }
 
     #[getter]
@@ -72558,7 +72843,8 @@ impl PySparseAccessor {
             ));
         }
         let (row_codes, row_labels) = sparse_coo_axis(py, multi, &row_levels, sort_labels)?;
-        let (column_codes, column_labels) = sparse_coo_axis(py, multi, &column_levels, sort_labels)?;
+        let (column_codes, column_labels) =
+            sparse_coo_axis(py, multi, &column_levels, sort_labels)?;
         let sparse = series.column().sparse().expect("sparse accessor validated");
         let selected: Vec<i64> = sparse
             .stored_values()
@@ -72583,8 +72869,11 @@ impl PySparseAccessor {
             &columns,
             (row_labels.len(), column_labels.len()),
         )?;
-        PyTuple::new(py, [matrix, row_labels.into_any(), column_labels.into_any()])
-            .map(|result| result.into_any().unbind())
+        PyTuple::new(
+            py,
+            [matrix, row_labels.into_any(), column_labels.into_any()],
+        )
+        .map(|result| result.into_any().unbind())
     }
 
     fn to_dense(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -72752,7 +73041,7 @@ fn frame_pairwise_window(
     }
     .map_err(index_error_to_py)?
     .set_names(names)
-    .with_level_zone(0, rows.tz().as_deref());
+    .with_level_zone(0, rows.tz());
     if let Some(right_multi) = right_multi {
         for level in 0..depth {
             multi = multi
@@ -86265,11 +86554,17 @@ impl PyResampler {
         if answers.is_empty()
             && let ResampleTarget::Series(source) = &self.target
         {
-            let empty = source.take(&[]).map_err(frame_error_to_py)?;
+            let column = source
+                .column()
+                .slice(0, 0)
+                .map_err(column_error_to_py)?
+                .keeping_dtype_of(source.column());
             let inner = Series::new(
                 source.name(),
-                self.bin_index(bins)?,
-                empty.column().clone(),
+                // The core's empty bin axis has no values from which to
+                // infer datetime type. Keep the source's declared type.
+                self.bin_index(&source.index().slice(0, 0))?,
+                column,
             )
             .map_err(frame_error_to_py)?;
             return PySeries { inner }.into_py_any(py);
@@ -86431,7 +86726,10 @@ impl PyResampler {
                 series.inner.index().clone()
             } else if let Ok(frame) = answer.extract::<PyRef<'_, PyDataFrame>>() {
                 frame_parts.push(frame.inner.clone());
-                frame.inner.index().clone()
+                match frame.inner.row_multiindex() {
+                    Some(levels) => row_multiindex_axis(levels.clone())?,
+                    None => frame.inner.index().clone(),
+                }
             } else {
                 return Err(not_implemented(
                     "Resampler.apply whose bins answer a value beside rows",
@@ -86450,6 +86748,14 @@ impl PyResampler {
             && series_parts.iter().all(Series::is_empty))
         .then(|| self.bin_index(&bins.slice(0, 0)))
         .transpose()?;
+        let empty_column = empty_series_index.as_ref().and_then(|_| {
+            let first = series_parts.first()?.column();
+            let dtype = column_pandas_dtype_name(first);
+            series_parts
+                .iter()
+                .all(|part| column_pandas_dtype_name(part.column()) == dtype)
+                .then(|| first.clone())
+        });
         let keyed = if self.group_keys && empty_series_index.is_none() {
             let bins = self.bin_index(bins)?;
             let keys: Vec<Vec<IndexLabel>> = bins
@@ -86496,7 +86802,11 @@ impl PyResampler {
                 fp_frame::concat_dataframes_with_axis_join(&refs, 0, fp_frame::ConcatJoin::Outer)
                     .map_err(frame_error_to_py)?;
             if let Some(index) = keyed {
+                let levels = index.row_multiindex().cloned();
                 out = out.with_index(index).map_err(frame_error_to_py)?;
+                if let Some(levels) = levels {
+                    out = out.with_row_multiindex(levels).map_err(frame_error_to_py)?;
+                }
             } else if let Some(levels) =
                 concat_row_multiindexes(indexes.iter().map(Index::row_multiindex))?
             {
@@ -86512,9 +86822,12 @@ impl PyResampler {
         let out =
             fp_frame::concat_series_with_ignore_index(&refs, false).map_err(frame_error_to_py)?;
         let out = match empty_series_index.or(keyed) {
-            Some(index) => {
-                Series::new(out.name(), index, out.column().clone()).map_err(frame_error_to_py)?
-            }
+            Some(index) => Series::new(
+                out.name(),
+                index,
+                empty_column.unwrap_or_else(|| out.column().clone()),
+            )
+            .map_err(frame_error_to_py)?,
             None => {
                 let index =
                     match concat_row_multiindexes(indexes.iter().map(Index::row_multiindex))? {
@@ -89218,8 +89531,7 @@ fn py_width_arg(obj: &Bound<'_, PyAny>) -> Option<(NumericWidth, bool)> {
 /// belongs to `sparse_dtype_arg`, rather than the payload-free DType::Sparse.
 fn is_sparse_dtype_arg(spec: &Bound<'_, PyAny>) -> bool {
     spec.is_instance_of::<PySparseDtype>()
-        || dtype_arg_text(spec)
-            .is_ok_and(|name| name == "Sparse" || name.starts_with("Sparse["))
+        || dtype_arg_text(spec).is_ok_and(|name| name == "Sparse" || name.starts_with("Sparse["))
 }
 
 fn sparse_fill_numpy_dtype(fill: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
@@ -89245,7 +89557,8 @@ fn sparse_dtype_from_parts(
         if let Some(fill) = fill_value.filter(|fill| !fill.is_none()) {
             if !is_scalar_impl(fill) {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "fill_value must be a scalar. Got {} instead", fill.str()?
+                    "fill_value must be a scalar. Got {} instead",
+                    fill.str()?
                 )));
             }
             dtype.fill_value = py_to_cell(py, fill)?;
@@ -89256,10 +89569,15 @@ fn sparse_dtype_from_parts(
     let numpy = py.import("numpy")?;
     let default = pyo3::types::PyString::new(py, "float64").into_any();
     let subtype = numpy
-        .call_method1("dtype", (subtype.filter(|value| !value.is_none()).unwrap_or(&default),))
-        .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            "SparseDtype subtype must be a numpy dtype",
-        ))?;
+        .call_method1(
+            "dtype",
+            (subtype.filter(|value| !value.is_none()).unwrap_or(&default),),
+        )
+        .map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "SparseDtype subtype must be a numpy dtype",
+            )
+        })?;
     let kind: String = subtype.getattr("kind")?.extract()?;
     let name: String = if matches!(kind.as_str(), "S" | "U") {
         "object".to_owned()
@@ -89271,13 +89589,17 @@ fn sparse_dtype_from_parts(
         Some(width) => width.storage(false),
         None => parse_dtype(&name)?,
     };
-    let fill_numpy_dtype = fill_value.filter(|fill| !fill.is_none())
-        .map(sparse_fill_numpy_dtype).transpose()?.flatten();
+    let fill_numpy_dtype = fill_value
+        .filter(|fill| !fill.is_none())
+        .map(sparse_fill_numpy_dtype)
+        .transpose()?
+        .flatten();
     let fill_value = match fill_value.filter(|fill| !fill.is_none()) {
         Some(fill) => {
             if !is_scalar_impl(fill) {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "fill_value must be a scalar. Got {} instead", fill.str()?
+                    "fill_value must be a scalar. Got {} instead",
+                    fill.str()?
                 )));
             }
             py_to_cell(py, fill)?
@@ -89290,7 +89612,12 @@ fn sparse_dtype_from_parts(
             _ => Scalar::Float64(f64::NAN),
         },
     };
-    Ok(SparseDType { value_dtype, fill_value, width, fill_numpy_dtype })
+    Ok(SparseDType {
+        value_dtype,
+        fill_value,
+        width,
+        fill_numpy_dtype,
+    })
 }
 
 /// Parse sparse strings and dtype objects without losing their metadata.
@@ -89302,7 +89629,10 @@ fn sparse_dtype_arg(spec: &Bound<'_, PyAny>) -> PyResult<Option<SparseDType>> {
     }
     // Accept a pandas SparseDtype supplied by a caller, without importing
     // pandas or asking it to perform any production operation.
-    if spec.get_type().name().is_ok_and(|name| name == "SparseDtype")
+    if spec
+        .get_type()
+        .name()
+        .is_ok_and(|name| name == "SparseDtype")
         && let (Ok(subtype), Ok(fill)) = (spec.getattr("subtype"), spec.getattr("fill_value"))
     {
         return sparse_dtype_from_parts(spec.py(), Some(&subtype), Some(&fill)).map(Some);
@@ -89316,11 +89646,13 @@ fn sparse_dtype_arg(spec: &Bound<'_, PyAny>) -> PyResult<Option<SparseDType>> {
     if !name.starts_with("Sparse[") {
         return Ok(None);
     }
-    let invalid = || PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
-        "data type '{name}' not understood"
-    ));
-    let parts = name.strip_prefix("Sparse[")
-        .and_then(|rest| rest.strip_suffix(']')).ok_or_else(invalid)?;
+    let invalid = || {
+        PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!("data type '{name}' not understood"))
+    };
+    let parts = name
+        .strip_prefix("Sparse[")
+        .and_then(|rest| rest.strip_suffix(']'))
+        .ok_or_else(invalid)?;
     let mut parts = parts.split(',');
     let subtype = parts.next().unwrap_or_default().trim();
     if subtype.is_empty() {
@@ -89330,7 +89662,9 @@ fn sparse_dtype_arg(spec: &Bound<'_, PyAny>) -> PyResult<Option<SparseDType>> {
     let dtype = sparse_dtype_from_parts(spec.py(), Some(&subtype), None)?;
     if let Some(fill) = parts.next() {
         let expected = scalar_to_py(spec.py(), &dtype.fill_value)?
-            .bind(spec.py()).str()?.to_string();
+            .bind(spec.py())
+            .str()?
+            .to_string();
         if fill.trim() != expected || parts.next().is_some() {
             return Err(invalid());
         }
@@ -89367,14 +89701,12 @@ fn sparse_column_with_dtype(column: &Column, dtype: SparseDType) -> PyResult<Col
             source.stored_values().to_vec(),
         ),
         None => SparseColumn::from_dense_column(dtype, column),
-    }.map_err(column_error_to_py)?;
+    }
+    .map_err(column_error_to_py)?;
     Ok(Column::from_sparse(sparse))
 }
 
-fn sparse_column_from_dtype(
-    column: &Column,
-    spec: &Bound<'_, PyAny>,
-) -> PyResult<Option<Column>> {
+fn sparse_column_from_dtype(column: &Column, spec: &Bound<'_, PyAny>) -> PyResult<Option<Column>> {
     sparse_dtype_arg(spec)?
         .map(|dtype| sparse_column_with_dtype(column, dtype))
         .transpose()
@@ -97215,11 +97547,21 @@ impl DummyCells {
             ),
             // pandas' sparse indicators require a numpy subtype, including
             // when a string extension column picks BooleanDtype by default.
-            _ => return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Cannot interpret extension dtype as a data type",
-            )),
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Cannot interpret extension dtype as a data type",
+                ));
+            }
         };
-        Ok((fp_types::SparseDType { value_dtype, fill_value, width, fill_numpy_dtype: None }, one))
+        Ok((
+            fp_types::SparseDType {
+                value_dtype,
+                fill_value,
+                width,
+                fill_numpy_dtype: None,
+            },
+            one,
+        ))
     }
 }
 
@@ -97598,7 +97940,8 @@ fn get_dummies(
             let name = source_names[source_position];
             let label = prefix_of(position, name)?;
             if let Some(column) = df.inner.column_at(source_position) {
-                for (level, indicator) in dummy_levels(column, dummy_na, drop_first, dtype, sparse)? {
+                for (level, indicator) in dummy_levels(column, dummy_na, drop_first, dtype, sparse)?
+                {
                     let text = dummy_level_text(py, &level)?;
                     out.push((
                         IndexLabel::Utf8(format!("{label}{prefix_sep}{text}")),
@@ -98807,10 +99150,7 @@ impl PySparseDtype {
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
         let payload = constructor_payload(
             py,
-            vec![
-                self.subtype(py)?,
-                self.fill_value(py)?.into_bound(py),
-            ],
+            vec![self.subtype(py)?, self.fill_value(py)?.into_bound(py)],
             &[],
         )?;
         restore_call(py, "SparseDtype", payload)
@@ -98819,7 +99159,11 @@ impl PySparseDtype {
     #[getter]
     fn name(&self, py: Python<'_>) -> PyResult<String> {
         if self.inner.fill_numpy_dtype.is_some() {
-            return Ok(format!("Sparse[{}, {}]", self.subtype(py)?.str()?, self.fill_value(py)?.bind(py).repr()?));
+            return Ok(format!(
+                "Sparse[{}, {}]",
+                self.subtype(py)?.str()?,
+                self.fill_value(py)?.bind(py).repr()?
+            ));
         }
         Ok(self.inner.pandas_name())
     }
@@ -98840,14 +99184,24 @@ impl PySparseDtype {
                 (Scalar::Int64(value), "uint64") => (*value as u64).into_py_any(py)?,
                 (value, _) => scalar_to_py(py, value)?,
             };
-            return Ok(py.import("numpy")?.call_method1("dtype", (name,))?
-                .getattr("type")?.call1((scalar,))?.unbind());
+            return Ok(py
+                .import("numpy")?
+                .call_method1("dtype", (name,))?
+                .getattr("type")?
+                .call1((scalar,))?
+                .unbind());
         }
         match &self.inner.fill_value {
             Scalar::Datetime64(value) if *value == Timestamp::NAT => Ok(py
-                .import("numpy")?.getattr("datetime64")?.call1(("NaT", "ns"))?.unbind()),
+                .import("numpy")?
+                .getattr("datetime64")?
+                .call1(("NaT", "ns"))?
+                .unbind()),
             Scalar::Timedelta64(value) if *value == Timedelta::NAT => Ok(py
-                .import("numpy")?.getattr("timedelta64")?.call1(("NaT", "ns"))?.unbind()),
+                .import("numpy")?
+                .getattr("timedelta64")?
+                .call1(("NaT", "ns"))?
+                .unbind()),
             value => scalar_to_py(py, value),
         }
     }
@@ -98855,7 +99209,14 @@ impl PySparseDtype {
     #[getter]
     fn kind(&self) -> &'static str {
         match self.inner.value_dtype {
-            DType::Int64 if self.inner.width.is_some_and(|width| width.name(false).starts_with('u')) => "u",
+            DType::Int64
+                if self
+                    .inner
+                    .width
+                    .is_some_and(|width| width.name(false).starts_with('u')) =>
+            {
+                "u"
+            }
             DType::Int64 => "i",
             DType::Float64 => "f",
             DType::Bool => "b",
@@ -98880,11 +99241,13 @@ impl PySparseDtype {
         _cls: &Bound<'_, pyo3::types::PyType>,
         string: &Bound<'_, PyAny>,
     ) -> PyResult<Self> {
-        sparse_dtype_arg(string)?.map(|inner| Self { inner }).ok_or_else(|| {
-            PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-                "Cannot construct a 'SparseDtype' from the given string",
-            )
-        })
+        sparse_dtype_arg(string)?
+            .map(|inner| Self { inner })
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                    "Cannot construct a 'SparseDtype' from the given string",
+                )
+            })
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -98899,14 +99262,17 @@ impl PySparseDtype {
         let Ok(Some(other_dtype)) = sparse_dtype_arg(other) else {
             return Ok(false);
         };
-        if self.inner.value_dtype != other_dtype.value_dtype || self.inner.width != other_dtype.width {
+        if self.inner.value_dtype != other_dtype.value_dtype
+            || self.inner.width != other_dtype.width
+        {
             return Ok(false);
         }
         if self.inner.fill_value.is_missing() && other_dtype.fill_value.is_missing() {
             return Ok(true);
         }
         let py = other.py();
-        scalar_to_py(py, &self.inner.fill_value)?.bind(py)
+        scalar_to_py(py, &self.inner.fill_value)?
+            .bind(py)
             .eq(scalar_to_py(py, &other_dtype.fill_value)?.bind(py))
     }
 
@@ -101494,16 +101860,13 @@ impl PySparseArray {
             ));
         }
         let dtype = dtype.filter(|dtype| !dtype.is_none());
-        let source = if dtype.is_some()
-            && (data.is_instance_of::<PyList>() || data.is_instance_of::<PyTuple>())
-        {
-            // Keep exact cells until sparse selection precedes the cast.
-            let values = data.try_iter()?.map(|value| py_to_cell(py, &value?))
-                .collect::<PyResult<Vec<_>>>()?;
-            Column::from_object_values(values)
-        } else {
-            PySeries::new(py, Some(data), None, None, None, None)?.inner.column().clone()
-        };
+        // Untyped numeric sequences first undergo ordinary inference, as
+        // pandas does: [large_int, None] is float64 before the sparse cast.
+        // Explicitly object-typed arrays/Series keep their original cells.
+        let source = PySeries::new(py, Some(data), None, None, None, None)?
+            .inner
+            .column()
+            .clone();
         let mut descriptor = match dtype {
             Some(spec) => match sparse_dtype_arg(spec)? {
                 Some(descriptor) => descriptor,
@@ -101525,7 +101888,8 @@ impl PySparseArray {
         if let Some(fill) = fill_value.filter(|fill| !fill.is_none()) {
             if !is_scalar_impl(fill) {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "fill_value must be a scalar. Got {} instead", fill.str()?
+                    "fill_value must be a scalar. Got {} instead",
+                    fill.str()?
                 )));
             }
             descriptor.fill_value = py_to_cell(py, fill)?;
@@ -101535,24 +101899,34 @@ impl PySparseArray {
             Some(index) => {
                 let index = index.call_method0("to_int_index")?;
                 let len: usize = index.getattr("length")?.extract()?;
-                let positions = index.getattr("indices")?.try_iter()?
+                let positions = index
+                    .getattr("indices")?
+                    .try_iter()?
                     .map(|position| position?.extract::<usize>())
                     .collect::<PyResult<Vec<_>>>()?;
-                if descriptor.value_dtype == DType::Int64 && source.values().iter().any(|value| {
-                    value.is_missing() || matches!(value, Scalar::Float64(value) if !value.is_finite())
-                }) {
+                if descriptor.value_dtype == DType::Int64
+                    && source.values().iter().any(|value| {
+                        value.is_missing()
+                            || matches!(value, Scalar::Float64(value) if !value.is_finite())
+                    })
+                {
                     return Err(IntCastingNaNError::new_err(
                         "Cannot convert non-finite values (NA or inf) to integer",
                     ));
                 }
-                Column::from_sparse(SparseColumn::from_parts(
-                    descriptor, len, positions, source.values().to_vec(),
-                ).map_err(column_error_to_py)?)
+                Column::from_sparse(
+                    SparseColumn::from_parts(descriptor, len, positions, source.values().to_vec())
+                        .map_err(column_error_to_py)?,
+                )
             }
             None => sparse_column_with_dtype(&source, descriptor)?,
         };
-        let inner = Series::new(LabelName::default(), Index::default_range(column.len()), column)
-            .map_err(frame_error_to_py)?;
+        let inner = Series::new(
+            LabelName::default(),
+            Index::default_range(column.len()),
+            column,
+        )
+        .map_err(frame_error_to_py)?;
         Ok(pyo3::PyClassInitializer::from(PyExtensionArray { inner }).add_subclass(Self))
     }
 
@@ -101561,14 +101935,26 @@ impl PySparseArray {
         let py = slf.py();
         let array: &PyExtensionArray = slf.as_ref();
         PySparseDtype {
-            inner: array.inner.column().sparse().expect("sparse array backing").sparse_dtype().clone(),
-        }.fill_value(py)
+            inner: array
+                .inner
+                .column()
+                .sparse()
+                .expect("sparse array backing")
+                .sparse_dtype()
+                .clone(),
+        }
+        .fill_value(py)
     }
 
     #[getter]
     fn npoints(slf: PyRef<'_, Self>) -> usize {
         let array: &PyExtensionArray = slf.as_ref();
-        array.inner.column().sparse().expect("sparse array backing").npoints()
+        array
+            .inner
+            .column()
+            .sparse()
+            .expect("sparse array backing")
+            .npoints()
     }
 
     #[getter]
@@ -101576,7 +101962,9 @@ impl PySparseArray {
         let array: &PyExtensionArray = slf.as_ref();
         let sparse = array.inner.column().sparse().expect("sparse array backing");
         if sparse.is_empty() {
-            return Err(PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>("division by zero"));
+            return Err(PyErr::new::<pyo3::exceptions::PyZeroDivisionError, _>(
+                "division by zero",
+            ));
         }
         Ok(sparse.npoints() as f64 / sparse.len() as f64)
     }
@@ -101585,15 +101973,21 @@ impl PySparseArray {
     fn sp_values(slf: PyRef<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
         let array: &PyExtensionArray = slf.as_ref();
-        sparse_stored_ndarray(py, array.inner.column().sparse().expect("sparse array backing"))
-            .map(Bound::unbind)
+        sparse_stored_ndarray(
+            py,
+            array.inner.column().sparse().expect("sparse array backing"),
+        )
+        .map(Bound::unbind)
     }
 
     #[getter]
     fn sp_index(slf: PyRef<'_, Self>) -> PySparseIndex {
         let array: &PyExtensionArray = slf.as_ref();
         let sparse = array.inner.column().sparse().expect("sparse array backing");
-        PySparseIndex { length: sparse.len(), indices: sparse.indices().to_vec() }
+        PySparseIndex {
+            length: sparse.len(),
+            indices: sparse.indices().to_vec(),
+        }
     }
 
     #[getter]
@@ -101604,22 +101998,36 @@ impl PySparseArray {
     fn to_dense(slf: PyRef<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
         let array: &PyExtensionArray = slf.as_ref();
-        sparse_ndarray(py, array.inner.column().sparse().expect("sparse array backing"), true)
-            .map(Bound::unbind)
+        sparse_ndarray(
+            py,
+            array.inner.column().sparse().expect("sparse array backing"),
+            true,
+        )
+        .map(Bound::unbind)
     }
 
     fn __getitem__(slf: PyRef<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
         let array: &PyExtensionArray = slf.as_ref();
-        if !key.is_instance_of::<pyo3::types::PyBool>() && let Ok(position) = key.extract::<i64>() {
+        if !key.is_instance_of::<pyo3::types::PyBool>()
+            && let Ok(position) = key.extract::<i64>()
+        {
             let len = i64::try_from(array.inner.len()).unwrap_or(i64::MAX);
-            let resolved = if position < 0 { position + len } else { position };
+            let resolved = if position < 0 {
+                position + len
+            } else {
+                position
+            };
             if !(0..len).contains(&resolved) {
-                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
-                    format!("index {position} is out of bounds for axis 0 with size {len}"),
-                ));
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "index {position} is out of bounds for axis 0 with size {len}"
+                )));
             }
-            return sparse_element_to_py(py, array.inner.column().sparse().expect("sparse array backing"), resolved as usize);
+            return sparse_element_to_py(
+                py,
+                array.inner.column().sparse().expect("sparse array backing"),
+                resolved as usize,
+            );
         }
         array.__getitem__(py, key)
     }
@@ -101644,8 +102052,14 @@ pub struct PySparseIndex {
 impl PySparseIndex {
     #[getter]
     fn indices(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let values = self.indices.iter().map(|&position| position as i64).collect::<Vec<_>>();
-        i64_ndarray(py, &values, "int64")?.call_method1("astype", ("int32",)).map(Bound::unbind)
+        let values = self
+            .indices
+            .iter()
+            .map(|&position| position as i64)
+            .collect::<Vec<_>>();
+        i64_ndarray(py, &values, "int64")?
+            .call_method1("astype", ("int32",))
+            .map(Bound::unbind)
     }
 
     #[getter]
@@ -101658,7 +102072,10 @@ impl PySparseIndex {
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        Ok(format!("IntIndex\nIndices: {}\n", self.indices(py)?.bind(py).repr()?))
+        Ok(format!(
+            "IntIndex\nIndices: {}\n",
+            self.indices(py)?.bind(py).repr()?
+        ))
     }
 }
 
@@ -102145,7 +102562,11 @@ impl PyExtensionArray {
                         "Invalid value in 'indices'. Must be between -1 and the length of the array.",
                     ));
                 }
-                let resolved = if position < 0 { position + len } else { position };
+                let resolved = if position < 0 {
+                    position + len
+                } else {
+                    position
+                };
                 if !(0..len).contains(&resolved) {
                     return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
                         "out of bounds value in 'indices'.",
