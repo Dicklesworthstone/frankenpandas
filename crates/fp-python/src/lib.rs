@@ -488,7 +488,7 @@ fn period_comparison(
     let period = if let Ok(period) = other.extract::<PyRef<'_, PyPeriod>>() {
         period.inner
     } else if let Ok(text) = other.extract::<String>() {
-        period_from_text(&text, Some(freq.alias()))?
+        period_from_text(&text, Some(&freq.alias()))?
     } else {
         return Ok(None);
     };
@@ -4963,6 +4963,25 @@ fn offset_freq_as_period(freq: &str) -> String {
     const MONTHS: [&str; 12] = [
         "JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
     ];
+    let digits = freq
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(freq.len());
+    if digits > 0 {
+        let (count, offset) = freq.split_at(digits);
+        let (rule, anchor) = offset.split_once('-').unwrap_or((offset, ""));
+        return match rule {
+            "ME" => format!("{count}M"),
+            "QE" => format!(
+                "{count}Q-{}",
+                if anchor.is_empty() { "DEC" } else { anchor }
+            ),
+            "YE" => format!(
+                "{count}Y-{}",
+                if anchor.is_empty() { "DEC" } else { anchor }
+            ),
+            _ => freq.to_owned(),
+        };
+    }
     let (base, anchor) = freq
         .split_once('-')
         .map_or((freq, None), |(base, anchor)| (base, Some(anchor)));
@@ -6696,17 +6715,21 @@ fn period_freq_text(freq: &Bound<'_, PyAny>) -> PyResult<String> {
         .map_or((freqstr.as_str(), None), |(head, anchor)| {
             (head, Some(anchor))
         });
-    let head = match head {
-        "ME" | "QE" | "YE" => &head[..1],
+    let digits = head
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(head.len());
+    let (count, rule) = head.split_at(digits);
+    let rule = match rule {
+        "ME" => "M",
+        "QE" => "Q",
+        "YE" => "Y",
         other => other,
     };
-    Ok(anchor.map_or_else(|| head.to_owned(), |anchor| format!("{head}-{anchor}")))
+    let head = format!("{count}{rule}");
+    Ok(anchor.map_or_else(|| head.clone(), |anchor| format!("{head}-{anchor}")))
 }
 
 fn convert_period_freq(p: Period, target_freq: &str, how: &str) -> PyResult<Period> {
-    if p.ordinal == i64::MIN {
-        return Ok(p);
-    }
     let pidx = fp_index::PeriodIndex::new(vec![p]);
     let res = pidx
         .asfreq_with_how(target_freq, how)
@@ -6765,13 +6788,24 @@ fn period_text_time_resolution(text: &str) -> Option<(&'static str, String)> {
 /// ('2024-01-01 22:00' at 'h', which raised "cannot parse").
 fn period_from_text(text: &str, freq: Option<&str>) -> PyResult<Period> {
     let unreadable = |err: String| PyErr::new::<pyo3::exceptions::PyValueError, _>(err);
+    // Weekly labels display a range, but their first date identifies the
+    // period. Accept this representation too, including multiplied weeks.
+    if let Some(target) = freq.and_then(PeriodFreq::parse)
+        && matches!(target.base(), PeriodFreq::Weekly(_))
+        && let Some((start, end)) = text.split_once('/')
+        && let (Ok(start), Ok(_)) = (Timestamp::parse(start), Timestamp::parse(end))
+    {
+        return fp_index::datetime_nanos_to_period(start.nanos, target).map_err(index_error_to_py);
+    }
     match (Period::parse(text), freq) {
         (Ok(period), Some(freq)) => match (period.freq, PeriodFreq::parse(freq)) {
             // A quarter label names the fiscal quarter of an anchored
             // frequency (pandas' quarter_to_myear): Period('2024Q1', 'Q-JAN')
             // is fiscal 2024Q1, starting 2023-02 (it read the calendar
             // quarter and became 2024Q4).
-            (PeriodFreq::QUARTERLY, Some(target @ PeriodFreq::Quarterly(_))) => {
+            (PeriodFreq::QUARTERLY, Some(target))
+                if matches!(target.base(), PeriodFreq::Quarterly(_)) =>
+            {
                 Ok(Period::new(period.ordinal, target))
             }
             _ => convert_period_freq(period, freq, "start"),
@@ -6816,15 +6850,7 @@ impl PyPeriod {
     /// The period's last instant, pandas' `end_time`: a business day's own
     /// day's last nanosecond, any other the one before the next period.
     fn end_nanos(&self) -> Option<i64> {
-        if self.inner.freq == PeriodFreq::Business {
-            return self.start_nanos()?.checked_add(86_399_999_999_999);
-        }
-        if self.inner.is_nat() {
-            return None;
-        }
-        fp_index::period_start_nanos(self.inner.shift(1))
-            .ok()?
-            .checked_sub(1)
+        self.inner.end_nanos()
     }
 
     /// The instant pandas reads the period's fields at (get_date_info): a
@@ -6832,16 +6858,19 @@ impl PyPeriod {
     /// 3 and its day 31), a business day or a finer period its start
     /// (br-frankenpandas-3x4e7).
     fn field_stamp(&self) -> Option<Timestamp> {
-        let nanos = match self.inner.freq {
+        // Fields describe the first base period, even when the span covers
+        // several of them: January at 2M has day=31 and end_time in February.
+        let base = Period::new(self.inner.ordinal, self.inner.freq.base());
+        let nanos = match base.freq {
             PeriodFreq::Business
             | PeriodFreq::Hourly
             | PeriodFreq::Minutely
             | PeriodFreq::Secondly
             | PeriodFreq::Milliseconds
             | PeriodFreq::Microseconds
-            | PeriodFreq::Nanoseconds => self.start_nanos()?,
+            | PeriodFreq::Nanoseconds => base.start_nanos()?,
             _ => {
-                let last = self.end_nanos()?;
+                let last = base.end_nanos()?;
                 last - last.rem_euclid(86_400_000_000_000)
             }
         };
@@ -6861,7 +6890,7 @@ impl PyPeriod {
 fn period_freq_offset(freq: PeriodFreq, n: i64) -> PyResult<PyDateOffset> {
     // An anchored frequency's offset carries its anchor (<2 * YearEnds:
     // month=6> for Y-JUN, QuarterEnd startingMonth=1 for Q-JAN).
-    Ok(match freq {
+    Ok(match freq.base() {
         PeriodFreq::Annual(month) => offset_year_end(n, false, i64::from(month))?,
         PeriodFreq::Quarterly(month) => offset_quarter_end(n, false, i64::from(month))?,
         PeriodFreq::Monthly => offset_month_end(n, false),
@@ -6901,7 +6930,9 @@ impl PyPeriod {
         let mut freq_arg: Option<String> = args
             .get_item(1)
             .ok()
-            .and_then(|a1| a1.extract::<String>().ok());
+            .filter(|freq| !freq.is_none())
+            .map(|freq| period_freq_text(&freq))
+            .transpose()?;
 
         if let Some(kw) = kwargs {
             if value_arg.is_none() {
@@ -6910,47 +6941,59 @@ impl PyPeriod {
             if freq_arg.is_none() {
                 freq_arg = kw
                     .get_item("freq")?
-                    .and_then(|f| f.extract::<String>().ok());
+                    .filter(|freq| !freq.is_none())
+                    .map(|freq| period_freq_text(&freq))
+                    .transpose()?;
             }
             if value_arg.is_none() {
                 let year_item = kw.get_item("year")?;
                 if let Some(y) = year_item {
                     let year = y.extract::<i64>()?;
                     let freq_str = freq_arg.as_deref().unwrap_or("Y");
-                    let parsed = PeriodFreq::parse(freq_str);
-                    let inner = match freq_str.to_ascii_uppercase().as_str() {
+                    let parsed = PeriodFreq::parse(freq_str).ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "unsupported frequency '{freq_str}'"
+                        ))
+                    })?;
+                    let inner = match parsed.base() {
                         // A fiscal year / quarter names the period itself:
                         // Period(year=2024, quarter=1, freq='Q-JAN') is
                         // 2024Q1 (pandas' quarter_to_myear).
-                        _ if matches!(parsed, Some(PeriodFreq::Quarterly(_))) => {
+                        PeriodFreq::Quarterly(_) => {
                             let quarter = kw
                                 .get_item("quarter")?
                                 .map_or(Ok(1), |v| v.extract::<i64>())?;
                             let ord = (year - 1970) * 4 + quarter - 1;
-                            Period::new(ord, parsed.unwrap_or(PeriodFreq::QUARTERLY))
+                            Period::new(ord, parsed)
                         }
-                        "M" => {
+                        PeriodFreq::Monthly => {
                             let month = kw
                                 .get_item("month")?
                                 .map_or(Ok(1), |v| v.extract::<i64>())?;
                             let ord = (year - 1970) * 12 + month - 1;
-                            Period::new(ord, PeriodFreq::Monthly)
+                            Period::new(ord, parsed)
                         }
-                        "D" => {
+                        PeriodFreq::Annual(_) => Period::new(year - 1970, parsed),
+                        _ => {
                             let month = kw
                                 .get_item("month")?
                                 .map_or(Ok(1), |v| v.extract::<i64>())?;
                             let day = kw.get_item("day")?.map_or(Ok(1), |v| v.extract::<i64>())?;
-                            let ord = days_from_ymd(year, month, day);
-                            Period::new(ord, PeriodFreq::Daily)
-                        }
-                        _ => {
-                            let ord = year - 1970;
-                            let annual = match parsed {
-                                Some(freq @ PeriodFreq::Annual(_)) => freq,
-                                _ => PeriodFreq::ANNUAL,
-                            };
-                            Period::new(ord, annual)
+                            let hour =
+                                kw.get_item("hour")?.map_or(Ok(0), |v| v.extract::<i64>())?;
+                            let minute = kw
+                                .get_item("minute")?
+                                .map_or(Ok(0), |v| v.extract::<i64>())?;
+                            let second = kw
+                                .get_item("second")?
+                                .map_or(Ok(0), |v| v.extract::<i64>())?;
+                            let nanos = civil_nanos(
+                                args.py(),
+                                [year, month, day, hour, minute, second, 0],
+                                0,
+                            )?;
+                            fp_index::datetime_nanos_to_period(nanos, parsed)
+                                .map_err(index_error_to_py)?
                         }
                     };
                     return Ok(PyPeriod { inner });
@@ -6990,7 +7033,7 @@ impl PyPeriod {
     }
 
     #[getter]
-    fn freqstr(&self) -> &'static str {
+    fn freqstr(&self) -> String {
         self.inner.freqstr()
     }
 
@@ -6999,7 +7042,7 @@ impl PyPeriod {
     /// it; it was the alias text.
     #[getter]
     fn freq(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let offset = fp_index::canonical_freq(self.inner.freqstr())
+        let offset = fp_index::canonical_freq(&self.inner.freqstr())
             .map(|freqstr| offset_for_freqstr(&freqstr))
             .transpose()?
             .flatten();
@@ -7046,13 +7089,13 @@ impl PyPeriod {
 
     #[getter]
     fn quarter(&self) -> Option<i64> {
-        self.field_stamp()?.quarter()
+        self.inner.quarter()
     }
 
     /// The fiscal year of the quarter (a Q-DEC year is the calendar one).
     #[getter]
     fn qyear(&self) -> Option<i64> {
-        self.year()
+        self.inner.qyear()
     }
 
     #[getter]
@@ -7114,7 +7157,7 @@ impl PyPeriod {
             return "NaT".to_owned();
         };
         let within = stamp.value().rem_euclid(1_000_000_000);
-        let year = stamp.year().unwrap_or_default();
+        let year = self.inner.qyear().unwrap_or_default();
         let mut own = String::with_capacity(fmt.len());
         let mut chars = fmt.chars();
         while let Some(c) = chars.next() {
@@ -7123,7 +7166,7 @@ impl PyPeriod {
                 continue;
             }
             match chars.next() {
-                Some('q') => own.push_str(&stamp.quarter().unwrap_or_default().to_string()),
+                Some('q') => own.push_str(&self.inner.quarter().unwrap_or_default().to_string()),
                 Some('F') => own.push_str(&year.to_string()),
                 Some('f') => own.push_str(&format!("{:02}", year.rem_euclid(100))),
                 Some('l') => own.push_str(&format!("{:03}", within / 1_000_000)),
@@ -20779,7 +20822,16 @@ impl PyDatetimeIndex {
     fn to_period(&self, freq: Option<&str>) -> PyResult<PyPeriodIndex> {
         // Without a freq, the index's own (a date_range's 'D'), read as the
         // period it spans (see `offset_freq_as_period`).
-        let own = self.inner.freqstr().map(|own| offset_freq_as_period(&own));
+        let own = if freq.is_some() {
+            None
+        } else if let Some(own) = self.inner.freqstr() {
+            Some(offset_freq_as_period(&own))
+        } else {
+            self.inner
+                .inferred_freq()
+                .map(|freq| period_alias_of_inferred(&freq))
+                .transpose()?
+        };
         let Some(freq) = freq.or(own.as_deref()) else {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "You must pass a freq argument as current index has none.",
@@ -20813,7 +20865,11 @@ impl PyDatetimeIndex {
             .ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyValueError, _>("to_period: lost a period")
             })?;
-        let mut out = PeriodIndex::new(periods);
+        let mut out = if periods.is_empty() {
+            PeriodIndex::from_ordinals(&[], p_freq)
+        } else {
+            PeriodIndex::new(periods)
+        };
         if let Some(n) = self.inner.name() {
             out = out.set_name(n);
         }
@@ -25412,6 +25468,11 @@ impl PyPeriodIndex {
 
     /// Its labels as a column: a period one (to_series / to_frame).
     fn series_column(&self) -> PyResult<Column> {
+        if self.inner.is_empty()
+            && let Some(freq) = self.inner.freq()
+        {
+            return Ok(Column::from_period_values_owned(Vec::new(), freq));
+        }
         if let Some(column) = typed_period_column(self.inner.values()) {
             return Ok(column);
         }
@@ -25483,7 +25544,7 @@ impl PyPeriodIndex {
         let inner = if let Some(inner) = typed {
             match given_freq {
                 Some(freq) if inner.freq().is_some_and(|own| own != freq) => inner
-                    .asfreq_with_how(freq.alias(), "end")
+                    .asfreq_with_how(&freq.alias(), "end")
                     .map_err(index_error_to_py)?,
                 _ => inner,
             }
@@ -25495,6 +25556,10 @@ impl PyPeriodIndex {
                 let mut periods: Vec<Option<Period>> = Vec::with_capacity(list.len());
                 for item in list {
                     if let Ok(period) = item.extract::<PyRef<'_, PyPeriod>>() {
+                        if period.inner.is_nat() {
+                            periods.push(None);
+                            continue;
+                        }
                         // A period at another freq than the given one is
                         // pandas' IncompatibleFrequency (it was kept at its
                         // own; br-frankenpandas-od7kt).
@@ -25509,6 +25574,10 @@ impl PyPeriodIndex {
                         }
                         periods.push(Some(period.inner));
                     } else if let Ok(s) = item.extract::<String>() {
+                        if s.trim().eq_ignore_ascii_case("nat") {
+                            periods.push(None);
+                            continue;
+                        }
                         // At another resolution than the given freq it is the
                         // period of that freq holding its start ('2020-01-01'
                         // with 'M' is 2020-01; it stayed a day), and a datetime
@@ -25518,6 +25587,12 @@ impl PyPeriodIndex {
                             PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{error}"))
                         };
                         let p = match (Period::parse(&s), given_freq) {
+                            (Ok(p), Some(freq))
+                                if p.freq == PeriodFreq::QUARTERLY
+                                    && matches!(freq.base(), PeriodFreq::Quarterly(_)) =>
+                            {
+                                Period::new(p.ordinal, freq)
+                            }
                             (Ok(p), Some(freq)) if p.freq != freq => {
                                 fp_index::datetime_nanos_to_period(
                                     fp_index::period_start_nanos(p).map_err(index_error_to_py)?,
@@ -25526,6 +25601,12 @@ impl PyPeriodIndex {
                                 .map_err(index_error_to_py)?
                             }
                             (Ok(p), _) => p,
+                            (Err(_), Some(freq))
+                                if matches!(freq.base(), PeriodFreq::Weekly(_))
+                                    && s.contains('/') =>
+                            {
+                                period_from_text(&s, Some(&freq.alias()))?
+                            }
                             (Err(error), Some(freq)) => {
                                 let stamp = Timestamp::parse(&s)
                                     .or_else(|_| parsed_timestamp(&s))
@@ -25566,20 +25647,30 @@ impl PyPeriodIndex {
                 }
                 let nat_freq = given_freq
                     .or_else(|| periods.iter().flatten().map(|period| period.freq).next())
-                    .unwrap_or(period_freq);
-                PeriodIndex::new(
-                    periods
-                        .into_iter()
-                        .map(|period| period.unwrap_or(Period::new(i64::MIN, nat_freq)))
-                        .collect(),
-                )
+                    .ok_or_else(|| {
+                        PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "freq not specified and cannot be inferred",
+                        )
+                    })?;
+                if periods.is_empty() {
+                    PeriodIndex::from_ordinals(&[], nat_freq)
+                } else {
+                    PeriodIndex::new(
+                        periods
+                            .into_iter()
+                            .map(|period| period.unwrap_or(Period::new(i64::MIN, nat_freq)))
+                            .collect(),
+                    )
+                }
             } else {
                 return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                     "PeriodIndex requires iterable data or another PeriodIndex",
                 ));
             }
         } else {
-            PeriodIndex::new(Vec::new())
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "PeriodIndex(...) must be called with a collection of some kind, None was passed",
+            ));
         };
         // The given name, else the data's - a Series' or an Index's, as
         // pandas (a Series' was dropped).
@@ -25789,19 +25880,16 @@ impl PyPeriodIndex {
             let mut i = indices.start;
             if indices.step > 0 {
                 while i < indices.stop {
-                    sliced.push(self.inner.values()[i as usize]);
+                    sliced.push(i as usize);
                     i += indices.step;
                 }
             } else {
                 while i > indices.stop {
-                    sliced.push(self.inner.values()[i as usize]);
+                    sliced.push(i as usize);
                     i += indices.step;
                 }
             }
-            let mut out = PeriodIndex::new(sliced);
-            if let Some(n) = self.inner.name() {
-                out = out.set_name(n);
-            }
+            let out = self.inner.take(&sliced).map_err(index_error_to_py)?;
             return Py::new(py, PyPeriodIndex { inner: out })?
                 .into_any()
                 .into_py_any(py);
@@ -26427,7 +26515,7 @@ impl PyPeriodIndex {
         let offset = self
             .inner
             .freq()
-            .and_then(|freq| fp_index::canonical_freq(freq.alias()))
+            .and_then(|freq| fp_index::canonical_freq(&freq.alias()))
             .map(|freqstr| offset_for_freqstr(&freqstr))
             .transpose()?
             .flatten();
@@ -26438,7 +26526,7 @@ impl PyPeriodIndex {
     }
 
     #[getter]
-    fn freqstr(&self) -> Option<&'static str> {
+    fn freqstr(&self) -> Option<String> {
         self.inner.freq().map(PeriodFreq::alias)
     }
 
@@ -26497,7 +26585,7 @@ impl PyPeriodIndex {
                 PeriodFreq::parse(freq.unwrap_or("Q")).ok_or_else(|| invalid(freq))?;
             // pandas 2.2.3 takes quarter fields at Q-DEC only: an anchored
             // quarter (Q-JAN) fails its base check as well.
-            if period_freq != PeriodFreq::QUARTERLY {
+            if period_freq.base() != PeriodFreq::QUARTERLY {
                 return Err(PyErr::new::<pyo3::exceptions::PyAssertionError, _>(
                     "base must equal FR_QTR",
                 ));
@@ -94621,7 +94709,7 @@ fn period_range(
                     "start must be <= end",
                 ));
             }
-            (p_start, (diff + 1) as usize)
+            (p_start, (diff / p_start.freq.multiplier() + 1) as usize)
         }
         (None, Some(e), Some(p)) => {
             let p_end = period_from_text(e, freq)?;

@@ -10640,6 +10640,56 @@ pub enum PeriodFreq {
     Microseconds,
     /// `ns` / `NS` — nanosecond periods.
     Nanoseconds,
+    /// A span of several base periods. Ordinals still count the base unit:
+    /// `2D` at ordinal 1 starts on 1970-01-02 and covers two days.
+    Multiple(PeriodMultiple),
+}
+
+/// The finite base of a multiplied frequency. Keeping it separate from
+/// `PeriodFreq` avoids recursive storage and keeps period scalars `Copy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING-KEBAB-CASE")]
+enum PeriodUnit {
+    Annual(u8),
+    Quarterly(u8),
+    Monthly,
+    Weekly(u8),
+    Daily,
+    Business,
+    Hourly,
+    Minutely,
+    Secondly,
+    Milliseconds,
+    Microseconds,
+    Nanoseconds,
+}
+
+/// A positive period span, constructed through [`PeriodFreq::with_multiplier`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "PeriodMultipleRepr")]
+pub struct PeriodMultiple {
+    unit: PeriodUnit,
+    count: i64,
+}
+
+#[derive(Deserialize)]
+struct PeriodMultipleRepr {
+    unit: PeriodUnit,
+    count: i64,
+}
+
+impl TryFrom<PeriodMultipleRepr> for PeriodMultiple {
+    type Error = &'static str;
+
+    fn try_from(value: PeriodMultipleRepr) -> Result<Self, Self::Error> {
+        if value.count <= 1 {
+            return Err("a multiplied period frequency must span at least two base periods");
+        }
+        Ok(Self {
+            unit: value.unit,
+            count: value.count,
+        })
+    }
 }
 
 /// The month abbreviations pandas anchors annual / quarterly frequencies on.
@@ -10657,6 +10707,67 @@ impl PeriodFreq {
     /// `W` / `W-SUN`: weeks Monday to Sunday.
     pub const WEEKLY: Self = Self::Weekly(6);
 
+    /// The frequency of one base period. A multiplied period's ordinal and
+    /// calendar fields use this unit, independently of its span.
+    #[must_use]
+    pub const fn base(self) -> Self {
+        match self {
+            Self::Multiple(multiple) => match multiple.unit {
+                PeriodUnit::Annual(month) => Self::Annual(month),
+                PeriodUnit::Quarterly(month) => Self::Quarterly(month),
+                PeriodUnit::Monthly => Self::Monthly,
+                PeriodUnit::Weekly(day) => Self::Weekly(day),
+                PeriodUnit::Daily => Self::Daily,
+                PeriodUnit::Business => Self::Business,
+                PeriodUnit::Hourly => Self::Hourly,
+                PeriodUnit::Minutely => Self::Minutely,
+                PeriodUnit::Secondly => Self::Secondly,
+                PeriodUnit::Milliseconds => Self::Milliseconds,
+                PeriodUnit::Microseconds => Self::Microseconds,
+                PeriodUnit::Nanoseconds => Self::Nanoseconds,
+            },
+            base => base,
+        }
+    }
+
+    /// Number of base periods in the span. Always positive.
+    #[must_use]
+    pub const fn multiplier(self) -> i64 {
+        match self {
+            Self::Multiple(multiple) => multiple.count,
+            _ => 1,
+        }
+    }
+
+    /// Set the span in units of this frequency's base. Zero and negative
+    /// spans are invalid for periods, and a span of one has the base form.
+    #[must_use]
+    pub const fn with_multiplier(self, count: i64) -> Option<Self> {
+        if count < 1 {
+            return None;
+        }
+        let base = self.base();
+        if count == 1 {
+            return Some(base);
+        }
+        let unit = match base {
+            Self::Annual(month) => PeriodUnit::Annual(month),
+            Self::Quarterly(month) => PeriodUnit::Quarterly(month),
+            Self::Monthly => PeriodUnit::Monthly,
+            Self::Weekly(day) => PeriodUnit::Weekly(day),
+            Self::Daily => PeriodUnit::Daily,
+            Self::Business => PeriodUnit::Business,
+            Self::Hourly => PeriodUnit::Hourly,
+            Self::Minutely => PeriodUnit::Minutely,
+            Self::Secondly => PeriodUnit::Secondly,
+            Self::Milliseconds => PeriodUnit::Milliseconds,
+            Self::Microseconds => PeriodUnit::Microseconds,
+            Self::Nanoseconds => PeriodUnit::Nanoseconds,
+            Self::Multiple(_) => return None,
+        };
+        Some(Self::Multiple(PeriodMultiple { unit, count }))
+    }
+
     /// Months a date's month count moves forward to land on its fiscal
     /// calendar: a fiscal year ending in month `m` starts in month `m + 1`,
     /// so `(months since 1970-01 + shift)` divided by 12 (3) is the annual
@@ -10664,7 +10775,7 @@ impl PeriodFreq {
     /// unanchored frequency.
     #[must_use]
     pub const fn fiscal_month_shift(self) -> i64 {
-        match self {
+        match self.base() {
             Self::Annual(month) | Self::Quarterly(month) => (12 - (month as i64 % 12)) % 12,
             _ => 0,
         }
@@ -10676,7 +10787,7 @@ impl PeriodFreq {
     /// and every other frequency.
     #[must_use]
     pub const fn week_start_shift(self) -> i64 {
-        match self {
+        match self.base() {
             Self::Weekly(day) => (day as i64 % 7 + 1) % 7,
             _ => 0,
         }
@@ -10704,6 +10815,21 @@ impl PeriodFreq {
     /// not milliseconds, and is refused here the way pandas refuses it for
     /// `to_period`. See the check at the top of the body.
     pub fn parse(alias: &str) -> Option<Self> {
+        let alias = alias.trim();
+        let digits_end = alias
+            .char_indices()
+            .find(|&(position, ch)| {
+                !(ch.is_ascii_digit() || (position == 0 && matches!(ch, '+' | '-')))
+            })
+            .map_or(alias.len(), |(position, _)| position);
+        if digits_end > 0 {
+            let count = alias[..digits_end].parse::<i64>().ok()?;
+            return Self::parse_base(alias[digits_end..].trim())?.with_multiplier(count);
+        }
+        Self::parse_base(alias)
+    }
+
+    fn parse_base(alias: &str) -> Option<Self> {
         // ⚠️ CASE MATTERS FOR EXACTLY ONE ALIAS, and this parser uppercases
         // everything. MEASURED, live pandas 2.2.3, Timestamp.to_period(f):
         //     'ms' -> millisecond      'Ms' -> millisecond
@@ -10737,7 +10863,11 @@ impl PeriodFreq {
 
     /// Canonical pandas alias string.
     #[must_use]
-    pub const fn alias(self) -> &'static str {
+    pub fn alias(self) -> String {
+        self.to_string()
+    }
+
+    const fn base_alias(self) -> &'static str {
         const ANNUAL: [&str; 12] = [
             "Y-JAN", "Y-FEB", "Y-MAR", "Y-APR", "Y-MAY", "Y-JUN", "Y-JUL", "Y-AUG", "Y-SEP",
             "Y-OCT", "Y-NOV", "Y-DEC",
@@ -10762,6 +10892,7 @@ impl PeriodFreq {
             Self::Milliseconds => "ms",
             Self::Microseconds => "us",
             Self::Nanoseconds => "ns",
+            Self::Multiple(_) => self.base().base_alias(),
         }
     }
 
@@ -10799,13 +10930,17 @@ impl PeriodFreq {
             // pandas' Week and BusinessDay offsets carry no `_resolution_obj`,
             // so `.resolution` raises AttributeError rather than answering.
             Self::Weekly(_) | Self::Business => None,
+            Self::Multiple(_) => None,
         }
     }
 }
 
 impl std::fmt::Display for PeriodFreq {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.alias())
+        if self.multiplier() != 1 {
+            write!(f, "{}", self.multiplier())?;
+        }
+        f.write_str(self.base_alias())
     }
 }
 
@@ -10850,7 +10985,7 @@ impl Period {
 
     /// Canonical pandas frequency alias, matching `pd.Period.freqstr`.
     #[must_use]
-    pub const fn freqstr(&self) -> &'static str {
+    pub fn freqstr(&self) -> String {
         self.freq.alias()
     }
 
@@ -10868,8 +11003,12 @@ impl Period {
     /// Matches `pd.Period + n` and `pd.Period - n`.
     #[must_use]
     pub fn shift(&self, n: i64) -> Self {
+        if self.is_nat() {
+            return *self;
+        }
+        let ordinal = i128::from(self.ordinal) + i128::from(n) * i128::from(self.freq.multiplier());
         Self {
-            ordinal: self.ordinal.saturating_add(n),
+            ordinal: ordinal.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64,
             freq: self.freq,
         }
     }
@@ -10885,7 +11024,7 @@ impl Period {
     }
 
     const fn fixed_span_nanos(freq: PeriodFreq) -> Option<i64> {
-        match freq {
+        match freq.base() {
             PeriodFreq::Daily => Some(Timedelta::NANOS_PER_DAY),
             PeriodFreq::Hourly => Some(Timedelta::NANOS_PER_HOUR),
             PeriodFreq::Minutely => Some(Timedelta::NANOS_PER_MIN),
@@ -10914,7 +11053,7 @@ impl Period {
         }
         let days = nanos.div_euclid(Timedelta::NANOS_PER_DAY);
         let (year, month, _day) = civil_from_days(days);
-        let ordinal = match freq {
+        let ordinal = match freq.base() {
             PeriodFreq::Annual(_) => {
                 let months = year
                     .checked_sub(1970)?
@@ -10969,6 +11108,7 @@ impl Period {
             PeriodFreq::Milliseconds => nanos.div_euclid(Timedelta::NANOS_PER_MILLI),
             PeriodFreq::Microseconds => nanos.div_euclid(Timedelta::NANOS_PER_MICRO),
             PeriodFreq::Nanoseconds => nanos,
+            PeriodFreq::Multiple(_) => return None,
         };
         (ordinal != i64::MIN).then_some(Self::new(ordinal, freq))
     }
@@ -10985,9 +11125,9 @@ impl Period {
         if self.is_nat() {
             return None;
         }
-        let nanos = match self.freq {
+        let nanos = match self.freq.base() {
             PeriodFreq::Annual(_) | PeriodFreq::Quarterly(_) => {
-                let months = if matches!(self.freq, PeriodFreq::Annual(_)) {
+                let months = if matches!(self.freq.base(), PeriodFreq::Annual(_)) {
                     12_i64
                 } else {
                     3_i64
@@ -11030,6 +11170,7 @@ impl Period {
             PeriodFreq::Milliseconds => self.ordinal.checked_mul(Timedelta::NANOS_PER_MILLI)?,
             PeriodFreq::Microseconds => self.ordinal.checked_mul(Timedelta::NANOS_PER_MICRO)?,
             PeriodFreq::Nanoseconds => self.ordinal,
+            PeriodFreq::Multiple(_) => return None,
         };
         (nanos != Timestamp::NAT).then_some(nanos)
     }
@@ -11041,12 +11182,15 @@ impl Period {
         if self.is_nat() {
             return None;
         }
-        if self.freq == PeriodFreq::Business {
-            let start = self.start_nanos()?;
+        if self.freq.base() == PeriodFreq::Business {
+            // A business span ends at the last business day's midnight +
+            // one calendar day, not at the next business day's midnight.
+            let last = self.ordinal.checked_add(self.freq.multiplier() - 1)?;
+            let start = Self::new(last, PeriodFreq::Business).start_nanos()?;
             let end = start.checked_add(Timedelta::NANOS_PER_DAY - 1)?;
             return (end != Timestamp::NAT).then_some(end);
         }
-        let next = Self::new(self.ordinal.checked_add(1)?, self.freq);
+        let next = Self::new(self.ordinal.checked_add(self.freq.multiplier())?, self.freq);
         let end = next.start_nanos()?.checked_sub(1)?;
         (end != Timestamp::NAT).then_some(end)
     }
@@ -11118,8 +11262,8 @@ impl Period {
         // pandas rolls a weekend day of a day-or-finer source to a business day
         // the opposite way from a week/month/quarter/year source: end rolls forward
         // to Monday, start rolls back to Friday; coarse sources roll end back to Friday.
-        let flips =
-            target_freq == PeriodFreq::Business && Self::fixed_span_nanos(self.freq).is_some();
+        let flips = target_freq.base() == PeriodFreq::Business
+            && Self::fixed_span_nanos(self.freq).is_some();
         let roll_business_forward = if flips { !is_start } else { is_start };
         Self::from_timestamp_nanos_with_business_roll(
             boundary_nanos,
@@ -11140,7 +11284,11 @@ impl Period {
         if self.is_nat() {
             return Timestamp::nat();
         }
-        let nanos = match self.freq {
+        // Calendar fields describe the first base period, not the far end
+        // of its multiplied span: a 2M period starting in January still has
+        // month=1 and day=31, although its end_time falls in February.
+        let base = Self::new(self.ordinal, self.freq.base());
+        let nanos = match base.freq {
             PeriodFreq::Daily
             | PeriodFreq::Business
             | PeriodFreq::Hourly
@@ -11148,13 +11296,14 @@ impl Period {
             | PeriodFreq::Secondly
             | PeriodFreq::Milliseconds
             | PeriodFreq::Microseconds
-            | PeriodFreq::Nanoseconds => self.start_nanos(),
+            | PeriodFreq::Nanoseconds => base.start_nanos(),
             PeriodFreq::Weekly(_)
             | PeriodFreq::Monthly
             | PeriodFreq::Quarterly(_)
-            | PeriodFreq::Annual(_) => self
+            | PeriodFreq::Annual(_) => base
                 .end_nanos()
                 .map(|end| end - end.rem_euclid(Timedelta::NANOS_PER_DAY)),
+            PeriodFreq::Multiple(_) => None,
         };
         nanos.map_or_else(Timestamp::nat, Timestamp::from_nanos)
     }
@@ -11209,7 +11358,7 @@ impl Period {
         if self.is_nat() {
             return None;
         }
-        match self.freq {
+        match self.freq.base() {
             PeriodFreq::Quarterly(_) => Some(self.ordinal.rem_euclid(4) + 1),
             _ => self.field_timestamp().quarter(),
         }
@@ -11221,7 +11370,7 @@ impl Period {
         if self.is_nat() {
             return None;
         }
-        match self.freq {
+        match self.freq.base() {
             PeriodFreq::Quarterly(_) => 1970_i64.checked_add(self.ordinal.div_euclid(4)),
             _ => self.year(),
         }
@@ -11381,7 +11530,7 @@ impl Period {
             return rendered.write_str("NaT");
         }
         let ord = self.ordinal;
-        match self.freq {
+        match self.freq.base() {
             // An anchored year or quarter is labelled by the fiscal year its
             // ordinal counts (Period('2024', 'Y-JUN') ends 2024-06-30), so
             // the label does not depend on the anchor.
@@ -11478,7 +11627,7 @@ impl Period {
             //     us -> "2024-03-15 10:30:45.123456"
             //     ns -> "2024-03-15 10:30:45.123456789"
             PeriodFreq::Milliseconds | PeriodFreq::Microseconds | PeriodFreq::Nanoseconds => {
-                let (per_sec, width) = match self.freq {
+                let (per_sec, width) = match self.freq.base() {
                     PeriodFreq::Milliseconds => (1_000_i64, 3_usize),
                     PeriodFreq::Microseconds => (1_000_000_i64, 6_usize),
                     _ => (1_000_000_000_i64, 9_usize),
@@ -11500,6 +11649,7 @@ impl Period {
                     width = width
                 )
             }
+            PeriodFreq::Multiple(_) => Self::new(ord, self.freq.base()).write_calendar(rendered),
         }
     }
 }
@@ -18576,7 +18726,7 @@ mod tests {
             PeriodFreq::Microseconds,
             PeriodFreq::Nanoseconds,
         ] {
-            assert_eq!(PeriodFreq::parse(freq.alias()), Some(freq));
+            assert_eq!(PeriodFreq::parse(&freq.alias()), Some(freq));
         }
     }
 
@@ -18588,12 +18738,12 @@ mod tests {
     fn anchored_period_freqs_parse_print_and_shift_39h5n() {
         for month in 1..=12_u8 {
             for freq in [PeriodFreq::Annual(month), PeriodFreq::Quarterly(month)] {
-                assert_eq!(PeriodFreq::parse(freq.alias()), Some(freq));
+                assert_eq!(PeriodFreq::parse(&freq.alias()), Some(freq));
             }
         }
         for day in 0..7_u8 {
             assert_eq!(
-                PeriodFreq::parse(PeriodFreq::Weekly(day).alias()),
+                PeriodFreq::parse(&PeriodFreq::Weekly(day).alias()),
                 Some(PeriodFreq::Weekly(day))
             );
         }
@@ -18745,7 +18895,7 @@ mod tests {
             PeriodFreq::Secondly,
         ] {
             assert_ne!(
-                Some(freq.alias()),
+                Some(freq.alias().as_str()),
                 freq.resolution(),
                 "{freq:?} reports its alias as its resolution again"
             );
@@ -18759,6 +18909,181 @@ mod tests {
         assert_eq!(period.ordinal(), 600);
         assert_eq!(period.freq(), PeriodFreq::Monthly);
         assert_eq!(period.freqstr(), "M");
+    }
+
+    #[test]
+    fn period_multiplied_frequencies_parse_and_roundtrip_tus8r() {
+        for (alias, canonical, base, multiplier) in [
+            ("2D", "2D", PeriodFreq::Daily, 2),
+            ("+3H", "3h", PeriodFreq::Hourly, 3),
+            ("15min", "15min", PeriodFreq::Minutely, 15),
+            ("2W-FRI", "2W-FRI", PeriodFreq::Weekly(4), 2),
+            ("2M", "2M", PeriodFreq::Monthly, 2),
+            ("2Q-JAN", "2Q-JAN", PeriodFreq::Quarterly(1), 2),
+            ("2Y-JUN", "2Y-JUN", PeriodFreq::Annual(6), 2),
+            ("2B", "2B", PeriodFreq::Business, 2),
+            ("2ms", "2ms", PeriodFreq::Milliseconds, 2),
+            ("3us", "3us", PeriodFreq::Microseconds, 3),
+            ("4ns", "4ns", PeriodFreq::Nanoseconds, 4),
+        ] {
+            let freq = PeriodFreq::parse(alias).expect("valid multiplied frequency");
+            assert_eq!(freq.base(), base, "{alias}");
+            assert_eq!(freq.multiplier(), multiplier, "{alias}");
+            assert_eq!(freq.alias(), canonical, "{alias}");
+            assert_eq!(PeriodFreq::parse(&freq.alias()), Some(freq));
+            assert_eq!(freq.resolution(), None);
+            let encoded = serde_json::to_string(&freq).expect("serializable frequency");
+            assert_eq!(serde_json::from_str::<PeriodFreq>(&encoded).unwrap(), freq);
+        }
+        assert_eq!(PeriodFreq::parse("1D"), Some(PeriodFreq::Daily));
+        for invalid in ["0D", "-1D", "2MS", "2 3D", "2", "9223372036854775808D"] {
+            assert_eq!(PeriodFreq::parse(invalid), None, "{invalid}");
+        }
+        assert!(
+            serde_json::from_str::<PeriodFreq>(r#"{"MULTIPLE":{"unit":"DAILY","count":0}}"#,)
+                .is_err()
+        );
+    }
+
+    /// Expected boundaries and labels measured against pandas 2.2.3 at
+    /// Timestamp('2024-02-28 13:47:59.123456789'). The ordinal stays in base
+    /// units, the label names the first base period, and the end spans n.
+    #[test]
+    fn period_multiplied_boundaries_and_labels_match_pandas_tus8r() {
+        let nanos = 1_709_128_079_123_456_789;
+        for (alias, ordinal, label, start, end) in [
+            (
+                "2D",
+                19_781,
+                "2024-02-28",
+                1_709_078_400_000_000_000,
+                1_709_251_199_999_999_999,
+            ),
+            (
+                "3h",
+                474_757,
+                "2024-02-28 13:00",
+                1_709_125_200_000_000_000,
+                1_709_135_999_999_999_999,
+            ),
+            (
+                "15min",
+                28_485_467,
+                "2024-02-28 13:47",
+                1_709_128_020_000_000_000,
+                1_709_128_919_999_999_999,
+            ),
+            (
+                "2W-FRI",
+                2_826,
+                "2024-02-24/2024-03-01",
+                1_708_732_800_000_000_000,
+                1_709_942_399_999_999_999,
+            ),
+            (
+                "2M",
+                649,
+                "2024-02",
+                1_706_745_600_000_000_000,
+                1_711_929_599_999_999_999,
+            ),
+            (
+                "2Q-JAN",
+                220,
+                "2025Q1",
+                1_706_745_600_000_000_000,
+                1_722_470_399_999_999_999,
+            ),
+            (
+                "2Y-JUN",
+                54,
+                "2024",
+                1_688_169_600_000_000_000,
+                1_751_327_999_999_999_999,
+            ),
+            (
+                "2B",
+                14_129,
+                "2024-02-28",
+                1_709_078_400_000_000_000,
+                1_709_251_199_999_999_999,
+            ),
+            (
+                "2ms",
+                1_709_128_079_123,
+                "2024-02-28 13:47:59.123",
+                1_709_128_079_123_000_000,
+                1_709_128_079_124_999_999,
+            ),
+            (
+                "3us",
+                1_709_128_079_123_456,
+                "2024-02-28 13:47:59.123456",
+                1_709_128_079_123_456_000,
+                1_709_128_079_123_458_999,
+            ),
+            (
+                "4ns",
+                nanos,
+                "2024-02-28 13:47:59.123456789",
+                nanos,
+                nanos + 3,
+            ),
+        ] {
+            let freq = PeriodFreq::parse(alias).expect("valid multiplied frequency");
+            let period = Period::from_timestamp_nanos(nanos, freq).expect("in-range timestamp");
+            assert_eq!(period.ordinal, ordinal, "{alias}");
+            assert_eq!(period.to_string(), label, "{alias}");
+            assert_eq!(period.start_nanos(), Some(start), "{alias}");
+            assert_eq!(period.end_nanos(), Some(end), "{alias}");
+            assert_eq!(period.shift(1).ordinal, ordinal + freq.multiplier());
+            assert_eq!(period.shift(-1).ordinal, ordinal - freq.multiplier());
+            assert_eq!(period.shift(1).diff(&period), Some(freq.multiplier()));
+            assert_eq!(
+                period.asfreq(alias).unwrap().ordinal,
+                ordinal + freq.multiplier() - 1
+            );
+            assert_eq!(period.asfreq_with_how(alias, "start").unwrap(), period);
+        }
+
+        // Business spans exclude weekends, while calendar fields still
+        // describe the first base day or month of a multi-period span.
+        let business = Period::new(14_091, PeriodFreq::parse("2B").unwrap());
+        assert_eq!(business.end_nanos(), Some(1_704_758_399_999_999_999));
+        assert_eq!(business.shift(1).to_string(), "2024-01-09");
+        let month = Period::new(649, PeriodFreq::parse("2M").unwrap());
+        assert_eq!(
+            (month.year(), month.month(), month.day()),
+            (Some(2024), Some(2), Some(29))
+        );
+        let quarter = Period::new(220, PeriodFreq::parse("2Q-JAN").unwrap());
+        assert_eq!(
+            (quarter.year(), quarter.quarter(), quarter.qyear()),
+            (Some(2024), Some(1), Some(2025))
+        );
+    }
+
+    #[test]
+    fn period_multiplied_ranges_keep_negative_ordinals_and_nat_tus8r() {
+        let freq = PeriodFreq::parse("3h").unwrap();
+        let before_epoch = Period::from_timestamp_nanos(-1, freq).unwrap();
+        assert_eq!(before_epoch.ordinal, -1);
+        assert_eq!(before_epoch.start_nanos(), Some(-3_600_000_000_000));
+        assert_eq!(before_epoch.end_nanos(), Some(7_199_999_999_999));
+        assert_eq!(
+            super::period_range(before_epoch, 3)
+                .iter()
+                .map(|period| period.ordinal)
+                .collect::<Vec<_>>(),
+            vec![-1, 2, 5],
+        );
+        assert!(super::period_range(before_epoch, 0).is_empty());
+        let nat = Period::new(i64::MIN, freq);
+        assert!(nat.shift(1).is_nat());
+        assert!(nat.asfreq("2D").unwrap().is_nat());
+        assert_eq!(nat.end_nanos(), None);
+        assert_eq!(Period::new(i64::MAX, freq).end_nanos(), None);
+        assert_eq!(Period::new(-100, freq).shift(i64::MAX).ordinal, i64::MAX);
     }
 
     #[test]
@@ -18880,6 +19205,7 @@ mod tests {
                 PeriodFreq::Milliseconds => PeriodFreq::Microseconds,
                 PeriodFreq::Microseconds => PeriodFreq::Nanoseconds,
                 PeriodFreq::Nanoseconds => PeriodFreq::ANNUAL,
+                PeriodFreq::Multiple(_) => freq.base(),
             }
         }
 

@@ -4223,8 +4223,8 @@ impl Index {
     }
 
     fn from_typed_values(kind: StridedKind, nanos: Vec<i64>) -> Self {
-        // An empty period index has no label to show its freq, nor a
-        // declared dtype for one: the PeriodIndex keeps it (built_freq).
+        // An empty period index keeps its freq in StridedKind::Period;
+        // PeriodIndex::from_index reads that backing even without labels.
         let declared = match kind {
             StridedKind::Datetime => Some(DeclaredDtype::Datetime64),
             StridedKind::Timedelta => Some(DeclaredDtype::Timedelta64),
@@ -10095,7 +10095,7 @@ fn datetime_period_ordinal(nanos: i64, freq: PeriodFreq) -> Result<i64, IndexErr
     })?;
     let date = dt.date_naive();
     let year_offset = i64::from(date.year()) - 1970;
-    match freq {
+    match freq.base() {
         // Fiscal years / quarters: the month count on the fiscal calendar,
         // twelve (three) to a period (Q-JAN puts 2024-03 in 2025Q1).
         PeriodFreq::Annual(_) => {
@@ -10135,7 +10135,7 @@ fn datetime_period_ordinal_at_boundary(
     freq: PeriodFreq,
     boundary: PeriodBoundary,
 ) -> Result<i64, IndexError> {
-    if freq == PeriodFreq::Business && matches!(boundary, PeriodBoundary::End) {
+    if freq.base() == PeriodFreq::Business && matches!(boundary, PeriodBoundary::End) {
         let dt = datetime_from_nanos(nanos).ok_or_else(|| {
             datetime_to_period_error(format!("invalid or NaT datetime nanos {nanos}"))
         })?;
@@ -10144,11 +10144,11 @@ fn datetime_period_ordinal_at_boundary(
     datetime_period_ordinal(nanos, freq)
 }
 
-/// The nanoseconds one period of a fixed-span frequency covers (its periods
-/// start at the epoch and every multiple of it), or None for a calendar one
-/// (week, business day, month, quarter, year).
+/// The nanoseconds in the base unit of a fixed-span frequency. Ordinals count
+/// this unit even when the frequency spans several of them. None for calendar
+/// units (week, business day, month, quarter, year).
 const fn fixed_period_span_nanos(freq: PeriodFreq) -> Option<i64> {
-    match freq {
+    match freq.base() {
         PeriodFreq::Daily => Some(Timedelta::NANOS_PER_DAY),
         PeriodFreq::Hourly => Some(Timedelta::NANOS_PER_HOUR),
         PeriodFreq::Minutely => Some(Timedelta::NANOS_PER_MIN),
@@ -10164,7 +10164,7 @@ const fn fixed_period_span_nanos(freq: PeriodFreq) -> Option<i64> {
 /// `target` - a month, or the fiscal quarter / year holding it.
 fn month_ordinal_at(month: i64, target: PeriodFreq) -> Option<i64> {
     let months = month.checked_add(target.fiscal_month_shift())?;
-    match target {
+    match target.base() {
         PeriodFreq::Monthly => Some(months),
         PeriodFreq::Quarterly(_) => Some(months.div_euclid(3)),
         PeriodFreq::Annual(_) => Some(months.div_euclid(12)),
@@ -10185,15 +10185,19 @@ fn period_asfreq_ordinal_fast(
     target: PeriodFreq,
     boundary: PeriodBoundary,
 ) -> Option<i64> {
-    if period.freq == PeriodFreq::Monthly {
-        return month_ordinal_at(period.ordinal, target);
+    if period.freq.base() == PeriodFreq::Monthly {
+        let month = match boundary {
+            PeriodBoundary::Start => period.ordinal,
+            PeriodBoundary::End => period.ordinal.checked_add(period.freq.multiplier() - 1)?,
+        };
+        return month_ordinal_at(month, target);
     }
     let span = fixed_period_span_nanos(period.freq)?;
     let nanos = match boundary {
         PeriodBoundary::Start => period.ordinal.checked_mul(span)?,
         PeriodBoundary::End => period
             .ordinal
-            .checked_add(1)?
+            .checked_add(period.freq.multiplier())?
             .checked_mul(span)?
             .checked_sub(1)?,
     };
@@ -10236,7 +10240,8 @@ fn period_asfreq_ordinal(
     // a business day: its end forward to Monday, its start back to Friday
     // (a week's or month's end rolls back); it rolled every source like a
     // week's (br-frankenpandas-od7kt).
-    let flips = target == PeriodFreq::Business && fixed_period_span_nanos(period.freq).is_some();
+    let flips =
+        target.base() == PeriodFreq::Business && fixed_period_span_nanos(period.freq).is_some();
     let roll = match (flips, boundary) {
         (true, PeriodBoundary::Start) => PeriodBoundary::End,
         (true, PeriodBoundary::End) => PeriodBoundary::Start,
@@ -10287,7 +10292,7 @@ impl AsfreqRuns {
         // the answer's has it, whichever boundary.
         let days = (self.from == PeriodFreq::Daily
             && matches!(
-                self.target,
+                self.target.base(),
                 PeriodFreq::Monthly | PeriodFreq::Quarterly(_) | PeriodFreq::Annual(_)
             ))
         .then(|| target_day_span(answer, self.target))
@@ -10639,11 +10644,11 @@ fn period_business_date(ordinal: i64) -> Result<chrono::NaiveDate, IndexError> {
 /// datetime label's own instant is read (45fzr). NaT and an ordinal past
 /// the calendar are errors.
 pub fn period_start_nanos(period: Period) -> Result<i64, IndexError> {
-    match period.freq {
+    match period.freq.base() {
         // A fiscal year / quarter starts the shift's months before its
         // calendar counterpart: Y-JUN 2024 (ordinal 54) starts 2023-07-01.
         PeriodFreq::Annual(_) | PeriodFreq::Quarterly(_) => {
-            let months = if matches!(period.freq, PeriodFreq::Annual(_)) {
+            let months = if matches!(period.freq.base(), PeriodFreq::Annual(_)) {
                 12
             } else {
                 3
@@ -10702,7 +10707,7 @@ fn period_next_start_nanos(period: Period) -> Result<i64, IndexError> {
     let next = Period {
         ordinal: period
             .ordinal
-            .checked_add(1)
+            .checked_add(period.freq.multiplier())
             .ok_or_else(|| period_timestamp_error("period ordinal overflow"))?,
         freq: period.freq,
     };
@@ -10710,6 +10715,14 @@ fn period_next_start_nanos(period: Period) -> Result<i64, IndexError> {
 }
 
 fn period_end_nanos(period: Period) -> Result<i64, IndexError> {
+    if period.freq.base() == PeriodFreq::Business {
+        let ordinal = period
+            .ordinal
+            .checked_add(period.freq.multiplier() - 1)
+            .ok_or_else(|| period_timestamp_error("business period ordinal overflow"))?;
+        let start = period_start_nanos(Period::new(ordinal, PeriodFreq::Business))?;
+        return period_checked_add_nanos(start, Timedelta::NANOS_PER_DAY - 1);
+    }
     period_checked_add_nanos(period_next_start_nanos(period)?, -1)
 }
 
@@ -10742,11 +10755,11 @@ fn period_qyear(period: Period) -> Result<i32, IndexError> {
     }
     // A quarter's qyear is the fiscal year its ordinal counts: Q-JAN's
     // 2025Q1 ends 2024-04-30 and its qyear is 2025.
-    if matches!(period.freq, PeriodFreq::Quarterly(_)) {
+    if matches!(period.freq.base(), PeriodFreq::Quarterly(_)) {
         return i32::try_from(1970 + period.ordinal.div_euclid(4))
             .map_err(|_| period_timestamp_error("qyear out of range"));
     }
-    let end_nanos = period_end_nanos(period)?;
+    let end_nanos = period_end_nanos(Period::new(period.ordinal, period.freq.base()))?;
     datetime_nanos_to_date(end_nanos)
         .map(|date| date.year())
         .map_err(period_date_error)
@@ -10794,7 +10807,7 @@ fn period_fields_freq(fields: &PeriodFields<'_>) -> Result<PeriodFreq, IndexErro
         .ok_or_else(|| {
             period_fields_error("freq is required unless quarter fields imply quarterly periods")
         })?;
-    if fields.quarter.is_some() && !matches!(freq, PeriodFreq::Quarterly(_)) {
+    if fields.quarter.is_some() && !matches!(freq.base(), PeriodFreq::Quarterly(_)) {
         return Err(period_fields_error(
             "quarter fields require quarterly frequency",
         ));
@@ -10864,7 +10877,7 @@ fn period_from_fields_at(
         .get(position)
         .copied()
         .ok_or_else(|| period_fields_error("year fields are required"))?;
-    let month = if matches!(freq, PeriodFreq::Quarterly(_)) {
+    let month = if matches!(freq.base(), PeriodFreq::Quarterly(_)) {
         if let Some(quarters) = fields.quarter {
             let quarter = quarters
                 .get(position)
@@ -10883,7 +10896,7 @@ fn period_from_fields_at(
         required_period_field(fields.month, "month", position)?
     };
     let day = if matches!(
-        freq,
+        freq.base(),
         PeriodFreq::Annual(_) | PeriodFreq::Quarterly(_) | PeriodFreq::Monthly
     ) {
         1
@@ -10891,7 +10904,7 @@ fn period_from_fields_at(
         period_field_value(fields.day, position, 1)
     };
     let hour = if matches!(
-        freq,
+        freq.base(),
         PeriodFreq::Hourly
             | PeriodFreq::Minutely
             | PeriodFreq::Secondly
@@ -10904,7 +10917,7 @@ fn period_from_fields_at(
         0
     };
     let minute = if matches!(
-        freq,
+        freq.base(),
         PeriodFreq::Minutely
             | PeriodFreq::Secondly
             | PeriodFreq::Milliseconds
@@ -10916,7 +10929,7 @@ fn period_from_fields_at(
         0
     };
     let second = if matches!(
-        freq,
+        freq.base(),
         PeriodFreq::Secondly
             | PeriodFreq::Milliseconds
             | PeriodFreq::Microseconds
@@ -15624,10 +15637,11 @@ impl Eq for PeriodIndex {}
 impl PeriodIndex {
     #[must_use]
     pub fn new(values: Vec<Period>) -> Self {
+        let built_freq = values.first().map(|period| period.freq);
         Self {
             values,
             name: None,
-            built_freq: None,
+            built_freq,
         }
     }
 
@@ -16001,7 +16015,7 @@ impl PeriodIndex {
         // Period labels, so a Series / DataFrame on this index keeps it (it
         // was their text; 45fzr) - periods of one freq held as ordinals,
         // labels made only when read (br-frankenpandas-od7kt).
-        let freq = self.values.first().map(|period| period.freq);
+        let freq = self.freq();
         let index = match freq {
             Some(freq) if self.values.iter().all(|period| period.freq == freq) => {
                 Index::from_period_values(
@@ -16024,6 +16038,20 @@ impl PeriodIndex {
     /// among them), or None for any other label (45fzr).
     #[must_use]
     pub fn from_index(index: &Index) -> Option<Self> {
+        if let Some(TypedStridedLabels {
+            kind: StridedKind::Period(freq),
+            view,
+        }) = &index.labels.typed_strided
+        {
+            return Some(Self {
+                values: view
+                    .iter()
+                    .map(|ordinal| Period::new(ordinal, *freq))
+                    .collect(),
+                name: index.name().cloned(),
+                built_freq: Some(*freq),
+            });
+        }
         // A missing label is the NaT period of the periods' freq, as pandas'
         // PeriodIndex holds one (a where / insert / reindex over one was an
         // object Index; br-frankenpandas-n3ktr); no period at all is none.
@@ -16300,14 +16328,16 @@ impl PeriodIndex {
                 {
                     return Ok(nanos);
                 }
-                match period.freq {
-                    PeriodFreq::Hourly
+                let base = Period::new(period.ordinal, period.freq.base());
+                match base.freq {
+                    PeriodFreq::Business
+                    | PeriodFreq::Hourly
                     | PeriodFreq::Minutely
                     | PeriodFreq::Secondly
                     | PeriodFreq::Milliseconds
                     | PeriodFreq::Microseconds
-                    | PeriodFreq::Nanoseconds => period_start_nanos(period),
-                    _ => period_end_nanos(period).map(|end| end - end.rem_euclid(DAY)),
+                    | PeriodFreq::Nanoseconds => period_start_nanos(base),
+                    _ => period_end_nanos(base).map(|end| end - end.rem_euclid(DAY)),
                 }
             })
             .collect()
@@ -16371,7 +16401,7 @@ impl PeriodIndex {
             .values
             .iter()
             .zip(calendar)
-            .map(|(period, calendar)| match period.freq {
+            .map(|(period, calendar)| match period.freq.base() {
                 PeriodFreq::Quarterly(_) if period.ordinal != i64::MIN => {
                     u32::try_from(period.ordinal.rem_euclid(4) + 1).ok()
                 }
@@ -16437,11 +16467,11 @@ impl PeriodIndex {
 
     /// Frequency resolution string, matching `pd.PeriodIndex.resolution`.
     ///
-    /// `None` for an empty index, and also for the two frequencies whose pandas
-    /// offsets have no resolution to report -- see [`PeriodFreq::resolution`].
+    /// Reads the declared frequency even when empty. `None` when the frequency
+    /// is unknown or has no pandas resolution -- see [`PeriodFreq::resolution`].
     #[must_use]
     pub fn resolution(&self) -> Option<&'static str> {
-        self.values.first().and_then(|p| p.freq.resolution())
+        self.freq().and_then(PeriodFreq::resolution)
     }
 
     /// Format each period as a string with strftime, matching `pd.PeriodIndex.strftime`.
@@ -16988,8 +17018,8 @@ impl PeriodIndex {
         self.values.iter().map(Period::to_string).collect()
     }
 
-    /// Frequency alias, matching `pd.PeriodIndex.freqstr`. Returns `None`
-    /// for an empty index; otherwise the Display form of the freq.
+    /// Frequency alias, matching `pd.PeriodIndex.freqstr`. An empty index keeps
+    /// its declared frequency; `None` only when no frequency was provided.
     #[must_use]
     pub fn freqstr(&self) -> Option<String> {
         self.freq().map(|f| f.to_string())
@@ -32541,6 +32571,127 @@ mod tests {
         Ok(())
     }
 
+    /// pandas 2.2.3: conversion keeps base ordinals, whereas ranges and
+    /// arithmetic step by the multiplied span. NaT keeps its position.
+    #[test]
+    fn period_index_multiplied_conversion_and_ranges_tus8r() -> Result<(), super::IndexError> {
+        let instants =
+            DatetimeIndex::new(vec![1_709_128_079_123_456_789, i64::MIN, -1]).set_name("when");
+        for (alias, expected, pre_epoch) in [
+            ("2D", 19_781, -1),
+            ("3h", 474_757, -1),
+            ("15min", 28_485_467, -1),
+            ("2W-FRI", 2_826, 0),
+            ("2M", 649, -1),
+            ("2Q-JAN", 220, 3),
+            ("2Y-JUN", 54, 0),
+            ("2B", 14_129, -1),
+        ] {
+            let converted = instants.to_period(alias)?;
+            let freq = PeriodFreq::parse(alias).expect("valid multiplied frequency");
+            assert_eq!(converted.freq(), Some(freq));
+            assert_eq!(converted.dtype(), format!("period[{alias}]"));
+            assert_eq!(converted.name().map(|name| name.as_str()), Some("when"));
+            assert_eq!(
+                converted
+                    .values()
+                    .iter()
+                    .map(|period| period.ordinal)
+                    .collect::<Vec<_>>(),
+                vec![expected, i64::MIN, pre_epoch],
+                "{alias}",
+            );
+            let shifted = converted.shift(2)?;
+            assert_eq!(
+                shifted.values()[0].ordinal,
+                expected + 2 * freq.multiplier()
+            );
+            assert!(shifted.values()[1].is_nat());
+            let range = PeriodIndex::from_range(converted.values()[0], 3);
+            assert_eq!(
+                range
+                    .values()
+                    .iter()
+                    .map(|period| period.ordinal)
+                    .collect::<Vec<_>>(),
+                vec![
+                    expected,
+                    expected + freq.multiplier(),
+                    expected + 2 * freq.multiplier()
+                ],
+            );
+            assert_eq!(
+                PeriodIndex::from_range(converted.values()[0], 0).freq(),
+                Some(freq)
+            );
+            assert_eq!(
+                converted.asfreq_with_how(alias, "start")?.values(),
+                converted.values(),
+            );
+            let end = converted.asfreq(alias)?;
+            assert_eq!(end.values()[0].ordinal, expected + freq.multiplier() - 1);
+            assert!(end.values()[1].is_nat());
+        }
+        for invalid in ["0D", "-2D", "2MS", "2BAD"] {
+            assert!(instants.to_period(invalid).is_err(), "{invalid}");
+        }
+        Ok(())
+    }
+
+    /// Expected boundaries from pandas Period('2024-01-05', freq=alias).
+    /// In particular a 2B Friday ends Monday, and a 2Q-JAN period's fields
+    /// describe the first quarter rather than the end of the six-month span.
+    #[test]
+    fn period_index_multiplied_boundaries_and_fields_tus8r() -> Result<(), super::IndexError> {
+        let instants = DatetimeIndex::new(vec![1_704_412_800_000_000_000]);
+        for (alias, start_day, end_day) in [
+            ("2D", 19_727, 19_728),
+            ("3h", 19_727, 19_727),
+            ("15min", 19_727, 19_727),
+            ("2W-FRI", 19_721, 19_734),
+            ("2M", 19_723, 19_782),
+            ("2Q-JAN", 19_662, 19_843),
+            ("2Y-JUN", 19_539, 20_269),
+            ("2B", 19_727, 19_730),
+        ] {
+            let periods = instants.to_period(alias)?;
+            assert_eq!(
+                periods.asfreq_with_how("3D", "start")?.values()[0].ordinal,
+                start_day,
+                "{alias}"
+            );
+            assert_eq!(
+                periods.asfreq("3D")?.values()[0].ordinal,
+                end_day,
+                "{alias}"
+            );
+            let period = periods.values()[0];
+            assert_eq!(
+                periods.start_time()?.asi8()[0],
+                period.start_nanos().unwrap()
+            );
+            assert_eq!(periods.end_time()?.asi8()[0], period.end_nanos().unwrap());
+        }
+        let monthly = instants.to_period("2M")?;
+        assert_eq!(monthly.month()?, vec![Some(1)]);
+        assert_eq!(monthly.day()?, vec![Some(31)]);
+        let quarterly = instants.to_period("2Q-JAN")?;
+        assert_eq!(quarterly.year()?, vec![Some(2024)]);
+        assert_eq!(quarterly.month()?, vec![Some(1)]);
+        assert_eq!(quarterly.day()?, vec![Some(31)]);
+        assert_eq!(quarterly.quarter()?, vec![Some(4)]);
+        assert_eq!(quarterly.qyear()?, vec![2024]);
+
+        let freq = PeriodFreq::parse("2Q-JAN").unwrap();
+        let from_fields = PeriodIndex::from_fields(PeriodFields {
+            quarter: Some(&[1]),
+            freq: Some(freq),
+            ..PeriodFields::new(&[2025])
+        })?;
+        assert_eq!(from_fields.values(), &[Period::new(220, freq)]);
+        Ok(())
+    }
+
     #[test]
     fn index_variant_wrappers_expose_identity_and_type_surface() {
         let range = RangeIndex::new(1, 7, 2).unwrap().set_name("row");
@@ -36557,6 +36708,45 @@ mod tests {
         ]);
         assert!(PeriodIndex::from_index(&mixed).is_none());
         assert_eq!(mixed.inferred_type(), "mixed");
+    }
+
+    #[test]
+    fn empty_period_index_roundtrip_keeps_frequency_tus8r() -> Result<(), super::IndexError> {
+        for alias in ["M", "2D", "3h", "2W-FRI"] {
+            let freq = PeriodFreq::parse(alias).unwrap();
+            let periods = PeriodIndex::new(vec![
+                Period::new(0, freq),
+                Period::new(i64::MIN, freq),
+                Period::new(freq.multiplier(), freq),
+            ])
+            .set_name("when");
+            let expected = PeriodIndex::from_ordinals(&[], freq).set_name("when");
+            let flat = periods.to_index();
+            assert_eq!(PeriodIndex::from_index(&flat), Some(periods.clone()));
+            for empty in [
+                expected.to_index(),
+                PeriodIndex::from_range(Period::new(0, freq), 0)
+                    .set_name("when")
+                    .to_index(),
+                flat.take(&[]),
+                flat.slice(1, 0),
+                periods.take(&[])?.to_index(),
+            ] {
+                let restored = PeriodIndex::from_index(&empty).expect("typed empty period index");
+                assert_eq!(restored, expected, "{alias}");
+                assert_eq!(restored.dtype(), format!("period[{alias}]"));
+                assert_eq!(restored.freqstr().as_deref(), Some(alias));
+                assert_eq!(
+                    restored.resolution(),
+                    if alias == "M" { Some("month") } else { None }
+                );
+            }
+        }
+        // An empty index with no period frequency still cannot invent one.
+        assert_eq!(PeriodIndex::new(Vec::new()).freq(), None);
+        assert!(PeriodIndex::from_index(&Index::new(Vec::new())).is_none());
+        assert!(PeriodIndex::from_index(&Index::from_datetime64_values(Vec::new())).is_none());
+        Ok(())
     }
 
     #[test]

@@ -71802,6 +71802,42 @@ fn period_index_label(label: &IndexLabel, freq: PeriodFreq) -> Result<IndexLabel
 }
 
 fn period_index_from_datetime_like_index(index: &Index, freq: &str) -> Result<Index, FrameError> {
+    if let Some(period_freq) = PeriodFreq::parse(freq)
+        && period_freq.multiplier() != 1
+    {
+        // A multiplied period keeps the base period's label and ordinal;
+        // its multiplier changes the span, not the label's calendar grid.
+        let labels = index
+            .labels()
+            .iter()
+            .map(|label| {
+                let nanos = match label {
+                    IndexLabel::Datetime64(nanos) => *nanos,
+                    IndexLabel::Utf8(text) if text.trim() == "NaT" => i64::MIN,
+                    IndexLabel::Utf8(text) => parse_naive_datetime_value(text)?
+                        .and_utc()
+                        .timestamp_nanos_opt()
+                        .ok_or_else(|| {
+                            FrameError::CompatibilityRejected("to_period datetime overflow".into())
+                        })?,
+                    other => {
+                        return Err(FrameError::CompatibilityRejected(format!(
+                            "to_period requires datetime-like row index labels, got {other:?}"
+                        )));
+                    }
+                };
+                if nanos == i64::MIN {
+                    return Ok(IndexLabel::Utf8("NaT".into()));
+                }
+                Period::from_timestamp_nanos(nanos, period_freq)
+                    .map(|period| IndexLabel::Utf8(period.calendar_string()))
+                    .ok_or_else(|| {
+                        FrameError::CompatibilityRejected("to_period ordinal overflow".into())
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(Index::new(labels).set_names(index.name()));
+    }
     // Default (non-anchored) frequency fast path: write every period label
     // directly into ONE contiguous Utf8 index buffer (bytes + offsets),
     // skipping the 1M per-row `IndexLabel::Utf8(String)` heap allocations and
@@ -72268,6 +72304,29 @@ fn period_label_to_timestamp(
     let trimmed = value.trim();
     if trimmed == "NaT" {
         return Ok(IndexLabel::Datetime64(i64::MIN));
+    }
+
+    if freq.multiplier() != 1 {
+        let base = freq.base();
+        let base_alias = base.alias();
+        let start = if let Some(anchor) = annual_anchor_month(&base_alias) {
+            annual_anchored_label_to_timestamp(label, anchor, PeriodTimestampHow::Start)?
+        } else if let Some(anchor) = quarterly_anchor_month(&base_alias) {
+            quarterly_anchored_label_to_timestamp(label, anchor, PeriodTimestampHow::Start)?
+        } else {
+            period_label_to_timestamp(label, base, PeriodTimestampHow::Start)?
+        };
+        let IndexLabel::Datetime64(nanos) = start else {
+            return Err(period_timestamp_parse_error(trimmed, freq));
+        };
+        let period = Period::from_timestamp_nanos(nanos, freq)
+            .ok_or_else(|| period_timestamp_parse_error(trimmed, freq))?;
+        let nanos = match how {
+            PeriodTimestampHow::Start => period.start_nanos(),
+            PeriodTimestampHow::End => period.end_nanos(),
+        }
+        .ok_or_else(|| period_timestamp_parse_error(trimmed, freq))?;
+        return Ok(IndexLabel::Datetime64(nanos));
     }
 
     // Calendar years / quarters here; fiscal ones resolve through
@@ -224284,6 +224343,43 @@ mod tests {
             df.column("value").unwrap().values()
         );
         assert_eq!(out.column_names(), vec!["value"]);
+    }
+
+    #[test]
+    fn dataframe_multiplied_period_labels_and_boundaries_tus8r() {
+        // pandas 2.2.3 Period('2024-01-05 12:34:56', freq): labels show
+        // one base period, while end_time spans the complete multiple.
+        let cases = [
+            ("2D", "2024-01-05", "2024-01-05 00:00:00", "2024-01-06 23:59:59.999999999"),
+            ("3h", "2024-01-05 12:00", "2024-01-05 12:00:00", "2024-01-05 14:59:59.999999999"),
+            ("15min", "2024-01-05 12:34", "2024-01-05 12:34:00", "2024-01-05 12:48:59.999999999"),
+            ("2W-FRI", "2023-12-30/2024-01-05", "2023-12-30 00:00:00", "2024-01-12 23:59:59.999999999"),
+            ("2M", "2024-01", "2024-01-01 00:00:00", "2024-02-29 23:59:59.999999999"),
+            ("3Q-JAN", "2024Q4", "2023-11-01 00:00:00", "2024-07-31 23:59:59.999999999"),
+            ("2Y-JUN", "2024", "2023-07-01 00:00:00", "2025-06-30 23:59:59.999999999"),
+            ("2B", "2024-01-05", "2024-01-05 00:00:00", "2024-01-08 23:59:59.999999999"),
+        ];
+        let index = Index::from_datetime64(vec![
+            Timestamp::parse("2024-01-05 12:34:56").unwrap().nanos,
+            i64::MIN,
+        ])
+        .set_names(Some("when"));
+        let frame = DataFrame::new_with_column_order(
+            index,
+            BTreeMap::from([("value".to_owned(), Column::from_int64_values(vec![10, 20]))]),
+            vec!["value".to_owned()],
+        )
+        .unwrap();
+        for (freq, label, start, end) in cases {
+            let periods = frame.to_period(freq).unwrap();
+            assert_eq!(periods.index().labels(), &[IndexLabel::Utf8(label.into()), IndexLabel::Utf8("NaT".into())], "{freq}");
+            for (how, boundary) in [("start", start), ("end", end)] {
+                let timestamps = periods.to_timestamp(freq, how).unwrap();
+                assert_eq!(timestamps.index().labels(), &[IndexLabel::Datetime64(Timestamp::parse(boundary).unwrap().nanos), IndexLabel::Datetime64(i64::MIN)], "{freq} {how}");
+                assert_eq!(timestamps.index().name(), frame.index().name());
+                assert_eq!(timestamps.column("value").unwrap().values(), frame.column("value").unwrap().values());
+            }
+        }
     }
 
     #[test]
