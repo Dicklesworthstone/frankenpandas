@@ -63,6 +63,34 @@ def test_declared_constructor_name_alias_and_object_dtype():
     assert_multiindex(build(fpd), build(pd))
 
 
+@pytest.mark.parametrize(
+    "dtype",
+    ["int64", "float64", "bool", "datetime64[ns]", "timedelta64[ns]", "int8", "float32", "object"],
+)
+def test_empty_declared_catalog_preserves_its_dtype(dtype):
+    def build(mod):
+        level = mod.Index([], dtype=dtype)
+        return mod.MultiIndex(levels=[level], codes=[[]], names=["typed"])
+
+    actual, expected = build(fpd), build(pd)
+    assert_multiindex(actual, expected)
+    assert_multiindex(actual[:0], expected[:0])
+    assert_multiindex(
+        fpd.Series([], index=actual, dtype="float64").index,
+        pd.Series([], index=expected, dtype="float64").index,
+    )
+
+
+def test_numeric_labels_keep_an_explicit_object_catalog():
+    def build(mod):
+        level = mod.Index([1, 2], dtype="object")
+        return mod.MultiIndex(levels=[level], codes=[[1, 0]], names=["objects"])
+
+    actual, expected = build(fpd), build(pd)
+    assert_multiindex(actual, expected)
+    assert_multiindex(actual[:0], expected[:0])
+
+
 def test_declared_constructor_copy_owns_input_catalogs_and_codes():
     levels, codes = [["z", "a", "unused"]], [[1, 0]]
     actual = fpd.MultiIndex(levels=levels, codes=codes, copy=True)

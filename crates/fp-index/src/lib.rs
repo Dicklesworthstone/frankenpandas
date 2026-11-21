@@ -24404,6 +24404,8 @@ struct MultiIndexLevelSnapshot {
     declared: bool,
     zone: Option<String>,
     width: Option<NumericWidth>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dtype: Option<DeclaredDtype>,
     #[serde(default)]
     categories: Option<IndexCategoriesSnapshot>,
 }
@@ -24462,6 +24464,16 @@ impl MultiIndexSnapshot {
                     "native MultiIndex snapshot width does not match its level labels".to_owned(),
                 ));
             }
+            if let Some(dtype) = level.dtype
+                && !level
+                    .catalog
+                    .iter()
+                    .all(|label| label.is_missing() || snapshot_dtype_holds(dtype, label))
+            {
+                return Err(IndexError::InvalidArgument(
+                    "native MultiIndex snapshot dtype does not match its level labels".to_owned(),
+                ));
+            }
             if let Some(categories) = &level.categories {
                 let known: FxHashSet<&IndexLabel> = categories.categories.iter().collect();
                 if !level
@@ -24501,6 +24513,7 @@ impl MultiIndexSnapshot {
                     .declared(level.declared)
                     .zoned(level.zone.map(Arc::from))
                     .with_width(level.width)
+                    .with_dtype(level.dtype)
                     .categorized(level.categories.map(|categories| {
                         Arc::new(IndexCategories {
                             categories: categories.categories,
@@ -24908,6 +24921,9 @@ struct Level {
     /// level. A zoned column's level was its text (br-frankenpandas-c4v57).
     zone: Option<Arc<str>>,
     width: Option<NumericWidth>,
+    /// The catalog's dtype, retained when an alignment or selection leaves
+    /// no labels from which to infer it.
+    dtype: Option<DeclaredDtype>,
     /// A categorical level keeps its complete category catalog and dtype
     /// through groupby output completion, selection and native snapshots.
     categories: Option<Arc<IndexCategories>>,
@@ -24985,6 +25001,7 @@ impl Level {
             codes: Arc::default(),
             zone: None,
             width: None,
+            dtype: None,
             categories: None,
             declared: false,
         }
@@ -24997,6 +25014,7 @@ impl Level {
             codes: Arc::new(OnceLock::from(Some(LevelCodes { uniques, codes }))),
             zone: None,
             width: None,
+            dtype: None,
             categories: None,
             declared: false,
         }
@@ -25011,6 +25029,11 @@ impl Level {
     /// This level in narrow numeric `width` (`int32`, `uint8`, `float32`, ...).
     fn with_width(mut self, width: Option<NumericWidth>) -> Self {
         self.width = width;
+        self
+    }
+
+    fn with_dtype(mut self, dtype: Option<DeclaredDtype>) -> Self {
+        self.dtype = dtype;
         self
     }
 
@@ -25118,6 +25141,7 @@ impl Level {
         }
         .zoned(self.zone.clone())
         .with_width(self.width)
+        .with_dtype(self.dtype)
         .categorized(self.categories.clone())
         .declared(self.declared)
     }
@@ -25134,6 +25158,7 @@ impl Level {
         }
         .zoned(self.zone.clone())
         .with_width(self.width)
+        .with_dtype(self.dtype)
         .categorized(self.categories.clone())
         .declared(self.declared)
     }
@@ -25141,6 +25166,19 @@ impl Level {
 
 /// `index` - a level's labels - in the level's zone and width when it has them (br-frankenpandas-c4v57, br-frankenpandas-13bjo).
 fn zoned_level_index(index: Index, level: &Level) -> Index {
+    // A catalog declaration also describes its row values when compatible.
+    // Missing rows can require a wider dtype than the nonmissing catalog.
+    let index = match level.dtype {
+        Some(dtype)
+            if index
+                .labels()
+                .iter()
+                .all(|label| snapshot_dtype_holds(dtype, label)) =>
+        {
+            index.with_declared_dtype(Some(dtype))
+        }
+        _ => index,
+    };
     let index = match level.zone.as_deref() {
         Some(zone) => index.clone().with_tz(Some(zone)).unwrap_or(index),
         None => index,
@@ -25282,6 +25320,7 @@ impl MultiIndex {
                     declared: level.declared,
                     zone: level.zone.as_deref().map(str::to_owned),
                     width: level.width,
+                    dtype: level.dtype,
                     categories: level.categories.as_ref().map(|categories| {
                         IndexCategoriesSnapshot {
                             categories: categories.categories.clone(),
@@ -26089,6 +26128,18 @@ impl MultiIndex {
         self
     }
 
+    /// Retain a level catalog's dtype, including when it is empty. Time zone,
+    /// numeric width and categorical membership are carried by their setters.
+    #[must_use]
+    pub fn with_level_dtype_from_index(mut self, level: usize, index: &Index) -> Self {
+        if let Some(target) = self.levels.get_mut(level) {
+            target.dtype = index
+                .declared_dtype()
+                .or_else(|| DeclaredDtype::of_name(index.dtype()));
+        }
+        self
+    }
+
     /// The categorical dtype of a level, including categories that have no
     /// rows. A categorical groupby's result must retain this independently
     /// from its row codes and the order in which groups appear.
@@ -26833,6 +26884,7 @@ impl MultiIndex {
                 Self::stacked_row_level(Arc::clone(&coded.uniques), &coded.codes, columns.len())
                     .zoned(level.zone.clone())
                     .with_width(level.width)
+                    .with_dtype(level.dtype)
                     .categorized(level.categories.clone())
                     .declared(level.declared),
             );
@@ -50844,6 +50896,48 @@ mod native_snapshot_tests {
     }
 
     #[test]
+    fn multiindex_empty_catalog_keeps_dtype_through_selection_and_snapshot() {
+        for dtype in [
+            DeclaredDtype::Int64,
+            DeclaredDtype::Float64,
+            DeclaredDtype::Bool,
+            DeclaredDtype::Datetime64,
+            DeclaredDtype::Timedelta64,
+            DeclaredDtype::Width(NumericWidth::Int32),
+            DeclaredDtype::Masked(MaskedDtype::Int64),
+            DeclaredDtype::Object,
+        ] {
+            let catalog = Index::new(Vec::new()).with_declared_dtype(Some(dtype));
+            let empty = MultiIndex::from_declared_levels(vec![Vec::new()], vec![Vec::new()])
+                .unwrap()
+                .with_level_dtype_from_index(0, &catalog);
+            for selected in [
+                empty.clone(),
+                empty.take(&[]).unwrap(),
+                empty.slice_rows(0, 0).unwrap(),
+            ] {
+                assert_eq!(selected.levels()[0].dtype(), dtype.name());
+                assert_eq!(selected.get_level_values(0).unwrap().dtype(), dtype.name());
+                let encoded = serde_json::to_string(&selected.snapshot().unwrap()).unwrap();
+                let decoded: super::MultiIndexSnapshot = serde_json::from_str(&encoded).unwrap();
+                let restored = decoded.restore().unwrap();
+                assert_eq!(restored.levels()[0].dtype(), dtype.name());
+                assert_eq!(restored.get_level_values(0).unwrap().dtype(), dtype.name());
+            }
+        }
+        // A nonempty catalog need not carry an explicit dtype declaration.
+        let empty = MultiIndex::from_declared_levels(vec![Vec::new()], vec![Vec::new()])
+            .unwrap()
+            .with_level_dtype_from_index(0, &Index::from_i64(vec![7]));
+        assert_eq!(empty.levels()[0].dtype(), "int64");
+        // Snapshots written before catalog dtype metadata remain readable.
+        let mut legacy = serde_json::to_value(empty.snapshot().unwrap()).unwrap();
+        legacy["levels"][0].as_object_mut().unwrap().remove("dtype");
+        let legacy: super::MultiIndexSnapshot = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.restore().unwrap().is_empty());
+    }
+
+    #[test]
     fn native_index_snapshot_rejects_forged_range_and_metadata() {
         let source = Index::from_range(0, 3, 1).snapshot().unwrap();
         let mut invalid = source.clone();
@@ -50904,6 +50998,9 @@ mod native_snapshot_tests {
         assert!(invalid.restore().is_err());
         let mut invalid = source.clone();
         invalid.levels[0].width = Some(NumericWidth::Int8);
+        assert!(invalid.restore().is_err());
+        let mut invalid = source.clone();
+        invalid.levels[0].dtype = Some(DeclaredDtype::Int64);
         assert!(invalid.restore().is_err());
         let mut invalid = source;
         invalid.levels[1].catalog[0] = IndexLabel::Int64(256);

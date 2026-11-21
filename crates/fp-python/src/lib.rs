@@ -21256,7 +21256,9 @@ impl PyMultiIndex {
         let mut inner =
             MultiIndex::from_declared_levels(catalogs, row_codes).map_err(index_error_to_py)?;
         for (axis, level) in supplied_levels.iter().enumerate() {
+            let catalog_index = index_arg_index(level)?;
             inner = inner
+                .with_level_dtype_from_index(axis, &catalog_index)
                 .with_level_zone(axis, array_zone(level).as_deref())
                 .with_level_width(axis, array_width(level));
         }
@@ -42653,7 +42655,7 @@ impl PySeries {
     #[allow(clippy::too_many_arguments)]
     fn align<'py>(
         slf: &Bound<'py, Self>,
-        other: &Bound<'py, PySeries>,
+        other: &Bound<'py, PyAny>,
         join: &str,
         axis: Option<&Bound<'py, PyAny>>,
         level: Option<&Bound<'py, PyAny>>,
@@ -42662,11 +42664,26 @@ impl PySeries {
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
         let _ = copy;
         parse_axis_param_for_type(axis.filter(|axis| !axis.is_none()), "Series")?;
-        if level.is_some_and(|level| !level.is_none()) {
-            return Err(not_implemented("Series.align(level=...)"));
+        if !other.is_instance_of::<PySeries>() && !other.is_instance_of::<PyDataFrame>() {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "unsupported type for alignment",
+            ));
         }
         let (this, other) = (slf.as_any(), other.as_any());
+        if let Some(level) = level.filter(|level| !level.is_none()) {
+            if other.is_instance_of::<PyDataFrame>() {
+                return aligned_on_level(this, "index", other, "index", join, level, fill_value);
+            }
+            let (left, right) = aligned_on_level(this, "index", other, "index", join, level, None)?;
+            return filled_after_align(left, right, fill_value);
+        }
         let joined = aligned_axis(&this.getattr("index")?, &other.getattr("index")?, join)?;
+        if other.is_instance_of::<PyDataFrame>() {
+            return Ok((
+                aligned_on(this, "index", joined.as_ref(), fill_value)?,
+                aligned_on(other, "index", joined.as_ref(), fill_value)?,
+            ));
+        }
         filled_after_align(
             aligned_on(this, "index", joined.as_ref(), None)?,
             aligned_on(other, "index", joined.as_ref(), None)?,
@@ -46882,6 +46899,425 @@ fn aligned_axis<'py>(
             )));
         }
     }))
+}
+
+/// A level join broadcasts a unique flat axis onto an existing MultiIndex.
+/// Only its selected catalog is joined: tuple rows keep their original order
+/// and duplicates, and unused flat labels never invent a Cartesian product.
+#[allow(clippy::too_many_arguments)]
+fn aligned_on_level<'py>(
+    left: &Bound<'py, PyAny>,
+    left_axis: &str,
+    right: &Bound<'py, PyAny>,
+    right_axis: &str,
+    join: &str,
+    level: &Bound<'py, PyAny>,
+    fill_value: Option<&Bound<'py, PyAny>>,
+) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
+    let left_labels = left.getattr(left_axis)?;
+    let right_labels = right.getattr(right_axis)?;
+    if left_labels
+        .call_method1("equals", (&right_labels,))?
+        .is_truthy()?
+    {
+        return Ok((left.clone(), right.clone()));
+    }
+    let left_multi = left_labels.extract::<PyRef<'_, PyMultiIndex>>().ok();
+    let right_multi = right_labels.extract::<PyRef<'_, PyMultiIndex>>().ok();
+    let (multi, flat, multi_left) = match (&left_multi, &right_multi) {
+        (Some(_), Some(_)) => {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Join on level between two MultiIndex objects is ambiguous",
+            ));
+        }
+        (Some(multi), None) => (&multi.inner, index_arg_index(&right_labels)?, true),
+        (None, Some(multi)) => (&multi.inner, index_arg_index(&left_labels)?, false),
+        (None, None) => {
+            // pandas ignores level entirely when neither axis is a MultiIndex.
+            let target = aligned_axis(&left_labels, &right_labels, join)?;
+            return Ok((
+                aligned_on(left, left_axis, target.as_ref(), fill_value)?,
+                aligned_on(right, right_axis, target.as_ref(), fill_value)?,
+            ));
+        }
+    };
+    if !matches!(join, "left" | "right" | "inner" | "outer") {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+            "do not recognize join method {join}"
+        )));
+    }
+    if !flat.is_unique() {
+        return Err(PyErr::new::<pyo3::exceptions::PyNotImplementedError, _>(
+            "Index._join_level on non-unique index is not implemented",
+        ));
+    }
+    // A matching name takes precedence over a numeric position, and repeated
+    // level names are ambiguous even when their individual values differ.
+    let wanted_name = py_axis_name(level)?;
+    let named: Vec<usize> = multi
+        .names()
+        .iter()
+        .enumerate()
+        .filter_map(|(position, name)| (name.is_some() && *name == wanted_name).then_some(position))
+        .collect();
+    let position = match named.as_slice() {
+        [position] => *position,
+        [] => multiindex_level_position(multi, level)?,
+        _ => {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "The name {} occurs multiple times, use a level number",
+                level.str()?
+            )));
+        }
+    };
+    let how = match (multi_left, join) {
+        (false, "left") => "right",
+        (false, "right") => "left",
+        _ => join,
+    };
+    let mut catalogs = multi.levels();
+    let source_level = &catalogs[position];
+    // Nonempty numeric indexes meet at NumPy's common width before joining.
+    // The native join preserves label positions but does not negotiate widths.
+    let numeric = |dtype: &str| {
+        matches!(dtype, "int64" | "float64")
+            || NumericWidth::parse(dtype).is_some_and(|(_, nullable)| !nullable)
+    };
+    let (join_level, join_flat, joined_dtype) = if !source_level.is_empty()
+        && !flat.is_empty()
+        && numeric(source_level.dtype())
+        && numeric(flat.dtype())
+    {
+        if (source_level.dtype() == "uint64" && flat.dtype().starts_with("int"))
+            || (flat.dtype() == "uint64" && source_level.dtype().starts_with("int"))
+        {
+            return Err(not_implemented(
+                "align(level=...) between uint64 and signed integer levels",
+            ));
+        }
+        let common: String = left
+            .py()
+            .import("numpy")?
+            .call_method1("result_type", (source_level.dtype(), flat.dtype()))?
+            .getattr("name")?
+            .extract()?;
+        let declared = match common.as_str() {
+            "int64" => fp_index::DeclaredDtype::Int64,
+            "float64" => fp_index::DeclaredDtype::Float64,
+            _ => fp_index::DeclaredDtype::Width(
+                NumericWidth::parse(&common)
+                    .ok_or_else(|| not_implemented("align with this numeric level dtype"))?
+                    .0,
+            ),
+        };
+        let normalize = |index: Index| {
+            let index = if matches!(common.as_str(), "float32" | "float64") {
+                index_in_dtype(index, "float64")
+            } else {
+                index
+            };
+            index.with_declared_dtype(Some(declared))
+        };
+        (
+            normalize(source_level.clone()),
+            normalize(flat.clone()),
+            Some(declared),
+        )
+    } else {
+        // Empty sides are handled before dtype negotiation in pandas too.
+        (source_level.clone(), flat.clone(), None)
+    };
+    let (mut joined, from_multi, from_flat) =
+        index_join_indexers(&join_level, &join_flat, how, false);
+    let flat_is_categorical = if multi_left {
+        right_labels.is_instance_of::<PyCategoricalIndex>()
+    } else {
+        left_labels.is_instance_of::<PyCategoricalIndex>()
+    };
+    if from_multi.is_some()
+        && (source_level.categories().is_some()
+            || flat.categories().is_some()
+            || flat_is_categorical)
+    {
+        return Err(not_implemented(
+            "align(level=...) with remapped categorical levels",
+        ));
+    }
+    if from_multi.is_none() {
+        // No indexer means pandas retains the original MultiIndex, including
+        // its dtype, even if the join's temporary numeric inputs were cast.
+        joined = source_level.clone();
+    } else if let Some(dtype) = joined_dtype {
+        joined = joined.with_declared_dtype(Some(dtype));
+    }
+    if joined.labels().iter().any(IndexLabel::is_missing) {
+        return Err(not_implemented(
+            "align(level=...) with a missing label in the joined level catalog",
+        ));
+    }
+    if source_level.tz().is_some() != flat.tz().is_some()
+        && source_level
+            .labels()
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Datetime64(_)))
+        && flat
+            .labels()
+            .iter()
+            .any(|label| matches!(label, IndexLabel::Datetime64(_)))
+    {
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+            "Cannot join tz-naive with tz-aware DatetimeIndex",
+        ));
+    }
+    if from_multi.is_some()
+        && let (Some(left_zone), Some(right_zone)) = (source_level.tz(), flat.tz())
+    {
+        let zone = if left_zone == right_zone {
+            left_zone
+        } else {
+            "UTC"
+        };
+        joined = joined.with_tz(Some(zone)).map_err(index_error_to_py)?;
+    }
+    let codes = multi.codes();
+    let mut remap: Vec<Option<usize>> = (0..source_level.len()).map(Some).collect();
+    if let Some(indexer) = &from_multi {
+        remap.fill(None);
+        for (target, source) in indexer.iter().enumerate() {
+            if let Ok(source) = usize::try_from(*source) {
+                remap[source] = Some(target);
+            }
+        }
+        // pandas 2.2.3 cannot remap a level containing missing codes: its
+        // mask omits those rows before applying the value indexer.
+        let present = codes[position].iter().filter(|&&code| code >= 0).count();
+        if present != multi.len() {
+            if remap.iter().any(Option::is_none) {
+                return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(format!(
+                    "boolean index did not match indexed array along axis 0; size of axis is {} but size of corresponding boolean axis is {present}",
+                    multi.len()
+                )));
+            }
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Length of values ({}) does not match length of index ({present})",
+                multi.len()
+            )));
+        }
+    }
+    let mut multi_rows = Vec::new();
+    let mut flat_rows = Vec::new();
+    let mut joined_codes = Vec::new();
+    for (row, &code) in codes[position].iter().enumerate() {
+        let target = if code < 0 { None } else { remap[code as usize] };
+        if code >= 0 && target.is_none() {
+            continue;
+        }
+        multi_rows.push(Some(row));
+        joined_codes.push(target);
+        let flat_row = match &from_flat {
+            None => target,
+            Some(indexer) => target
+                .and_then(|at| indexer.get(at))
+                .or_else(|| (code < 0).then(|| indexer.last()).flatten())
+                .and_then(|&at| usize::try_from(at).ok()),
+        };
+        flat_rows.push(flat_row);
+    }
+    catalogs[position] = joined;
+    let mut native_catalogs = Vec::with_capacity(catalogs.len());
+    let mut native_codes = Vec::with_capacity(catalogs.len());
+    for (axis, catalog) in catalogs.iter().enumerate() {
+        let mut labels = catalog.labels().to_vec();
+        let missing = u32::try_from(labels.len()).map_err(|_| {
+            PyErr::new::<pyo3::exceptions::PyOverflowError, _>("MultiIndex level is too large")
+        })?;
+        let row_codes: Vec<u32> = multi_rows
+            .iter()
+            .enumerate()
+            .map(|(row, source)| {
+                let code = if axis == position {
+                    joined_codes[row]
+                } else {
+                    usize::try_from(codes[axis][source.expect("multi row exists")]).ok()
+                };
+                code.map_or(missing, |code| code as u32)
+            })
+            .collect();
+        if row_codes.contains(&missing) {
+            labels.push(IndexLabel::Null(NullKind::NaN));
+        }
+        native_catalogs.push(labels);
+        native_codes.push(row_codes);
+    }
+    let mut target = MultiIndex::from_declared_levels(native_catalogs, native_codes)
+        .map_err(index_error_to_py)?
+        .set_names(multi.names().to_vec());
+    for (axis, catalog) in catalogs.iter().enumerate() {
+        target = target
+            .with_level_dtype_from_index(axis, catalog)
+            .with_level_zone(axis, catalog.tz())
+            .with_level_width(axis, catalog.width())
+            .with_level_categories(axis, catalog.categories().cloned())
+            .map_err(index_error_to_py)?;
+    }
+    if left.is_instance_of::<PyDataFrame>() && right.is_instance_of::<PySeries>() {
+        // pandas' DataFrame/Series path validates the frame's reindexer,
+        // unlike its DataFrame/DataFrame path, which permits duplicates.
+        if multi_left && from_multi.is_some() && !multi.is_unique() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "cannot reindex on an axis with duplicate labels",
+            ));
+        }
+        // On columns pandas reindexes the Series by level a second time.
+        // A changed MultiIndex then meets another MultiIndex ambiguously.
+        if !multi_left && left_axis == "columns" && !target.equals(multi) {
+            return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
+                "Join on level between two MultiIndex objects is ambiguous",
+            ));
+        }
+    }
+    let (left_rows, right_rows) = if multi_left {
+        (&multi_rows, &flat_rows)
+    } else {
+        (&flat_rows, &multi_rows)
+    };
+    Ok((
+        take_level_aligned(left, left_axis, &target, left_rows, fill_value)?,
+        take_level_aligned(right, right_axis, &target, right_rows, fill_value)?,
+    ))
+}
+
+/// Gather the values by the level join's positional indexers, keeping dtype
+/// promotion in the same reindex implementation used for ordinary alignment.
+fn take_level_aligned<'py>(
+    obj: &Bound<'py, PyAny>,
+    axis: &str,
+    target: &MultiIndex,
+    positions: &[Option<usize>],
+    fill_value: Option<&Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = obj.py();
+    let gather = |column: &Column| -> PyResult<Column> {
+        if fill_value.is_none_or(|fill| fill.is_none()) {
+            return fp_frame::reindex_column_with_invented_gaps(column, positions)
+                .map_err(frame_error_to_py);
+        }
+        let source = PySeries {
+            inner: Series::new("", Index::default_range(column.len()), column.clone())
+                .map_err(frame_error_to_py)?,
+        };
+        let rows = Bound::new(
+            py,
+            PyIndex {
+                inner: Index::from_i64_values(
+                    positions
+                        .iter()
+                        .map(|position| position.map_or(-1, |at| at as i64))
+                        .collect(),
+                ),
+            },
+        )?;
+        Ok(source
+            .reindex(
+                py,
+                Some(rows.as_any()),
+                None,
+                None,
+                None,
+                None,
+                fill_value,
+                None,
+                None,
+            )?
+            .inner
+            .column()
+            .clone())
+    };
+    let target_rows = target
+        .to_flat_index(MULTIINDEX_FLAT_SEP)
+        .with_row_multiindex(target.clone())
+        .map_err(index_error_to_py)?;
+    if let Ok(series) = obj.extract::<PyRef<'_, PySeries>>() {
+        let inner = Series::new(
+            series.inner.name(),
+            target_rows,
+            gather(series.inner.column())?,
+        )
+        .map_err(frame_error_to_py)?;
+        return Bound::new(py, PySeries { inner }).map(Bound::into_any);
+    }
+    let source = obj.extract::<PyRef<'_, PyDataFrame>>()?;
+    let frame = &source.inner;
+    let mut inner = if axis == "index" {
+        let names: Vec<String> = frame.column_names().into_iter().cloned().collect();
+        let columns = names
+            .iter()
+            .enumerate()
+            .map(|(position, name)| {
+                Ok((
+                    name.clone(),
+                    gather(frame.column_at(position).expect("column position exists"))?,
+                ))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        DataFrame::new_with_column_order(
+            target_rows,
+            fp_frame::ColumnStore::from_pairs(columns),
+            names,
+        )
+        .and_then(|frame_out| frame_out.with_column_labels(frame.column_labels()))
+        .and_then(|frame_out| {
+            frame_out.with_columns_multiindex(frame.columns_multiindex().cloned())
+        })
+        .and_then(|frame_out| frame_out.with_row_multiindex(target.clone()))
+        .map_err(frame_error_to_py)?
+        .with_columns_name(frame.columns_name().cloned())
+    } else {
+        let fill = fill_value
+            .filter(|fill| !fill.is_none())
+            .map(|fill| py_to_cell(py, fill))
+            .transpose()?
+            .unwrap_or(Scalar::Null(NullKind::NaN));
+        let names: Vec<String> = (0..target.len())
+            .map(|at| {
+                target
+                    .get_tuple(at)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("_")
+            })
+            .collect();
+        let columns = names
+            .iter()
+            .zip(positions)
+            .map(|(name, position)| {
+                let column = match position.and_then(|at| frame.column_at(at)) {
+                    Some(column) => column.clone(),
+                    None => broadcast_assigned_column(fill.clone(), frame.len())?,
+                };
+                Ok((name.clone(), column))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let mut out = DataFrame::new_with_column_order(
+            frame.index().clone(),
+            fp_frame::ColumnStore::from_pairs(columns),
+            names,
+        )
+        .and_then(|frame_out| frame_out.with_columns_multiindex(Some(target.clone())))
+        .map_err(frame_error_to_py)?;
+        if let Some(rows) = frame.row_multiindex() {
+            out = out
+                .with_row_multiindex(rows.clone())
+                .map_err(frame_error_to_py)?;
+        }
+        out
+    };
+    inner = inner
+        .set_flags(Some(frame.flags().allows_duplicate_labels()))
+        .map_err(frame_error_to_py)?;
+    Bound::new(py, PyDataFrame { inner }).map(Bound::into_any)
 }
 
 /// `obj` reindexed along `axis` ('index' / 'columns') onto `labels`, the
@@ -60374,9 +60810,7 @@ impl PyDataFrame {
         fill_value: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyAny>)> {
         let _ = copy;
-        if level.is_some_and(|level| !level.is_none()) {
-            return Err(not_implemented("DataFrame.align(level=...)"));
-        }
+        let level = level.filter(|level| !level.is_none());
         let axis = parse_axis_param_for_type(axis.filter(|axis| !axis.is_none()), "DataFrame")?;
         let this = slf.as_any();
         if other.is_instance_of::<PySeries>() {
@@ -60386,6 +60820,11 @@ impl PyDataFrame {
                 ));
             };
             let frame_axis = if axis == 0 { "index" } else { "columns" };
+            if let Some(level) = level {
+                let (left, right) =
+                    aligned_on_level(this, frame_axis, other, "index", join, level, None)?;
+                return filled_after_align(left, right, fill_value);
+            }
             let joined = aligned_axis(&this.getattr(frame_axis)?, &other.getattr("index")?, join)?;
             return filled_after_align(
                 aligned_on(this, frame_axis, joined.as_ref(), None)?,
@@ -60396,6 +60835,11 @@ impl PyDataFrame {
         let (mut left, mut right) = (this.clone(), other.clone());
         for (position, name) in [(0, "index"), (1, "columns")] {
             if axis.is_some_and(|axis| axis != position) {
+                continue;
+            }
+            if let Some(level) = level {
+                (left, right) =
+                    aligned_on_level(&left, name, &right, name, join, level, fill_value)?;
                 continue;
             }
             let joined = aligned_axis(&left.getattr(name)?, &right.getattr(name)?, join)?;

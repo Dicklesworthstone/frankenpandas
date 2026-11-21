@@ -865,6 +865,8 @@ jobs:
           "$FP_PYTHON_BIN" -m pytest crates/fp-python/tests/test_differential_packets.py \
             crates/fp-python/tests/test_sparse.py \
             crates/fp-python/tests/test_period_multipliers.py \
+            crates/fp-python/tests/test_align_level.py \
+            crates/fp-python/tests/test_align_level_native_contract.py \
             crates/fp-python/tests/test_multiindex_constructor.py -v
 
       # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.5: fails when a
