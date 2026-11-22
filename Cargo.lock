@@ -1509,6 +1509,7 @@ dependencies = [
  "mimalloc",
  "pyo3",
  "rustc-hash",
+ "serde_json",
 ]
 
 [[package]]

@@ -28,8 +28,8 @@ use fp_frame::{
     DataFrame, DropNaHow, FrameError, LabelName, PlotKind, Series, concat_dataframes, concat_series,
 };
 use fp_index::{
-    AlignMode, CategoricalIndex, DatetimeIndex, DuplicateKeep, Index, IndexLabel, MultiIndex,
-    OrderedF64, PeriodIndex, RangeIndex, TimedeltaIndex,
+    AlignMode, CategoricalIndex, CustomBusinessDaySpec, DatetimeIndex, DuplicateKeep, Index,
+    IndexLabel, MultiIndex, OrderedF64, PeriodIndex, RangeIndex, TimedeltaIndex,
 };
 use fp_types::{
     CategoricalMetadata, DType, IntervalClosed, NullKind, NumericWidth, Period, PeriodFreq, Scalar,
@@ -18991,8 +18991,20 @@ impl PyDatetimeIndex {
         py: Python<'py>,
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
         let name = axis_name_to_py(py, self.inner.name())?.into_bound_py_any(py)?;
-        let payload =
-            (self.inner.asi8(), self.inner.tz(), self.inner.freq(), name).into_bound_py_any(py)?;
+        let calendar = self
+            .inner
+            .custom_business_day()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| PyErr::new::<pyo3::exceptions::PyValueError, _>(error.to_string()))?;
+        let payload = (
+            self.inner.asi8(),
+            self.inner.tz(),
+            self.inner.freq(),
+            name,
+            calendar,
+        )
+            .into_bound_py_any(py)?;
         restore_call(py, "DatetimeIndex", payload)
     }
 
@@ -19120,6 +19132,31 @@ impl PyDatetimeIndex {
         let Some(freq) = freq.filter(|freq| !freq.is_none()) else {
             return Ok(PyDatetimeIndex { inner });
         };
+        if let Some(offset) = custom_business_frequency(Some(freq))? {
+            let wall = inner.tz_localize(None).map_err(index_error_to_py)?.asi8();
+            let spec = offset.custom_business_day.as_ref().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("missing business-day calendar")
+            })?;
+            let calendar = CustomBusinessCalendar::from_spec(spec);
+            let valid_start = wall.first().is_none_or(|&at| {
+                at != Timestamp::NAT
+                    && calendar.is_open(at.div_euclid(CustomBusinessCalendar::DAY))
+                    && (!offset.normalize || at.rem_euclid(CustomBusinessCalendar::DAY) == 0)
+            });
+            let follows = wall.len() < 2
+                || offset.moved_instants(py, &wall[..wall.len() - 1], 1)? == wall[1..];
+            if !valid_start || !follows {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Inferred frequency None from passed values does not conform to passed frequency {}",
+                    offset.freqstr()
+                )));
+            }
+            return Ok(Self {
+                inner: inner
+                    .with_freq(Some(offset.freqstr()))
+                    .with_custom_business_day(Some(spec.as_ref().clone())),
+            });
+        }
         let freq = freq_alias(freq, "DatetimeIndex")?;
         let inferred = inner.inferred_freq();
         let wanted = if freq == "infer" {
@@ -20446,9 +20483,18 @@ impl PyDatetimeIndex {
     /// always None).
     #[getter]
     fn freq(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(spec) = self.inner.custom_business_day() {
+            let count = self
+                .inner
+                .freq()
+                .as_deref()
+                .and_then(fp_index::split_freq_count)
+                .map_or(1, |(count, _)| count);
+            return PyDateOffset::custom_business(count, spec.clone()).into_offset_py(py);
+        }
         match self.inner.freq() {
             Some(freqstr) => match offset_for_freqstr(&freqstr)? {
-                Some(offset) => offset.into_py_any(py),
+                Some(offset) => offset.into_offset_py(py),
                 None => Ok(py.None()),
             },
             None => Ok(py.None()),
@@ -94458,6 +94504,7 @@ fn date_range(
         ));
     }
     let zone = passed.or(inferred);
+    let custom_offset = custom_business_frequency(freq)?;
     let freq: Option<String> = freq
         .filter(|freq| !freq.is_none())
         .map(|freq| freq_alias(freq, "date_range"))
@@ -94550,6 +94597,10 @@ fn date_range(
     // were made, read back and made again (br-frankenpandas-so0mr).
     let mut affine: Option<(i64, i64, usize)> = None;
     let mut nanos: Vec<i64> = match (start, end, periods, freq) {
+        _ if custom_offset.is_some() => custom_offset
+            .as_ref()
+            .ok_or_else(three_of_four)?
+            .custom_range(start, end, periods)?,
         // pandas' linspace: numpy spaces the points in float64, truncates
         // them to int64, and pins the last one to `end`.
         (Some(first), Some(last), Some(periods), None) => {
@@ -94676,6 +94727,7 @@ fn date_range(
     // The range carries its freq, as pandas' (`freq='D'` in the repr,
     // `.freq` <Day>); the linspace form has none.
     let range_freq = match (given, freq) {
+        _ if custom_offset.is_some() => custom_offset.as_ref().map(PyDateOffset::freqstr),
         ((true, true, true), None) => None,
         (_, freq) => fp_index::canonical_freq(freq.unwrap_or("D"))
             .map(|canonical| signed_freq(canonical, negative)),
@@ -94683,7 +94735,12 @@ fn date_range(
     let dti = DatetimeIndex::from_index(index)
         .and_then(|dti| dti.with_tz(zone.as_deref()))
         .map_err(index_error_to_py)?
-        .with_freq(range_freq);
+        .with_freq(range_freq)
+        .with_custom_business_day(
+            custom_offset
+                .and_then(|offset| offset.custom_business_day)
+                .map(|spec| spec.as_ref().clone()),
+        );
     Ok(PyDatetimeIndex { inner: dti })
 }
 
@@ -95179,9 +95236,10 @@ fn period_range(
 /// pandas' custom business days (freq 'C'): the weekdays `weekmask` holds
 /// (pandas' 'Mon Tue Wed Thu Fri' by default; day names or seven 0 / 1
 /// digits) that no holiday names.
+#[derive(Clone, Debug, PartialEq)]
 struct CustomBusinessCalendar {
     open: [bool; 7],
-    holidays: HashSet<i64>,
+    holidays: Vec<i64>,
 }
 
 impl CustomBusinessCalendar {
@@ -95201,7 +95259,13 @@ impl CustomBusinessCalendar {
                 Err(_) => {
                     let flags = weekmask
                         .try_iter()?
-                        .map(|flag| flag?.is_truthy())
+                        .map(|flag| match flag?.extract::<i64>()? {
+                            0 => Ok(false),
+                            1 => Ok(true),
+                            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                "A business day weekmask array must have all 1's and 0's",
+                            )),
+                        })
                         .collect::<PyResult<Vec<bool>>>()?;
                     if flags.len() != 7 {
                         return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -95217,7 +95281,9 @@ impl CustomBusinessCalendar {
         };
         let text = text.trim();
         let invalid = || {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid weekmask {text:?}"))
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid business day weekmask string {text:?}"
+            ))
         };
         let mut open = [false; 7];
         if text.len() == 7 && text.bytes().all(|b| matches!(b, b'0' | b'1')) {
@@ -95225,35 +95291,123 @@ impl CustomBusinessCalendar {
                 *day = flag == b'1';
             }
         } else {
-            for name in text.split_whitespace() {
-                let day = NAMES
+            let mut remaining = text;
+            while !remaining.is_empty() {
+                let (day, name) = NAMES
                     .iter()
-                    .position(|known| known.eq_ignore_ascii_case(name))
+                    .enumerate()
+                    .find(|(_, name)| remaining.starts_with(**name))
                     .ok_or_else(invalid)?;
                 open[day] = true;
+                remaining = remaining[name.len()..].trim_start();
             }
         }
-        let holidays = match holidays {
-            None => HashSet::new(),
+        if !open.iter().any(|&open| open) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Cannot construct a numpy.busdaycal with a weekmask of all zeros",
+            ));
+        }
+        let mut holidays: Vec<i64> = match holidays {
+            None => Vec::new(),
             Some(holidays) => holidays
                 .try_iter()?
                 .map(|holiday| Self::day_of(py, &holiday?))
                 .collect::<PyResult<_>>()?,
         };
+        holidays.retain(|day| *day != i64::MIN && open[Self::weekday(*day)]);
+        holidays.sort_unstable();
+        holidays.dedup();
         Ok(Self { open, holidays })
     }
 
     /// The day number (days since 1970-01-01) of a date-like.
     fn day_of(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<i64> {
+        if py_scalar_is_missing(value)? {
+            return Ok(i64::MIN);
+        }
+        if value.get_type().name()?.to_str()? == "datetime64" {
+            return value
+                .call_method1("astype", ("datetime64[D]",))?
+                .call_method1("astype", ("int64",))?
+                .extract();
+        }
         let stamp = py.get_type::<PyTimestamp>().call1((value,))?;
-        let nanos = stamp.extract::<PyRef<'_, PyTimestamp>>()?.inner.nanos;
-        Ok(nanos.div_euclid(Self::DAY))
+        let nanos = stamp.extract::<PyRef<'_, PyTimestamp>>()?.wall().nanos;
+        Ok(if nanos == Timestamp::NAT {
+            i64::MIN
+        } else {
+            nanos.div_euclid(Self::DAY)
+        })
+    }
+
+    fn weekday(day: i64) -> usize {
+        ((day.rem_euclid(7) + 3) % 7) as usize
     }
 
     fn is_open(&self, day: i64) -> bool {
         // 1970-01-01 was a Thursday (Monday 0).
-        let weekday = usize::try_from((day + 3).rem_euclid(7)).unwrap_or(0);
-        self.open[weekday] && !self.holidays.contains(&day)
+        self.open[Self::weekday(day)] && self.holidays.binary_search(&day).is_err()
+    }
+
+    fn from_spec(spec: &CustomBusinessDaySpec) -> Self {
+        Self {
+            open: spec.weekmask,
+            holidays: spec.holidays.clone(),
+        }
+    }
+
+    /// Find the inclusive next/previous open day, crossing only weekends
+    /// and holidays at the requested boundary.
+    fn roll(&self, mut day: i64, direction: i64) -> PyResult<i64> {
+        while !self.is_open(day) {
+            day = day.checked_add(direction).ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyOverflowError, _>("offset overflow")
+            })?;
+        }
+        Ok(day)
+    }
+
+    /// Skip whole weeks, then compensate for holidays in the skipped
+    /// interval. The work depends on the calendar, not the offset count.
+    fn shift_day(&self, day: i64, count: i64) -> PyResult<i64> {
+        let overflow = || PyErr::new::<pyo3::exceptions::PyOverflowError, _>("offset overflow");
+        let direction = if count < 0 { -1_i64 } else { 1_i64 };
+        let mut at = self.roll(day, if count > 0 { -1 } else { 1 })?;
+        let mut remaining = count.unsigned_abs();
+        let per_week = self.open.iter().filter(|&&open| open).count() as u64;
+        while remaining > 0 {
+            let weeks = remaining / per_week;
+            let mut next =
+                i64::try_from(i128::from(at) + i128::from(direction) * i128::from(weeks) * 7)
+                    .map_err(|_| overflow())?;
+            let mut tail = remaining % per_week;
+            while tail > 0 {
+                next = next.checked_add(direction).ok_or_else(overflow)?;
+                if self.open[Self::weekday(next)] {
+                    tail -= 1;
+                }
+            }
+            let crossed = if direction > 0 {
+                self.holidays.partition_point(|&holiday| holiday <= next)
+                    - self.holidays.partition_point(|&holiday| holiday <= at)
+            } else {
+                self.holidays.partition_point(|&holiday| holiday < at)
+                    - self.holidays.partition_point(|&holiday| holiday < next)
+            };
+            at = next;
+            remaining = crossed as u64;
+        }
+        Ok(at)
+    }
+
+    fn shift(&self, nanos: i64, count: i64, offset_nanos: i64) -> PyResult<i64> {
+        let day = self.shift_day(nanos.div_euclid(Self::DAY), count)?;
+        i64::try_from(
+            i128::from(day) * i128::from(Self::DAY)
+                + i128::from(nanos.rem_euclid(Self::DAY))
+                + i128::from(offset_nanos),
+        )
+        .map_err(|_| PyErr::new::<pyo3::exceptions::PyOverflowError, _>("offset overflow"))
     }
 
     /// pandas' bdate_range under this calendar: the open days from `start`
@@ -104390,7 +104544,7 @@ impl PyCategorical {
 /// ...) that moves between anchor dates. `kind` names the pandas class it
 /// stands for. MonthEnd / YearEnd and `months=` / `years=` used to add a
 /// flat 30 / 365 days (fvsao.35).
-#[pyclass(name = "DateOffset", from_py_object)]
+#[pyclass(name = "DateOffset", from_py_object, subclass)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PyDateOffset {
     #[pyo3(get)]
@@ -104426,6 +104580,8 @@ pub struct PyDateOffset {
     /// pandas' rule code: the freqstr without the count (None for a
     /// DateOffset, whose freqstr is its repr).
     rule_code: Option<String>,
+    /// A custom frequency cannot be reconstructed from its `C` alias.
+    custom_business_day: Option<Arc<CustomBusinessDaySpec>>,
 }
 
 /// relativedelta's absolute (replacing) fields, as DateOffset takes them.
@@ -104459,11 +104615,145 @@ impl Default for PyDateOffset {
             kind: None,
             attr: None,
             rule_code: None,
+            custom_business_day: None,
         }
     }
 }
 
 impl PyDateOffset {
+    fn custom_business(n: i64, spec: CustomBusinessDaySpec) -> Self {
+        Self {
+            n,
+            normalize: spec.normalize,
+            anchor: Some("C".to_owned()),
+            kind: Some("CustomBusinessDay"),
+            rule_code: Some("C".to_owned()),
+            custom_business_day: Some(Arc::new(spec)),
+            ..Default::default()
+        }
+    }
+
+    /// Keep the concrete class through arithmetic, frequency reads and
+    /// pickle restoration, including the `CDay` alias of this class.
+    fn into_offset_py(self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if self.custom_business_day.is_some() {
+            Ok(Py::new(py, (PyCustomBusinessDay, self))?.into_any())
+        } else {
+            self.into_py_any(py)
+        }
+    }
+
+    fn custom_roll(&self, dt: &Bound<'_, PyAny>, direction: i64) -> PyResult<PyTimestamp> {
+        let stamp = dt
+            .py()
+            .get_type::<PyTimestamp>()
+            .call1((dt,))?
+            .extract::<PyRef<'_, PyTimestamp>>()?
+            .clone();
+        if stamp.inner.is_nat() || self.is_on_offset(dt)? {
+            return Ok(stamp);
+        }
+        let unit = Self {
+            n: direction,
+            ..self.clone()
+        };
+        stamp.offset_shift(dt.py(), &unit, 1)
+    }
+
+    /// Generate on the wall clock. Both signed directions use pandas'
+    /// forward-rolled start and backward-rolled end, then step by the
+    /// native calendar; the caller localizes each result in its own zone.
+    fn custom_range(
+        &self,
+        start: Option<i64>,
+        end: Option<i64>,
+        periods: Option<usize>,
+    ) -> PyResult<Vec<i64>> {
+        let spec = self.custom_business_day.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("missing business-day calendar")
+        })?;
+        if start == Some(Timestamp::NAT) || end == Some(Timestamp::NAT) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Neither `start` nor `end` can be NaT",
+            ));
+        }
+        if periods == Some(0) && self.n != 0 {
+            return Ok(Vec::new());
+        }
+        let calendar = CustomBusinessCalendar::from_spec(spec);
+        let overflow = || PyErr::new::<pyo3::exceptions::PyOverflowError, _>("offset overflow");
+        let apply = |at: i64, count: i64| -> PyResult<i64> {
+            let shifted = calendar.shift(at, count, spec.offset_nanos)?;
+            if self.normalize {
+                shifted
+                    .checked_sub(shifted.rem_euclid(CustomBusinessCalendar::DAY))
+                    .ok_or_else(overflow)
+            } else {
+                Ok(shifted)
+            }
+        };
+        let roll = |at: i64, direction: i64| -> PyResult<i64> {
+            if calendar.is_open(at.div_euclid(CustomBusinessCalendar::DAY))
+                && (!self.normalize || at.rem_euclid(CustomBusinessCalendar::DAY) == 0)
+            {
+                Ok(at)
+            } else {
+                apply(at, direction)
+            }
+        };
+        let first = start.map(|at| roll(at, 1)).transpose()?;
+        let last = end.map(|at| roll(at, -1)).transpose()?;
+        let span = || {
+            periods
+                .and_then(|count| i64::try_from(count).ok())
+                .and_then(|count| count.checked_sub(1))
+                .and_then(|count| count.checked_mul(self.n))
+                .ok_or_else(overflow)
+        };
+        let (mut at, last) = match (first, last) {
+            (Some(first), Some(last)) => (first, last),
+            (Some(first), None) => (first, apply(first, span()?)?),
+            (None, Some(last)) => (
+                apply(last, span()?.checked_neg().ok_or_else(overflow)?)?,
+                last,
+            ),
+            (None, None) => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "must specify start or end",
+                ));
+            }
+        };
+        let no_progress = || {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Offset {} did not increment date",
+                self.__repr__()
+            ))
+        };
+        if self.n == 0 && spec.offset_nanos == 0 {
+            return if at < last {
+                Err(no_progress())
+            } else {
+                Ok(vec![at])
+            };
+        }
+        let mut output = Vec::new();
+        while if self.n >= 0 { at <= last } else { at >= last } {
+            output
+                .try_reserve(1)
+                .map_err(|_| PyErr::new::<pyo3::exceptions::PyValueError, _>("array is too big"))?;
+            output.push(at);
+            if at == last {
+                break;
+            }
+            let next = apply(at, self.n)?;
+            if (self.n >= 0 && next <= at) || (self.n < 0 && next >= at) {
+                return Err(no_progress());
+            }
+            at = next;
+        }
+        Ok(output)
+    }
+
     /// A calendar offset over the anchored alias `anchor`.
     fn anchored(
         kind: &'static str,
@@ -104493,11 +104783,12 @@ impl PyDateOffset {
             Option<String>,
             Option<String>,
         );
-        let ((n, normalize), relative, absolute, (anchor, kind, attr, rule_code)): (
+        let ((n, normalize), relative, absolute, (anchor, kind, attr, rule_code), custom): (
             (i64, bool),
             Relative,
             Vec<Option<i64>>,
             Named,
+            Option<String>,
         ) = payload.extract()?;
         let (years, months, weeks, days, hours, minutes, seconds, microseconds, nanoseconds) =
             relative;
@@ -104518,6 +104809,23 @@ impl PyDateOffset {
         let absolute: [Option<i64>; 8] = absolute.try_into().map_err(|_| {
             PyErr::new::<pyo3::exceptions::PyValueError, _>("a pickled offset needs 8 fields")
         })?;
+        let custom_business_day = custom
+            .map(|json| {
+                let spec: CustomBusinessDaySpec = serde_json::from_str(&json).map_err(|error| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(error.to_string())
+                })?;
+                if !spec.weekmask.iter().any(|&open| open)
+                    || spec.holidays.windows(2).any(|pair| pair[0] >= pair[1])
+                    || kind != Some("CustomBusinessDay")
+                    || spec.normalize != normalize
+                {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "invalid custom business-day calendar in a pickle",
+                    ));
+                }
+                Ok(Arc::new(spec))
+            })
+            .transpose()?;
         Ok(Self {
             n,
             normalize,
@@ -104535,6 +104843,7 @@ impl PyDateOffset {
             kind,
             attr,
             rule_code,
+            custom_business_day,
         })
     }
 
@@ -104634,6 +104943,26 @@ impl PyDateOffset {
                 "Overflow occurred in npy_datetimestruct_to_datetime",
             )
         };
+        if let Some(spec) = &self.custom_business_day {
+            let calendar = CustomBusinessCalendar::from_spec(spec);
+            let count = self.n.checked_mul(times).ok_or_else(overflow)?;
+            return nanos
+                .iter()
+                .map(|&value| {
+                    if value == Timestamp::NAT {
+                        return Ok(value);
+                    }
+                    let moved = calendar.shift(value, count, spec.offset_nanos)?;
+                    if self.normalize {
+                        moved
+                            .checked_sub(moved.rem_euclid(DAY))
+                            .ok_or_else(overflow)
+                    } else {
+                        Ok(moved)
+                    }
+                })
+                .collect();
+        }
         let shift = self.constant_shift(py, times)?;
         let relative = shift
             .is_none()
@@ -104738,7 +105067,9 @@ impl PyDateOffset {
             return Ok(nanos);
         }
         let n = self.n.checked_mul(times).ok_or_else(overflow)?;
-        let mut out = if let Some(anchor) = &self.anchor {
+        let mut out = if let Some(spec) = &self.custom_business_day {
+            CustomBusinessCalendar::from_spec(spec).shift(nanos, n, spec.offset_nanos)?
+        } else if let Some(anchor) = &self.anchor {
             fp_frame::shift_by_anchored_offset(nanos, anchor, n).map_err(frame_error_to_py)?
         } else {
             let mut value = nanos;
@@ -104790,7 +105121,7 @@ impl PyDateOffset {
                 .ok_or_else(overflow)?
         };
         if self.normalize {
-            out -= out.rem_euclid(DAY);
+            out = out.checked_sub(out.rem_euclid(DAY)).ok_or_else(overflow)?;
         }
         Ok(out)
     }
@@ -104824,6 +105155,17 @@ impl PyDateOffset {
         other: &Bound<'_, PyAny>,
         times: i64,
     ) -> PyResult<Option<Py<PyAny>>> {
+        if self.custom_business_day.is_some()
+            && (other.extract::<PyRef<'_, PyTimestamp>>().is_ok()
+                || other.is_instance_of::<PyDateTime>())
+        {
+            let stamp = py
+                .get_type::<PyTimestamp>()
+                .call1((other,))?
+                .extract::<PyRef<'_, PyTimestamp>>()?
+                .offset_shift(py, self, times)?;
+            return Ok(Some(stamp.into_py_any(py)?));
+        }
         if let Some(nanos) = Self::instant(other)? {
             let stamp = PyTimestamp {
                 inner: Timestamp::from_nanos(self.apply(py, nanos, times)?),
@@ -104853,6 +105195,24 @@ fn freq_alias(freq: &Bound<'_, PyAny>, what: &str) -> PyResult<String> {
         Ok(_) => Err(not_implemented(&format!("{what}(DateOffset(...))"))),
         Err(_) => freq.extract::<String>(),
     }
+}
+
+/// Preserve custom calendars before a frequency is reduced to a textual
+/// alias. Bare C strings use the ordinary Monday-Friday calendar.
+fn custom_business_frequency(freq: Option<&Bound<'_, PyAny>>) -> PyResult<Option<PyDateOffset>> {
+    let Some(freq) = freq.filter(|freq| !freq.is_none()) else {
+        return Ok(None);
+    };
+    if let Ok(offset) = freq.extract::<PyRef<'_, PyDateOffset>>() {
+        return Ok(offset.custom_business_day.as_ref().map(|_| offset.clone()));
+    }
+    let Ok(text) = freq.extract::<String>() else {
+        return Ok(None);
+    };
+    if fp_index::split_freq_count(&text).is_some_and(|(_, rule)| rule == "C") {
+        return offset_for_freqstr(&text);
+    }
+    Ok(None)
 }
 
 /// pandas resamples only a datetime axis: any other raises its TypeError
@@ -105230,6 +105590,13 @@ impl PyDateOffset {
                 self.attr.clone(),
                 self.rule_code.clone(),
             ),
+            self.custom_business_day
+                .as_ref()
+                .map(|spec| serde_json::to_string(spec.as_ref()))
+                .transpose()
+                .map_err(|error| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(error.to_string())
+                })?,
         )
             .into_bound_py_any(py)?;
         restore_call(py, "DateOffset", payload)
@@ -105305,10 +105672,18 @@ impl PyDateOffset {
     /// "QS-MAR"); a DateOffset's is its repr.
     #[getter]
     fn freqstr(&self) -> String {
-        match &self.rule_code {
+        let base = match &self.rule_code {
             Some(code) if self.n == 1 => code.clone(),
             Some(code) => format!("{}{code}", self.n),
             None => self.__repr__(),
+        };
+        match &self.custom_business_day {
+            Some(spec) if spec.offset_nanos != 0 => {
+                let sign = if spec.offset_nanos < 0 { '-' } else { '+' };
+                let tick = custom_business_offset_freq(spec.offset_nanos);
+                format!("{base}{sign}{tick}")
+            }
+            _ => base,
         }
     }
 
@@ -105327,6 +105702,9 @@ impl PyDateOffset {
 
     /// The Timestamp itself when it is on this offset, else the next one.
     fn rollforward(&self, dt: &Bound<'_, PyAny>) -> PyResult<PyTimestamp> {
+        if self.custom_business_day.is_some() {
+            return self.custom_roll(dt, 1);
+        }
         let nanos = Self::instant(dt)?.ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyTypeError, _>("rollforward takes a Timestamp")
         })?;
@@ -105344,6 +105722,9 @@ impl PyDateOffset {
 
     /// The Timestamp itself when it is on this offset, else the previous one.
     fn rollback(&self, dt: &Bound<'_, PyAny>) -> PyResult<PyTimestamp> {
+        if self.custom_business_day.is_some() {
+            return self.custom_roll(dt, -1);
+        }
         let nanos = Self::instant(dt)?.ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyTypeError, _>("rollback takes a Timestamp")
         })?;
@@ -105368,6 +105749,18 @@ impl PyDateOffset {
     /// Whether the Timestamp's date is on this offset (a relative offset is
     /// on every date).
     fn is_on_offset(&self, dt: &Bound<'_, PyAny>) -> PyResult<bool> {
+        if let Some(spec) = &self.custom_business_day {
+            let stamp = dt
+                .py()
+                .get_type::<PyTimestamp>()
+                .call1((dt,))?
+                .extract::<PyRef<'_, PyTimestamp>>()?;
+            let wall = stamp.wall().nanos;
+            return Ok(!stamp.inner.is_nat()
+                && (!self.normalize || wall.rem_euclid(CustomBusinessCalendar::DAY) == 0)
+                && CustomBusinessCalendar::from_spec(spec)
+                    .is_open(wall.div_euclid(CustomBusinessCalendar::DAY)));
+        }
         let nanos = Self::instant(dt)?.ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyTypeError, _>("is_on_offset takes a Timestamp")
         })?;
@@ -105384,7 +105777,7 @@ impl PyDateOffset {
     /// DateOffset's keywords sorted).
     fn __repr__(&self) -> String {
         let class = self.kind.unwrap_or("DateOffset");
-        let plural = if self.n.abs() == 1 { "" } else { "s" };
+        let plural = if self.n.unsigned_abs() == 1 { "" } else { "s" };
         let count = if self.n == 1 {
             String::new()
         } else {
@@ -105423,6 +105816,12 @@ impl PyDateOffset {
                     .join(", ")
             }
         };
+        let attrs = match &self.custom_business_day {
+            Some(spec) if spec.offset_nanos != 0 => {
+                format!("offset={}", custom_business_offset_repr(spec.offset_nanos))
+            }
+            _ => attrs,
+        };
         let attrs = if attrs.is_empty() {
             attrs
         } else {
@@ -105448,8 +105847,12 @@ impl PyDateOffset {
         // A frequency string compares as the offset it names (pandas'
         // `to_offset`): `date_range(freq='D').freq == 'D'` is True.
         let same = if let Ok(text) = other.extract::<String>() {
-            self.rule_code.is_some()
-                && fp_index::canonical_freq(&text).as_deref() == Some(self.freqstr().as_str())
+            if self.custom_business_day.is_some() {
+                offset_for_freqstr(&text)?.is_some_and(|other| *self == other)
+            } else {
+                self.rule_code.is_some()
+                    && fp_index::canonical_freq(&text).as_deref() == Some(self.freqstr().as_str())
+            }
         } else if let Ok(other) = other.extract::<PyRef<'_, PyDateOffset>>() {
             *self == *other
         } else {
@@ -105486,20 +105889,238 @@ impl PyDateOffset {
             .unwrap_or_else(|| py.NotImplemented()))
     }
 
-    fn __mul__(&self, factor: i64) -> PyResult<Self> {
+    fn __mul__(&self, py: Python<'_>, factor: i64) -> PyResult<Py<PyAny>> {
         let n = self
             .n
             .checked_mul(factor)
             .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyOverflowError, _>("offset overflow"))?;
-        Ok(Self { n, ..self.clone() })
+        Self { n, ..self.clone() }.into_offset_py(py)
     }
 
-    fn __rmul__(&self, factor: i64) -> PyResult<Self> {
-        self.__mul__(factor)
+    fn __rmul__(&self, py: Python<'_>, factor: i64) -> PyResult<Py<PyAny>> {
+        self.__mul__(py, factor)
     }
 
-    fn __neg__(&self) -> PyResult<Self> {
-        self.__mul__(-1)
+    fn __neg__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        self.__mul__(py, -1)
+    }
+}
+
+/// A real DateOffset subclass whose native calendar survives arithmetic,
+/// ranges, index selection and pickle; `CDay` aliases this same class.
+#[pyclass(extends = PyDateOffset, name = "CustomBusinessDay", module = "frankenpandas.offsets", from_py_object)]
+#[derive(Clone)]
+pub struct PyCustomBusinessDay;
+
+fn default_custom_business_spec() -> CustomBusinessDaySpec {
+    CustomBusinessDaySpec {
+        weekmask: [true, true, true, true, true, false, false],
+        holidays: Vec::new(),
+        display_weekmask: Some("Mon Tue Wed Thu Fri".to_owned()),
+        display_weekmask_flags: None,
+        display_holidays: Vec::new(),
+        normalize: false,
+        offset_nanos: 0,
+    }
+}
+
+fn custom_business_offset_repr(nanos: i64) -> String {
+    let days = nanos.div_euclid(CustomBusinessCalendar::DAY);
+    let seconds = nanos.rem_euclid(CustomBusinessCalendar::DAY) / 1_000_000_000;
+    let microseconds = nanos.rem_euclid(1_000_000_000) / 1_000;
+    let mut parts = Vec::new();
+    if days != 0 {
+        parts.push(format!("days={days}"));
+    }
+    if seconds != 0 {
+        parts.push(format!("seconds={seconds}"));
+    }
+    if microseconds != 0 {
+        parts.push(format!("microseconds={microseconds}"));
+    }
+    if parts.is_empty() {
+        parts.push("0".to_owned());
+    }
+    format!("datetime.timedelta({})", parts.join(", "))
+}
+
+fn custom_business_offset_freq(nanos: i64) -> String {
+    let mut remaining = nanos.unsigned_abs();
+    let mut output = String::new();
+    for (unit, suffix) in [
+        (86_400_000_000_000, "D"),
+        (3_600_000_000_000, "h"),
+        (60_000_000_000, "Min"),
+        (1_000_000_000, "s"),
+        (1_000, "us"),
+        (1, "ns"),
+    ] {
+        let count = remaining / unit;
+        if count != 0 {
+            output.push_str(&format!("{count}{suffix}"));
+            remaining %= unit;
+        }
+    }
+    output
+}
+
+fn custom_business_days_array<'py>(py: Python<'py>, days: &[i64]) -> PyResult<Bound<'py, PyAny>> {
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "datetime64[D]")?;
+    py.import("numpy")?
+        .call_method("array", (days.to_vec(),), Some(&kwargs))
+}
+
+#[pymethods]
+impl PyCustomBusinessDay {
+    #[new]
+    #[pyo3(signature = (n=1, normalize=false, weekmask=None, holidays=None, calendar=None, offset=None))]
+    fn new(
+        py: Python<'_>,
+        n: i64,
+        normalize: bool,
+        weekmask: Option<&Bound<'_, PyAny>>,
+        holidays: Option<&Bound<'_, PyAny>>,
+        calendar: Option<&Bound<'_, PyAny>>,
+        offset: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<(Self, PyDateOffset)> {
+        let calendar = calendar.filter(|calendar| !calendar.is_none());
+        let effective_weekmask = calendar.and_then(|calendar| calendar.getattr("weekmask").ok());
+        let effective_holidays = calendar.and_then(|calendar| calendar.getattr("holidays").ok());
+        let parsed = CustomBusinessCalendar::new(
+            py,
+            effective_weekmask.as_ref().or(weekmask),
+            effective_holidays.as_ref().or(holidays),
+        )?;
+        let display_weekmask = match weekmask {
+            None => Some("Mon Tue Wed Thu Fri".to_owned()),
+            Some(mask) => mask.extract::<String>().ok(),
+        };
+        let display_weekmask_flags = if display_weekmask.is_none() {
+            let flags = weekmask
+                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("missing weekmask"))?
+                .try_iter()?
+                .map(|flag| flag?.is_truthy())
+                .collect::<PyResult<Vec<_>>>()?;
+            Some(flags.try_into().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    "A business day weekmask array must have length 7",
+                )
+            })?)
+        } else {
+            None
+        };
+        let mut display_holidays = match holidays.or(effective_holidays.as_ref()) {
+            Some(days) => days
+                .try_iter()?
+                .map(|day| CustomBusinessCalendar::day_of(py, &day?))
+                .collect::<PyResult<Vec<_>>>()?,
+            None => Vec::new(),
+        };
+        display_holidays.sort_unstable_by_key(|day| (*day == i64::MIN, *day));
+        let offset_nanos = match offset {
+            None => 0,
+            Some(offset) if offset.is_instance_of::<PyDelta>() => {
+                py_delta_nanos(offset.cast::<PyDelta>()?)?
+            }
+            Some(offset) => match offset.extract::<PyRef<'_, PyTimedelta>>() {
+                Ok(delta) if delta.nanos != Timedelta::NAT => delta.nanos,
+                _ => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+                        "Cannot convert {} to datetime.timedelta",
+                        offset.get_type().name()?
+                    )));
+                }
+            },
+        };
+        let spec = CustomBusinessDaySpec {
+            weekmask: parsed.open,
+            holidays: parsed.holidays,
+            display_weekmask,
+            display_weekmask_flags,
+            display_holidays,
+            normalize,
+            offset_nanos,
+        };
+        Ok((Self, PyDateOffset::custom_business(n, spec)))
+    }
+
+    #[getter]
+    fn weekmask(slf: PyRef<'_, Self>, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let offset = slf.into_super();
+        let spec = offset.custom_business_day.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("missing business-day calendar")
+        })?;
+        match &spec.display_weekmask {
+            Some(text) => text.into_py_any(py),
+            None => spec
+                .display_weekmask_flags
+                .unwrap_or(spec.weekmask)
+                .to_vec()
+                .into_py_any(py),
+        }
+    }
+
+    #[getter]
+    fn holidays<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let offset = slf.into_super();
+        let spec = offset.custom_business_day.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("missing business-day calendar")
+        })?;
+        PyTuple::new(
+            py,
+            custom_business_days_array(py, &spec.display_holidays)?
+                .try_iter()?
+                .collect::<PyResult<Vec<_>>>()?,
+        )
+    }
+
+    #[getter]
+    fn calendar<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let offset = slf.into_super();
+        let spec = offset.custom_business_day.as_ref().ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>("missing business-day calendar")
+        })?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("weekmask", spec.weekmask.to_vec())?;
+        kwargs.set_item("holidays", custom_business_days_array(py, &spec.holidays)?)?;
+        // NumPy supplies the public container; date stepping uses the
+        // native calendar above, never numpy.busday_offset.
+        py.import("numpy")?
+            .call_method("busdaycalendar", (), Some(&kwargs))
+    }
+
+    #[getter]
+    fn offset<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let offset = slf.into_super();
+        let nanos = offset
+            .custom_business_day
+            .as_ref()
+            .map_or(0, |spec| spec.offset_nanos);
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("microseconds", nanos / 1_000)?;
+        py.import("datetime")?
+            .call_method("timedelta", (), Some(&kwargs))
+    }
+
+    #[getter]
+    fn kwds<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyDict>> {
+        let out = PyDict::new(slf.py());
+        for field in ["weekmask", "holidays", "calendar", "offset"] {
+            out.set_item(field, slf.getattr(field)?)?;
+        }
+        Ok(out)
+    }
+
+    #[getter]
+    fn base(slf: PyRef<'_, Self>, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let mut offset = slf.into_super().clone();
+        offset.n = 1;
+        offset.into_offset_py(py)
+    }
+
+    fn copy(slf: PyRef<'_, Self>, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        slf.into_super().clone().into_offset_py(py)
     }
 }
 
@@ -105798,7 +106419,7 @@ fn to_offset(py: Python<'_>, freq: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         None
     };
     match offset {
-        Some(offset) => Ok(Py::new(py, offset)?.into_any()),
+        Some(offset) => offset.into_offset_py(py),
         None => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
             "Invalid frequency: {}",
             freq.str()?
@@ -105884,6 +106505,7 @@ fn offset_for_freqstr(freqstr: &str) -> PyResult<Option<PyDateOffset>> {
         ("us", None) => offset_micro(n),
         ("ns", None) => offset_nano(n),
         ("B", None) => offset_business_day(n, false),
+        ("C", None) => PyDateOffset::custom_business(n, default_custom_business_spec()),
         ("ME", None) => offset_month_end(n, false),
         ("MS", None) => offset_month_begin(n, false),
         ("BME", None) => offset_business_month_end(n, false),
@@ -112049,7 +112671,7 @@ fn plotting_deregister_matplotlib_converters() -> PyResult<()> {
 
 /// Every pandas offset class a [`PyDateOffset`] stands for (its `kind`), so
 /// an unpickled offset takes the kind back ([`restore`]).
-const DATE_OFFSET_KINDS: [&str; 23] = [
+const DATE_OFFSET_KINDS: [&str; 24] = [
     "Day",
     "Hour",
     "Minute",
@@ -112073,6 +112695,7 @@ const DATE_OFFSET_KINDS: [&str; 23] = [
     "BusinessYearEnd",
     "BusinessYearBegin",
     "BusinessDay",
+    "CustomBusinessDay",
 ];
 
 /// The `(callable, args)` an object's `__reduce__` gives: frankenpandas'
@@ -112166,18 +112789,36 @@ fn restore(py: Python<'_>, kind: &str, payload: &Bound<'_, PyAny>) -> PyResult<P
             PyTimedelta { nanos, unit }.into_py_any(py)
         }
         "NaT" | "NA" => Ok(module.getattr(kind)?.unbind()),
-        "DateOffset" => PyDateOffset::restored(payload)?.into_py_any(py),
+        "DateOffset" => PyDateOffset::restored(payload)?.into_offset_py(py),
         "DatetimeIndex" => {
-            let (nanos, tz, freq, name): (
+            let (nanos, tz, freq, name, calendar): (
                 Vec<i64>,
                 Option<String>,
                 Option<String>,
                 Bound<'_, PyAny>,
+                Option<String>,
             ) = payload.extract()?;
+            let calendar = calendar
+                .map(|json| {
+                    let spec: CustomBusinessDaySpec =
+                        serde_json::from_str(&json).map_err(|error| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(error.to_string())
+                        })?;
+                    if !spec.weekmask.iter().any(|&open| open)
+                        || spec.holidays.windows(2).any(|pair| pair[0] >= pair[1])
+                    {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                            "invalid custom business-day calendar in a pickle",
+                        ));
+                    }
+                    Ok(spec)
+                })
+                .transpose()?;
             let index = DatetimeIndex::new(nanos)
                 .with_tz(tz.as_deref())
                 .map_err(index_error_to_py)?
                 .with_freq(freq)
+                .with_custom_business_day(calendar)
                 .set_names(py_axis_name(&name)?);
             PyDatetimeIndex { inner: index }.into_py_any(py)
         }
@@ -112568,6 +113209,11 @@ fn frankenpandas(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     let offsets_mod = PyModule::new(m.py(), "offsets")?;
     offsets_mod.add("DateOffset", m.py().get_type::<PyDateOffset>())?;
+    offsets_mod.add(
+        "CustomBusinessDay",
+        m.py().get_type::<PyCustomBusinessDay>(),
+    )?;
+    offsets_mod.add("CDay", m.py().get_type::<PyCustomBusinessDay>())?;
     offsets_mod.add_function(wrap_pyfunction!(offset_day, &offsets_mod)?)?;
     offsets_mod.add_function(wrap_pyfunction!(offset_hour, &offsets_mod)?)?;
     offsets_mod.add_function(wrap_pyfunction!(offset_minute, &offsets_mod)?)?;
