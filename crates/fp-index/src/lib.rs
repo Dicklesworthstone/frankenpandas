@@ -27648,6 +27648,145 @@ impl MultiIndex {
         Ok((target.clone(), self.get_indexer(target)?))
     }
 
+    /// Reindex one level by a unique, flat catalog, returning the retained
+    /// tuples and their source positions. Target-only labels remain in the
+    /// catalog without inventing tuples. Within each contiguous run of the
+    /// preceding levels, rows follow the target catalog's order; other levels
+    /// keep their relative order. Filtering happens before identifying runs.
+    ///
+    /// The caller supplies the negotiated catalog dtype. Other level catalogs,
+    /// including unused labels, names, and dtype metadata, are retained.
+    /// Duplicate source tuples are preserved here; DataFrame and Series apply
+    /// their own duplicate-axis validation before gathering values.
+    ///
+    /// # Errors
+    /// Rejects an invalid level, a repeated or missing target label, and a
+    /// remapping of missing codes in the selected level. The last case is
+    /// deliberately explicit: pandas 2.2.3 can silently relabel source values
+    /// while remapping such a level.
+    pub fn reindex_level(
+        &self,
+        target: &Index,
+        level: usize,
+    ) -> Result<(Self, Vec<usize>), IndexError> {
+        let selected = self.levels.get(level).ok_or(IndexError::OutOfBounds {
+            position: level,
+            length: self.nlevels(),
+        })?;
+        if !target.is_unique() {
+            return Err(IndexError::InvalidArgument(
+                "Index._join_level on non-unique index is not implemented".to_owned(),
+            ));
+        }
+        if target.labels().iter().any(IndexLabel::is_missing) {
+            return Err(IndexError::InvalidArgument(
+                "reindex(level=...) with a missing target label".to_owned(),
+            ));
+        }
+        let source_catalog = Self::reported_catalog(selected);
+        let same_catalog = source_catalog.as_slice() == target.labels();
+        if !same_catalog && selected.iter().any(IndexLabel::is_missing) {
+            return Err(IndexError::InvalidArgument(
+                "reindex(level=...) cannot safely remap missing level codes".to_owned(),
+            ));
+        }
+        let target_positions: FxHashMap<&IndexLabel, usize> = target
+            .labels()
+            .iter()
+            .enumerate()
+            .map(|(position, label)| (label, position))
+            .collect();
+        let mut rows: Vec<(usize, Option<usize>)> = selected
+            .iter()
+            .enumerate()
+            .filter_map(|(row, label)| {
+                if same_catalog && label.is_missing() {
+                    Some((row, None))
+                } else {
+                    target_positions
+                        .get(label)
+                        .map(|&position| (row, Some(position)))
+                }
+            })
+            .collect();
+        // A global sort by prefix would move noncontiguous groups past one
+        // another. pandas reorders the selected level within each run only.
+        let mut start = 0;
+        while start < rows.len() {
+            let mut end = start + 1;
+            while end < rows.len()
+                && (0..level).all(|prefix| {
+                    self.label_at(prefix, rows[start].0) == self.label_at(prefix, rows[end].0)
+                })
+            {
+                end += 1;
+            }
+            rows[start..end].sort_by_key(|&(_, position)| position);
+            start = end;
+        }
+        let positions: Vec<usize> = rows.iter().map(|&(row, _)| row).collect();
+        let mut out = self.take(&positions)?;
+        // An inferred level reports a catalog derived from its remaining
+        // rows, even though take shares its full internal uniques. Freeze
+        // the original reported catalog so unused labels and their codes
+        // survive a subset or an empty selection.
+        for (other, source) in self.levels.iter().enumerate() {
+            if other == level || source.declared || source.categories.is_some() {
+                continue;
+            }
+            let coded = source.codes().ok_or_else(|| {
+                IndexError::InvalidArgument("MultiIndex level is too large".to_owned())
+            })?;
+            let mut catalog = Self::reported_catalog(source);
+            // Missing labels remain internal sentinels. Keep their original
+            // representations, including NaT, while reported codes stay -1.
+            catalog.extend(
+                coded
+                    .uniques
+                    .iter()
+                    .filter(|label| label.is_missing())
+                    .cloned(),
+            );
+            u32::try_from(catalog.len()).map_err(|_| {
+                IndexError::InvalidArgument("MultiIndex level is too large".to_owned())
+            })?;
+            let catalog_positions: FxHashMap<&IndexLabel, u32> = catalog
+                .iter()
+                .enumerate()
+                .map(|(position, label)| (label, position as u32))
+                .collect();
+            let codes: Vec<u32> = positions
+                .iter()
+                .map(|&row| catalog_positions[&coded.uniques[coded.codes[row] as usize]])
+                .collect();
+            out.levels[other] = Level::from_codes(Arc::new(catalog), CodesWindow::from(codes))
+                .zoned(source.zone.clone())
+                .with_width(source.width)
+                .with_dtype(source.dtype)
+                .categorized(source.categories.clone())
+                .declared(true);
+        }
+        let mut catalog = target.labels().to_vec();
+        let missing = u32::try_from(catalog.len())
+            .map_err(|_| IndexError::InvalidArgument("MultiIndex level is too large".to_owned()))?;
+        let codes: Vec<u32> = rows
+            .iter()
+            .map(|&(_, position)| position.map_or(missing, |position| position as u32))
+            .collect();
+        if codes.contains(&missing) {
+            catalog.push(IndexLabel::Null(fp_types::NullKind::NaN));
+        }
+        let mut replacement = Level::from_codes(Arc::new(catalog), CodesWindow::from(codes));
+        replacement.declared = true;
+        out.levels[level] = replacement;
+        out = out
+            .with_level_dtype_from_index(level, target)
+            .with_level_zone(level, target.tz())
+            .with_level_width(level, target.width())
+            .with_level_categories(level, target.categories().cloned())?;
+        Ok((out, positions))
+    }
+
     /// Per-row flag for duplicated composite tuples.
     ///
     /// Matches `pd.MultiIndex.duplicated(keep='first'|'last'|False)`.
@@ -40657,6 +40796,82 @@ mod tests {
 
         assert!(source.reindex(&target).is_err());
 
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_level_reindex_sorts_within_prefix_runs_u6p7i() -> Result<(), super::IndexError> {
+        let source = MultiIndex::from_tuples(vec![
+            vec!["b".into(), 2_i64.into()],
+            vec!["a".into(), 1_i64.into()],
+            vec!["a".into(), 2_i64.into()],
+            vec!["b".into(), 1_i64.into()],
+        ])?
+        .set_names(vec![Some("group".into()), Some("item".into())]);
+        let target = Index::new(vec![2_i64.into(), 1_i64.into()]);
+        let (reindexed, positions) = source.reindex_level(&target, 1)?;
+        // Live pandas 2.2.3: separated 'b' runs stay separated; only the
+        // contiguous 'a' run changes order.
+        assert_eq!(positions, vec![0, 2, 1, 3]);
+        assert_eq!(reindexed.to_list(), source.take(&positions)?.to_list());
+        assert_eq!(reindexed.levels()[1].labels(), target.labels());
+        assert_eq!(reindexed.levels()[0], source.levels()[0]);
+        assert_eq!(reindexed.codes(), vec![vec![1, 0, 0, 1], vec![0, 0, 1, 1]]);
+        assert_eq!(reindexed.names(), source.names());
+
+        let (outer, positions) =
+            source.reindex_level(&Index::new(vec!["a".into(), "unused".into()]), 0)?;
+        assert_eq!(positions, vec![1, 2]);
+        assert_eq!(outer.levels()[0].labels(), &["a".into(), "unused".into()]);
+        assert_eq!(outer.levels()[1], source.levels()[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_level_reindex_filters_before_finding_runs_u6p7i() -> Result<(), super::IndexError>
+    {
+        let source = MultiIndex::from_tuples(vec![
+            vec!["b".into(), 1_i64.into()],
+            vec!["a".into(), 3_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])?;
+        let (reindexed, positions) =
+            source.reindex_level(&Index::new(vec![2_i64.into(), 1_i64.into()]), 1)?;
+        assert_eq!(positions, vec![2, 0]);
+        assert_eq!(reindexed.to_list(), source.take(&positions)?.to_list());
+
+        let empty = Index::new(Vec::new()).with_declared_dtype(Some(super::DeclaredDtype::Int64));
+        let (reindexed, positions) = source.reindex_level(&empty, 1)?;
+        assert!(positions.is_empty());
+        assert!(reindexed.is_empty());
+        assert_eq!(reindexed.levels()[0], source.levels()[0]);
+        assert_eq!(reindexed.levels()[1].dtype(), "int64");
+        Ok(())
+    }
+
+    #[test]
+    fn multi_index_level_reindex_preserves_unselected_missing_codes_u6p7i()
+    -> Result<(), super::IndexError> {
+        let source = MultiIndex::from_tuples(vec![
+            vec!["b".into(), IndexLabel::Null(fp_types::NullKind::NaN)],
+            vec!["a".into(), 1_i64.into()],
+            vec!["b".into(), 2_i64.into()],
+        ])?;
+        let (reindexed, positions) = source.reindex_level(&Index::new(vec!["b".into()]), 0)?;
+        assert_eq!(positions, vec![0, 2]);
+        assert_eq!(reindexed.codes()[1], vec![-1, 1]);
+        assert_eq!(reindexed.levels()[1], source.levels()[1]);
+        assert!(
+            source
+                .reindex_level(&Index::new(vec![2_i64.into(), 1_i64.into()]), 1)
+                .is_err()
+        );
+        assert!(
+            source
+                .reindex_level(&Index::new(vec!["b".into(), "b".into()]), 0)
+                .is_err()
+        );
+        assert!(source.reindex_level(&Index::new(Vec::new()), 2).is_err());
         Ok(())
     }
 
