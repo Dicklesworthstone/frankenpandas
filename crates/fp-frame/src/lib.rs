@@ -72387,8 +72387,14 @@ fn period_label_to_timestamp(
             }
         }
         PeriodFreq::Hourly => {
-            let base = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:00")
+            if !trimmed.ends_with(":00") {
+                return Err(period_timestamp_parse_error(trimmed, freq));
+            }
+            let base = NaiveDateTime::parse_from_str(&format!("{trimmed}:00"), "%Y-%m-%d %H:%M:%S")
                 .map_err(|_| period_timestamp_parse_error(trimmed, freq))?;
+            if base.minute() != 0 || base.second() != 0 {
+                return Err(period_timestamp_parse_error(trimmed, freq));
+            }
             if how == PeriodTimestampHow::Start {
                 base
             } else {
@@ -72396,7 +72402,7 @@ fn period_label_to_timestamp(
             }
         }
         PeriodFreq::Minutely => {
-            let base = NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M")
+            let base = NaiveDateTime::parse_from_str(&format!("{trimmed}:00"), "%Y-%m-%d %H:%M:%S")
                 .map_err(|_| period_timestamp_parse_error(trimmed, freq))?;
             if how == PeriodTimestampHow::Start {
                 base
@@ -79552,6 +79558,19 @@ pub fn concat_dataframes_with_ignore_index(
             {
                 Column::new(DType::Float64, values)?
             }
+            None if values.is_empty() => {
+                let mut present = frames.iter().filter_map(|frame| frame.column(col_name));
+                if let Some(first) = present.next() {
+                    let dtype = first.dtype();
+                    if dtype != DType::Null && present.all(|column| column.dtype() == dtype) {
+                        Column::new(dtype, values)?
+                    } else {
+                        column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?
+                    }
+                } else {
+                    column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?
+                }
+            }
             None => column_with_invented_gaps(values, invented_a_gap, source_was_all_valid)?,
         };
         columns.insert(
@@ -83528,11 +83547,7 @@ impl<'a> SparseDataFrameView<'a> {
     }
 
     fn total_cells(&self) -> usize {
-        self.df
-            .columns()
-            .ordered_columns()
-            .map(Column::len)
-            .sum()
+        self.df.columns().ordered_columns().map(Column::len).sum()
     }
 
     /// Count stored sparse values across all columns. Dense columns use their
@@ -83588,10 +83603,7 @@ impl<'a> SparseDataFrameView<'a> {
                     || Self::column_npoints_for(column, &Self::default_fill_value(column)),
                     SparseColumn::npoints,
                 );
-                (
-                    name.clone(),
-                    Self::density_for(npoints, column.len()),
-                )
+                (name.clone(), Self::density_for(npoints, column.len()))
             })
             .collect()
     }
@@ -91303,7 +91315,8 @@ impl DataFrame {
         if nan_missing_exact && validity.all() {
             for step in 0..n {
                 let i = if reverse { n - 1 - step } else { step };
-                let bits = data[i].to_bits();
+                let v = data[i];
+                let bits = (if v == 0.0 { 0.0 } else { v }).to_bits();
                 let mut z = bits;
                 z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
                 z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
@@ -91360,7 +91373,8 @@ impl DataFrame {
             let i = if reverse { n - 1 - step } else { step };
             let is_present = (presence_words[i >> 6] >> (i & 63)) & 1 == 1;
             if is_present {
-                let bits = data[i].to_bits();
+                let v = data[i];
+                let bits = (if v == 0.0 { 0.0 } else { v }).to_bits();
                 let mut z = bits;
                 z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
                 z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
@@ -91449,14 +91463,17 @@ impl DataFrame {
         let mut missing_count: u32 = 0;
         for (i, value) in data.iter().enumerate().take(n) {
             if is_present(i) {
-                *counts.entry(value.to_bits()).or_insert(0) += 1;
+                let canonical = (if *value == 0.0 { 0.0 } else { *value }).to_bits();
+                *counts.entry(canonical).or_insert(0) += 1;
             } else {
                 missing_count += 1;
             }
         }
         for (i, dup) in duplicated.iter_mut().enumerate() {
             *dup = if is_present(i) {
-                counts.get(&data[i].to_bits()).copied().unwrap_or(0) > 1
+                let v = data[i];
+                let canonical = (if v == 0.0 { 0.0 } else { v }).to_bits();
+                counts.get(&canonical).copied().unwrap_or(0) > 1
             } else {
                 missing_count > 1
             };
@@ -224225,8 +224242,8 @@ mod tests {
     }
 
     #[test]
-    fn sparse_dataframe_counts_compressed_points_and_expands_by_position()
-    -> Result<(), FrameError> {
+    fn sparse_dataframe_counts_compressed_points_and_expands_by_position() -> Result<(), FrameError>
+    {
         use fp_columnar::SparseColumn;
         use fp_types::SparseDType;
 
@@ -224267,12 +224284,24 @@ mod tests {
         assert_eq!(dense.columns_name(), frame.columns_name());
         assert_eq!(dense.column_at(0).unwrap().dtype(), DType::Int64);
         assert_eq!(dense.column_at(1).unwrap().dtype(), DType::Float64);
-        assert_eq!(dense.column_at(0).unwrap().values(), &[
-            Scalar::Int64(0), Scalar::Int64(5), Scalar::Int64(0), Scalar::Int64(0),
-        ]);
-        assert_eq!(dense.column_at(1).unwrap().values(), &[
-            Scalar::Float64(7.0), Scalar::Float64(7.0), Scalar::Float64(2.5), Scalar::Float64(7.0),
-        ]);
+        assert_eq!(
+            dense.column_at(0).unwrap().values(),
+            &[
+                Scalar::Int64(0),
+                Scalar::Int64(5),
+                Scalar::Int64(0),
+                Scalar::Int64(0),
+            ]
+        );
+        assert_eq!(
+            dense.column_at(1).unwrap().values(),
+            &[
+                Scalar::Float64(7.0),
+                Scalar::Float64(7.0),
+                Scalar::Float64(2.5),
+                Scalar::Float64(7.0),
+            ]
+        );
         assert!(frame.column_at(0).unwrap().sparse().is_some());
         assert!(dense.column_at(0).unwrap().sparse().is_none());
         Ok(())
@@ -224350,34 +224379,93 @@ mod tests {
         // pandas 2.2.3 Period('2024-01-05 12:34:56', freq): labels show
         // one base period, while end_time spans the complete multiple.
         let cases = [
-            ("2D", "2024-01-05", "2024-01-05 00:00:00", "2024-01-06 23:59:59.999999999"),
-            ("3h", "2024-01-05 12:00", "2024-01-05 12:00:00", "2024-01-05 14:59:59.999999999"),
-            ("15min", "2024-01-05 12:34", "2024-01-05 12:34:00", "2024-01-05 12:48:59.999999999"),
-            ("2W-FRI", "2023-12-30/2024-01-05", "2023-12-30 00:00:00", "2024-01-12 23:59:59.999999999"),
-            ("2M", "2024-01", "2024-01-01 00:00:00", "2024-02-29 23:59:59.999999999"),
-            ("3Q-JAN", "2024Q4", "2023-11-01 00:00:00", "2024-07-31 23:59:59.999999999"),
-            ("2Y-JUN", "2024", "2023-07-01 00:00:00", "2025-06-30 23:59:59.999999999"),
-            ("2B", "2024-01-05", "2024-01-05 00:00:00", "2024-01-08 23:59:59.999999999"),
+            (
+                "2D",
+                "2024-01-05",
+                "2024-01-05 00:00:00",
+                "2024-01-06 23:59:59.999999999",
+            ),
+            (
+                "3h",
+                "2024-01-05 12:00",
+                "2024-01-05 12:00:00",
+                "2024-01-05 14:59:59.999999999",
+            ),
+            (
+                "15min",
+                "2024-01-05 12:34",
+                "2024-01-05 12:34:00",
+                "2024-01-05 12:48:59.999999999",
+            ),
+            (
+                "2W-FRI",
+                "2023-12-30/2024-01-05",
+                "2023-12-30 00:00:00",
+                "2024-01-12 23:59:59.999999999",
+            ),
+            (
+                "2M",
+                "2024-01",
+                "2024-01-01 00:00:00",
+                "2024-02-29 23:59:59.999999999",
+            ),
+            (
+                "3Q-JAN",
+                "2024Q4",
+                "2023-11-01 00:00:00",
+                "2024-07-31 23:59:59.999999999",
+            ),
+            (
+                "2Y-JUN",
+                "2024",
+                "2023-07-01 00:00:00",
+                "2025-06-30 23:59:59.999999999",
+            ),
+            (
+                "2B",
+                "2024-01-05",
+                "2024-01-05 00:00:00",
+                "2024-01-08 23:59:59.999999999",
+            ),
         ];
         let index = Index::from_datetime64(vec![
-            Timestamp::parse("2024-01-05 12:34:56").unwrap().nanos,
+            fp_types::Timestamp::parse("2024-01-05 12:34:56")
+                .unwrap()
+                .nanos,
             i64::MIN,
         ])
         .set_names(Some("when"));
         let frame = DataFrame::new_with_column_order(
             index,
-            BTreeMap::from([("value".to_owned(), Column::from_int64_values(vec![10, 20]))]),
+            BTreeMap::from([("value".to_owned(), Column::from_i64_values(vec![10, 20]))]),
             vec!["value".to_owned()],
         )
         .unwrap();
         for (freq, label, start, end) in cases {
             let periods = frame.to_period(freq).unwrap();
-            assert_eq!(periods.index().labels(), &[IndexLabel::Utf8(label.into()), IndexLabel::Utf8("NaT".into())], "{freq}");
+            assert_eq!(
+                periods.index().labels(),
+                &[
+                    IndexLabel::Utf8(label.into()),
+                    IndexLabel::Utf8("NaT".into())
+                ],
+                "{freq}"
+            );
             for (how, boundary) in [("start", start), ("end", end)] {
                 let timestamps = periods.to_timestamp(freq, how).unwrap();
-                assert_eq!(timestamps.index().labels(), &[IndexLabel::Datetime64(Timestamp::parse(boundary).unwrap().nanos), IndexLabel::Datetime64(i64::MIN)], "{freq} {how}");
+                assert_eq!(
+                    timestamps.index().labels(),
+                    &[
+                        IndexLabel::Datetime64(fp_types::Timestamp::parse(boundary).unwrap().nanos),
+                        IndexLabel::Datetime64(i64::MIN)
+                    ],
+                    "{freq} {how}"
+                );
                 assert_eq!(timestamps.index().name(), frame.index().name());
-                assert_eq!(timestamps.column("value").unwrap().values(), frame.column("value").unwrap().values());
+                assert_eq!(
+                    timestamps.column("value").unwrap().values(),
+                    frame.column("value").unwrap().values()
+                );
             }
         }
     }
@@ -226406,7 +226494,12 @@ mod tests {
                             k => (k as f64) - 2.0,
                         };
                         scalars.push(Scalar::Float64(v));
-                        keys.push(Some(v.to_bits()));
+                        let canonical_bits = if v == 0.0 {
+                            0.0_f64.to_bits()
+                        } else {
+                            v.to_bits()
+                        };
+                        keys.push(Some(canonical_bits));
                     }
                 }
             }

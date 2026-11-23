@@ -542,9 +542,13 @@ fn live_oracle_series_to_datetime_unit_seconds_matches_pandas() {
         return;
     };
 
-    let actual = fp_frame::to_datetime_with_unit(
+    let actual = fp_frame::to_datetime_with_options(
         &super::build_series(fixture.left.as_ref().expect("left")).expect("series"),
-        fixture.datetime_unit.as_deref().expect("unit"),
+        fp_frame::ToDatetimeOptions {
+            unit: fixture.datetime_unit.as_deref(),
+            errors: fp_frame::DatetimeErrors::Coerce,
+            ..fp_frame::ToDatetimeOptions::default()
+        },
     )
     .expect("actual series");
     super::compare_series_expected(&actual, &expected).expect("pandas parity");

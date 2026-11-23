@@ -5061,7 +5061,11 @@ mod tests {
                     &mut EvidenceLedger::new(),
                 )
                 .expect("groupby");
-                assert_eq!(out.index().labels(), std::slice::from_ref(&label), "{func:?}");
+                assert_eq!(
+                    out.index().labels(),
+                    std::slice::from_ref(&label),
+                    "{func:?}"
+                );
             }
         }
     }
@@ -5088,7 +5092,10 @@ mod tests {
             "value",
             index,
             Column::from_values(
-                [1, 10, 2, 3, 4, 20].into_iter().map(Scalar::Int64).collect(),
+                [1, 10, 2, 3, 4, 20]
+                    .into_iter()
+                    .map(Scalar::Int64)
+                    .collect(),
             )
             .expect("column"),
         )
@@ -5195,7 +5202,10 @@ mod tests {
                         .into_iter()
                         .map(|value| Scalar::Utf8(value.to_owned()))
                         .collect(),
-                    vec![Scalar::Utf8("abc".to_owned()), Scalar::Utf8("xy".to_owned())],
+                    vec![
+                        Scalar::Utf8("abc".to_owned()),
+                        Scalar::Utf8("xy".to_owned()),
+                    ],
                 ),
             ];
             for (raw_values, expected) in value_cases {

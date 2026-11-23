@@ -13311,7 +13311,7 @@ fn validate_xlsx_bytes(data: &[u8]) -> Result<(), IoError> {
     };
 
     let validate_entry = |name: &[u8], method: u16, payload: &[u8]| -> Result<(), IoError> {
-        if !name.ends_with(b".xml") {
+        if !(name.len() >= 4 && name[name.len() - 4..].eq_ignore_ascii_case(b".xml")) {
             return Ok(());
         }
         match method {
@@ -43827,7 +43827,53 @@ mod excel_column_overflow {
   </sheetData>
 </worksheet>"#;
 
-        for bad_sheet in [overflow_col_sheet, overflow_row_sheet, inverted_dim_sheet] {
+        let u32_overflow_col_sheet = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="ZZZZZZZ1"><v>1</v></c></row>
+  </sheetData>
+</worksheet>"#;
+        let eight_a_col_sheet = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="AAAAAAAA1"><v>1</v></c></row>
+  </sheetData>
+</worksheet>"#;
+        let u32_overflow_row_sheet = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="4294967296"><c r="A4294967296"><v>1</v></c></row>
+  </sheetData>
+</worksheet>"#;
+        assert_eq!(
+            super::validate_xlsx_cell_ref(b"XFD1048576").expect("XFD1048576 valid"),
+            (1_048_576, 16_384)
+        );
+        assert!(super::validate_xlsx_cell_ref(b"XFE1").is_err());
+        assert!(super::validate_xlsx_cell_ref(b"A1048577").is_err());
+
+        let xfd_boundary_sheet = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="XFD1:XFD2"/>
+  <sheetData>
+    <row r="1"><c r="XFD1" t="inlineStr"><is><t>edge</t></is></c></row>
+    <row r="2"><c r="XFD2"><v>7</v></c></row>
+  </sheetData>
+</worksheet>"#;
+        let boundary_bytes = build_minimal_xlsx(xfd_boundary_sheet, false);
+        let boundary_df = read_excel_bytes(&boundary_bytes, &ExcelReadOptions::default())
+            .expect("valid XFD boundary xlsx should parse");
+        assert_eq!(boundary_df.len(), 1);
+        assert_eq!(boundary_df.column_names(), vec!["edge"]);
+
+        for bad_sheet in [
+            overflow_col_sheet,
+            u32_overflow_col_sheet,
+            eight_a_col_sheet,
+            overflow_row_sheet,
+            u32_overflow_row_sheet,
+            inverted_dim_sheet,
+        ] {
             for deflate in [false, true] {
                 let bytes = build_minimal_xlsx(bad_sheet, deflate);
                 assert!(

@@ -5678,14 +5678,10 @@ mod tests {
     fn ivm_recomputes_unrelated_stale_and_replayed_deltas() {
         let policy = RuntimePolicy::hardened(Some(10_000));
         let mut ledger = EvidenceLedger::new();
-        let context = ivm_snapshot_context(
-            vec![0, 1],
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
-            None,
-        );
-        let mut view =
-            MaterializedView::from_full_eval(&col("a"), &context, &policy, &mut ledger)
-                .expect("initial view");
+        let context =
+            ivm_snapshot_context(vec![0, 1], vec![Scalar::Int64(1), Scalar::Int64(2)], None);
+        let mut view = MaterializedView::from_full_eval(&col("a"), &context, &policy, &mut ledger)
+            .expect("initial view");
 
         let unrelated = Delta {
             series_name: "b".into(),
@@ -5695,10 +5691,7 @@ mod tests {
         view.apply_delta(&unrelated, &context, &policy, &mut ledger)
             .expect("unrelated delta");
         assert_ivm_snapshot_matches_full(&view, &context, &policy);
-        assert_eq!(
-            view.result.values(),
-            &[Scalar::Int64(1), Scalar::Int64(2)]
-        );
+        assert_eq!(view.result.values(), &[Scalar::Int64(1), Scalar::Int64(2)]);
 
         let updated = ivm_snapshot_context(
             vec![0, 1, 2],
@@ -5753,9 +5746,8 @@ mod tests {
         let expr = col("a").gt(Expr::Local {
             name: "limit".into(),
         });
-        let mut view =
-            MaterializedView::from_full_eval(&expr, &context, &policy, &mut ledger)
-                .expect("initial view");
+        let mut view = MaterializedView::from_full_eval(&expr, &context, &policy, &mut ledger)
+            .expect("initial view");
 
         // Construct a fresh full context so its local broadcast anchor also
         // contains every current row.
@@ -5791,11 +5783,7 @@ mod tests {
         assert_ivm_snapshot_matches_full(&view, &updated, &policy);
         assert_eq!(
             view.result.values(),
-            &[
-                Scalar::Bool(true),
-                Scalar::Bool(false),
-                Scalar::Bool(false),
-            ]
+            &[Scalar::Bool(true), Scalar::Bool(false), Scalar::Bool(false),]
         );
     }
 
@@ -5804,9 +5792,8 @@ mod tests {
         let policy = RuntimePolicy::hardened(Some(10_000));
         let mut ledger = EvidenceLedger::new();
         let context = ivm_snapshot_context(vec![0], vec![Scalar::Float64(-0.0)], None);
-        let mut view =
-            MaterializedView::from_full_eval(&col("a"), &context, &policy, &mut ledger)
-                .expect("initial view");
+        let mut view = MaterializedView::from_full_eval(&col("a"), &context, &policy, &mut ledger)
+            .expect("initial view");
 
         let updated = ivm_snapshot_context(
             vec![0, 1],
@@ -5853,23 +5840,15 @@ mod tests {
     fn ivm_failed_validation_or_refresh_preserves_the_cache() {
         let policy = RuntimePolicy::hardened(Some(10_000));
         let mut ledger = EvidenceLedger::new();
-        let context = ivm_snapshot_context(
-            vec![0],
-            vec![Scalar::Int64(1)],
-            Some(Scalar::Int64(0)),
-        );
+        let context = ivm_snapshot_context(vec![0], vec![Scalar::Int64(1)], Some(Scalar::Int64(0)));
         let expr = col("a").gt(Expr::Local {
             name: "limit".into(),
         });
-        let mut view =
-            MaterializedView::from_full_eval(&expr, &context, &policy, &mut ledger)
-                .expect("initial view");
+        let mut view = MaterializedView::from_full_eval(&expr, &context, &policy, &mut ledger)
+            .expect("initial view");
 
-        let updated = ivm_snapshot_context(
-            vec![0, 1],
-            vec![Scalar::Int64(1), Scalar::Int64(2)],
-            None,
-        );
+        let updated =
+            ivm_snapshot_context(vec![0, 1], vec![Scalar::Int64(1), Scalar::Int64(2)], None);
         let malformed = Delta {
             series_name: "a".into(),
             new_labels: vec![1_i64.into()],

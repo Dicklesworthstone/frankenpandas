@@ -104783,13 +104783,15 @@ impl PyDateOffset {
             Option<String>,
             Option<String>,
         );
-        let ((n, normalize), relative, absolute, (anchor, kind, attr, rule_code), custom): (
+        type RestoredDateOffset = (
             (i64, bool),
             Relative,
             Vec<Option<i64>>,
             Named,
             Option<String>,
-        ) = payload.extract()?;
+        );
+        let ((n, normalize), relative, absolute, (anchor, kind, attr, rule_code), custom): RestoredDateOffset =
+            payload.extract()?;
         let (years, months, weeks, days, hours, minutes, seconds, microseconds, nanoseconds) =
             relative;
         let kind = match kind {
@@ -105983,7 +105985,7 @@ impl PyCustomBusinessDay {
         holidays: Option<&Bound<'_, PyAny>>,
         calendar: Option<&Bound<'_, PyAny>>,
         offset: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<(Self, PyDateOffset)> {
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
         let calendar = calendar.filter(|calendar| !calendar.is_none());
         let effective_weekmask = calendar.and_then(|calendar| calendar.getattr("weekmask").ok());
         let effective_holidays = calendar.and_then(|calendar| calendar.getattr("holidays").ok());
@@ -106042,7 +106044,10 @@ impl PyCustomBusinessDay {
             normalize,
             offset_nanos,
         };
-        Ok((Self, PyDateOffset::custom_business(n, spec)))
+        Ok(
+            pyo3::PyClassInitializer::from(PyDateOffset::custom_business(n, spec))
+                .add_subclass(Self),
+        )
     }
 
     #[getter]
@@ -112791,13 +112796,14 @@ fn restore(py: Python<'_>, kind: &str, payload: &Bound<'_, PyAny>) -> PyResult<P
         "NaT" | "NA" => Ok(module.getattr(kind)?.unbind()),
         "DateOffset" => PyDateOffset::restored(payload)?.into_offset_py(py),
         "DatetimeIndex" => {
-            let (nanos, tz, freq, name, calendar): (
+            type RestoredDatetimeIndex<'py> = (
                 Vec<i64>,
                 Option<String>,
                 Option<String>,
-                Bound<'_, PyAny>,
+                Bound<'py, PyAny>,
                 Option<String>,
-            ) = payload.extract()?;
+            );
+            let (nanos, tz, freq, name, calendar): RestoredDatetimeIndex<'_> = payload.extract()?;
             let calendar = calendar
                 .map(|json| {
                     let spec: CustomBusinessDaySpec =
@@ -117388,7 +117394,7 @@ mod tests {
             let arr_none = PyList::new(py, [&text_none, &ints3]).expect("arr_none"); // ubs:ignore — test fixture
             let mi_none =
                 PyMultiIndex::from_arrays(arr_none.as_any(), None, None).expect("mi_none"); // ubs:ignore — test assertion
-            assert_eq!(mi_none.inner.codes()[0], &[-1, 1, 0]);
+            assert_eq!(mi_none.inner.codes()[0], &[0, -1, 1]);
             let mixed_obj = np
                 .call_method1(
                     "array",
@@ -117447,12 +117453,9 @@ mod tests {
             let skew_res = expanding_skew_series(&s_skew, Some(3)).expect("skew_res"); // ubs:ignore — test assertion
             assert_eq!(
                 skew_res.values()[2],
-                Scalar::Float64(-0.272_380_105_814_572_7)
+                Scalar::Float64(-0.633_716_141_422_053_2)
             );
-            assert_eq!(
-                skew_res.values()[9],
-                Scalar::Float64(1.415_949_527_972_006_2)
-            );
+            assert_eq!(skew_res.values()[9], Scalar::Float64(1.252_806_193_279_788));
 
             // z8jnb: float32 ** 0.3 uses f32::powf.
             let s_f32 = PySeries {

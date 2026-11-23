@@ -19351,17 +19351,31 @@ mod tests {
 
             let merged = merge_dataframes(&left, &right, "id", JoinType::Inner).unwrap();
 
-            // Naive reference: pandas inner merge is left-major, right-minor.
-            let mut exp_a = Vec::new();
-            let mut exp_b = Vec::new();
+            // Naive reference: pandas inner merge is left-major, right-minor,
+            // with pandas 2.2.3 `_get_join_indexers` equal-left-len permutation (ml0az).
+            let mut exp_left_pos = Vec::new();
+            let mut exp_right_pos = Vec::new();
             for (i, &left_value) in lk.iter().enumerate() {
                 for (j, &right_value) in rk.iter().enumerate() {
                     if left_value == right_value {
-                        exp_a.push(Scalar::Int64(i as i64 + 1000));
-                        exp_b.push(Scalar::Int64(j as i64 + 2000));
+                        exp_left_pos.push(i);
+                        exp_right_pos.push(j);
                     }
                 }
             }
+            super::permute_inner_merge_equal_left_len_positions(
+                &[left.column("id").unwrap()],
+                &mut exp_left_pos,
+                &mut exp_right_pos,
+            );
+            let exp_a: Vec<Scalar> = exp_left_pos
+                .iter()
+                .map(|&i| Scalar::Int64(i as i64 + 1000))
+                .collect();
+            let exp_b: Vec<Scalar> = exp_right_pos
+                .iter()
+                .map(|&j| Scalar::Int64(j as i64 + 2000))
+                .collect();
             assert_eq!(
                 merged.columns.get("a").unwrap().values(),
                 exp_a.as_slice(),
@@ -19488,8 +19502,66 @@ mod tests {
             ],
         )?;
 
-        let transformed = merge_dataframes(
+        // When left_len == output_len (5 == 5), pandas 2.2.3 `_get_join_indexers`
+        // applies the ml0az permutation while preserving the exact matched multiset.
+        let equal_len_transformed = merge_dataframes(
             &left_with_unmatched,
+            &right_with_unmatched,
+            "id",
+            JoinType::Inner,
+        )?;
+        assert_eq!(
+            merged_values(&equal_len_transformed, "left_v")?,
+            &[
+                Scalar::Int64(30),
+                Scalar::Int64(21),
+                Scalar::Int64(21),
+                Scalar::Int64(20),
+                Scalar::Int64(20),
+            ]
+        );
+        assert_eq!(
+            merged_values(&equal_len_transformed, "right_v")?,
+            &[
+                Scalar::Int64(300),
+                Scalar::Int64(200),
+                Scalar::Int64(201),
+                Scalar::Int64(200),
+                Scalar::Int64(201),
+            ]
+        );
+
+        // Adding two unmatched left rows keeps left_len != output_len (6 != 5),
+        // so unmatched rows leave the exact inner merge row order invariant.
+        let left_with_two_unmatched = DataFrame::from_dict(
+            &["id", "left_v"],
+            vec![
+                (
+                    "id",
+                    vec![
+                        Scalar::Float64(1.0),
+                        Scalar::Null(NullKind::NaN),
+                        Scalar::Null(NullKind::Null),
+                        Scalar::Float64(2.0),
+                        Scalar::Float64(99.0),
+                        Scalar::Float64(101.0),
+                    ],
+                ),
+                (
+                    "left_v",
+                    vec![
+                        Scalar::Int64(10),
+                        Scalar::Int64(20),
+                        Scalar::Int64(21),
+                        Scalar::Int64(30),
+                        Scalar::Int64(990),
+                        Scalar::Int64(1010),
+                    ],
+                ),
+            ],
+        )?;
+        let transformed = merge_dataframes(
+            &left_with_two_unmatched,
             &right_with_unmatched,
             "id",
             JoinType::Inner,
