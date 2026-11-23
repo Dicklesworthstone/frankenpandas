@@ -66,7 +66,13 @@ fn sparse_arithmetic_and_serialization_keep_explicit_fill_entries() {
     let restored: Series = serde_json::from_str(&json).unwrap();
     assert_eq!(restored.dtype_name(), "Sparse[int64, 0]");
     assert_eq!(
-        restored.column().sparse().unwrap().sparse_dtype().fill_numpy_dtype.as_deref(),
+        restored
+            .column()
+            .sparse()
+            .unwrap()
+            .sparse_dtype()
+            .fill_numpy_dtype
+            .as_deref(),
         Some("int64")
     );
     let sparse = restored.sparse().unwrap();
@@ -104,7 +110,13 @@ fn sparse_scalar_arithmetic_updates_the_fill_and_keeps_numeric_width() {
     .unwrap();
     assert_eq!(series.dtype_name(), "Sparse[int16, 2]");
     assert_eq!(
-        series.column().sparse().unwrap().sparse_dtype().fill_numpy_dtype.as_deref(),
+        series
+            .column()
+            .sparse()
+            .unwrap()
+            .sparse_dtype()
+            .fill_numpy_dtype
+            .as_deref(),
         Some("int64")
     );
     let sparse = series.sparse().unwrap();
