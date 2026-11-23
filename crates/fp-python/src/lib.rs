@@ -13529,6 +13529,9 @@ fn flat_index_to_py(py: Python<'_>, index: &Index) -> PyResult<Py<PyAny>> {
         )?
         .into_any())
     };
+    if let Some(categorical) = categorical_index_of(index) {
+        return Ok(Py::new(py, PyCategoricalIndex { inner: categorical })?.into_any());
+    }
     // An empty index keeps its source's class (pandas' empty slice of a
     // DatetimeIndex is one; dwyud); one declared object is a plain Index
     // whatever it holds (pandas' astype(object); i20vm).
@@ -13778,10 +13781,14 @@ fn index_arg_index(index: &Bound<'_, PyAny>) -> PyResult<Index> {
     Ok(
         if let Ok(dti) = index.extract::<PyRef<'_, PyDatetimeIndex>>() {
             dti.inner.as_index().clone()
+        } else if let Ok(tdi) = index.extract::<PyRef<'_, PyTimedeltaIndex>>() {
+            tdi.inner.as_index().clone()
         } else if let Ok(periods) = index.extract::<PyRef<'_, PyPeriodIndex>>() {
             // A PeriodIndex's ordinals and name (its labels were copied out
             // and its name dropped; br-frankenpandas-od7kt).
             periods.inner.to_index()
+        } else if let Ok(ci) = index.extract::<PyRef<'_, PyCategoricalIndex>>() {
+            ci.inner.to_index()
         } else if let Ok(plain) = plain_index_ref(index) {
             // An Index is its own rows, its labels shared: they were copied
             // out and rebuilt (Series(v, index=Index(arr)) 14.7 ms a million;
@@ -16516,7 +16523,13 @@ impl PyIndex {
     /// pandas' dtype object (see [`index_dtype_object`]).
     #[getter]
     fn dtype<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        index_dtype_object(py, self.inner.dtype(), None)
+        let categories = self.inner.categories().map(|cats| {
+            (
+                cats.categories.iter().map(index_label_to_scalar).collect(),
+                cats.ordered,
+            )
+        });
+        index_dtype_object(py, self.inner.dtype(), categories)
     }
 
     #[getter]
@@ -19665,8 +19678,14 @@ impl PyDatetimeIndex {
         })
     }
 
-    fn equals(&self, other: &PyDatetimeIndex) -> bool {
-        self.inner.equals(&other.inner)
+    fn equals(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(other) = other.extract::<PyRef<'_, PyDatetimeIndex>>() {
+            self.inner.equals(&other.inner)
+        } else if let Ok(other) = plain_index_ref(other) {
+            self.inner.as_index().equals(&other.inner)
+        } else {
+            false
+        }
     }
 
     /// `index > x` (and the other comparisons) compare every label as a
@@ -19788,7 +19807,7 @@ impl PyDatetimeIndex {
             {
                 let inner = DatetimeIndex::from_index(index)
                     .map_err(index_error_to_py)?
-                    .with_freq(freq);
+                    .with_freq_from(&self.inner, freq);
                 return Ok(Py::new(py, Self { inner })?.into_any());
             }
             let sliced: Vec<i64> = (0..s_idx.slicelength)
@@ -19797,7 +19816,10 @@ impl PyDatetimeIndex {
                     self.inner.asi8_at(usize::try_from(at).ok()?)
                 })
                 .collect();
-            let inner = self.with_nanos(sliced).inner.with_freq(freq);
+            let inner = self
+                .with_nanos(sliced)
+                .inner
+                .with_freq_from(&self.inner, freq);
             return Ok(Py::new(py, Self { inner })?.into_any());
         }
         // A boolean mask keeps the freq when it selects a run (pandas turns
@@ -19826,7 +19848,10 @@ impl PyDatetimeIndex {
         };
         let picked = self.inner.nanos_at_owned(positions);
         let freq = self.inner.freq().filter(|_| run);
-        let inner = self.with_nanos(picked).inner.with_freq(freq);
+        let inner = self
+            .with_nanos(picked)
+            .inner
+            .with_freq_from(&self.inner, freq);
         Ok(Py::new(py, Self { inner })?.into_any())
     }
 
@@ -21856,8 +21881,10 @@ impl PyMultiIndex {
         self.clone()
     }
 
-    fn equals(&self, other: &PyMultiIndex) -> bool {
-        self.inner == other.inner
+    fn equals(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .extract::<PyRef<'_, PyMultiIndex>>()
+            .is_ok_and(|other| self.inner == other.inner)
     }
 
     /// pandas' repr: one tuple a line under `MultiIndex([`, each level's
@@ -23943,8 +23970,14 @@ impl PyTimedeltaIndex {
         })
     }
 
-    pub fn equals(&self, other: &Self) -> bool {
-        self.inner.equals(&other.inner)
+    pub fn equals(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(other) = other.extract::<PyRef<'_, Self>>() {
+            self.inner.equals(&other.inner)
+        } else if let Ok(other) = plain_index_ref(other) {
+            self.inner.as_index().equals(&other.inner)
+        } else {
+            false
+        }
     }
 
     pub fn round(&self, freq: &str) -> PyResult<Self> {
@@ -25845,8 +25878,14 @@ impl PyPeriodIndex {
         })
     }
 
-    pub fn equals(&self, other: &Self) -> bool {
-        self.inner.equals(&other.inner)
+    pub fn equals(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(other) = other.extract::<PyRef<'_, Self>>() {
+            self.inner.equals(&other.inner)
+        } else if let Ok(other) = plain_index_ref(other) {
+            self.inner.to_index().equals(&other.inner)
+        } else {
+            false
+        }
     }
 
     #[pyo3(signature = (how="start"))]
@@ -26958,18 +26997,11 @@ impl PyPeriodIndex {
     }
 
     #[pyo3(signature = (periods=1))]
-    fn shift(&self, periods: i64) -> Self {
-        let vals: Vec<Period> = self
-            .inner
-            .values()
-            .iter()
-            .map(|p| Period::new(p.ordinal + periods, p.freq))
-            .collect();
-        let mut out = PeriodIndex::new(vals);
-        if let Some(n) = self.inner.name() {
-            out = out.set_name(n);
-        }
-        Self { inner: out }
+    fn shift(&self, periods: i64) -> PyResult<Self> {
+        self.inner
+            .shift(periods)
+            .map(|inner| Self { inner })
+            .map_err(index_error_to_py)
     }
 
     /// pandas' `Index.sortlevel(level=None, ascending=True,
@@ -27389,8 +27421,14 @@ impl PyCategoricalIndex {
         })
     }
 
-    pub fn equals(&self, other: &Self) -> bool {
-        self.inner.equals(&other.inner)
+    pub fn equals(&self, other: &Bound<'_, PyAny>) -> bool {
+        if let Ok(other) = other.extract::<PyRef<'_, Self>>() {
+            self.inner.equals(&other.inner)
+        } else if let Ok(other) = plain_index_ref(other) {
+            self.inner.to_index().equals(&other.inner)
+        } else {
+            false
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -47227,9 +47265,18 @@ fn aligned_on_level<'py>(
     } else {
         (&flat_rows, &multi_rows)
     };
+    let right_target = if left.is_instance_of::<PyDataFrame>()
+        && right.is_instance_of::<PySeries>()
+        && !multi_left
+        && left_axis == "columns"
+    {
+        multi
+    } else {
+        &target
+    };
     Ok((
         take_level_aligned(left, left_axis, &target, left_rows, fill_value)?,
-        take_level_aligned(right, right_axis, &target, right_rows, fill_value)?,
+        take_level_aligned(right, right_axis, right_target, right_rows, fill_value)?,
     ))
 }
 
@@ -72196,17 +72243,9 @@ impl CategoricalGroupProduct {
             }
             codes.push(level);
         }
-        // A zero-row product still reports each other key's full catalog.
-        // Ordinary levels normally sort their row labels, but with no rows
-        // they need a declared catalog (in the same sorted level order).
-        let mut catalogs = self.domains.clone();
-        if len == 0 {
-            for (catalog, source) in catalogs.iter_mut().zip(&self.sources) {
-                if source.categorical().is_none() {
-                    catalog.sort_by(Self::compare);
-                }
-            }
-        }
+        // A zero-row product still reports each other key's full catalog in
+        // self.domains' order (sorted when sort=True, first-seen when sort=False).
+        let catalogs = self.domains.clone();
         let mut multi = MultiIndex::from_coded_levels(catalogs, codes)
             .map_err(index_error_to_py)?
             .set_names(self.names.clone());
@@ -72216,6 +72255,7 @@ impl CategoricalGroupProduct {
                 .with_level_width(level, source.width())
                 .with_level_order_declared(level, len == 0);
             if let Some(meta) = source.categorical() {
+                let has_missing = self.domains[level].iter().any(IndexLabel::is_missing);
                 multi = multi
                     .with_level_categories(
                         level,
@@ -72225,7 +72265,7 @@ impl CategoricalGroupProduct {
                                 .iter()
                                 .map(scalar_to_index_label_converter)
                                 .collect(),
-                            ordered: meta.ordered,
+                            ordered: meta.ordered && !has_missing,
                         }),
                     )
                     .map_err(index_error_to_py)?;
@@ -72413,7 +72453,11 @@ impl CategoricalGroupProduct {
                 .iter()
                 .map(|row| i32::try_from(ranks.rank(&row[level])).unwrap_or(-1))
                 .collect();
-            return Ok(Column::from_categorical_codes(codes, meta.clone()));
+            let mut meta = meta.clone();
+            if self.domains[level].iter().any(IndexLabel::is_missing) {
+                meta.ordered = false;
+            }
+            return Ok(Column::from_categorical_codes(codes, meta));
         }
         let values = labels
             .iter()
@@ -85376,7 +85420,10 @@ impl PySeriesGroupBy {
     }
 
     fn size(&self) -> PyResult<Py<PyAny>> {
-        let res = self.grouped()?.size().map_err(frame_error_to_py)?;
+        let mut res = self.grouped()?.size().map_err(frame_error_to_py)?;
+        if !self.as_index {
+            res = res.rename("size").map_err(frame_error_to_py)?;
+        }
         self.wrap_result("size", res)
     }
 
@@ -95259,12 +95306,24 @@ impl CustomBusinessCalendar {
                 Err(_) => {
                     let flags = weekmask
                         .try_iter()?
-                        .map(|flag| match flag?.extract::<i64>()? {
-                            0 => Ok(false),
-                            1 => Ok(true),
-                            _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                "A business day weekmask array must have all 1's and 0's",
-                            )),
+                        .map(|flag| {
+                            let flag = flag?;
+                            if flag.is_instance_of::<pyo3::types::PyBool>()
+                                || flag
+                                    .get_type()
+                                    .name()
+                                    .is_ok_and(|name| matches!(name.to_str(), Ok("bool" | "bool_")))
+                            {
+                                flag.is_truthy()
+                            } else {
+                                match flag.extract::<i64>()? {
+                                    0 => Ok(false),
+                                    1 => Ok(true),
+                                    _ => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                                        "A business day weekmask array must have all 1's and 0's",
+                                    )),
+                                }
+                            }
                         })
                         .collect::<PyResult<Vec<bool>>>()?;
                     if flags.len() != 7 {
@@ -104701,8 +104760,6 @@ impl PyDateOffset {
                 apply(at, direction)
             }
         };
-        let first = start.map(|at| roll(at, 1)).transpose()?;
-        let last = end.map(|at| roll(at, -1)).transpose()?;
         let span = || {
             periods
                 .and_then(|count| i64::try_from(count).ok())
@@ -104710,13 +104767,19 @@ impl PyDateOffset {
                 .and_then(|count| count.checked_mul(self.n))
                 .ok_or_else(overflow)
         };
-        let (mut at, last) = match (first, last) {
-            (Some(first), Some(last)) => (first, last),
-            (Some(first), None) => (first, apply(first, span()?)?),
-            (None, Some(last)) => (
-                apply(last, span()?.checked_neg().ok_or_else(overflow)?)?,
-                last,
-            ),
+        let (mut at, last) = match (start, end) {
+            (Some(start), Some(end)) => (roll(start, 1)?, end),
+            (Some(start), None) => {
+                let first = roll(start, 1)?;
+                (first, apply(first, span()?)?)
+            }
+            (None, Some(end)) => {
+                let last = roll(end, -1)?;
+                (
+                    apply(last, span()?.checked_neg().ok_or_else(overflow)?)?,
+                    last,
+                )
+            }
             (None, None) => {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                     "must specify start or end",

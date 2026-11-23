@@ -11182,11 +11182,10 @@ impl Period {
         if self.is_nat() {
             return None;
         }
-        if self.freq.base() == PeriodFreq::Business {
-            // A business span ends at the last business day's midnight +
-            // one calendar day, not at the next business day's midnight.
-            let last = self.ordinal.checked_add(self.freq.multiplier() - 1)?;
-            let start = Self::new(last, PeriodFreq::Business).start_nanos()?;
+        if self.freq == PeriodFreq::Business {
+            // A single business day ends at its own day's last nanosecond;
+            // multiplied business spans (2B, 3B, ...) span up to next_start - 1ns.
+            let start = self.start_nanos()?;
             let end = start.checked_add(Timedelta::NANOS_PER_DAY - 1)?;
             return (end != Timestamp::NAT).then_some(end);
         }
@@ -11252,6 +11251,10 @@ impl Period {
         }
         let boundary_nanos = if is_start {
             self.start_nanos()
+        } else if self.freq.base() == PeriodFreq::Business && self.freq != PeriodFreq::Business {
+            self.ordinal
+                .checked_add(self.freq.multiplier() - 1)
+                .and_then(|last| Self::new(last, PeriodFreq::Business).end_nanos())
         } else {
             self.end_nanos()
         }

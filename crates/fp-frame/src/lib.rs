@@ -54255,6 +54255,9 @@ impl SeriesGroupBy<'_> {
         if let Some(r) = self.integral_reduce(i64::wrapping_add, false) {
             return r;
         }
+        if let Some(r) = self.nullable_integral_reduce(i64::wrapping_add, true) {
+            return r;
+        }
         // Dense single-fold fast path (no per-group Vec<f64> buckets) — see
         // dense_group_fold. Both add as pandas' group_sum: compensated
         // (br-frankenpandas-xhogl).
@@ -54934,6 +54937,9 @@ impl SeriesGroupBy<'_> {
         if let Some(r) = self.integral_reduce(std::cmp::min, true) {
             return r;
         }
+        if let Some(r) = self.nullable_integral_reduce(std::cmp::min, false) {
+            return r;
+        }
         if let Some(r) = self.dense_group_fold(f64::INFINITY, f64::min, |a, _| Scalar::Float64(a)) {
             return r;
         }
@@ -54959,6 +54965,9 @@ impl SeriesGroupBy<'_> {
             return self.agg_temporal_extrema(|a, b| a.max(b));
         }
         if let Some(r) = self.integral_reduce(std::cmp::max, true) {
+            return r;
+        }
+        if let Some(r) = self.nullable_integral_reduce(std::cmp::max, false) {
             return r;
         }
         if let Some(r) =
@@ -55078,6 +55087,60 @@ impl SeriesGroupBy<'_> {
         let index = Index::new(labels).rename_index(idx_name);
         Some(
             Self::integral_column(acc, is_bool, keep_bool)
+                .and_then(|column| Series::new(self.series.name(), index, column)),
+        )
+    }
+
+    /// Exact 64-bit integer group fold for nullable Int64 columns (preserves
+    /// values above 2^53 instead of rounding through f64).
+    fn nullable_integral_reduce(
+        &self,
+        fold: impl Fn(i64, i64) -> i64,
+        empty_zero: bool,
+    ) -> Option<Result<Series, FrameError>> {
+        if self.series.column.dtype() != DType::Int64Nullable {
+            return None;
+        }
+        let values = self.series.column.values();
+        let (gids, ngroups, labels) = self.row_group_layout(true);
+        let mut acc = vec![0_i64; ngroups];
+        let mut seen = vec![false; ngroups];
+        for (row, &g) in gids.iter().enumerate() {
+            if g == usize::MAX {
+                continue;
+            }
+            if let Scalar::Int64(v) = values[row] {
+                acc[g] = if seen[g] {
+                    fold(acc[g], v)
+                } else {
+                    seen[g] = true;
+                    v
+                };
+            }
+        }
+        let out_scalars: Vec<Scalar> = acc
+            .into_iter()
+            .zip(seen)
+            .map(|(v, has)| {
+                if has {
+                    Scalar::Int64(v)
+                } else if empty_zero {
+                    Scalar::Int64(0)
+                } else {
+                    Scalar::Null(NullKind::Null)
+                }
+            })
+            .collect();
+        let by_name = self.by.name();
+        let idx_name = if by_name.is_empty() {
+            None
+        } else {
+            Some(by_name)
+        };
+        let index = Index::new(labels).rename_index(idx_name);
+        Some(
+            Column::new(DType::Int64Nullable, out_scalars)
+                .map_err(FrameError::from)
                 .and_then(|column| Series::new(self.series.name(), index, column)),
         )
     }
@@ -118602,13 +118665,35 @@ impl DataFrameGroupBy<'_> {
         let multi = fp_index::MultiIndex::from_arrays(level_arrays)?
             .set_names(names)
             .with_missing_as_level(!self.dropna);
-        Ok(Some(self.by.iter().enumerate().fold(
-            multi,
-            |multi, (level, name)| {
-                let zone = self.df.columns[name].timezone().map(str::to_owned);
-                multi.with_level_zone(level, zone.as_deref())
-            },
-        )))
+        Ok(Some(self.attach_key_level_metadata(multi)?))
+    }
+
+    fn attach_key_level_metadata(
+        &self,
+        mut multi: fp_index::MultiIndex,
+    ) -> Result<fp_index::MultiIndex, FrameError> {
+        for (level, name) in self.by.iter().enumerate() {
+            let col = &self.df.columns[name];
+            let zone = col.timezone().map(str::to_owned);
+            multi = multi.with_level_zone(level, zone.as_deref());
+            if let Some(meta) = col.categorical() {
+                let has_missing = multi
+                    .level_labels(level)
+                    .is_some_and(|labels| labels.iter().any(IndexLabel::is_missing));
+                let categories = fp_index::IndexCategories {
+                    categories: meta
+                        .categories
+                        .iter()
+                        .map(Self::group_key_scalar_label)
+                        .collect(),
+                    ordered: meta.ordered && !has_missing,
+                };
+                multi = multi.with_level_categories(level, Some(categories))?;
+            } else if !self.sort {
+                multi = multi.with_level_order_declared(level, true);
+            }
+        }
+        Ok(multi)
     }
 
     /// Helper to format the final aggregated DataFrame respecting `as_index`.
@@ -123182,9 +123267,10 @@ impl DataFrameGroupBy<'_> {
         &self,
         grouping: &DenseMultiInt64Grouping,
     ) -> Result<(Index, fp_index::MultiIndex), FrameError> {
-        grouping
+        let (index, multi) = grouping
             .packed
-            .result_index(&grouping.order, self.key_names.clone())
+            .result_index(&grouping.order, self.key_names.clone())?;
+        Ok((index, self.attach_key_level_metadata(multi)?))
     }
 
     /// Utf8/mixed sibling of [`multi_dense_index`]: builds the flat `", "`-joined
@@ -123195,9 +123281,10 @@ impl DataFrameGroupBy<'_> {
         &self,
         grouping: &DenseMultiMixedGrouping<'_>,
     ) -> Result<(Index, fp_index::MultiIndex), FrameError> {
-        grouping
+        let (index, multi) = grouping
             .packed
-            .result_index(&grouping.order, self.key_names.clone())
+            .result_index(&grouping.order, self.key_names.clone())?;
+        Ok((index, self.attach_key_level_metadata(multi)?))
     }
 
     fn try_idx_extreme_dense(&self, want_max: bool) -> Result<Option<DataFrame>, FrameError> {
@@ -128907,6 +128994,9 @@ impl DataFrameGroupBy<'_> {
     /// `nanskew_grouped`/`nankurt` exactly and `int64_dense_grouping` matches
     /// `build_groups`' group order.
     fn try_moment_dense(&self, func: &str) -> Result<Option<DataFrame>, FrameError> {
+        if !self.as_index || self.by.len() != 1 {
+            return Ok(None);
+        }
         // Float64 AND all-valid Int64 value columns are eligible: `try_moment_dense`
         // is only ever called with skew/sem/kurt, all of which widen an Int64 column
         // to Float64 (nan* coerce via collect_finite), so the typed f64 moment engine
@@ -129018,21 +129108,13 @@ impl DataFrameGroupBy<'_> {
             col_order.push(col_name.clone());
         }
 
-        // Per br-frankenpandas-vxgxx: pandas groupby.sem result has by-name
-        // on group-key axis.
-        let by_name = if self.by.len() == 1 {
-            self.single_key_name()
-        } else {
-            None
-        };
-        float_moment_frame(DataFrame {
-            columns: ordered_column_store(result_cols, &col_order),
-            column_order: col_order.into(),
-            index: Index::new(out_labels).rename_index(by_name),
-            column_multiindex: None,
-            row_multiindex: None,
-            allows_duplicate_labels: self.df.allows_duplicate_labels,
-        })
+        float_moment_frame(self.format_output(
+            result_cols,
+            col_order,
+            out_labels,
+            &group_order,
+            &groups,
+        )?)
     }
 
     /// pandas' `skew(skipna=...)`: with `skipna=false` a group holding a

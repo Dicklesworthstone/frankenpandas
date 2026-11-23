@@ -20459,6 +20459,12 @@ impl Column {
     #[must_use]
     pub fn keeping_dtype_of(mut self, source: &Self) -> Self {
         self.pandas_string = source.pandas_string && self.dtype == DType::Utf8;
+        if self.categorical.is_none()
+            && source.categorical.is_some()
+            && self.dtype == DType::Categorical
+        {
+            self.categorical = source.categorical.clone();
+        }
         // A zoned datetime keeps its zone: the typed takes rebuild through
         // the naive datetime64 constructors (a repr of an aware column with
         // a NaT printed UTC wall times; br-frankenpandas-xs0nn).
@@ -26587,10 +26593,7 @@ impl Column {
     /// matching pandas' permissive slice semantics.
     pub fn slice(&self, start: usize, len: usize) -> Result<Self, ColumnError> {
         if start >= self.values.len() {
-            if self.sparse().is_some() {
-                return Ok(self.take_positions(&[]));
-            }
-            return Self::new(self.dtype.clone(), Vec::new());
+            return Ok(self.take_positions(&[]));
         }
         let end = start.saturating_add(len).min(self.values.len());
         Ok(self.take_contiguous_range(start, end - start))

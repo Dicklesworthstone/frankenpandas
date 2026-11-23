@@ -10235,7 +10235,22 @@ fn period_asfreq_ordinal(
     if let Some(ordinal) = period_asfreq_ordinal_fast(period, target, boundary) {
         return Ok(ordinal);
     }
-    let nanos = period_boundary_nanos(period, boundary)?;
+    let nanos = if matches!(boundary, PeriodBoundary::End)
+        && period.freq.base() == PeriodFreq::Business
+        && period.freq != PeriodFreq::Business
+    {
+        if period.ordinal == i64::MIN {
+            i64::MIN
+        } else {
+            let last = period
+                .ordinal
+                .checked_add(period.freq.multiplier() - 1)
+                .ok_or_else(|| period_timestamp_error("business period ordinal overflow"))?;
+            period_end_nanos(Period::new(last, PeriodFreq::Business))?
+        }
+    } else {
+        period_boundary_nanos(period, boundary)?
+    };
     // pandas rolls a weekend day of a day or finer source the other way to
     // a business day: its end forward to Monday, its start back to Friday
     // (a week's or month's end rolls back); it rolled every source like a
@@ -10715,12 +10730,8 @@ fn period_next_start_nanos(period: Period) -> Result<i64, IndexError> {
 }
 
 fn period_end_nanos(period: Period) -> Result<i64, IndexError> {
-    if period.freq.base() == PeriodFreq::Business {
-        let ordinal = period
-            .ordinal
-            .checked_add(period.freq.multiplier() - 1)
-            .ok_or_else(|| period_timestamp_error("business period ordinal overflow"))?;
-        let start = period_start_nanos(Period::new(ordinal, PeriodFreq::Business))?;
+    if period.freq == PeriodFreq::Business {
+        let start = period_start_nanos(period)?;
         return period_checked_add_nanos(start, Timedelta::NANOS_PER_DAY - 1);
     }
     period_checked_add_nanos(period_next_start_nanos(period)?, -1)
@@ -25150,6 +25161,15 @@ impl Level {
     /// their buffer and the uniques shared, or the labels cloned past u32
     /// codes.
     fn window(&self, start: usize, len: usize) -> Self {
+        if len == 0 && !self.declared && self.categories.is_none() && self.len > 0 {
+            let catalog = MultiIndex::level_catalog(self);
+            return Self::from_codes(Arc::new(catalog), CodesWindow::from(Vec::new()))
+                .zoned(self.zone.clone())
+                .with_width(self.width)
+                .with_dtype(self.dtype)
+                .categorized(self.categories.clone())
+                .declared(true);
+        }
         match self.codes() {
             Some(coded) => {
                 Self::from_codes(Arc::clone(&coded.uniques), coded.codes.window(start, len))
@@ -26021,22 +26041,30 @@ impl MultiIndex {
     /// (a stack's: its labels in the frame's order, unused ones kept) less
     /// any missing label, else [`Self::level_catalog`] (br-frankenpandas-33b80).
     fn reported_catalog(level: &Level) -> Vec<IndexLabel> {
+        Self::reported_catalog_for(level, false)
+    }
+
+    fn reported_catalog_for(level: &Level, missing_is_a_level: bool) -> Vec<IndexLabel> {
         if let Some(categories) = &level.categories {
             let present: FxHashMap<&IndexLabel, ()> = level
                 .codes()
                 .map(|coded| coded.uniques.iter().map(|label| (label, ())).collect())
                 .unwrap_or_else(|| level.iter().map(|label| (label, ())).collect());
-            return categories
+            let mut catalog: Vec<IndexLabel> = categories
                 .categories
                 .iter()
                 .filter(|label| present.contains_key(label))
                 .cloned()
                 .collect();
+            if missing_is_a_level && present.keys().any(|label| label.is_missing()) {
+                catalog.push(IndexLabel::Null(fp_types::NullKind::NaN));
+            }
+            return catalog;
         }
         match level.declared_catalog() {
             Some(catalog) => catalog
                 .iter()
-                .filter(|label| !label.is_missing())
+                .filter(|label| missing_is_a_level || !label.is_missing())
                 .cloned()
                 .collect(),
             None => Self::level_catalog(level),
@@ -26085,7 +26113,8 @@ impl MultiIndex {
             .iter()
             .enumerate()
             .map(|(level_idx, level)| {
-                let mut index = Index::new(Self::reported_catalog(level));
+                let mut index =
+                    Index::new(Self::reported_catalog_for(level, self.missing_is_a_level));
                 if let Some(name) = self.names.get(level_idx).and_then(|name| name.as_ref()) {
                     index = index.set_name(name);
                 }
@@ -26191,7 +26220,13 @@ impl MultiIndex {
         self.levels
             .iter()
             .map(|level| {
-                let positions: FxHashMap<IndexLabel, isize> = Self::reported_catalog(level)
+                let catalog = Self::reported_catalog_for(level, self.missing_is_a_level);
+                let missing_code = self
+                    .missing_is_a_level
+                    .then(|| catalog.iter().position(IndexLabel::is_missing))
+                    .flatten()
+                    .map(|code| isize::try_from(code).unwrap_or(isize::MAX));
+                let positions: FxHashMap<IndexLabel, isize> = catalog
                     .into_iter()
                     .enumerate()
                     .map(|(code, label)| (label, isize::try_from(code).unwrap_or(isize::MAX)))
@@ -26200,7 +26235,7 @@ impl MultiIndex {
                     .iter()
                     .map(|label| {
                         if label.is_missing() {
-                            -1
+                            missing_code.unwrap_or(-1)
                         } else {
                             positions.get(label).copied().unwrap_or(-1)
                         }
