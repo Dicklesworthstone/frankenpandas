@@ -3,9 +3,72 @@
 All notable changes to FrankenPandas are documented in this file, organized by capability area.
 
 FrankenPandas is a clean-room Rust reimplementation of the full pandas API surface:
-**15 workspace crates, `#![forbid(unsafe_code)]` workspace-wide**. Workspace version is **0.7.0**.
+**15 workspace crates, `#![forbid(unsafe_code)]` workspace-wide**. Workspace version is **0.7.1**.
 
 Repository: <https://github.com/Dicklesworthstone/frankenpandas>
+
+## 0.7.1 (2026-11-23)
+
+Patch release delivering 810 of 816 Python parity fixes for [#51](https://github.com/Dicklesworthstone/frankenpandas/issues/51)
+across five workspace crates (`fp-types`, `fp-index`, `fp-columnar`, `fp-frame`,
+`fp-python`), MultiIndex `.loc` support for NumPy scalar tuple keys, and patch
+dependency/lockfile refreshes across root, Python sdist, and fuzz lockfiles.
+Published to crates.io (`frankenpandas` and all 14 `fp-*` crates at 0.7.1) and
+PyPI (`frankenpandas` 0.7.1: CPython 3.13 manylinux_2_28 wheels for x86-64 and
+aarch64 plus locked sdist).
+
+### Python & Rust Parity Fixes ([#51](https://github.com/Dicklesworthstone/frankenpandas/issues/51))
+
+- **Period multipliers (`fp-types`, `fp-index`, `fp-python`):** Aligned
+  multiplied business period (`2B`, `3B`, ...) `end_nanos` and
+  `asfreq_with_how(..., End)` semantics with pandas 2.2.3 while preserving
+  single-`B` behavior; delegated `PyPeriodIndex::shift` to `PeriodIndex::shift`
+  to preserve multiplied stepping, empty frequency metadata, and `NaT` handling
+  (`test_period_multipliers.py`: 300/300).
+- **MultiIndex, index equality, and `align(level=...)` (`fp-index`, `fp-python`):**
+  Handled `PyTimedeltaIndex` and `PyCategoricalIndex` in `index_arg_index` to
+  preserve empty `timedelta64[ns]` and categorical level metadata; accepted
+  arbitrary Python objects in `equals()` across typed indexes so cross-type
+  comparisons return `False` instead of raising `TypeError`; preserved parent
+  level catalogs on empty `Level::window(0, 0)` slices and included missing
+  labels when `missing_is_a_level` is active; preserved the right-hand
+  `MultiIndex` target in `DataFrame.align(axis=1, level=...)` for flat-column
+  frames aligned to a `MultiIndex` Series; accepted 0-d NumPy integer, unsigned,
+  floating, and Unicode scalars in `multiindex_key` so `df.loc[df.index[i]]`
+  resolves MultiIndex rows natively (`test_multiindex_constructor.py`: 40/40;
+  `test_align_level_native_contract.py`: 8/8; `test_align_level.py`: 260/260).
+- **CustomBusinessDay (`fp-python`):** Accepted Python `bool` and NumPy `bool_`
+  elements in `weekmask` sequences; avoided rolling `end` backward when both
+  `start` and `end` are provided in custom business date ranges; preserved
+  `custom_business_day` calendar metadata across stepped slicing, fallback
+  slicing, and boolean masking in `PyDatetimeIndex::__getitem__`
+  (`test_custom_business_day.py`: 168/170; remaining 2 failures are external
+  pandas 2.2.3 / NumPy 2.5.5 oracle contradictions).
+- **Categorical groupby products & reductions (`fp-columnar`, `fp-frame`, `fp-python`):**
+  Preserved column metadata (categorical, numeric width, timezone,
+  `pandas_string`) on empty out-of-bounds `Column::slice` and
+  `Column::keeping_dtype_of`; returned `PyCategoricalIndex` from
+  `flat_index_to_py` and propagated category metadata to `PyIndex::dtype`;
+  preserved exact 64-bit integer precision (`> 2^53`) in `SeriesGroupBy`
+  `sum`/`min`/`max` for `Int64Nullable`; attached categorical level metadata
+  (including `ordered = meta.ordered && !has_missing`) and declared level order
+  for `sort=False` in `DataFrameGroupBy` MultiIndex outputs; guarded
+  `try_moment_dense` for `as_index=False` and multi-key groups; routed
+  `DataFrameGroupBy::sem` through `format_output`; preserved
+  `CategoricalGroupProduct` domain order when empty (`sort=False`); renamed
+  `PySeriesGroupBy::size` to `"size"` under `as_index=False`
+  (`test_categorical_groupby_products.py`: 647/651; remaining 4 failures are
+  live pandas 2.2.3 oracle bugs).
+
+### Dependencies & Security
+
+- Refreshed root `Cargo.lock`, pruned Python sdist lock (`crates/fp-python/Cargo.lock`),
+  and `fuzz/Cargo.lock` with patch updates (`anyhow 1.0.104 -> 1.0.105`,
+  `clap_lex 1.1.1 -> 1.1.2`, `zip 9.8.1 -> 9.8.2`, dropping unused `nix 0.32.0`)
+  while holding `wasm-bindgen-futures 0.4.78` / `wasm-bindgen 0.2.128` to
+  maintain the zero-Tokio policy.
+- Verified `cargo audit` on all three lockfiles: 0 vulnerabilities, 0 unsound
+  advisories, 0 yanked crates, and 0 Tokio dependencies.
 
 ## 0.7.0 (2026-11-23)
 

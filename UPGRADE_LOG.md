@@ -5,6 +5,14 @@
 **Language:** Rust
 **Manifest:** Cargo.toml
 
+## Release-wave audit: 2026-11-23 (v0.7.1)
+
+- **Patch lockfile refresh (`Cargo.lock`, `crates/fp-python/Cargo.lock`, `fuzz/Cargo.lock`):**
+  - Updated `anyhow 1.0.104 -> 1.0.105`, `clap_lex 1.1.1 -> 1.1.2`, and `zip 9.8.1 -> 9.8.2` (also dropping unused `nix 0.32.0`).
+  - Preserved `wasm-bindgen-futures 0.4.78` / `wasm-bindgen 0.2.128` (holding `0.4.80` which introduces `tokio`) and `libfuzzer-sys 0.4.12` in `fuzz/Cargo.lock`.
+  - Audited all three lockfiles with `cargo audit`: 0 vulnerabilities, 0 unsound advisories, 0 yanked crates, and 0 Tokio dependencies.
+  - Verified explicit `[profile.release] opt-level = 3` intact alongside per-package `fp-dot-kernel` (`+avx2,+fma`) and `fp-columnar` (`+sse4.1`) SIMD flags.
+
 ## Release-wave audit: 2026-11-23 (v0.7.0)
 
 - **Lockfile & security refresh (`Cargo.lock`, `fuzz/Cargo.lock`, `crates/fp-python/Cargo.lock`):**

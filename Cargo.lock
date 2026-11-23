@@ -98,9 +98,9 @@ checksum = "940b3a0ca603d1eade50a4846a2afffd5ef57a9feac2c0e2ec2e14f9ead76000"
 
 [[package]]
 name = "anyhow"
-version = "1.0.104"
+version = "1.0.105"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+checksum = "2cb931c189b85683d69a5cfad41d4d418671e1ac413dd209f3f2fc31e3cfd902"
 
 [[package]]
 name = "ar_archive_writer"
@@ -338,7 +338,7 @@ dependencies = [
  "js-sys",
  "libc",
  "memchr",
- "nix 0.31.4",
+ "nix",
  "nkeys",
  "parking_lot",
  "pin-project",
@@ -702,9 +702,9 @@ dependencies = [
 
 [[package]]
 name = "clap_lex"
-version = "1.1.1"
+version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
+checksum = "e0921b3876b3a1df8a1c9f912e7f94342458022c2e84288015893d83c4d62a79"
 
 [[package]]
 name = "cmov"
@@ -1321,7 +1321,7 @@ dependencies = [
 
 [[package]]
 name = "fp-bench"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "fp-columnar",
  "fp-frame",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "fp-columnar"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "fp-dot-kernel",
  "fp-types",
@@ -1347,7 +1347,7 @@ dependencies = [
 
 [[package]]
 name = "fp-conformance"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "criterion",
  "fp-columnar",
@@ -1373,11 +1373,11 @@ dependencies = [
 
 [[package]]
 name = "fp-dot-kernel"
-version = "0.7.0"
+version = "0.7.1"
 
 [[package]]
 name = "fp-expr"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "fp-columnar",
  "fp-frame",
@@ -1392,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "fp-frame"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -1417,7 +1417,7 @@ dependencies = [
 
 [[package]]
 name = "fp-frankentui"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "fp-conformance",
  "fp-runtime",
@@ -1430,7 +1430,7 @@ dependencies = [
 
 [[package]]
 name = "fp-groupby"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "bumpalo",
  "fp-columnar",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "fp-index"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono",
  "criterion",
@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "fp-io"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "arrow",
  "arrow-ipc",
@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "fp-join"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "bumpalo",
  "fp-columnar",
@@ -1507,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "fp-python"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "fp-columnar",
  "fp-expr",
@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "fp-runtime"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "asupersync",
  "serde",
@@ -1536,7 +1536,7 @@ dependencies = [
 
 [[package]]
 name = "fp-types"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -1578,7 +1578,7 @@ dependencies = [
 
 [[package]]
 name = "frankenpandas"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "fp-columnar",
  "fp-expr",
@@ -2391,18 +2391,6 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "memoffset",
-]
-
-[[package]]
-name = "nix"
-version = "0.32.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77730ed34f01f4990cb2ea67fec715ecebc6fab9a6396cf83c5529b13f581bdc"
-dependencies = [
- "bitflags",
- "cfg-if",
- "cfg_aliases",
- "libc",
 ]
 
 [[package]]
@@ -3729,7 +3717,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys",
@@ -4431,9 +4419,9 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "9.8.1"
+version = "9.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9534624d547e3f516ecde0ed9a70d37788f01d340efcfdd03bf3ea8e163c1d0"
+checksum = "2d8dbe089cf6b0448b78f5fc50139ab5aaa40d08ac07cdc1baf2c13add35fcce"
 dependencies = [
  "constant_time_eq",
  "crc32fast",
@@ -4442,7 +4430,7 @@ dependencies = [
  "indexmap",
  "libc",
  "memchr",
- "nix 0.32.0",
+ "nix",
  "typed-path",
  "windows-sys",
  "zeroize",

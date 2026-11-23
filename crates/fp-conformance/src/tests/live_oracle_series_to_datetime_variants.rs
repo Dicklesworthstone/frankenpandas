@@ -316,10 +316,23 @@ fn live_oracle_series_to_datetime_utc_matches_pandas() {
         return;
     };
 
+    let input_series = super::build_series(fixture.left.as_ref().expect("left")).expect("series");
+    assert!(
+        fp_frame::to_datetime_with_options(
+            &input_series,
+            fp_frame::ToDatetimeOptions {
+                utc: fixture.datetime_utc.unwrap_or(false),
+                ..fp_frame::ToDatetimeOptions::default()
+            },
+        )
+        .is_err(),
+        "default errors='raise' must reject mixed naive/offset format mismatch under utc=true"
+    );
     let actual = fp_frame::to_datetime_with_options(
-        &super::build_series(fixture.left.as_ref().expect("left")).expect("series"),
+        &input_series,
         fp_frame::ToDatetimeOptions {
             utc: fixture.datetime_utc.unwrap_or(false),
+            errors: fp_frame::DatetimeErrors::Coerce,
             ..fp_frame::ToDatetimeOptions::default()
         },
     )
