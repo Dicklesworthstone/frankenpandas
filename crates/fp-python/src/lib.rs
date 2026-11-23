@@ -68007,12 +68007,23 @@ fn frame_iloc_write(
 /// scalars (a prefix of the levels, at most `nlevels` long), as labels;
 /// None for anything else (a list, a slice, a mask, a longer tuple).
 fn multiindex_key(key: &Bound<'_, PyAny>, nlevels: usize) -> PyResult<Option<Vec<IndexLabel>>> {
+    let is_numpy_nonbool_scalar = |item: &Bound<'_, PyAny>| {
+        item.getattr("ndim")
+            .and_then(|ndim| ndim.extract::<usize>())
+            .is_ok_and(|ndim| ndim == 0)
+            && item
+                .getattr("dtype")
+                .and_then(|dtype| dtype.getattr("kind"))
+                .and_then(|kind| kind.extract::<String>())
+                .is_ok_and(|kind| matches!(kind.as_str(), "i" | "u" | "f" | "U"))
+    };
     let scalar = |item: &Bound<'_, PyAny>| {
         !item.is_instance_of::<pyo3::types::PyBool>()
             && (item.is_instance_of::<pyo3::types::PyString>()
                 || item.is_instance_of::<pyo3::types::PyInt>()
                 || item.is_instance_of::<pyo3::types::PyFloat>()
-                || item.extract::<PyRef<'_, PyTimestamp>>().is_ok())
+                || item.extract::<PyRef<'_, PyTimestamp>>().is_ok()
+                || is_numpy_nonbool_scalar(item))
     };
     if let Ok(tuple) = key.cast::<PyTuple>() {
         if tuple.is_empty() || tuple.len() > nlevels || !tuple.iter().all(|item| scalar(&item)) {
@@ -117564,6 +117575,42 @@ mod tests {
                 mdiv.inner.values(),
                 &[Scalar::Int64(1), Scalar::Int64(0), Scalar::Int64(0)]
             );
+        });
+    }
+
+    #[test]
+    fn multiindex_key_accepts_numpy_scalars_and_rejects_arrays_and_bools() {
+        Python::initialize();
+        Python::attach(|py| {
+            let np = py.import("numpy").expect("numpy"); // ubs:ignore — test fixture
+            let i1 = np.call_method1("int64", (1_i64,)).expect("np.int64"); // ubs:ignore — test fixture
+            let f25 = np.call_method1("float64", (2.5_f64,)).expect("np.float64"); // ubs:ignore — test fixture
+            let s_b = "b".into_pyobject(py).expect("b").into_any(); // ubs:ignore — test fixture
+            let tup3 = PyTuple::new(py, [&i1, &s_b, &f25]).expect("tuple"); // ubs:ignore — test fixture
+            let parsed = multiindex_key(tup3.as_any(), 3).expect("parse tuple"); // ubs:ignore — test assertion
+            assert_eq!(
+                parsed,
+                Some(vec![
+                    IndexLabel::Int64(1),
+                    IndexLabel::Utf8("b".to_owned()),
+                    IndexLabel::Float64(fp_index::OrderedF64(2.5)),
+                ])
+            );
+
+            let i32_scalar = np.call_method1("int32", (7_i32,)).expect("np.int32"); // ubs:ignore — test fixture
+            assert_eq!(
+                multiindex_key(&i32_scalar, 2).expect("parse scalar"), // ubs:ignore — test assertion
+                Some(vec![IndexLabel::Int64(7)])
+            );
+
+            // Negative cases: 1-D ndarray, numpy bool scalar, and >nlevels tuple must not parse.
+            let arr1d = np
+                .call_method1("array", (PyList::new(py, [1_i64, 2]).expect("list"),)) // ubs:ignore — test fixture
+                .expect("np.array"); // ubs:ignore — test fixture
+            assert_eq!(multiindex_key(&arr1d, 2).expect("1d array"), None); // ubs:ignore — test assertion
+            let np_bool = np.call_method1("bool_", (true,)).expect("np.bool_"); // ubs:ignore — test fixture
+            assert_eq!(multiindex_key(&np_bool, 2).expect("np.bool_"), None); // ubs:ignore — test assertion
+            assert_eq!(multiindex_key(tup3.as_any(), 2).expect("too long"), None); // ubs:ignore — test assertion
         });
     }
 }
