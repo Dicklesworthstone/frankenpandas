@@ -3,9 +3,75 @@
 All notable changes to FrankenPandas are documented in this file, organized by capability area.
 
 FrankenPandas is a clean-room Rust reimplementation of the full pandas API surface:
-**15 workspace crates, `#![forbid(unsafe_code)]` workspace-wide**. Workspace version is **0.6.0**.
+**15 workspace crates, `#![forbid(unsafe_code)]` workspace-wide**. Workspace version is **0.7.0**.
 
 Repository: <https://github.com/Dicklesworthstone/frankenpandas>
+
+## 0.7.0 (2026-11-23)
+
+110+ commits since 0.6.0, adding native compressed sparse storage, custom
+business-day calendars, multiplied period frequencies, grouped ordered and
+mixed-index as-of joins, typed v2 Pickle/HDF5 snapshots, hardened XLSX
+pre-validation, comprehensive dependency security updates, and full pandas 2.2.3
+live-oracle conformance fixes. Published to crates.io (`frankenpandas` and all
+14 `fp-*` crates at 0.7.0) and PyPI (`frankenpandas` 0.7.0: CPython 3.13
+manylinux_2_28 wheels for x86-64 and aarch64 plus locked sdist).
+
+### Features
+
+- **Compressed sparse storage:** `SparseColumn` backed by compressed positions
+  and values with parameterized `SparseDType`, carried natively through
+  `Series`, `DataFrame`, arithmetic, casts, concatenation, and Python
+  (`SparseDtype`, `arrays.SparseArray`, `.sparse` accessors, dummy encoding,
+  and SciPy COO export).
+- **Calendars & multiplied Period frequencies:** Native `CustomBusinessDay`
+  calendars and positive multiplied Period frequencies (`2D`, `3h`, `15min`,
+  `2W-FRI`, `2M`, `3Q-JAN`, `2Y-JUN`, `2B`) across Rust and Python.
+- **Joins & alignment:** Grouped `merge_ordered` (`left_by`/`right_by`),
+  exact as-of source indexers and mixed index/column `merge_asof`, `Series`
+  and `DataFrame` alignment on `MultiIndex` levels, declared `MultiIndex`
+  construction, and catalog-preserving `MultiIndex` reindexing.
+- **Windows, GroupBy & Concat:** Pairwise `DataFrame` window `corr` and `cov`,
+  categorical multi-key groupby reductions, tuple keys and named column levels
+  in `concat`, and timezone-aware resample callback preservation.
+- **Typed nullable float kernels & differential fuzzing:** Nullable float
+  arithmetic and masks on typed buffers; structure-aware live-oracle
+  differential fuzzing (`fuzz_differential_vs_pandas`) against pandas 2.2.3.
+
+### Fixes
+
+- **Native Pickle & HDF5 v2 snapshots ([#40](https://github.com/Dicklesworthstone/frankenpandas/issues/40)):**
+  Versioned `frankenpandas.dataframe.v2` typed snapshot envelope for both
+  Pickle and HDF5 preserving exact dtypes, null kinds, validity masks,
+  categorical/sparse/timezone/width metadata, duplicate columns, and
+  `MultiIndex` catalogs while retaining legacy `v1` read compatibility.
+- **Excel XLSX cell-reference pre-validation ([#42](https://github.com/Dicklesworthstone/frankenpandas/issues/42)):**
+  Upgraded `calamine` to `0.38.0` and added case-insensitive ZIP XML
+  pre-validation (`validate_xlsx_bytes`) across all six `read_excel*` entry
+  points rejecting out-of-range columns (`>XFD`), rows (`>1,048,576`), and
+  inverted dimensions with `IoError::Excel` in both debug and release builds.
+- **Parity & correctness:** Fixed `-0.0` vs `+0.0` equivalence in
+  `DataFrame::duplicated`'s single-`Float64` fast path, `PeriodFreq::Hourly`
+  and `PeriodFreq::Minutely` timestamp parsing, 0-row `DataFrame` `concat`
+  common-dtype preservation, `sort=False` inner merge equal-left-length order,
+  nullable float `NaN` vs `<NA>` semantics, `to_datetime` raise-by-default
+  errors, and exception/index/window parity across the live pandas 2.2.3 suite.
+- **Build hygiene:** Migrated `PyCustomBusinessDay::new` to PyO3 0.30
+  `PyClassInitializer`, added explicit `[profile.release] opt-level = 3`
+  preserving per-package `fp-dot-kernel` (`+avx2,+fma`) and `fp-columnar`
+  (`+sse4.1`) SIMD flags, and cleared all workspace `clippy -D warnings` and
+  `rustfmt` checks.
+
+### Dependencies & Security
+
+- Refreshed root `Cargo.lock`, `fuzz/Cargo.lock` ([#43](https://github.com/Dicklesworthstone/frankenpandas/issues/43)),
+  and `crates/fp-python/Cargo.lock` to zero `cargo audit` vulnerabilities,
+  zero unsound advisories, zero yanked crates, and zero Tokio dependencies.
+- Key updates: `arrow`/`arrow-ipc`/`parquet` `60.2.0`, `calamine` `0.38.0`,
+  `zip` `9.8.1`, `rustix` `1.1.6`, `ctutils` `0.4.8`, `libz-sys` `1.1.33`,
+  `url` `2.5.9`, `rusqlite` `0.43.0`, `hdf5-metno` `0.15.1`,
+  `rust_xlsxwriter` `0.104.0`, `sas7bdat` `0.10.4`, `mysql` `28.0.4`,
+  `asupersync` `0.7.0`.
 
 ## 0.6.0 (2026-10-14)
 
