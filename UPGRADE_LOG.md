@@ -5,6 +5,26 @@
 **Language:** Rust
 **Manifest:** Cargo.toml
 
+## Release-wave audit: 2026-11-23 (v0.7.0)
+
+- **Lockfile & security refresh (`Cargo.lock`, `fuzz/Cargo.lock`, `crates/fp-python/Cargo.lock`):**
+  - Updated 94 packages in root `Cargo.lock` (while preserving the no-Tokio supply-chain policy by holding `wasm-bindgen-futures` at `0.4.78` / `wasm-bindgen` at `0.2.128`, since `wasm-bindgen-futures 0.4.80` pulls `tokio`).
+  - Cleared all security vulnerabilities and unsound advisories across all three lockfiles (`cargo audit`: 0 vulnerabilities, 0 unsound, 0 yanked):
+    - `ctutils 0.4.3 -> 0.4.8` (RUSTSEC-2026-0385)
+    - `libz-sys 1.1.29 -> 1.1.33` (RUSTSEC-2026-0418, RUSTSEC-2026-0544)
+    - `url 2.5.8 -> 2.5.9` (RUSTSEC-2026-0592)
+    - `arrow` / `arrow-ipc` / `parquet 60.0.0 -> 60.2.0` (RUSTSEC-2026-0442)
+    - `rustix 1.1.5 -> 1.1.6` (RUSTSEC-2026-0486)
+    - `zip 9.1.1 -> 9.8.1` (cleared all 8 zip 8.6.0 advisories in fuzz/python locks)
+    - `calamine 0.38.0` (RUSTSEC-2026-0436; paired with `fp-io` XLSX pre-validation hardening for #42)
+    - `rusqlite 0.42.0 -> 0.43.0` (`libsqlite3-sys >= 0.40.0`, RUSTSEC-2026-0459)
+- **Direct manifest bumps verified against full tests:**
+  - `hdf5-metno 0.12.4 -> 0.15.1` (all 12 native HDF5 v2 snapshot tests pass against HDF5 1.14.6)
+  - `rust_xlsxwriter 0.102.0 -> 0.104.0`, `sas7bdat 0.9.0 -> 0.10.4`, `mysql 28.0.3 -> 28.0.4` (`lru 0.18.5`, no `proc-macro-error2` or `paste` remaining in graph)
+  - `asupersync 0.6.2 -> 0.7.0` (`franken-kernel`/`franken-evidence`/`franken-decision 0.7.0`; `fp-runtime --all-features` passes 56/56, zero Tokio)
+  - Manifest floor syncs: `bumpalo 3.20.4`, `bytes 1.12.2`, `regex 1.13.2`, `serde_json 1.0.154`, `thiserror 2.0.21`, `unicode-normalization 0.1.26`.
+  - Held: `fallible-iterator 0.2.0` (coupled to `postgres-protocol 0.6.12`), `pyo3 0.30.1` (latest stable), `calamine 0.38.0` (latest stable), `wasm-bindgen-futures 0.4.78` (no-Tokio policy).
+
 ## Release-wave audit: 2026-10-03 (in progress)
 
 The historical September audit below is retained. Its test checkmarks do not
