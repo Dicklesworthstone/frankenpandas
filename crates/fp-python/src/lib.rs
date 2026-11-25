@@ -49409,21 +49409,12 @@ impl PyDataFrame {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let n = self.inner.len();
-        // Index equality answers by the shared label identity first (the
-        // label comparison built and read a million labels a side;
-        // br-frankenpandas-roqqq).
-        if let Ok(series) = value.extract::<PyRef<'_, PySeries>>()
-            && series.inner.index() == self.inner.index()
-        {
-            self.inner = self
-                .inner
-                .with_column(name, series.inner.column().clone())
-                .map_err(frame_error_to_py)?;
+        if let Ok(series) = value.extract::<PyRef<'_, PySeries>>() {
+            let (frame, column) = align_series_for_assignment(&self.inner, &series.inner)?;
+            self.inner = frame.with_column(name, column).map_err(frame_error_to_py)?;
             return Ok(());
         }
-        let values: Vec<Scalar> = if let Ok(series) = value.extract::<PyRef<'_, PySeries>>() {
-            aligned_values(&series.inner, self.inner.index().labels())?
-        } else if let Some(column) = py_array_like_column(py, value)? {
+        let values: Vec<Scalar> = if let Some(column) = py_array_like_column(py, value)? {
             if column.len() != n {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "Length of values ({}) does not match length of index ({n})",
@@ -53184,6 +53175,7 @@ impl PyDataFrame {
             return Ok(());
         }
         let labels = extract_index_labels(Some(value), 0)?;
+        refuse_index_labels_keyed_alike(&labels)?;
         // The axis is named as the labels are - an Index's or Series' own
         // name, none for a list - as pandas' (an Index's name was dropped;
         // br-frankenpandas-n9zpp).
@@ -62495,23 +62487,24 @@ impl PyDataFrame {
         value: &Bound<'_, PyAny>,
         allow_duplicates: bool,
     ) -> PyResult<()> {
-        // A Series as it stands; a list, tuple, array or Index by position; a
-        // scalar broadcast down every row, as pandas (a scalar raised;
-        // fvsao.30).
-        let col = if let Ok(py_s) = value.extract::<PyRef<'_, PySeries>>() {
-            py_s.inner.column().clone()
-        } else {
-            py_value_to_column(py, value, self.inner.len())?
-        };
-        // The new column's label keeps its type (insert(0, 9, ..) is the
-        // integer 9; fvsao.32).
         let label = match typed_column_label(column) {
             Some(label) => label,
             None => IndexLabel::Utf8(column.str()?.to_string()),
         };
-        self.inner = self
-            .inner
-            .insert_allow_duplicates(loc, fp_frame::column_key(&label), col, allow_duplicates)
+        let name = fp_frame::column_key(&label);
+        refuse_label_clash(&self.inner, &name, &label)?;
+        let converted = pandas_object_as_fp(value)?;
+        let value = converted.as_ref().unwrap_or(value);
+        let (frame, col) = if let Ok(series) = value.extract::<PyRef<'_, PySeries>>() {
+            align_series_for_assignment(&self.inner, &series.inner)?
+        } else {
+            (
+                std::borrow::Cow::Borrowed(&self.inner),
+                py_value_to_column(py, value, self.inner.len())?,
+            )
+        };
+        self.inner = frame
+            .insert_allow_duplicates(loc, name, col, allow_duplicates)
             .map_err(frame_error_to_py)?
             .with_recorded_column_labels([label]);
         Ok(())
@@ -67836,6 +67829,51 @@ fn frame_loc_write(
     }?;
     // The frame's own columns keep their typed labels.
     Ok(written.with_labels_of(frame))
+}
+
+/// The receiving frame and the Series column on its row index for whole-column
+/// assignment or insertion. A nonempty Series establishes an empty frame's
+/// rows. Otherwise reindex the typed column, including its missing-value mask.
+fn align_series_for_assignment<'a>(
+    frame: &'a DataFrame,
+    series: &Series,
+) -> PyResult<(std::borrow::Cow<'a, DataFrame>, Column)> {
+    use std::borrow::Cow;
+
+    let target = frame.index();
+    let source = series.index();
+    if target.is_empty() && !source.is_empty() {
+        let index = source.rename_index(target.name().or(source.name()));
+        let expanded = frame
+            .reindex_to_index(&index)
+            .and_then(|frame| frame.with_index(index))
+            .map_err(frame_error_to_py)?;
+        return Ok((Cow::Owned(expanded), series.column().clone()));
+    }
+    let column = if source == target {
+        series.column().clone()
+    } else if reindex_zones_mismatch(source, target) {
+        series
+            .head(0)
+            .and_then(|empty| empty.reindex_to_index(target))
+            .map_err(frame_error_to_py)?
+            .column()
+            .clone()
+    } else if index_labels_equal(source, target) {
+        series.column().clone()
+    } else {
+        if source.has_duplicates() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "cannot reindex on an axis with duplicate labels",
+            ));
+        }
+        series
+            .reindex_to_index(target)
+            .map_err(frame_error_to_py)?
+            .column()
+            .clone()
+    };
+    Ok((Cow::Borrowed(frame), column))
 }
 
 /// `series`' values on the rows labeled `labels`, as pandas aligns a Series

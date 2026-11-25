@@ -230,3 +230,59 @@ def test_iloc_series_name_is_the_full_multiindex_column_label(labels, rows):
     ]
     for position in (0, 1, -1):
         _assert_same(frames[0].iloc[rows, position], frames[1].iloc[rows, position])
+
+
+@pytest.mark.parametrize("operation", ["insert", "setitem", "assign"])
+@pytest.mark.parametrize(
+    "rows, source_rows, dtype",
+    [
+        (["b", "a"], ["a", "b"], "int64"),
+        (["b", "a", "c"], ["a", "b"], "int64"),
+        (["b", "b", "c"], ["a", "b"], "Int64"),
+        (["a", "a"], ["a", "a"], "Int32"),
+        ([], ["b", "a"], "Int64"),
+    ],
+)
+def test_series_column_writes_align_rows_and_preserve_dtype(operation, rows, source_rows, dtype):
+    def write(module):
+        frame = module.DataFrame({"old": [1] * len(rows)}, index=module.Index(rows, name="rows"))
+        series = module.Series([11, 22], index=module.Index(source_rows, name="source"), dtype=dtype)
+        if operation == "insert":
+            frame.insert(0, "new", series)
+        elif operation == "setitem":
+            frame["new"] = series
+        else:
+            frame = frame.assign(new=series)
+        col = frame["new"]
+        return (
+            frame.columns.tolist(), frame.index.tolist(), frame.index.name,
+            str(col.dtype), col.isna().tolist(), col.dropna().tolist(), frame["old"].isna().tolist(),
+        )
+
+    assert write(fpd) == write(pd)
+
+
+@pytest.mark.parametrize("operation", ["insert", "setitem"])
+def test_series_write_with_ambiguous_duplicate_source_is_atomic(operation):
+    def check(module):
+        frame = module.DataFrame({"old": [1, 2]}, index=["a", "b"])
+        value = module.Series([8, 9], index=["a", "a"])
+        with pytest.raises(ValueError, match="duplicate"):
+            if operation == "insert":
+                frame.insert(0, "new", value)
+            else:
+                frame["new"] = value
+        return frame
+
+    _assert_same(check(fpd), check(pd))
+
+
+@pytest.mark.parametrize("operation", ["columns", "insert"])
+def test_column_writes_refuse_unrepresentable_labels_before_mutation(operation):
+    frame = fpd.DataFrame([[1, 2]], columns=[0, 1])
+    with pytest.raises(NotImplementedError, match="keyed by the same text"):
+        if operation == "columns":
+            frame.columns = [0, "0"]
+        else:
+            frame.insert(0, "0", [3], allow_duplicates=True)
+    _assert_same(frame, pd.DataFrame([[1, 2]], columns=[0, 1]))
