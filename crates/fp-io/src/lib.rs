@@ -21035,9 +21035,9 @@ mod tests {
         let frame = read_csv_str(input).expect("read");
         let value_col = frame.column("value").expect("value");
 
-        // Missing (the NaN-as-missing float column reads it Float64(NaN);
-        // br-frankenpandas-33fa5), the others their numbers.
-        assert!(value_col.values()[1].is_missing());
+        // The scalar missing marker is independent of the float backing
+        // selected by the reader (br-frankenpandas-33fa5).
+        assert_eq!(value_col.values()[1], Scalar::Null(NullKind::NaN));
         assert_eq!(value_col.values()[0], Scalar::Float64(10.0));
         assert_eq!(value_col.values()[2], Scalar::Float64(3.5));
 
@@ -24850,7 +24850,7 @@ mod tests {
         let nan_frame = read_csv_str("x\nNaN\n1.0\n").expect("fallback nan");
         let nan_cells = nan_frame.column("x").expect("x").values();
         assert_eq!(nan_cells.len(), 2);
-        assert!(nan_cells[0].is_missing());
+        assert_eq!(nan_cells[0], Scalar::Null(NullKind::NaN));
         assert_eq!(nan_cells[1], Scalar::Float64(1.0));
 
         let bool_frame = read_csv_str("x\ntrue\nfalse\n").expect("fallback bool");
@@ -33869,7 +33869,7 @@ mod tests {
         let x_cells = frame.column("x").expect("x").values();
         assert_eq!(x_cells.len(), 3);
         assert_eq!(x_cells[0], Scalar::Float64(1.5));
-        assert!(x_cells[1].is_missing());
+        assert_eq!(x_cells[1], Scalar::Null(NullKind::NaN));
         assert_eq!(x_cells[2], Scalar::Float64(-2.0));
         assert_eq!(
             frame.column("s").expect("s").values()[0],
@@ -34657,7 +34657,7 @@ mod tests {
             .expect("parse");
         let a = plain.column("a").unwrap();
         assert_eq!(a.dtype(), fp_types::DType::Float64);
-        assert!(a.values()[1].is_missing());
+        assert_eq!(a.values()[1], Scalar::Null(NullKind::NaN));
         assert_eq!(a.values()[2], Scalar::Float64(3.0));
         let records =
             read_json_str(r#"[{"a":1},{"a":null},{"a":3}]"#, JsonOrient::Records).expect("parse");

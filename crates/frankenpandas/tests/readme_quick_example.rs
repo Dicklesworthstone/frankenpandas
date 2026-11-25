@@ -6271,9 +6271,8 @@ fn readme_csv_options_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         &na_opts,
     )?;
     let score_col = na_df.column("score").unwrap();
-    // Row 1 (Bob) should be missing after MISSING → NA (the float column is
-    // NaN-as-missing, so the cell reads Float64(NaN)); the others present.
-    assert!(score_col.values()[1].is_missing());
+    // Row 1 (Bob) has the canonical float missing marker after MISSING → NA.
+    assert_eq!(score_col.values()[1], Scalar::Null(NullKind::NaN));
     assert_eq!(score_col.values()[0], Scalar::Float64(42.0));
     assert_eq!(score_col.values()[2], Scalar::Float64(17.5));
 

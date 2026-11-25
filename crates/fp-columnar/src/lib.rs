@@ -3615,8 +3615,8 @@ enum ScalarValues {
         /// values. Keeping the worker-owned value chunks separate from this
         /// compact mask avoids both the parallel output zero-fill and a second
         /// full-sized concatenation merely to retain nullable semantics. The
-        /// scalar view continues to expose its raw Float64 payloads (including
-        /// NaN), exactly like `from_f64_values_owned` does.
+        /// scalar view exposes missing rows as `Null(NaN)`, like every other
+        /// ordinary Float64 backing.
         nullable_validity: Option<ValidityMask>,
         values: OnceLock<Vec<Scalar>>,
     },
@@ -6611,6 +6611,18 @@ impl ScalarValues {
         None
     }
 
+    /// Ordinary float64 has one scalar spelling for a missing value,
+    /// regardless of whether its backing stores NaN or a separate mask.
+    /// Nullable Float64 uses `LazyMaskedFloat64` instead: its valid NaNs
+    /// must remain values (br-frankenpandas-33fa5).
+    fn float64_cell(value: f64) -> Scalar {
+        if value.is_nan() {
+            Scalar::Null(NullKind::NaN)
+        } else {
+            Scalar::Float64(value)
+        }
+    }
+
     fn as_slice(&self) -> &[Scalar] {
         match self {
             Self::Sparse { column, values } => {
@@ -6719,18 +6731,30 @@ impl ScalarValues {
                 })
                 .as_slice(),
             Self::LazyAllValidFloat64 { data, values, .. } => values
-                .get_or_init(|| data.iter().copied().map(Scalar::Float64).collect())
+                .get_or_init(|| data.iter().copied().map(Self::float64_cell).collect())
                 .as_slice(),
             Self::LazyAllValidFloat64Vec { data, values, .. } => values
-                .get_or_init(|| data.iter().copied().map(Scalar::Float64).collect())
+                .get_or_init(|| data.iter().copied().map(Self::float64_cell).collect())
                 .as_slice(),
-            Self::LazyAllValidFloat64Chunks { chunks, values, .. } => values
+            Self::LazyAllValidFloat64Chunks {
+                chunks,
+                nullable_validity,
+                values,
+                ..
+            } => values
                 .get_or_init(|| {
                     chunks
                         .iter()
                         .flat_map(Float64Chunk::as_slice)
                         .copied()
-                        .map(Scalar::Float64)
+                        .enumerate()
+                        .map(|(row, value)| {
+                            if nullable_validity.as_ref().is_none_or(|mask| mask.get(row)) {
+                                Self::float64_cell(value)
+                            } else {
+                                Scalar::Null(NullKind::NaN)
+                            }
+                        })
                         .collect()
                 })
                 .as_slice(),
@@ -6794,8 +6818,8 @@ impl ScalarValues {
                 // column -- the Scalar-view counterpart of the page-contiguous f64
                 // buffer, which had no Scalar sibling until now.
                 Some(shared) => {
-                    let page =
-                        shared.get_or_init(|| data.iter().copied().map(Scalar::Float64).collect());
+                    let page = shared
+                        .get_or_init(|| data.iter().copied().map(Self::float64_cell).collect());
                     &page[*start..*start + *len]
                 }
                 None => values
@@ -6803,7 +6827,7 @@ impl ScalarValues {
                         data[*start..*start + *len]
                             .iter()
                             .copied()
-                            .map(Scalar::Float64)
+                            .map(Self::float64_cell)
                             .collect()
                     })
                     .as_slice(),
@@ -6819,7 +6843,7 @@ impl ScalarValues {
                     data.get_or_init(|| Self::materialize_float64_dot(a_cols, b_col, *len))
                         .iter()
                         .copied()
-                        .map(Scalar::Float64)
+                        .map(Self::float64_cell)
                         .collect()
                 })
                 .as_slice(),
@@ -6833,7 +6857,7 @@ impl ScalarValues {
                     data.get_or_init(|| plan.materialize_column(*col))
                         .iter()
                         .copied()
-                        .map(Scalar::Float64)
+                        .map(Self::float64_cell)
                         .collect()
                 })
                 .as_slice(),
@@ -6847,7 +6871,7 @@ impl ScalarValues {
                     data.get_or_init(|| plan.materialize_row(*source_row))
                         .iter()
                         .copied()
-                        .map(Scalar::Float64)
+                        .map(Self::float64_cell)
                         .collect()
                 })
                 .as_slice(),
@@ -6870,7 +6894,7 @@ impl ScalarValues {
                     })
                     .iter()
                     .copied()
-                    .map(Scalar::Float64)
+                    .map(Self::float64_cell)
                     .collect()
                 })
                 .as_slice(),
@@ -6887,7 +6911,7 @@ impl ScalarValues {
                         .get_or_init(|| Self::expand_strided(data.as_slice(), *start, *step, *len))
                         .iter()
                         .copied()
-                        .map(Scalar::Float64)
+                        .map(Self::float64_cell)
                         .collect()
                 })
                 .as_slice(),
@@ -6909,7 +6933,7 @@ impl ScalarValues {
                         })
                         .iter()
                         .copied()
-                        .map(Scalar::Float64)
+                        .map(Self::float64_cell)
                         .collect()
                 })
                 .as_slice(),
@@ -6925,8 +6949,8 @@ impl ScalarValues {
                         .iter()
                         .enumerate()
                         .map(|(idx, value)| {
-                            if validity.get(idx) || value.is_nan() {
-                                Scalar::Float64(*value)
+                            if validity.get(idx) {
+                                Self::float64_cell(*value)
                             } else {
                                 Scalar::Null(NullKind::NaN)
                             }
@@ -7197,7 +7221,7 @@ impl ScalarValues {
                 .get_or_init(|| {
                     let mut out = Vec::with_capacity(*total_len);
                     for (&value, &run_len) in run_values.iter().zip(run_lens.iter()) {
-                        out.resize(out.len() + run_len, Scalar::Float64(value));
+                        out.resize(out.len() + run_len, Self::float64_cell(value));
                     }
                     out
                 })
@@ -7213,7 +7237,7 @@ impl ScalarValues {
                     let mut out = Vec::with_capacity(*total_len);
                     for &(start, len) in segments.iter() {
                         for &value in &data[start..start + len] {
-                            out.push(Scalar::Float64(value));
+                            out.push(Self::float64_cell(value));
                         }
                     }
                     out
@@ -7252,7 +7276,7 @@ impl ScalarValues {
                             out.resize(out.len() + len, Scalar::Null(NullKind::NaN));
                         } else {
                             for &value in &data[start..start + len] {
-                                out.push(Scalar::Float64(value));
+                                out.push(Self::float64_cell(value));
                             }
                         }
                     }
@@ -7272,7 +7296,7 @@ impl ScalarValues {
                         run_values.iter().zip(run_valid.iter()).zip(run_lens.iter())
                     {
                         if valid {
-                            out.resize(out.len() + run_len, Scalar::Float64(value));
+                            out.resize(out.len() + run_len, Self::float64_cell(value));
                         } else {
                             out.resize(out.len() + run_len, Scalar::Null(NullKind::NaN));
                         }
@@ -7563,10 +7587,10 @@ impl ScalarValues {
             Self::LazyCategoryCodes {
                 codes, categories, ..
             } => Self::category_cell(categories, codes[idx]),
-            Self::LazyAllValidFloat64 { data, .. } => Scalar::Float64(data[idx]),
-            Self::LazyAllValidFloat64Vec { data, .. } => Scalar::Float64(data[idx]),
+            Self::LazyAllValidFloat64 { data, .. } => Self::float64_cell(data[idx]),
+            Self::LazyAllValidFloat64Vec { data, .. } => Self::float64_cell(data[idx]),
             Self::LazyAllValidFloat64Slice { data, start, .. } => {
-                Scalar::Float64(data[start + idx])
+                Self::float64_cell(data[start + idx])
             }
             Self::LazyMaskedFloat64 {
                 buffer, validity, ..
@@ -14364,6 +14388,9 @@ impl Column {
         match value {
             Scalar::Null(NullKind::NaN) if temporal => Scalar::Null(NullKind::NaT),
             Scalar::Float64(float) if temporal && float.is_nan() => Scalar::Null(NullKind::NaT),
+            Scalar::Float64(float) if dtype == DType::Float64 && float.is_nan() => {
+                Scalar::Null(NullKind::NaN)
+            }
             Scalar::Null(NullKind::NaN) => Scalar::Null(NullKind::NaN),
             Scalar::Null(NullKind::NaT) => Scalar::Null(NullKind::NaT),
             Scalar::Null(_) => Scalar::missing_for_dtype(dtype),
@@ -14653,18 +14680,10 @@ impl Column {
     }
 
     fn from_inferred_float64_values(values: Vec<Scalar>) -> Result<Self, ColumnError> {
-        // Coerce to f64 while tracking whether the column is "canonical NaN-missing"
-        // (every missing slot is EXACTLY Null(NaN) — no Null(NaT)/Null(Null), and no
-        // present Float64(NaN) which is `is_missing` yet a distinct Scalar variant).
-        // This is the pandas-faithful Float64 case (float missing is always NaN).
-        // When it holds, a raw f64 buffer (with a 0.0 SENTINEL at missing slots) +
-        // validity fully reproduces every Scalar via the LazyNullableFloat64 backing
-        // — which every typed fast path (take_positions/sort/dedup/...) recognizes,
-        // unlike the Eager ColumnData::Float64+from_vec representation whose per-slot
-        // NullKind forces a per-row Scalar::clone gather (take was 13x slower).
-        // The 0.0 sentinel is REQUIRED: LazyNullableFloat64.values() emits
-        // Float64(datum) when `validity || datum.is_nan()`, so a NaN sentinel at a
-        // missing slot would wrongly materialize Float64(NaN) instead of Null(NaN).
+        // Keep ordinary float NaNs in the same typed, mask-backed path as
+        // Null(NaN). Explicit non-float null kinds still retain their existing
+        // scalar representation. The backing's invalid datum is immaterial:
+        // both NaN and 0.0 expose Null(NaN) (br-frankenpandas-33fa5).
         let mut fdata: Vec<f64> = Vec::with_capacity(values.len());
         let mut canonical_nan_missing = true;
         let mut coerced: Vec<Scalar> = Vec::with_capacity(values.len());
@@ -14682,17 +14701,16 @@ impl Column {
                 // the condition for the fast LazyNullableFloat64 backing below,
                 // so it should help the typed paths rather than cost them.
                 // (br-frankenpandas-nywa8)
-                value @ Scalar::Null(_) => Self::normalize_missing_for_dtype(value, DType::Float64),
+                value if value.is_missing() => {
+                    Self::normalize_missing_for_dtype(value, DType::Float64)
+                }
                 other => cast_scalar_owned(other, DType::Float64)?,
             };
             match &c {
                 Scalar::Float64(x) => {
                     fdata.push(*x);
-                    if x.is_nan() {
-                        canonical_nan_missing = false; // present Float64(NaN): keep Eager
-                    }
                 }
-                Scalar::Null(NullKind::NaN) => fdata.push(0.0), // 0.0 sentinel, NOT NaN
+                Scalar::Null(NullKind::NaN) => fdata.push(0.0),
                 _ => {
                     fdata.push(0.0);
                     canonical_nan_missing = false; // Null(NaT)/Null(Null): keep Eager
@@ -15738,15 +15756,13 @@ impl Column {
         }
     }
 
-    /// Build a nullable Float64 column from a raw `data` buffer plus an EXPLICIT
-    /// validity mask, WITHOUT re-deriving validity from NaN. The `LazyNullableFloat64`
-    /// backing renders each slot as: validity-set ⇒ present `Float64(data)`;
-    /// cleared-bit-with-NaN-datum ⇒ present `Float64(NaN)`; cleared-bit-with-
-    /// non-NaN-datum ⇒ `Null(NullKind::NaN)`. This is the only constructor that
-    /// reproduces the per-element Scalar path's three-way representation for typed
-    /// nullable arithmetic outputs (a GENERATED NaN must stay a present
-    /// `Float64(NaN)`, an absent operand must be `Null`). Callers set the validity
-    /// bit iff the slot is present AND its datum is non-NaN.
+    /// Build an ordinary Float64 column from a raw buffer and explicit mask,
+    /// without re-deriving validity from NaN. Callers set each bit only for a
+    /// present, non-NaN datum. Both missing operands and generated NaNs expose
+    /// `Null(NullKind::NaN)` through the scalar API.
+    ///
+    /// For pandas' nullable Float64 extension dtype, whose valid NaNs remain
+    /// values, use [`Self::from_nullable_f64_values_with_validity`] instead.
     #[must_use]
     pub fn from_f64_values_nullable(data: Vec<f64>, validity: ValidityMask) -> Self {
         debug_assert_eq!(data.len(), validity.len());
@@ -15991,10 +16007,8 @@ impl Column {
     /// concatenating them into a second full-sized buffer.
     ///
     /// The chunks are in row order and the explicit validity mask has one bit per
-    /// output row. Its scalar view preserves the raw NaN payload at an invalid
-    /// slot, matching [`Self::from_f64_values_owned`], while the column-level
-    /// validity mask retains missingness for typed consumers. This is the exact
-    /// representation already used by the nullable unary fallback.
+    /// output row. Invalid slots expose `Null(NaN)` through the scalar view,
+    /// independently of the datum stored in the worker's output buffer.
     fn from_f64_owned_chunks_with_validity(
         chunks: Vec<(Arc<Vec<f64>>, usize, usize)>,
         len: usize,
@@ -42502,6 +42516,137 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ordinary_float_missing_scalars_are_independent_of_storage_33fa5() {
+        fn assert_cells(column: &Column, expected: &[Option<f64>]) {
+            assert_eq!(column.dtype(), DType::Float64);
+            assert_eq!(column.len(), expected.len());
+            for (row, expected) in expected.iter().enumerate() {
+                // Check the one-cell reader before it can reuse a materialized
+                // scalar view, then check both borrowed readers independently.
+                let cell = column.scalar_at(row).unwrap();
+                assert_eq!(column.validity().get(row), expected.is_some());
+                match expected {
+                    None => {
+                        assert_eq!(cell, Scalar::Null(NullKind::NaN), "row {row}");
+                        assert_eq!(column.values()[row], Scalar::Null(NullKind::NaN));
+                        assert_eq!(column.value(row), Some(&Scalar::Null(NullKind::NaN)));
+                    }
+                    Some(expected) => {
+                        for actual in [&cell, &column.values()[row], column.value(row).unwrap()] {
+                            let Scalar::Float64(actual) = actual else {
+                                panic!("row {row}: expected float, got {actual:?}");
+                            };
+                            assert_eq!(actual.to_bits(), expected.to_bits());
+                        }
+                    }
+                }
+            }
+        }
+
+        let data = vec![
+            1.5,
+            f64::NAN,
+            -0.0,
+            f64::INFINITY,
+            f64::NAN,
+            f64::NEG_INFINITY,
+        ];
+        let expected = [
+            Some(1.5),
+            None,
+            Some(-0.0),
+            Some(f64::INFINITY),
+            None,
+            Some(f64::NEG_INFINITY),
+        ];
+        let scalars: Vec<Scalar> = data.iter().copied().map(Scalar::Float64).collect();
+        let validity = ValidityMask::from_words(vec![0b101101], 6);
+        let sources = [
+            Column::from_f64_values(data.clone()),
+            Column::from_f64_values_owned(data.clone()),
+            Column::from_f64_arc(Arc::from(data.clone())),
+            Column::from_values(scalars.clone()).unwrap(),
+            Column::new(DType::Float64, scalars).unwrap(),
+            Column::from_values(vec![
+                Scalar::Float64(1.5),
+                Scalar::Null(NullKind::Null),
+                Scalar::Float64(-0.0),
+                Scalar::Float64(f64::INFINITY),
+                Scalar::Float64(f64::NAN),
+                Scalar::Float64(f64::NEG_INFINITY),
+            ])
+            .unwrap(),
+            Column::from_f64_values_nullable(data.clone(), validity.clone()),
+            Column::from_f64_values_with_validity(data, validity.clone()),
+            Column::from_f64_values_with_validity(
+                vec![1.5, 0.0, -0.0, f64::INFINITY, 0.0, f64::NEG_INFINITY],
+                validity.clone(),
+            ),
+            Column::from_f64_owned_chunks_with_validity(
+                vec![
+                    (Arc::new(vec![1.5, 0.0, -0.0]), 0, 3),
+                    (Arc::new(vec![f64::INFINITY, f64::NAN, f64::NEG_INFINITY]), 0, 3),
+                ],
+                6,
+                validity,
+                Some(false),
+            ),
+        ];
+        let mask = Column::from_bool_values(vec![true, true, false, false, true, true]);
+        for source in sources {
+            assert_cells(&source, &expected);
+            assert_cells(&source.clone(), &expected);
+            assert_cells(
+                &source.take_positions(&[4, 0, 1, 3, 2]),
+                &[None, Some(1.5), None, Some(f64::INFINITY), Some(-0.0)],
+            );
+            assert_cells(
+                &source.take_contiguous_range(1, 4),
+                &[None, Some(-0.0), Some(f64::INFINITY), None],
+            );
+            assert_cells(
+                &source.filter_by_mask(&mask).unwrap(),
+                &[Some(1.5), None, None, Some(f64::NEG_INFINITY)],
+            );
+            assert_cells(
+                &source.shift(1, Scalar::Null(NullKind::NaN)).unwrap(),
+                &[None, Some(1.5), None, Some(-0.0), Some(f64::INFINITY), None],
+            );
+            assert_cells(
+                &source
+                    .reindex_by_positions(&[Some(1), None, Some(0)])
+                    .unwrap(),
+                &[None, None, Some(1.5)],
+            );
+            assert_cells(
+                &source.concat(&source).unwrap(),
+                &[expected, expected].concat(),
+            );
+        }
+    }
+
+    #[test]
+    fn float_scalar_normalization_preserves_masked_nan_and_object_values_33fa5() {
+        // Nullable Float64's computed NaN is present. It must not acquire a
+        // missing bit or become Null when either scalar reader observes it.
+        let masked = Column::from_nullable_f64_values_with_validity(
+            vec![f64::NAN, f64::NAN, -0.0],
+            ValidityMask::from_words(vec![0b101], 3),
+        );
+        assert!(masked.validity().get(0));
+        assert!(matches!(masked.scalar_at(0), Some(Scalar::Float64(v)) if v.is_nan()));
+        assert!(matches!(masked.values()[0], Scalar::Float64(v) if v.is_nan()));
+        assert_eq!(masked.scalar_at(1), Some(Scalar::Null(NullKind::Null)));
+        assert_eq!(masked.values()[1], Scalar::Null(NullKind::Null));
+        let object = Column::from_object_values(vec![
+            Scalar::Float64(f64::NAN),
+            Scalar::Null(NullKind::Null),
+        ]);
+        assert!(matches!(object.values()[0], Scalar::Float64(v) if v.is_nan()));
+        assert_eq!(object.values()[1], Scalar::Null(NullKind::Null));
+    }
+
     // br-frankenpandas-1rrs8: this `#[test]` had been stacked onto
     // `take_contiguous_range_derive_separates_validity_from_nan` by a later
     // insertion (2b2f25995), so the function compiled as dead code and never ran.
@@ -45282,7 +45427,7 @@ mod tests {
         let result = left.binary_numeric(&right, ArithmeticOp::Sub).expect("sub");
 
         assert!(!result.validity().get(0));
-        assert!(matches!(result.values()[0], Scalar::Float64(v) if v.is_nan()));
+        assert_eq!(result.values()[0], Scalar::Null(NullKind::NaN));
     }
 
     #[test]
@@ -45453,7 +45598,7 @@ mod tests {
     }
 
     #[test]
-    fn aligned_binary_f64_operation_nan_keeps_float_nan_materialization() {
+    fn aligned_binary_f64_operation_nan_has_canonical_missing_materialization() {
         let left = Column::from_f64_values(vec![f64::INFINITY]);
         let right = Column::from_f64_values(vec![f64::INFINITY]);
         let positions = [Some(0)];
@@ -45467,7 +45612,7 @@ mod tests {
             &actual.values,
             ScalarValues::LazyNullableFloat64 { values, .. } if values.get().is_none()
         ));
-        assert!(matches!(actual.values()[0], Scalar::Float64(value) if value.is_nan()));
+        assert_eq!(actual.values()[0], Scalar::Null(NullKind::NaN));
     }
 
     #[test]
@@ -49086,8 +49231,8 @@ mod tests {
             "mul"
         );
 
-        // div: op-produced NaN (0/0 at idx 4) stays a present Float64(NaN); the
-        // absent-operand slots stay Null. NaN needs a bit-compare, not ==.
+        // Ordinary float64 gives a generated NaN (0/0 at idx 4) the same
+        // missing marker as an absent operand.
         let d = left.div(&right).expect("div");
         let dv = d.values();
         match &dv[0] {
@@ -49100,10 +49245,8 @@ mod tests {
             Scalar::Float64(x) => assert_eq!(*x, 0.5),
             o => panic!("div[3]={o:?}"),
         }
-        match &dv[4] {
-            Scalar::Float64(x) => assert!(x.is_nan(), "0/0 ⇒ present NaN"),
-            o => panic!("div[4]={o:?}"),
-        }
+        assert_eq!(dv[4], Scalar::Null(NullKind::NaN));
+        assert!(!d.validity().get(4));
         assert!(matches!(dv[5], Scalar::Null(_)), "div[5] null (both null)");
     }
 
@@ -49442,7 +49585,7 @@ mod tests {
             "mod with zero should promote to Float64"
         );
         assert!(matches!(modulo.values()[0], Scalar::Float64(v) if (v - 1.0).abs() < 1e-10));
-        assert!(matches!(modulo.values()[1], Scalar::Float64(v) if v.is_nan()));
+        assert_eq!(modulo.values()[1], Scalar::Null(NullKind::NaN));
         assert!(matches!(modulo.values()[2], Scalar::Float64(v) if (v - 2.0).abs() < 1e-10));
 
         let floordiv = left
@@ -50102,10 +50245,8 @@ mod tests {
                 o => panic!("fv4={o:?}"),
             }
 
-            // (c) NaN-bearing LazyAllValidFloat64 (from_f64_values). A source NaN is
-            // validity-cleared (missing) but its datum stays a PRESENT Float64(NaN)
-            // in values() — the three-way rep — so the filtered slot must too (the
-            // Scalar-clone path clones Float64(NaN) and Self::new re-marks it missing).
+            // (c) A NaN-bearing typed buffer gives the same canonical missing
+            // scalar as the explicit-mask float backing after filtering.
             let ncol = Column::from_f64_values(vec![1.0, 2.0, f64::NAN, 4.0, 5.0, f64::NAN, 7.0]);
             let nr = ncol.filter_by_mask(&mask).expect("nan filter");
             let nv = nr.values();
@@ -50113,18 +50254,12 @@ mod tests {
                 Scalar::Float64(x) => assert_eq!(*x, 1.0),
                 o => panic!("nv0={o:?}"),
             }
-            match &nv[1] {
-                Scalar::Float64(x) => assert!(x.is_nan(), "pos2 stays present-NaN"),
-                o => panic!("nv1={o:?}"),
-            }
+            assert_eq!(nv[1], Scalar::Null(NullKind::NaN));
             match &nv[2] {
                 Scalar::Float64(x) => assert_eq!(*x, 4.0),
                 o => panic!("nv2={o:?}"),
             }
-            match &nv[3] {
-                Scalar::Float64(x) => assert!(x.is_nan(), "pos5 stays present-NaN"),
-                o => panic!("nv3={o:?}"),
-            }
+            assert_eq!(nv[3], Scalar::Null(NullKind::NaN));
             match &nv[4] {
                 Scalar::Float64(x) => assert_eq!(*x, 7.0),
                 o => panic!("nv4={o:?}"),
@@ -66667,16 +66802,16 @@ mod tests {
             .expect("b");
 
             let (q, r) = a.divmod(&b).expect("divmod");
-            assert!(matches!(q.values()[0], Scalar::Float64(v) if v.is_nan()));
-            assert!(matches!(r.values()[0], Scalar::Float64(v) if v.is_nan()));
-            assert!(matches!(q.values()[1], Scalar::Float64(v) if v.is_nan()));
-            assert!(matches!(r.values()[1], Scalar::Float64(v) if v.is_nan()));
+            assert_eq!(q.values()[0], Scalar::Null(NullKind::NaN));
+            assert_eq!(r.values()[0], Scalar::Null(NullKind::NaN));
+            assert_eq!(q.values()[1], Scalar::Null(NullKind::NaN));
+            assert_eq!(r.values()[1], Scalar::Null(NullKind::NaN));
             assert_eq!(q.values()[2], Scalar::Float64(0.0));
             assert_eq!(r.values()[2], Scalar::Float64(5.0));
             assert_eq!(q.values()[3], Scalar::Float64(-1.0));
             assert_eq!(r.values()[3], Scalar::Float64(f64::INFINITY));
-            assert!(matches!(q.values()[4], Scalar::Float64(v) if v.is_nan()));
-            assert!(matches!(r.values()[4], Scalar::Float64(v) if v.is_nan()));
+            assert_eq!(q.values()[4], Scalar::Null(NullKind::NaN));
+            assert_eq!(r.values()[4], Scalar::Null(NullKind::NaN));
         }
 
         #[test]
@@ -69061,14 +69196,8 @@ mod tests {
                 out.values()[0].to_f64().unwrap().is_finite(),
                 "tap 0 does not touch the null and must stay finite"
             );
-            assert!(
-                out.values()[1].to_f64().unwrap().is_nan(),
-                "tap 1 consumes the null and must be NaN, not a finite value"
-            );
-            assert!(
-                out.values()[2].to_f64().unwrap().is_nan(),
-                "tap 2 consumes the null and must be NaN"
-            );
+            assert_eq!(out.values()[1], Scalar::Null(NullKind::NaN));
+            assert_eq!(out.values()[2], Scalar::Null(NullKind::NaN));
             assert!(
                 out.values()[3].to_f64().unwrap().is_finite(),
                 "tap 3 does not touch the null and must stay finite"
@@ -69078,9 +69207,14 @@ mod tests {
             let a2 = Column::from_values(vec![f(1.0), f(2.0)]).unwrap();
             let kn = Column::from_values(vec![f(1.0), Scalar::Null(NullKind::NaN)]).unwrap();
             let out2 = a2.convolve(&kn, "full").unwrap();
-            assert!(
-                out2.values().iter().any(|s| s.to_f64().unwrap().is_nan()),
-                "a missing kernel tap must propagate NaN"
+            assert_eq!(
+                out2.values(),
+                &[
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaN),
+                ],
+                "a missing kernel tap must propagate the canonical missing marker"
             );
 
             // --- convolve: a NON-NUMERIC column must not convolve as zeros
@@ -69092,7 +69226,7 @@ mod tests {
             .unwrap();
             let out3 = utf8.convolve(&v, "full").unwrap();
             assert!(
-                out3.values().iter().all(|s| s.to_f64().unwrap().is_nan()),
+                out3.values().iter().all(|s| *s == Scalar::Null(NullKind::NaN)),
                 "a Utf8 column must yield NaN, not silently integrate as zeros"
             );
 
@@ -69117,8 +69251,14 @@ mod tests {
             // Pinned explicitly: if someone later stops delegating (e.g. to
             // "optimize" it), this catches the silent regression.
             let cr = a.correlate(&v, "full").unwrap();
-            assert!(
-                cr.values().iter().any(|s| s.to_f64().unwrap().is_nan()),
+            assert_eq!(
+                cr.values(),
+                &[
+                    Scalar::Float64(1.0),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Float64(3.0),
+                ],
                 "correlate must propagate the null it inherits from convolve"
             );
             let cr_clean = Column::from_values(vec![f(1.0), f(2.0), f(3.0)])
@@ -69858,9 +69998,15 @@ mod tests {
                 Some(1.5f64.to_bits()),
                 Some((-0.0f64).to_bits()),
                 Some(f64::INFINITY.to_bits()),
-                Some(nan.to_bits()),
+                None,
             ]
         );
+        assert_eq!(column.values()[3], Scalar::Null(NullKind::NaN));
+        // Scalar normalization does not rewrite the numerical buffer, even
+        // the NaN payload bits retained for typed consumers.
+        let (raw, mask) = column.as_f64_slice_with_validity().expect("typed floats");
+        assert_eq!(raw[3].to_bits(), nan.to_bits());
+        assert!(!mask.get(3));
 
         let mixed = Column::from_values(vec![
             Scalar::Float64(1.0),
