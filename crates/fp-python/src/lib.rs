@@ -102686,6 +102686,55 @@ impl PySparseArray {
         Ok(pyo3::PyClassInitializer::from(PyExtensionArray { inner }).add_subclass(Self))
     }
 
+    /// Import a single SciPy sparse column without materializing its implicit
+    /// zeros. CSC conversion combines duplicate COO coordinates; an already
+    /// compressed column must have strictly increasing row positions.
+    #[classmethod]
+    #[pyo3(signature = (data))]
+    fn from_spmatrix(
+        _cls: &Bound<'_, pyo3::types::PyType>,
+        data: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PySparseArray>> {
+        let py = data.py();
+        let shape = data.getattr("shape")?;
+        let width: usize = shape.get_item(1)?.extract()?;
+        if width != 1 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "'data' must have a single column, not '{width}'"
+            )));
+        }
+        // Sorting a borrowed CSC matrix would mutate the caller's buffers.
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("copy", true)?;
+        let matrix = data.call_method("tocsc", (), Some(&kwargs))?;
+        matrix.call_method0("sort_indices")?;
+        let len: usize = matrix.getattr("shape")?.get_item(0)?.extract()?;
+        let subtype = matrix.getattr("dtype")?;
+        let fill = subtype.getattr("type")?.call1((0,))?.call_method0("item")?;
+        let dtype = sparse_dtype_from_parts(py, Some(&subtype), Some(&fill))?;
+        let stored = matrix.getattr("data")?;
+        let values = PySeries::new(py, Some(&stored), None, None, None, None)?
+            .inner
+            .column()
+            .values()
+            .to_vec();
+        let indices: Vec<usize> = matrix.getattr("indices")?.extract()?;
+        if indices.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Indices must be strictly increasing",
+            ));
+        }
+        let column = Column::from_sparse(
+            SparseColumn::from_parts(dtype, len, indices, values).map_err(column_error_to_py)?,
+        );
+        let inner = Series::new(LabelName::default(), Index::default_range(len), column)
+            .map_err(frame_error_to_py)?;
+        Py::new(
+            py,
+            pyo3::PyClassInitializer::from(PyExtensionArray { inner }).add_subclass(Self),
+        )
+    }
+
     #[getter]
     fn fill_value(slf: PyRef<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();

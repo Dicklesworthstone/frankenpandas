@@ -793,3 +793,123 @@ def test_sparse_get_dummies_to_scipy_coo_workflow():
     actual = fpd.get_dummies(["b", "a", "b", None], sparse=True, dummy_na=True).sparse.to_coo()
     expected = pd.get_dummies(["b", "a", "b", None], sparse=True, dummy_na=True).sparse.to_coo()
     assert_coo_matrix(actual, expected)
+
+
+# br-frankenpandas-at95d: SciPy inputs must stay compressed on import.
+@pytest.mark.parametrize("format", ["coo", "csr", "csc", "bsr", "dia", "lil", "dok"])
+@pytest.mark.parametrize("dtype", ["int8", "uint16", "int64", "float32", "float64", "bool"])
+def test_sparse_array_from_spmatrix_preserves_values_and_subtype(format, dtype):
+    scipy = pytest.importorskip("scipy.sparse")
+    values = np.array([0, 2, 0, 3, 0], dtype=dtype).reshape(-1, 1)
+    source = scipy.coo_matrix(values).asformat(format)
+    actual = fpd.arrays.SparseArray.from_spmatrix(source)
+    expected = pd.arrays.SparseArray.from_spmatrix(source)
+    assert str(actual.dtype) == str(expected.dtype)
+    assert type(actual.fill_value) is type(expected.fill_value)
+    assert actual.fill_value == expected.fill_value
+    assert actual.npoints == expected.npoints
+    np.testing.assert_array_equal(actual.sp_index.indices, expected.sp_index.indices)
+    np.testing.assert_array_equal(actual.sp_values, expected.sp_values)
+    np.testing.assert_array_equal(actual.to_dense(), expected.to_dense())
+    assert actual.to_dense().dtype == expected.to_dense().dtype
+
+
+@pytest.mark.parametrize("dtype", ["int64", "float32", "bool"])
+@pytest.mark.parametrize("length", [0, 5])
+def test_sparse_array_from_spmatrix_empty_storage(dtype, length):
+    scipy = pytest.importorskip("scipy.sparse")
+    source = scipy.csc_matrix((length, 1), dtype=dtype)
+    actual = fpd.arrays.SparseArray.from_spmatrix(source)
+    expected = pd.arrays.SparseArray.from_spmatrix(source)
+    assert len(actual) == len(expected)
+    assert str(actual.dtype) == str(expected.dtype)
+    assert actual.npoints == expected.npoints == 0
+    assert actual.sp_values.dtype == expected.sp_values.dtype
+    np.testing.assert_array_equal(actual.to_dense(), expected.to_dense())
+
+
+def test_sparse_array_from_spmatrix_keeps_explicit_zero_and_exact_integer():
+    scipy = pytest.importorskip("scipy.sparse")
+    source = scipy.csc_matrix(
+        (np.array([0, 2**53 + 1]), np.array([1, 3]), np.array([0, 2])),
+        shape=(6, 1),
+    )
+    actual = fpd.arrays.SparseArray.from_spmatrix(source)
+    expected = pd.arrays.SparseArray.from_spmatrix(source)
+    assert actual.npoints == expected.npoints == 2
+    np.testing.assert_array_equal(actual.sp_index.indices, expected.sp_index.indices)
+    np.testing.assert_array_equal(actual.sp_values, expected.sp_values)
+    np.testing.assert_array_equal(actual.to_dense(), expected.to_dense())
+
+
+def test_sparse_array_from_spmatrix_sorts_a_copy_of_csc():
+    scipy = pytest.importorskip("scipy.sparse")
+    source = scipy.csc_matrix(
+        (np.array([7, 0, 2]), np.array([4, 0, 2]), np.array([0, 3])),
+        shape=(6, 1),
+    )
+    before_data = source.data.copy()
+    before_indices = source.indices.copy()
+    actual = fpd.arrays.SparseArray.from_spmatrix(source)
+    np.testing.assert_array_equal(source.data, before_data)
+    np.testing.assert_array_equal(source.indices, before_indices)
+    expected = pd.arrays.SparseArray.from_spmatrix(source.copy())
+    np.testing.assert_array_equal(actual.sp_values, expected.sp_values)
+    np.testing.assert_array_equal(actual.sp_index.indices, expected.sp_index.indices)
+
+
+@pytest.mark.parametrize("width", [0, 2, 4])
+def test_sparse_array_from_spmatrix_rejects_non_column_shape(width):
+    scipy = pytest.importorskip("scipy.sparse")
+    source = scipy.csc_matrix((3, width))
+    for module in (pd, fpd):
+        with pytest.raises(ValueError, match="must have a single column"):
+            module.arrays.SparseArray.from_spmatrix(source)
+
+
+def test_sparse_array_from_spmatrix_duplicate_coo_coordinates_are_combined():
+    scipy = pytest.importorskip("scipy.sparse")
+    source = scipy.coo_matrix(
+        (np.array([2, 3, 0]), (np.array([1, 1, 3]), np.array([0, 0, 0]))),
+        shape=(5, 1),
+    )
+    actual = fpd.arrays.SparseArray.from_spmatrix(source)
+    expected = pd.arrays.SparseArray.from_spmatrix(source)
+    np.testing.assert_array_equal(actual.sp_values, expected.sp_values)
+    np.testing.assert_array_equal(actual.sp_index.indices, expected.sp_index.indices)
+    np.testing.assert_array_equal(actual.to_dense(), expected.to_dense())
+
+
+def test_sparse_array_from_spmatrix_rejects_duplicate_csc_positions():
+    scipy = pytest.importorskip("scipy.sparse")
+    source = scipy.csc_matrix(
+        (np.array([2, 3]), np.array([1, 1]), np.array([0, 2])),
+        shape=(4, 1),
+    )
+    for module in (pd, fpd):
+        with pytest.raises(ValueError, match="strictly increasing"):
+            module.arrays.SparseArray.from_spmatrix(source)
+
+
+def test_sparse_array_from_spmatrix_does_not_expand_logical_length():
+    scipy = pytest.importorskip("scipy.sparse")
+
+    class CompressedOnly(scipy.csc_matrix):
+        def toarray(self, *args, **kwargs):
+            raise AssertionError("sparse import must not call toarray")
+
+        def todense(self, *args, **kwargs):
+            raise AssertionError("sparse import must not call todense")
+
+    length = 1_000_000_000
+    source = CompressedOnly(
+        (np.array([5, 9]), np.array([3, length - 1]), np.array([0, 2])),
+        shape=(length, 1),
+    )
+    actual = fpd.arrays.SparseArray.from_spmatrix(source)
+    assert len(actual) == length
+    assert actual.npoints == 2
+    assert actual[0] == 0
+    assert actual[3] == 5
+    assert actual[-1] == 9
+    np.testing.assert_array_equal(actual.sp_index.indices, [3, length - 1])
