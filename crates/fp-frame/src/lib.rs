@@ -50242,6 +50242,107 @@ type StrDenseGrouping = (Vec<usize>, Vec<usize>, Vec<usize>);
 /// group count, the groups in result order, and their labels.
 type Utf8KeyGrouping = (Vec<usize>, usize, Vec<usize>, Index);
 
+/// The source row each grouped difference reads, in the original row order.
+/// Missing-key rows excluded by the grouping retain an absent partner for a
+/// nonzero shift. A zero-period shift copies every row, including excluded
+/// keys, as pandas does. Checked offsets also cover extreme periods.
+fn groupby_diff_positions<'a>(
+    len: usize,
+    periods: i64,
+    groups: impl Iterator<Item = &'a [usize]>,
+) -> Vec<Option<usize>> {
+    if periods == 0 {
+        return (0..len).map(Some).collect();
+    }
+    let distance = usize::try_from(periods.unsigned_abs()).unwrap_or(usize::MAX);
+    let mut positions = vec![None; len];
+    for rows in groups {
+        for (local, &row) in rows.iter().enumerate() {
+            let partner = if periods >= 0 {
+                local.checked_sub(distance)
+            } else {
+                local.checked_add(distance)
+            };
+            positions[row] = partner.and_then(|partner| rows.get(partner)).copied();
+        }
+    }
+    positions
+}
+
+/// A grouped difference over an already resolved partner map. Masked numeric
+/// columns subtract in their own dtype: Int64 never travels through f64, and
+/// Float64 carries its explicit NA mask rather than treating a present NaN as
+/// missing. Ordinary int64 retains the grouped shift's float arithmetic.
+fn groupby_diff_column(source: &Column, positions: &[Option<usize>]) -> Result<Column, FrameError> {
+    if source.dtype() == DType::BoolNullable {
+        return Err(FrameError::CompatibilityRejected(
+            "numpy boolean subtract, the `-` operator, is not supported, use the bitwise_xor, \
+             the `^` operator, or the logical_xor function instead."
+                .to_owned(),
+        ));
+    }
+    if matches!(
+        source.dtype(),
+        DType::Int64Nullable | DType::Float64Nullable
+    ) {
+        let shifted = source.reindex_by_positions(positions)?;
+        let difference = source.sub(&shifted)?;
+        return Ok(match source.width() {
+            Some(width) => difference.cast_to_width(width, true)?,
+            None => difference,
+        });
+    }
+
+    let temporal = matches!(
+        source.dtype(),
+        DType::Timedelta64 | DType::Datetime64 { .. }
+    );
+    let dtype = match source.dtype() {
+        DType::Timedelta64 | DType::Datetime64 { .. } => DType::Timedelta64,
+        DType::Bool => DType::Bool,
+        _ => DType::Float64,
+    };
+    let missing = Scalar::Null(if temporal {
+        NullKind::NaT
+    } else {
+        NullKind::NaN
+    });
+    let values = source.values();
+    let difference = positions
+        .iter()
+        .enumerate()
+        .map(|(row, partner)| {
+            let Some(partner) = partner else {
+                return missing.clone();
+            };
+            let (current, previous) = (&values[row], &values[*partner]);
+            if current.is_missing() || previous.is_missing() {
+                return missing.clone();
+            }
+            match (current, previous) {
+                (Scalar::Timedelta64(current), Scalar::Timedelta64(previous))
+                | (Scalar::Datetime64(current), Scalar::Datetime64(previous)) => {
+                    if *current == i64::MIN || *previous == i64::MIN {
+                        return Scalar::Null(NullKind::NaT);
+                    }
+                    match i64::try_from(i128::from(*current) - i128::from(*previous)) {
+                        Ok(delta) if delta != i64::MIN => Scalar::Timedelta64(delta),
+                        _ => Scalar::Null(NullKind::NaT),
+                    }
+                }
+                (Scalar::Bool(current), Scalar::Bool(previous)) => {
+                    Scalar::Bool(current != previous)
+                }
+                _ => match (current.to_f64(), previous.to_f64()) {
+                    (Ok(current), Ok(previous)) => Scalar::Float64(current - previous),
+                    _ => missing.clone(),
+                },
+            }
+        })
+        .collect();
+    Ok(Column::new(dtype, difference)?)
+}
+
 #[cfg(test)]
 std::thread_local! {
     static SERIES_GROUPBY_FORCE_UNCACHED_UTF8: std::cell::Cell<bool> =
@@ -57686,6 +57787,19 @@ impl SeriesGroupBy<'_> {
 
     /// GroupBy difference within each group.
     pub fn diff(&self, periods: i64) -> Result<Series, FrameError> {
+        // Masked numbers subtract after a dtype-preserving grouped shift,
+        // including the source mask's present NaNs (05cm6). A nullable
+        // boolean subtraction is pandas' TypeError, not Series.diff's XOR.
+        if self.series.column.dtype().is_nullable() {
+            let (_, _, groups) = self.build_groups();
+            let positions = groupby_diff_positions(
+                self.series.len(),
+                periods,
+                groups.values().map(Vec::as_slice),
+            );
+            let column = groupby_diff_column(&self.series.column, &positions)?;
+            return Series::new(self.series.name(), self.series.index.clone(), column);
+        }
         // A negative diff reads the row `-periods` ahead in its group, as
         // pandas' (the periods were unsigned: g.diff(-1) raised
         // OverflowError); the dense ring kernels below read back, so only a
@@ -57775,74 +57889,15 @@ impl SeriesGroupBy<'_> {
                 return build(out, mask);
             }
         }
-        let is_temporal = matches!(
-            self.series.column.dtype(),
-            DType::Timedelta64 | DType::Datetime64 { .. }
+        let (_, _, groups) = self.build_groups();
+        let positions = groupby_diff_positions(
+            self.series.len(),
+            signed,
+            groups.values().map(Vec::as_slice),
         );
-        let out_dtype = match self.series.column.dtype() {
-            DType::Timedelta64 | DType::Datetime64 { .. } => DType::Timedelta64,
-            DType::Bool | DType::BoolNullable => DType::Bool,
-            _ => DType::Float64,
-        };
-        let null_scalar = if is_temporal {
-            Scalar::Null(NullKind::NaT)
-        } else {
-            Scalar::Null(NullKind::NaN)
-        };
-        self.transform_groups_with_dtype(Some(out_dtype), |vals| {
-            vals.iter()
-                .enumerate()
-                .map(|(idx, value)| {
-                    let Some(previous) = i64::try_from(idx)
-                        .ok()
-                        .and_then(|idx| usize::try_from(idx - signed).ok())
-                        .and_then(|source| vals.get(source))
-                    else {
-                        return null_scalar.clone();
-                    };
-                    if value.is_missing() || previous.is_missing() {
-                        return null_scalar.clone();
-                    }
-                    // Per br-frankenpandas-q82t4: Timedelta64 diff preserves
-                    // Timedelta dtype matching pandas. NaT propagates.
-                    if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) =
-                        (value, previous)
-                    {
-                        if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
-                            return Scalar::Null(NullKind::NaT);
-                        }
-                        let delta = i128::from(*cur_ns) - i128::from(*prev_ns);
-                        if delta > i128::from(i64::MAX) || delta <= i128::from(i64::MIN) {
-                            return Scalar::Null(NullKind::NaT);
-                        }
-                        return Scalar::Timedelta64(delta as i64);
-                    }
-                    if let (Scalar::Datetime64(cur_ns), Scalar::Datetime64(prev_ns)) =
-                        (value, previous)
-                    {
-                        if *cur_ns == fp_types::Timestamp::NAT
-                            || *prev_ns == fp_types::Timestamp::NAT
-                        {
-                            return Scalar::Null(NullKind::NaT);
-                        }
-                        let delta = i128::from(*cur_ns) - i128::from(*prev_ns);
-                        if delta > i128::from(i64::MAX) || delta <= i128::from(i64::MIN) {
-                            return Scalar::Null(NullKind::NaT);
-                        }
-                        return Scalar::Timedelta64(delta as i64);
-                    }
-                    // pandas 2.2.3 Bool.diff() == (cur XOR prev), not numeric.
-                    if let (Scalar::Bool(cur_b), Scalar::Bool(prev_b)) = (value, previous) {
-                        return Scalar::Bool(cur_b != prev_b);
-                    }
-                    if let (Ok(current), Ok(prev)) = (value.to_f64(), previous.to_f64()) {
-                        Scalar::Float64(current - prev)
-                    } else {
-                        null_scalar.clone()
-                    }
-                })
-                .collect()
-        })
+        let column = groupby_diff_column(&self.series.column, &positions)?;
+        Series::new(self.series.name(), self.series.index.clone(), column)
+            .map(|out| self.keeping_source_kind(out))
     }
 
     /// GroupBy percentage change within each group.
@@ -127375,13 +127430,13 @@ impl DataFrameGroupBy<'_> {
         })
     }
 
-    /// Internal: apply a per-group transform per column with explicit target dtype preservation.
-    fn transform_groups_with_column_dtype<F, G>(&self, func: F) -> Result<DataFrame, FrameError>
-    where
-        F: Fn(&str, &Column) -> (DType, G),
-        G: Fn(&[Scalar]) -> Vec<Scalar>,
-    {
-        let (group_order, groups) = self.build_groups();
+    /// Diff fallback sharing one partner map across every value column.
+    /// A masked column keeps its own arithmetic and validity instead of
+    /// being gathered into Scalars and inferred back as ordinary float64.
+    fn diff_columns(&self, periods: i64) -> Result<DataFrame, FrameError> {
+        let (_, groups) = self.build_groups();
+        let positions =
+            groupby_diff_positions(self.df.len(), periods, groups.values().map(Vec::as_slice));
         let value_cols: Vec<String> = self
             .df
             .column_order
@@ -127390,34 +127445,12 @@ impl DataFrameGroupBy<'_> {
             .cloned()
             .collect();
 
-        let n = self.df.len();
         let mut result_cols = BTreeMap::new();
         let mut col_order = Vec::new();
 
         for col_name in &value_cols {
             let col = &self.df.columns[col_name];
-            let (target_dtype, transform_fn) = func(col_name, col);
-            let default_null = match &target_dtype {
-                DType::Timedelta64 | DType::Datetime64 { .. } => Scalar::Null(NullKind::NaT),
-                _ => Scalar::Null(NullKind::NaN),
-            };
-            let mut out = vec![default_null; n];
-
-            for gkey in &group_order {
-                let row_indices = &groups[gkey];
-                let group_vals: Vec<Scalar> = row_indices
-                    .iter()
-                    .map(|&i| col.values()[i].clone())
-                    .collect();
-                let transformed = transform_fn(&group_vals);
-                for (j, &ri) in row_indices.iter().enumerate() {
-                    if j < transformed.len() {
-                        out[ri] = transformed[j].clone();
-                    }
-                }
-            }
-
-            result_cols.insert(col_name.clone(), Column::new(target_dtype, out)?);
+            result_cols.insert(col_name.clone(), groupby_diff_column(col, &positions)?);
             col_order.push(col_name.clone());
         }
 
@@ -127980,72 +128013,7 @@ impl DataFrameGroupBy<'_> {
         {
             return Ok(df);
         }
-        self.transform_groups_with_column_dtype(|_col_name, col| {
-            let is_temporal = matches!(col.dtype(), DType::Timedelta64 | DType::Datetime64 { .. });
-            let out_dtype = match col.dtype() {
-                DType::Timedelta64 | DType::Datetime64 { .. } => DType::Timedelta64,
-                DType::Bool | DType::BoolNullable => DType::Bool,
-                _ => DType::Float64,
-            };
-            let null_scalar = if is_temporal {
-                Scalar::Null(NullKind::NaT)
-            } else {
-                Scalar::Null(NullKind::NaN)
-            };
-            (out_dtype, move |vals: &[Scalar]| {
-                vals.iter()
-                    .enumerate()
-                    .map(|(i, v)| {
-                        let Some(prev) = i64::try_from(i)
-                            .ok()
-                            .and_then(|i| usize::try_from(i - signed).ok())
-                            .and_then(|source| vals.get(source))
-                        else {
-                            return null_scalar.clone();
-                        };
-                        if v.is_missing() || prev.is_missing() {
-                            return null_scalar.clone();
-                        }
-                        // Per br-frankenpandas-q82t4 and br-frankenpandas-2z1sp: Timedelta64 diff preserves
-                        // Timedelta dtype matching pandas. NaT propagates.
-                        if let (Scalar::Timedelta64(cur_ns), Scalar::Timedelta64(prev_ns)) =
-                            (v, prev)
-                        {
-                            if *cur_ns == Timedelta::NAT || *prev_ns == Timedelta::NAT {
-                                return Scalar::Null(NullKind::NaT);
-                            }
-                            let delta = i128::from(*cur_ns) - i128::from(*prev_ns);
-                            if delta > i128::from(i64::MAX) || delta <= i128::from(i64::MIN) {
-                                return Scalar::Null(NullKind::NaT);
-                            }
-                            return Scalar::Timedelta64(delta as i64);
-                        }
-                        if let (Scalar::Datetime64(cur_ns), Scalar::Datetime64(prev_ns)) = (v, prev)
-                        {
-                            if *cur_ns == fp_types::Timestamp::NAT
-                                || *prev_ns == fp_types::Timestamp::NAT
-                            {
-                                return Scalar::Null(NullKind::NaT);
-                            }
-                            let delta = i128::from(*cur_ns) - i128::from(*prev_ns);
-                            if delta > i128::from(i64::MAX) || delta <= i128::from(i64::MIN) {
-                                return Scalar::Null(NullKind::NaT);
-                            }
-                            return Scalar::Timedelta64(delta as i64);
-                        }
-                        // pandas 2.2.3 Bool.diff() == (cur XOR prev), not numeric.
-                        if let (Scalar::Bool(cur_b), Scalar::Bool(prev_b)) = (v, prev) {
-                            return Scalar::Bool(cur_b != prev_b);
-                        }
-                        if let (Ok(a), Ok(b)) = (v.to_f64(), prev.to_f64()) {
-                            Scalar::Float64(a - b)
-                        } else {
-                            null_scalar.clone()
-                        }
-                    })
-                    .collect()
-            })
-        })
+        self.diff_columns(signed)
     }
 
     /// GroupBy nth: select the nth row from each group.
@@ -187045,6 +187013,203 @@ mod tests {
         assert!(v.values()[0].is_missing()); // first in group → NaN
         assert_eq!(v.values()[1], Scalar::Float64(5.0)); // 15-10
         assert_eq!(v.values()[2], Scalar::Float64(10.0)); // 25-15
+    }
+
+    #[test]
+    fn groupby_diff_keeps_masked_integer_precision_05cm6() {
+        let base = 1_i64 << 53;
+        let index = Index::new((0..8).map(IndexLabel::Int64).collect());
+        let values = Column::new(
+            DType::Int64Nullable,
+            vec![
+                Scalar::Int64(base),
+                Scalar::Int64(10),
+                Scalar::Int64(base + 1),
+                Scalar::Int64(13),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(20),
+                Scalar::Int64(base + 3),
+                Scalar::Int64(25),
+            ],
+        )
+        .unwrap();
+        let keys = Column::new(
+            DType::Int64,
+            vec![
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(0),
+                Scalar::Null(NullKind::Null),
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+                Scalar::Int64(0),
+                Scalar::Int64(1),
+            ],
+        )
+        .unwrap();
+        let series = Series::new("value", index.clone(), values.clone()).unwrap();
+        let by = Series::new("key", index.clone(), keys.clone()).unwrap();
+        let frame = DataFrame::new_with_column_order(
+            index.clone(),
+            BTreeMap::from([("key".to_owned(), keys), ("value".to_owned(), values)]),
+            vec!["key".to_owned(), "value".to_owned()],
+        )
+        .unwrap();
+        let cases = [
+            (
+                1,
+                [None, None, Some(1), None, None, Some(10), None, Some(5)],
+            ),
+            (
+                -1,
+                [Some(-1), Some(-10), None, None, None, Some(-5), None, None],
+            ),
+            (
+                0,
+                [
+                    Some(0),
+                    Some(0),
+                    Some(0),
+                    Some(0),
+                    None,
+                    Some(0),
+                    Some(0),
+                    Some(0),
+                ],
+            ),
+            (2, [None, None, None, None, None, None, Some(2), Some(15)]),
+            (i64::MIN, [None; 8]),
+            (i64::MAX, [None; 8]),
+        ];
+        for (periods, expected) in cases {
+            let got_series = series.groupby(&by).unwrap().diff(periods).unwrap();
+            let got_frame = frame.groupby(&["key"]).unwrap().diff(periods).unwrap();
+            assert_eq!(got_series.index(), &index);
+            assert_eq!(got_frame.index(), &index);
+            assert_eq!(got_series.name(), series.name());
+            for column in [got_series.column(), got_frame.column("value").unwrap()] {
+                assert_eq!(column.dtype(), DType::Int64Nullable);
+                for (row, wanted) in expected.iter().enumerate() {
+                    assert_eq!(
+                        column.validity().get(row),
+                        wanted.is_some(),
+                        "periods={periods}, row={row}"
+                    );
+                    if let Some(value) = wanted {
+                        assert_eq!(column.values()[row], Scalar::Int64(*value));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn groupby_diff_masked_float_keeps_present_nan_05cm6() {
+        let index = Index::new((0..6).map(IndexLabel::Int64).collect());
+        let column = Column::from_nullable_f64_values_with_validity(
+            vec![1.0, f64::NAN, 3.0, f64::INFINITY, f64::INFINITY, 99.0],
+            ValidityMask::from_words(vec![0b011111], 6),
+        );
+        let keys = Column::from_i64_values(vec![0; 6]);
+        let series = Series::new("value", index.clone(), column.clone()).unwrap();
+        let by = Series::new("key", index.clone(), keys.clone()).unwrap();
+        let frame = DataFrame::new_with_column_order(
+            index,
+            BTreeMap::from([("key".to_owned(), keys), ("value".to_owned(), column)]),
+            vec!["key".to_owned(), "value".to_owned()],
+        )
+        .unwrap();
+        for (periods, valid, nan_rows) in [
+            (1, 0b011110_u64, vec![1, 2, 4]),
+            (-1, 0b001111, vec![0, 1, 3]),
+            (0, 0b011111, vec![1, 3, 4]),
+        ] {
+            let got_series = series.groupby(&by).unwrap().diff(periods).unwrap();
+            let got_frame = frame.groupby(&["key"]).unwrap().diff(periods).unwrap();
+            for column in [got_series.column(), got_frame.column("value").unwrap()] {
+                assert_eq!(column.dtype(), DType::Float64Nullable);
+                for row in 0..6 {
+                    assert_eq!(column.validity().get(row), (valid >> row) & 1 == 1);
+                }
+                for &row in &nan_rows {
+                    assert!(
+                        matches!(column.values()[row], Scalar::Float64(value) if value.is_nan())
+                    );
+                    assert!(
+                        column.validity().get(row),
+                        "computed NaN is a present value"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn groupby_diff_masked_narrow_width_wraps_and_empty_stays_typed_05cm6() {
+        use fp_types::NumericWidth;
+
+        let index = Index::new(vec![IndexLabel::Int64(0), IndexLabel::Int64(1)]);
+        let by = Series::new("key", index.clone(), Column::from_i64_values(vec![0, 0])).unwrap();
+        for (width, values, forward, backward) in [
+            (NumericWidth::Int8, vec![127, -128], 1, -1),
+            (NumericWidth::UInt8, vec![0, 255], 255, 1),
+        ] {
+            let column = Column::from_i64_values(values)
+                .cast_to_width(width, true)
+                .unwrap();
+            let series = Series::new("value", index.clone(), column).unwrap();
+            for (periods, row, expected) in [(1, 1, forward), (-1, 0, backward)] {
+                let got = series.groupby(&by).unwrap().diff(periods).unwrap();
+                assert_eq!(got.dtype(), DType::Int64Nullable);
+                assert_eq!(got.column().width(), Some(width));
+                assert_eq!(got.values()[row], Scalar::Int64(expected));
+                assert!(!got.column().validity().get(1 - row));
+            }
+            let empty = Series::new(
+                "value",
+                Index::new(Vec::new()),
+                series.column().take_positions(&[]),
+            )
+            .unwrap();
+            let empty_by = Series::new(
+                "key",
+                Index::new(Vec::new()),
+                Column::from_i64_values(Vec::new()),
+            )
+            .unwrap();
+            let got = empty.groupby(&empty_by).unwrap().diff(1).unwrap();
+            assert_eq!(got.dtype(), DType::Int64Nullable);
+            assert_eq!(got.column().width(), Some(width));
+            assert!(got.is_empty());
+        }
+    }
+
+    #[test]
+    fn groupby_diff_nullable_boolean_refuses_subtraction_05cm6() {
+        for values in [vec![Scalar::Bool(true), Scalar::Bool(false)], Vec::new()] {
+            let n = values.len();
+            let index = Index::new((0..n as i64).map(IndexLabel::Int64).collect());
+            let column = Column::new(DType::BoolNullable, values).unwrap();
+            let keys = Column::from_i64_values(vec![0; n]);
+            let series = Series::new("value", index.clone(), column.clone()).unwrap();
+            let by = Series::new("key", index.clone(), keys.clone()).unwrap();
+            let frame = DataFrame::new_with_column_order(
+                index,
+                BTreeMap::from([("key".to_owned(), keys), ("value".to_owned(), column)]),
+                vec!["key".to_owned(), "value".to_owned()],
+            )
+            .unwrap();
+            for periods in [-1, 0, 1] {
+                for error in [
+                    series.groupby(&by).unwrap().diff(periods).unwrap_err(),
+                    frame.groupby(&["key"]).unwrap().diff(periods).unwrap_err(),
+                ] {
+                    assert!(
+                        matches!(error, FrameError::CompatibilityRejected(message) if message.starts_with("numpy boolean subtract"))
+                    );
+                }
+            }
+        }
     }
 
     #[test]
