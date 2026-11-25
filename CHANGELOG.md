@@ -7,6 +7,25 @@ FrankenPandas is a clean-room Rust reimplementation of the full pandas API surfa
 
 Repository: <https://github.com/Dicklesworthstone/frankenpandas>
 
+## Unreleased
+
+### Oracle contradiction policy ([#51](https://github.com/Dicklesworthstone/frankenpandas/issues/51))
+
+- Resolve the six remaining experimental Python oracle contradictions as four
+  narrow accepted divergences, documented in `crates/fp-conformance/DISCREPANCIES.md`
+  (DISC-036 through DISC-039). Preserve effective custom-calendar metadata across
+  copying and serialization, reject nonbinary weekmask entries, retain distinct
+  typed keys in categorical products, and retain real missing-key groups in
+  `transform` with `dropna=False`.
+- Keep native correctness assertions mandatory and add separate pandas 2.2.3
+  witnesses for the upstream behavior. Unaffected cases still compare directly
+  against pandas. This resolves test-oracle policy; it makes no production
+  behavior change and does not turn these cases into claims of exact parity.
+- Add `test_custom_business_day.py` and `test_categorical_groupby_products.py`
+  to the Python wheel CI gate. Exercise pinned NumPy 2.3.5 and 2.5.5 environments
+  to cover both sides of the nonbinary-weekmask validation difference, and keep
+  wheel installation from silently replacing the selected NumPy version.
+
 ## 0.7.1 (2026-11-23)
 
 Patch release delivering 810 of 816 Python parity fixes for [#51](https://github.com/Dicklesworthstone/frankenpandas/issues/51)

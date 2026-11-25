@@ -811,8 +811,18 @@ jobs:
           if-no-files-found: warn
 
   python-wheel:
-    name: Python wheel & differential tests
+    name: Python wheel & differential tests (Python ${{ matrix.python }}, NumPy ${{ matrix.numpy }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # DISC-037: exercise both rejection and coercion of a nonbinary
+          # weekmask. NumPy 2.5.5 requires Python >=3.12.
+          - python: "3.11"
+            numpy: "2.3.5"
+          - python: "3.13"
+            numpy: "2.5.5"
     env:
       CARGO_TERM_COLOR: always
       CARGO_TARGET_DIR: ${{ github.workspace }}/.target-python-wheel
@@ -843,14 +853,14 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python }}
 
       - name: Create venv and install dependencies
         run: |
           python -m venv .venv-oracle
-          "$FP_PYTHON_BIN" -m pip install --upgrade pip -r crates/fp-conformance/oracle/requirements.txt maturin pytest
+          "$FP_PYTHON_BIN" -m pip install --upgrade pip -r crates/fp-conformance/oracle/requirements.txt "numpy==${{ matrix.numpy }}" maturin pytest
           test -x "$FP_PYTHON_BIN" || { echo "required live pandas oracle interpreter is missing: $FP_PYTHON_BIN" >&2; exit 1; }
-          "$FP_PYTHON_BIN" -c 'import pandas; print(f"live pandas oracle {pandas.__version__}")'
+          "$FP_PYTHON_BIN" -c 'import numpy, pandas, sys; print(f"live oracle: Python {sys.version}; pandas {pandas.__version__}; NumPy {numpy.__version__}")'
 
       - name: Build wheel with maturin
         run: |
@@ -858,21 +868,35 @@ jobs:
 
       - name: Install wheel
         run: |
-          "$FP_PYTHON_BIN" -m pip install --force-reinstall dist/*.whl
+          # Keep the installed oracle environment fixed while replacing the
+          # binding; otherwise --force-reinstall also upgrades its NumPy dep.
+          "$FP_PYTHON_BIN" -m pip install --force-reinstall --no-deps dist/*.whl
+          "$FP_PYTHON_BIN" -c 'import numpy; assert numpy.__version__ == "${{ matrix.numpy }}"'
 
       - name: Run differential pytest suite
+        # Keep the existing broad gate on its reference environment. The
+        # NumPy 2.5.5 leg qualifies #51 below; unrelated warning-parity
+        # contracts require a separate review before expanding that gate.
+        if: matrix.python == '3.11'
         run: |
           "$FP_PYTHON_BIN" -m pytest crates/fp-python/tests/test_differential_packets.py \
-            crates/fp-python/tests/test_sparse.py \
-            crates/fp-python/tests/test_period_multipliers.py \
+            crates/fp-python/tests/test_sparse.py -v
+
+      - name: Run issue 51 parity policy suites
+        run: |
+          "$FP_PYTHON_BIN" -m pytest \
             crates/fp-python/tests/test_align_level.py \
             crates/fp-python/tests/test_align_level_native_contract.py \
+            crates/fp-python/tests/test_period_multipliers.py \
+            crates/fp-python/tests/test_custom_business_day.py \
+            crates/fp-python/tests/test_categorical_groupby_products.py \
             crates/fp-python/tests/test_multiindex_constructor.py -v
 
       # br-frankenpandas-rc0923-epic-python-honest-dropin-fvsao.5: fails when a
       # binding accepts a pandas parameter and drops it (it prints the
       # honoured/refused/undecided counts).
       - name: Parameter honesty audit
+        if: matrix.python == '3.11'
         run: |
           "$FP_PYTHON_BIN" -m pytest crates/fp-python/tests/test_param_honesty.py -v -s
 
@@ -881,6 +905,7 @@ jobs:
       # an empty frame) passed. This venv has no pandas, pyarrow or openpyxl; the
       # battery's expected values are literals recorded from pandas 2.2.3.
       - name: Pandas-absent native IO battery
+        if: matrix.python == '3.11'
         shell: bash
         run: |
           python -m venv "$RUNNER_TEMP/nopd"
@@ -902,6 +927,6 @@ jobs:
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v7
         with:
-          name: frankenpandas-wheel-linux
+          name: frankenpandas-wheel-linux-py${{ matrix.python }}-numpy${{ matrix.numpy }}
           path: dist/*.whl
           if-no-files-found: warn

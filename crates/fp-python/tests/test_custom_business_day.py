@@ -169,12 +169,28 @@ def test_ranges_and_vector_arithmetic_preserve_local_time_through_dst(inclusive,
 def test_calendar_metadata_survives_offset_and_index_copy_selection_pickle(calendar):
     actual, expected = fp.offsets.CDay(2, **calendar), pd.offsets.CDay(2, **calendar)
     for clone in (copy.copy, copy.deepcopy, lambda obj: pickle.loads(pickle.dumps(obj))):
-        assert_offset_equal(clone(actual), clone(expected))
+        # DISC-036: pandas 2.2.3 reconstructs a supplied busdaycalendar from
+        # the display weekmask and loses its effective weekdays. The original
+        # oracle offset is the independent integrity reference for this input;
+        # all other calendars still compare the two reconstructed offsets.
+        restored = clone(actual)
+        wanted = expected if "calendar" in calendar else clone(expected)
+        assert_offset_equal(restored, wanted)
+        assert_stamp_equal(
+            fp.Timestamp("2024-07-02") + restored,
+            pd.Timestamp("2024-07-02") + wanted,
+        )
     left = fp.date_range("2024-07-01", periods=8, freq=actual, name="day")
     right = pd.date_range("2024-07-01", periods=8, freq=expected, name="day")
     for selector in (slice(None), slice(1, 6), slice(None, None, 2), slice(None, None, -1)):
         assert_index_equal(left[selector], right[selector])
-    assert_index_equal(pickle.loads(pickle.dumps(left)), pickle.loads(pickle.dumps(right)))
+    restored_index = pickle.loads(pickle.dumps(left))
+    wanted_index = right if "calendar" in calendar else pickle.loads(pickle.dumps(right))
+    assert_index_equal(restored_index, wanted_index)
+    assert_stamp_equal(
+        fp.Timestamp("2024-07-02") + restored_index.freq,
+        pd.Timestamp("2024-07-02") + wanted_index.freq,
+    )
     # Validate a fresh sequence: pandas 2.2.3 tries to hash list-valued
     # weekmasks when comparing the frequency of an existing index.
     assert_index_equal(
@@ -182,6 +198,38 @@ def test_calendar_metadata_survives_offset_and_index_copy_selection_pickle(calen
         pd.DatetimeIndex(list(right), freq=expected, name="day"),
     )
     assert_index_equal(fp.Series(range(len(left)), index=left).index, pd.Series(range(len(right)), index=right).index)
+
+
+def test_pandas_223_calendar_roundtrip_bug_witness_disc036():
+    assert pd.__version__ == "2.2.3", "Review DISC-036 when the pinned pandas oracle changes"
+    weekmask = [True, True, False, True, True, False, False]
+    holidays = np.array(["2024-07-04"], dtype="datetime64[D]")
+    original = pd.offsets.CDay(2, calendar=np.busdaycalendar(weekmask=weekmask, holidays=holidays))
+    np.testing.assert_array_equal(original.calendar.weekmask, weekmask)
+    np.testing.assert_array_equal(original.calendar.holidays, holidays)
+    assert original.weekmask == "Mon Tue Wed Thu Fri"
+    assert pd.Timestamp("2024-07-02") + original == pd.Timestamp("2024-07-08")
+    # Direct .copy() and an explicit weekmask are unaffected controls.
+    np.testing.assert_array_equal(original.copy().calendar.weekmask, weekmask)
+    explicit = pd.offsets.CDay(2, weekmask="Mon Tue Thu Fri", holidays=holidays)
+    corrupted_weekmask = [True, True, True, True, True, False, False]
+    for clone in (copy.copy, copy.deepcopy, lambda obj: pickle.loads(pickle.dumps(obj))):
+        restored = clone(original)
+        assert restored.n == original.n
+        assert restored.weekmask == original.weekmask
+        np.testing.assert_array_equal(restored.calendar.weekmask, corrupted_weekmask)
+        np.testing.assert_array_equal(restored.calendar.holidays, holidays)
+        assert pd.Timestamp("2024-07-02") + restored == pd.Timestamp("2024-07-05")
+        np.testing.assert_array_equal(clone(explicit).calendar.weekmask, weekmask)
+        assert pd.Timestamp("2024-07-02") + clone(explicit) == pd.Timestamp("2024-07-08")
+    index = pd.date_range("2024-07-01", periods=8, freq=original, name="day")
+    restored_index = pickle.loads(pickle.dumps(index))
+    # Stored rows survive, but subsequent arithmetic through freq changes.
+    np.testing.assert_array_equal(restored_index.asi8, index.asi8)
+    np.testing.assert_array_equal(restored_index.freq.calendar.weekmask, corrupted_weekmask)
+    np.testing.assert_array_equal(restored_index.freq.calendar.holidays, holidays)
+    assert pd.Timestamp("2024-07-02") + restored_index.freq == pd.Timestamp("2024-07-05")
+    np.testing.assert_array_equal(original.calendar.weekmask, weekmask)
 
 
 @pytest.mark.parametrize("count", [-10000, -501, -13, -1, 0, 1, 13, 501, 10000])
@@ -200,12 +248,41 @@ def test_custom_business_frequency_strings(freq):
     assert_index_equal(fp.date_range("2024-07-06", periods=5, freq=freq), pd.date_range("2024-07-06", periods=5, freq=freq))
 
 
-@pytest.mark.parametrize("weekmask", ["", "0000000", "mon tue", "Monday", [1, 2, 0, 1, 1, 0, 0], [True, False]])
+@pytest.mark.parametrize("weekmask", ["", "0000000", "mon tue", "Monday", [True, False]])
 def test_invalid_custom_business_masks_raise_like_pandas(weekmask):
     with pytest.raises(ValueError):
         pd.offsets.CDay(weekmask=weekmask)
     with pytest.raises(ValueError):
         fp.offsets.CDay(weekmask=weekmask)
+
+
+def test_nonbinary_custom_business_mask_is_rejected_disc037():
+    # Native validation is independent of NumPy's version-sensitive coercion.
+    # This assertion must remain active even where the oracle accepts 2.
+    with pytest.raises(ValueError):
+        fp.offsets.CDay(weekmask=[1, 2, 0, 1, 1, 0, 0])
+    valid = [1, 1, 0, 1, 1, 0, 0]
+    assert_offset_equal(fp.offsets.CDay(weekmask=valid), pd.offsets.CDay(weekmask=valid))
+
+
+def test_numpy_nonbinary_weekmask_policy_witness_disc037():
+    assert pd.__version__ == "2.2.3", "Review DISC-037 when the pinned pandas oracle changes"
+    weekmask = [1, 2, 0, 1, 1, 0, 0]
+    if np.__version__ == "2.5.5":
+        # The release-qualification environment coerces 2 to True. Keep this
+        # narrow witness separate from the always-on native rejection above.
+        expected = [True, True, False, True, True, False, False]
+        np.testing.assert_array_equal(np.busdaycalendar(weekmask=weekmask).weekmask, expected)
+        offset = pd.offsets.CDay(weekmask=weekmask)
+        assert offset.weekmask == weekmask
+        np.testing.assert_array_equal(offset.calendar.weekmask, expected)
+    else:
+        # Verified on NumPy 2.3.5; any other accepting version must be reviewed
+        # explicitly rather than inheriting a blanket exception for >= 2.5.5.
+        with pytest.raises(ValueError):
+            np.busdaycalendar(weekmask=weekmask)
+        with pytest.raises(ValueError):
+            pd.offsets.CDay(weekmask=weekmask)
 
 
 def test_different_holiday_calendars_do_not_compare_as_the_same_c_frequency():

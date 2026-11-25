@@ -114,6 +114,18 @@ def _frame(module, second_categorical=False):
     )
 
 
+def _mixed_key_frame(module):
+    return module.DataFrame(
+        {
+            "a": module.Categorical(
+                ["a/b", "a", None, "a/b", "a"], categories=["unused", "a/b", "a"]
+            ),
+            "b": module.Series([1, "1", float("nan"), None, "b/1"], dtype=object),
+            "v": [1, 2, 3, 4, 5],
+        }
+    )
+
+
 REDUCTIONS = [
     "sum", "prod", "count", "size", "nunique", "min", "max", "mean",
     "median", "first", "last", "std", "var", "sem", "any", "all",
@@ -259,20 +271,56 @@ def test_empty_category_domain_keeps_other_nonempty_level_catalogs(sort):
 @pytest.mark.parametrize("dropna", [False, True])
 def test_missing_and_mixed_type_keys_remain_distinct(sort, dropna):
     def run(module):
-        frame = module.DataFrame(
-            {
-                "a": module.Categorical(
-                    ["a/b", "a", None, "a/b", "a"], categories=["unused", "a/b", "a"]
-                ),
-                "b": module.Series([1, "1", float("nan"), None, "b/1"], dtype=object),
-                "v": [1, 2, 3, 4, 5],
-            }
-        )
-        return frame.groupby(
+        return _mixed_key_frame(module).groupby(
             ["a", "b"], observed=False, sort=sort, dropna=dropna
         )["v"].sum()
 
-    _result(run(fpd), run(pd))
+    actual = run(fpd)
+    if not sort:
+        _result(actual, run(pd))
+        return
+
+    # DISC-038: pandas 2.2.3 crashes while sorting this expanded product.
+    # Preserve typed keys and the complete product: categories in declared
+    # order, then numeric/string/missing ordinary keys. This is an explicit
+    # integrity contract, not a successful comparison with pandas.groupby.
+    categories = ["unused", "a/b", "a"]
+    missing = [] if dropna else [None]
+    index = pd.MultiIndex.from_product(
+        [
+            pd.CategoricalIndex(
+                categories + missing, categories=categories, ordered=False, name="a"
+            ),
+            pd.Index([1, "1", "b/1"] + missing, dtype=object, name="b"),
+        ]
+    )
+    values = (
+        [0, 0, 0, 1, 0, 0, 0, 2, 5]
+        if dropna
+        else [0, 0, 0, 0, 1, 0, 0, 4, 0, 2, 5, 0, 0, 0, 0, 3]
+    )
+    _result(actual, pd.Series(values, index=index, dtype="int64", name="v"))
+
+
+@pytest.mark.parametrize("dropna", [False, True])
+def test_pandas_223_sorted_mixed_product_bug_witness_disc038(dropna):
+    assert pd.__version__ == "2.2.3", "Review DISC-038 when the pinned pandas oracle changes"
+    frame = _mixed_key_frame(pd)
+    # The observed reduction handles the typed keys correctly; only the
+    # unobserved product expansion raises the cross-type sorting exception.
+    observed = frame.groupby(
+        ["a", "b"], observed=True, sort=True, dropna=dropna
+    )["v"].sum()
+    expected_keys = (
+        [("a/b", 1), ("a", "1"), ("a", "b/1")]
+        if dropna
+        else [("a/b", 1), ("a/b", None), ("a", "1"), ("a", "b/1"), (None, None)]
+    )
+    _values(observed.index, expected_keys)
+    assert observed.tolist() == ([1, 2, 5] if dropna else [1, 4, 2, 5, 3])
+    assert str(observed.dtype) == "int64"
+    with pytest.raises(TypeError, match="^'<' not supported between instances of 'str' and 'int'$"):
+        frame.groupby(["a", "b"], observed=False, sort=True, dropna=dropna)["v"].sum()
 
 
 @pytest.mark.parametrize("dtype", [object, "string"])
@@ -334,13 +382,45 @@ def test_row_operations_and_group_iteration_do_not_expand_the_product(sort, drop
     expected = _frame(pd).groupby(["a", "b"], observed=False, sort=sort, dropna=dropna)
     assert actual.ngroups == expected.ngroups
     _result(actual.head(1), expected.head(1))
-    _result(actual["v"].transform("sum"), expected["v"].transform("sum"))
+    if dropna:
+        expected_transform = expected["v"].transform("sum")
+    else:
+        # DISC-039: observed=False must not erase the real (missing, 2)
+        # group's value. Pin values, dtype, name, and the original row axis.
+        expected_transform = pd.Series([6, 8, 3, 4, 6, 8], dtype="int64", name="v")
+    _result(actual["v"].transform("sum"), expected_transform)
     _result(actual.ngroup(), expected.ngroup())
     actual_groups, expected_groups = list(actual), list(expected)
     assert len(actual_groups) == len(expected_groups)
     for (ak, av), (ek, ev) in zip(actual_groups, expected_groups):
         _cell(ak, ek)
         _result(av, ev)
+
+
+@pytest.mark.parametrize("sort", [False, True])
+def test_pandas_223_transform_drops_null_group_bug_witness_disc039(sort):
+    assert pd.__version__ == "2.2.3", "Review DISC-039 when the pinned pandas oracle changes"
+    frame = _frame(pd)
+    grouped = frame.groupby(["a", "b"], observed=False, sort=sort, dropna=False)
+    assert grouped.ngroups == 4
+    assert grouped.ngroup().tolist() == ([1, 2, 0, 3, 1, 2] if sort else [0, 1, 2, 3, 0, 1])
+    missing_groups = [(key, part) for key, part in grouped if _missing(key[0])]
+    assert len(missing_groups) == 1
+    key, part = missing_groups[0]
+    assert key[1] == 2
+    assert part.index.tolist() == [3]
+    assert part["v"].tolist() == [4]
+    # Negative control: the same grouping reports the missing-key group,
+    # then drops its value and promotes the transform result to float64.
+    pd.testing.assert_series_equal(
+        grouped["v"].transform("sum"),
+        pd.Series([6.0, 8.0, 3.0, np.nan, 6.0, 8.0], dtype="float64", name="v"),
+    )
+    # observed=True does not expand empty products and retains every row.
+    pd.testing.assert_series_equal(
+        frame.groupby(["a", "b"], observed=True, sort=sort, dropna=False)["v"].transform("sum"),
+        pd.Series([6, 8, 3, 4, 6, 8], dtype="int64", name="v"),
+    )
 
 
 @pytest.mark.parametrize("operation", ["idxmin", "idxmax"])

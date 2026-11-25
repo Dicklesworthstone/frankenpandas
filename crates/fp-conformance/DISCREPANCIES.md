@@ -9,7 +9,7 @@
 > real citation did. The duplicates were renumbered to DISC-022/023/024, keeping the
 > number on whichever entry the existing in-tree citations actually meant. DISC-032
 > was skipped (DISC-033 was taken past it and is cited as such). The next free
-> number is DISC-036. To see every ID in use:
+> number is DISC-040. To see every ID in use:
 > `grep -n '^### DISC-' crates/fp-conformance/DISCREPANCIES.md`
 
 ## Active Divergences
@@ -194,6 +194,174 @@
 - **Tests affected:** `crates/fp-python/tests/test_sparse.py::test_pandas_223_duplicate_sparse_to_dense_bug_witness_disc035` pins the upstream negative control; `test_sparse_duplicate_to_dense_preserves_physical_columns_disc035` asserts native integrity for text, numeric, and MultiIndex labels; `test_sparse_dataframe_custom_dtypes_and_repeated_columns` and `test_sparse_dataframe_mapping_casts_repeated_columns_by_position` use per-column dense references only for repeated labels.
 - **Review date:** 2026-11-20
 
+### Issue #51: policy for the six remaining Python oracle contradictions
+
+The six failing parameter cases recorded in [#51](https://github.com/Dicklesworthstone/frankenpandas/issues/51)
+represent four causes, assigned DISC-036 through DISC-039 below. The decision is
+to retain the existing Python API behavior, with mandatory native contract tests
+and separate upstream witnesses. This is an explicit, narrow acceptance of
+observable differences, not six additional production fixes or a claim of exact
+pandas parity. The other inputs and assertions in the affected suites remain
+ordinary differential checks.
+
+This decision applies to the current Python API, which exposes no strict/hardened
+selector for these operations. It does not redefine the explicit strict overflow
+policy in DISC-020, implement a new compatibility mode, or authorize exceptions
+for other oracle failures. In particular, valid-data preservation (DISC-036 and
+DISC-039), a successful typed-key operation (DISC-038), and malformed-input
+validation (DISC-037) have separate contracts and evidence.
+
+Reproduce the original six failures with the released `frankenpandas==0.7.1`
+wheel, `pandas==2.2.3`, `numpy==2.5.5`, and CPython 3.13. The original suite result
+was independently reproduced on 2026-11-24: **1,423 passed, 6 failed** across
+`test_align_level.py`, `test_align_level_native_contract.py`,
+`test_period_multipliers.py`, `test_custom_business_day.py`,
+`test_multiindex_constructor.py`, and `test_categorical_groupby_products.py`.
+The revised tests retain coverage of all original inputs; new witnesses make the
+oracle defects visible without suppressing native regressions.
+
+**Verification on 2026-11-24:** the revised six-suite invocation passed
+**1,435 tests, 0 failures, 0 skips, 0 xfails** with the released FrankenPandas
+0.7.1 wheel and pandas 2.2.3 in each of two CPython 3.13.5 environments:
+NumPy 2.5.5 and NumPy 2.3.5. The six additional tests are upstream witnesses;
+native behavior is unchanged. This is release-wheel evidence for the policy
+tests, not a fresh Rust workspace build or a claim that the CI matrix has run.
+
+Both affected suites are selected in `.github/workflows/ci.yml`. Its Python wheel
+matrix pins NumPy 2.3.5 with Python 3.11 and NumPy 2.5.5 with Python 3.13, and
+installs the freshly built wheel without replacing those dependencies. This
+exercises both known weekmask outcomes across all six #51 suites. The existing
+broad differential, parameter-honesty, and pandas-absent IO gates remain on the
+Python 3.11 / NumPy 2.3.5 leg; the new leg does not qualify unrelated NumPy 2.5.5
+warning-parity contracts. A pandas pin change fails the explicit
+witness guards and requires review; an unrecognized NumPy version that accepts
+the malformed mask also fails rather than gaining an implicit exemption.
+
+### DISC-036: CustomBusinessDay round trips preserve the effective input calendar
+
+- **Reference:** MEASURED with pandas 2.2.3 and NumPy 2.5.5; also reproduced with
+  NumPy 2.3.5. Construct `CDay(2, calendar=np.busdaycalendar(weekmask="Mon Tue Thu Fri",
+  holidays=["2024-07-04"]))`. Its effective calendar mask is
+  `[True, True, False, True, True, False, False]`. `copy.copy`, `copy.deepcopy`, and
+  pickle reconstruct the pandas offset with a Monday-through-Friday calendar,
+  changing Wednesday from invalid to valid. The public `weekmask` argument still
+  has its default value, so checking that attribute alone misses the corruption.
+  `Timestamp("2024-07-02") + offset` changes from July 8 to July 5 after the round
+  trip. Pickling a DatetimeIndex retains its stored timestamps but corrupts the
+  effective calendar of its `freq` in the same way.
+- **Our impl:** Preserve the effective weekmask, normalized holidays, offset
+  parameters, index values, and frequency metadata. Offset arithmetic after the
+  round trip must agree with the original calendar. Explicit weekmask/holiday
+  construction and ordinary selection remain directly comparable with pandas.
+- **Impact:** For an externally supplied calendar whose effective weekmask differs
+  from the public/default `weekmask` argument, copied or deserialized offsets and
+  index frequencies deliberately differ from pandas' reconstructed calendar.
+  This protects the dates selected by the input calendar.
+- **Resolution:** ACCEPTED for the existing Python surface. Compare native
+  round trips in this case with the unchanged live pandas original, never the
+  corrupted clone. Keep clone-versus-clone comparisons for other inputs. The
+  separate pandas witness pins both the changed mask and changed arithmetic,
+  with an explicit-weekmask control. No runtime behavior changes for this policy.
+- **Tests affected:** `test_custom_business_day.py::test_calendar_metadata_survives_offset_and_index_copy_selection_pickle[calendar5]`
+  is the one original failing case. `test_pandas_223_calendar_roundtrip_bug_witness_disc036`
+  records the upstream behavior; the original test retains all offset, selection,
+  index, serialization, and reconstruction assertions.
+- **Review date:** 2026-11-24. Revisit on a pandas pin change or changed round-trip
+  witness. If the oracle preserves the original calendar, restore direct parity
+  for that comparison rather than preserving the workaround indefinitely.
+
+### DISC-037: CustomBusinessDay rejects nonbinary weekmask entries
+
+- **Reference:** MEASURED with pandas 2.2.3: `CDay(weekmask=[1, 2, 0, 1, 1, 0, 0])`
+  and NumPy's `busdaycalendar` accept the input under NumPy 2.5.5, coercing it to
+  `[True, True, False, True, True, False, False]`. Under NumPy 2.3.5 both raise
+  `ValueError`. Therefore a test unconditionally expecting a pandas exception
+  asserts an environment-dependent premise, not a stable pandas contract.
+- **Our impl:** A sequence weekmask contains seven boolean or binary `0`/`1`
+  entries. Reject the nonbinary integer `2` with `ValueError`; do not silently
+  reinterpret malformed input as a different calendar. Valid textual masks,
+  Python booleans, NumPy booleans, and binary sequences retain their existing
+  contract.
+- **Impact:** This is an explicit validation-policy divergence on malformed input
+  in the NumPy 2.5.5 environment. It is not evidence of pandas calendar corruption
+  and does not imply that every NumPy release accepts nonbinary entries.
+- **Resolution:** ACCEPTED for the existing Python surface. Native rejection is
+  unconditional. The separate oracle witness requires the exact normalized mask
+  from both pandas and NumPy only when `numpy.__version__ == "2.5.5"`; other
+  versions must reject the input, so new acceptance requires a policy review.
+  Other invalid-mask cases still require both engines to raise.
+- **Tests affected:** The former `test_custom_business_day.py::test_invalid_custom_business_masks_raise_like_pandas[weekmask4]`
+  case is now the explicitly named `test_nonbinary_custom_business_mask_is_rejected_disc037`.
+  `test_numpy_nonbinary_weekmask_policy_witness_disc037` records the environment
+  distinction; the other five invalid-mask parameter cases keep direct parity.
+- **Review date:** 2026-11-24. Revisit when either oracle dependency changes its
+  observed acceptance or normalization. Do not broaden the exception from one
+  measured NumPy version to an unverified version range.
+
+### DISC-038: Mixed-type categorical products preserve typed keys and deterministic order
+
+- **Reference:** MEASURED with pandas 2.2.3 under NumPy 2.3.5 and 2.5.5. With
+  `observed=False, sort=True`, a categorical key with declared categories
+  `["unused", "a/b", "a"]` combined with an object key containing `1`, `"1"`,
+  `"b/1"`, and missing values raises
+  `TypeError: '<' not supported between instances of 'str' and 'int'` during the
+  expanded sum reduction, for both `dropna` settings. The same observed groups
+  aggregate with `observed=True`; `sort=False` also permits the full product.
+- **Our impl:** Return the full product, preserving the categorical domain and
+  distinct typed object keys. For the test's `sort=True` inputs the category
+  order is `["unused", "a/b", "a"]`, and the ordinary key order is
+  `[1, "1", "b/1"]`, followed by the missing group when `dropna=False`.
+  The resulting `int64` sums are `[0, 0, 0, 1, 0, 0, 0, 2, 5]` for `dropna=True`
+  and `[0, 0, 0, 0, 1, 0, 0, 4, 0, 2, 5, 0, 0, 0, 0, 3]` for `dropna=False`.
+- **Impact:** These sorted mixed-type product reductions succeed where pandas
+  raises an internal comparison error. Numeric `1` and string `"1"` remain
+  distinct, as do slash-containing labels; missing groups follow `dropna`.
+- **Resolution:** ACCEPTED for the existing Python surface, following the
+  successful-operation precedent in DISC-031. Use an independently constructed
+  expected product with explicit values for only the affected sorted cases;
+  check shape, values, ordering, index names, level catalogs/codes, categories,
+  and dtype. Keep direct comparisons for `sort=False`. A separate pinned pandas
+  witness requires the specific error and checks its working observed control.
+  This is not a general permission to ignore oracle `TypeError`s.
+- **Tests affected:** `test_categorical_groupby_products.py::test_missing_and_mixed_type_keys_remain_distinct[False-True]`
+  and `[True-True]` (parameter IDs are `[dropna-sort]`). The two corresponding
+  `test_pandas_223_sorted_mixed_product_bug_witness_disc038` cases record the
+  upstream failure separately from native success.
+- **Review date:** 2026-11-24. Revisit on a pandas pin change or when the specific
+  sorted-product error disappears; compare the repaired oracle's full output
+  before restoring direct differential assertions.
+
+### DISC-039: Categorical row transforms retain the missing-key group with dropna=False
+
+- **Reference:** MEASURED with pandas 2.2.3 under NumPy 2.3.5 and 2.5.5. For the
+  six-row `_frame` fixture in `test_categorical_groupby_products.py`, multi-key
+  groupby with `observed=False, dropna=False` reports four real groups, including
+  `(nan, 2)` with value `[4]`. Yet its selected `transform("sum")` returns
+  `float64 [6.0, 8.0, 3.0, nan, 6.0, 8.0]`, dropping that row's group sum.
+  With `observed=True, dropna=False`, pandas returns
+  `int64 [6, 8, 3, 4, 6, 8]`. The discrepancy occurs with either `sort` setting.
+- **Our impl:** Return `int64 [6, 8, 3, 4, 6, 8]` in the original row order,
+  preserving the Series name and index. `dropna=False` keeps the real missing-key
+  group; expansion of an unobserved reduction domain must not delete real rows
+  or synthesize input rows for a row transform.
+- **Impact:** The missing-key row retains its real sum and the result retains its
+  integer dtype. All other row values agree. `dropna=True`, group counts,
+  `head`, `ngroup`, and group iteration continue to compare directly against the
+  same pandas `observed=False` groupby.
+- **Resolution:** ACCEPTED for the existing Python surface. Only the affected
+  transform comparison uses an independently specified literal Series. An
+  independent pandas witness checks the working `observed=True` control against
+  that Series, and records the erroneous float/NaN result and the real group it
+  contradicts. The original multi-operation test still executes every other
+  comparison.
+- **Tests affected:** `test_categorical_groupby_products.py::test_row_operations_and_group_iteration_do_not_expand_the_product[False-False]`
+  and `[False-True]` (parameter IDs are `[dropna-sort]`). The two corresponding
+  `test_pandas_223_transform_drops_null_group_bug_witness_disc039` cases test both
+  sort settings.
+- **Review date:** 2026-11-24. Revisit on a pandas pin change or changed transform
+  witness, and restore the same-parameter oracle comparison when it preserves
+  the missing-key group and dtype.
+
 ## Resolved Divergences
 
 ### DISC-006: Row MultiIndex is scaffolded, not full pandas parity
@@ -343,4 +511,8 @@
 3. Must list affected test cases
 4. Must include review date
 5. Tests for ACCEPTED divergences use XFAIL markers where applicable
+6. An accepted oracle contradiction must retain an unconditional native contract
+   test and an independent, narrowly scoped upstream witness. Whole-test XFAILs,
+   broad exception catches, and weakened dtype/index/value assertions must not
+   hide native regressions. Report these checks separately from exact parity.
 

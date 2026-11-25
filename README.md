@@ -84,7 +84,7 @@ AACE is a core identity constraint, not a best-effort optimization. pandas' alig
 | **Fail closed** | Unknown features, incompatible dtypes, and ambiguous coercions produce errors, not silent corruption. Strict mode rejects; hardened mode logs and recovers under a Bayesian expected-loss decision rule. |
 | **Zero unsafe** | Every crate uses `#![forbid(unsafe_code)]`. Memory safety comes from the type system, not audits. |
 | **Test everything differentially** | Conformance packets run FrankenPandas operations and compare against the pandas oracle. 1,387 packet JSON files, replayed against the live pandas oracle in CI (daily batch and every pull request). |
-| **Document every divergence** | 34 numbered divergence entries (20 active, the rest resolved) are written up in `crates/fp-conformance/DISCREPANCIES.md` with root-cause analysis, resolution status (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED), and reproducible test packets. No silent disagreement. |
+| **Document every divergence** | 38 numbered divergence entries (24 active, the rest resolved) are written up in `crates/fp-conformance/DISCREPANCIES.md` with root-cause analysis, resolution status (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED), and reproducible tests. No silent disagreement. |
 
 ## What's In The Box
 
@@ -1143,7 +1143,9 @@ All error types are re-exported through the `frankenpandas` facade crate.
 
 Regenerates conformance packet artifacts and fails closed if any parity report or gate is not green. **1,387 packet JSON files spanning 1,400 fixture files** cover alignment, join, groupby, concat, filter, CSV, dtype, null semantics, resample, rolling, groupby rolling/resample, datetime accessors, string accessors, MultiIndex, IO round-trip, and more. The live pandas oracle runs in CI on every PR (with system-pandas fallback). The drift history ledger (`artifacts/phase2c/drift_history.jsonl`) tracks parity trends over time.
 
-**34 documented divergence entries** (DISC-001 through DISC-035; DISC-032 is unused) in [`crates/fp-conformance/DISCREPANCIES.md`](crates/fp-conformance/DISCREPANCIES.md), labeled ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED. Each carries full root-cause analysis, status, affected test cases, and a review date so users hitting these failures find the explanation without having to re-derive the divergence.
+**38 documented divergence entries** (DISC-001 through DISC-039; DISC-032 is unused) in [`crates/fp-conformance/DISCREPANCIES.md`](crates/fp-conformance/DISCREPANCIES.md), labeled ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED. Each carries full root-cause analysis, status, affected test cases, and a review date so users hitting these failures find the explanation without having to re-derive the divergence.
+
+The six oracle contradictions in [#51](https://github.com/Dicklesworthstone/frankenpandas/issues/51) are covered by four accepted Python API contracts (DISC-036 through DISC-039): preserve custom-calendar metadata, reject nonbinary weekmasks, keep mixed-type group keys distinct, and retain missing-key groups in row transforms when `dropna=False`. Their tests require native correctness and separately witness the pinned oracle's behavior; passing them does **not** claim exact pandas parity on those cases. Both affected suites run in the Python wheel CI matrix, with NumPy pinned on each leg so its differing weekmask validation remains visible.
 
 ## Missing Data Handling
 
@@ -1808,7 +1810,7 @@ Uses a deterministic LCG (Linear Congruential Generator) with Fisher-Yates shuff
 ## FAQ
 
 **Q: How compatible is this with pandas?**
-A: We target absolute API parity. The same method names, same parameter names, same edge-case behavior. Differential conformance tests verify against a pinned live pandas oracle in CI and on any checkout with `.venv-oracle`. **1,387 packet JSON files** are the current evidence; the last recorded full live-oracle pass (2026-09-01, when the corpus held 1,341) matched 1,323 of them. 34 divergence entries are documented in `DISCREPANCIES.md`, every one with root-cause analysis, affected tests, and a reproducible packet.
+A: We target absolute API parity. The same method names, same parameter names, same edge-case behavior. Differential conformance tests verify against a pinned live pandas oracle in CI and on any checkout with `.venv-oracle`. **1,387 packet JSON files** are the current evidence; the last recorded full live-oracle pass (2026-09-01, when the corpus held 1,341) matched 1,323 of them. 38 divergence entries are documented in `DISCREPANCIES.md`, every one with root-cause analysis, affected tests, and reproducible test cases.
 
 **Q: Why not just use Polars?**
 A: Polars is excellent but has a different API (lazy evaluation, no index alignment, different method names). FrankenPandas targets users who need drop-in pandas semantics (index alignment, identical method names, identical edge-case behavior) both in safe Rust and directly in Python via `import frankenpandas as pd`.
@@ -1889,7 +1891,7 @@ A: As of 2026-10-13 the tracker holds more than 4,800 beads, of which about 210 
 | `docs/planning/ERROR_CONFORMANCE.md` | Pandas error catalog and FrankenPandas error parity status |
 | `docs/planning/DIFFERENTIAL_FUZZ_DESIGN.md` | Differential fuzz design notes |
 | `docs/security/THREAT_MODEL.md` | Per-subsystem threat model notes (attack surfaces, trust boundaries, mitigations, hostile-input probes, gap beads) |
-| `crates/fp-conformance/DISCREPANCIES.md` | 34 numbered divergence entries from pandas (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED) |
+| `crates/fp-conformance/DISCREPANCIES.md` | 38 numbered divergence entries from pandas (ACCEPTED / INVESTIGATING / WILL-FIX / RESOLVED) |
 | `artifacts/perf/` | Optimization round baselines, opportunity matrices, proofs |
 | `artifacts/phase2c/` | Conformance packet artifacts, drift history, compat-closure attestation packs |
 
