@@ -286,3 +286,32 @@ def test_column_writes_refuse_unrepresentable_labels_before_mutation(operation):
         else:
             frame.insert(0, "0", [3], allow_duplicates=True)
     _assert_same(frame, pd.DataFrame([[1, 2]], columns=[0, 1]))
+
+
+@pytest.mark.parametrize("columns", [[0, 1], ["x", "x"], ["x", "y"]])
+@pytest.mark.parametrize("position", [0, 1, -1])
+@pytest.mark.parametrize("rhs", ["list", "series", "frame"])
+def test_isetitem_replaces_only_the_column_at_the_given_position(columns, position, rhs):
+    def write(module):
+        frame = module.DataFrame([[1, 10], [2, 20]], columns=columns, index=["a", "b"])
+        if rhs == "list":
+            value = [81, 82]
+        elif rhs == "series":
+            value = module.Series([81, 82], index=["b", "a"], dtype="Int64")
+        else:
+            value = module.DataFrame({"v": [81, 82]}, index=["b", "a"])
+        assert frame.isetitem(position, value) is None
+        return frame
+
+    _assert_same(write(fpd), write(pd))
+
+
+@pytest.mark.parametrize("position", [2, -3])
+def test_isetitem_out_of_bounds_keeps_the_frame(position):
+    def check(module):
+        frame = module.DataFrame([[1, 10]], columns=["x", "x"])
+        with pytest.raises(IndexError):
+            frame.isetitem(position, [99])
+        return frame
+
+    _assert_same(check(fpd), check(pd))

@@ -62493,16 +62493,7 @@ impl PyDataFrame {
         };
         let name = fp_frame::column_key(&label);
         refuse_label_clash(&self.inner, &name, &label)?;
-        let converted = pandas_object_as_fp(value)?;
-        let value = converted.as_ref().unwrap_or(value);
-        let (frame, col) = if let Ok(series) = value.extract::<PyRef<'_, PySeries>>() {
-            align_series_for_assignment(&self.inner, &series.inner)?
-        } else {
-            (
-                std::borrow::Cow::Borrowed(&self.inner),
-                py_value_to_column(py, value, self.inner.len())?,
-            )
-        };
+        let (frame, col) = column_for_positional_write(py, &self.inner, value)?;
         self.inner = frame
             .insert_allow_duplicates(loc, name, col, allow_duplicates)
             .map_err(frame_error_to_py)?
@@ -64072,16 +64063,11 @@ impl PyDataFrame {
     }
 
     #[pyo3(signature = (loc, value))]
-    fn isetitem(&mut self, py: Python<'_>, loc: usize, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        let names = self.inner.column_names();
-        if loc >= names.len() {
-            return Err(PyErr::new::<pyo3::exceptions::PyIndexError, _>(
-                "column index out of bounds",
-            ));
-        }
-        let col_name = names[loc].to_string();
-        let py_key = pyo3::types::PyString::new(py, &col_name);
-        self.__setitem__(py, py_key.as_any(), value)
+    fn isetitem(&mut self, py: Python<'_>, loc: i64, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let position = take_positions(vec![loc], self.inner.num_columns())?[0];
+        let (frame, column) = column_for_positional_write(py, &self.inner, value)?;
+        self.inner = frame.isetitem(position, column).map_err(frame_error_to_py)?;
+        Ok(())
     }
 
     #[getter]
@@ -67829,6 +67815,33 @@ fn frame_loc_write(
     }?;
     // The frame's own columns keep their typed labels.
     Ok(written.with_labels_of(frame))
+}
+
+/// A column placed by position (insert or isetitem) still aligns a labelled
+/// right-hand side on rows. A one-column frame supplies its Series.
+fn column_for_positional_write<'a>(
+    py: Python<'_>,
+    frame: &'a DataFrame,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<(std::borrow::Cow<'a, DataFrame>, Column)> {
+    let converted = pandas_object_as_fp(value)?;
+    let value = converted.as_ref().unwrap_or(value);
+    if let Ok(series) = value.extract::<PyRef<'_, PySeries>>() {
+        return align_series_for_assignment(frame, &series.inner);
+    }
+    if let Ok(rhs) = value.extract::<PyRef<'_, PyDataFrame>>() {
+        if rhs.inner.num_columns() != 1 {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "expected one column, got {}",
+                rhs.inner.num_columns()
+            )));
+        }
+        return align_series_for_assignment(frame, &rhs.column_series_at(0)?.inner);
+    }
+    Ok((
+        std::borrow::Cow::Borrowed(frame),
+        py_value_to_column(py, value, frame.len())?,
+    ))
 }
 
 /// The receiving frame and the Series column on its row index for whole-column
