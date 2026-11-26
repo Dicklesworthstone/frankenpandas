@@ -127,7 +127,7 @@ use dta::stata::{
 use fp_columnar::{Column, ColumnError};
 use fp_frame::{DataFrame, FrameError, Series, ToDatetimeOptions, to_datetime_values_with_options};
 use fp_index::{Index, IndexError, IndexLabel, format_datetime_ns};
-use fp_types::{DType, NullKind, Scalar, Timedelta, Timestamp, cast_scalar_owned};
+use fp_types::{DType, NullKind, NumericWidth, Scalar, Timedelta, Timestamp, cast_scalar_owned};
 #[cfg(feature = "hdf5")]
 use hdf5::File as Hdf5File;
 use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
@@ -11168,30 +11168,24 @@ pub fn read_jsonl(path: &Path) -> Result<DataFrame, IoError> {
 
 // ── Parquet I/O ─────────────────────────────────────────────────────────────
 
-/// Convert an fp-types DType to an Arrow DataType.
-fn dtype_to_arrow(dtype: DType) -> ArrowDataType {
-    match dtype {
-        DType::Int64 | DType::Int64Nullable => ArrowDataType::Int64,
-        DType::Float64 | DType::Float64Nullable => ArrowDataType::Float64,
-        DType::Utf8 => ArrowDataType::Utf8,
-        // pyarrow's encoding of pandas' `category`: keys into the categories.
-        DType::Categorical => ArrowDataType::Dictionary(
-            Box::new(ArrowDataType::Int32),
-            Box::new(ArrowDataType::Utf8),
-        ),
-        DType::Bool | DType::BoolNullable => ArrowDataType::Boolean,
-        DType::Null => ArrowDataType::Utf8, // fallback: null-only columns as string
-        // Real Arrow temporal types, as pyarrow writes them for pandas; these
-        // were plain Int64, which every reader (fp included) took for integers.
-        // (br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20)
-        DType::Timedelta64 => ArrowDataType::Duration(TimeUnit::Nanosecond),
-        DType::Datetime64 { tz } => {
-            ArrowDataType::Timestamp(TimeUnit::Nanosecond, tz.map(|tz| fp_tz_to_arrow(tz).into()))
-        }
-        DType::Period => ArrowDataType::Int64, // store as ordinal
-        DType::Interval => ArrowDataType::Utf8, // store as string until arrow interval lands
-        DType::Sparse => ArrowDataType::Utf8,  // marker fallback until sparse arrays land
+/// Physical types for numeric widths that share 64-bit storage in fp.
+fn width_to_arrow(width: NumericWidth) -> ArrowDataType {
+    match width {
+        NumericWidth::Int8 => ArrowDataType::Int8,
+        NumericWidth::Int16 => ArrowDataType::Int16,
+        NumericWidth::Int32 => ArrowDataType::Int32,
+        NumericWidth::UInt8 => ArrowDataType::UInt8,
+        NumericWidth::UInt16 => ArrowDataType::UInt16,
+        NumericWidth::UInt32 => ArrowDataType::UInt32,
+        NumericWidth::UInt64 => ArrowDataType::UInt64,
+        NumericWidth::Float32 => ArrowDataType::Float32,
     }
+}
+
+fn arrow_numeric_width(dt: &ArrowDataType) -> Option<NumericWidth> {
+    NumericWidth::ALL
+        .into_iter()
+        .find(|&width| width_to_arrow(width) == *dt)
 }
 
 fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
@@ -11209,10 +11203,12 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
         }
         DType::Float64 | DType::Float64Nullable => {
             let mut builder = Float64Builder::with_capacity(column.len());
-            for value in column.values() {
+            for (row, value) in column.values().iter().enumerate() {
                 match value {
                     Scalar::Float64(n) => {
-                        if n.is_nan() {
+                        if n.is_nan()
+                            && !(column.dtype().is_nullable() && column.validity().get(row))
+                        {
                             builder.append_null();
                         } else {
                             builder.append_value(*n);
@@ -11319,6 +11315,16 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
         }
     };
 
+    if let Some(width) = column.width() {
+        // Arrow casts its validity bitmap with the values. Fail on a value
+        // outside the declared width instead of replacing it with a null.
+        let options = arrow::compute::CastOptions {
+            safe: false,
+            ..Default::default()
+        };
+        return arrow::compute::cast_with_options(arr.as_ref(), &width_to_arrow(width), &options)
+            .map_err(|err| IoError::Arrow(err.to_string()));
+    }
     Ok(arr)
 }
 
@@ -11328,8 +11334,8 @@ fn column_to_arrow_array(column: &Column) -> Result<Arc<dyn Array>, IoError> {
 /// preserves nullable Int64 columns as Arrow null-bitmaps rather than coercing
 /// through Float64.
 pub fn series_to_arrow_array(series: &Series) -> Result<(ArrowDataType, Arc<dyn Array>), IoError> {
-    let dt = dtype_to_arrow(series.column().dtype());
-    Ok((dt, column_to_arrow_array(series.column())?))
+    let array = column_to_arrow_array(series.column())?;
+    Ok((array.data_type().clone(), array))
 }
 
 /// Rebuild a Series from an Arrow array and explicit dtype metadata.
@@ -11340,6 +11346,10 @@ pub fn series_from_arrow_array(
     dt: &ArrowDataType,
 ) -> Result<Series, IoError> {
     let name: String = name.into();
+    if let Some(width) = arrow_numeric_width(dt) {
+        let column = restore_arrow_width(arrow_storage_column(arr, dt)?, width, false)?;
+        return Ok(Series::new(name, Index::new(index_labels), column)?);
+    }
     let values = arrow_array_to_scalars(arr, dt)?;
     if let ArrowDataType::Timestamp(_, Some(_)) = dt {
         // The zone lives on the dtype; value inference alone would drop it, and
@@ -11370,10 +11380,8 @@ const FP_DTYPE_METADATA_KEY: &str = "frankenpandas.dtype";
 /// The metadata tag for a dtype Arrow cannot represent, or `None` when Arrow's
 /// own type is already a faithful carrier.
 ///
-/// Deliberately narrow: only the two dtypes that collide with another dtype
-/// under `dtype_to_arrow` get a tag. Every other column writes exactly the bytes
-/// and schema it wrote before this change, so no existing reader — including
-/// non-FrankenPandas ones — sees anything new.
+/// Arrow physical types encode numeric widths but do not distinguish NumPy
+/// dtypes from pandas masked extension dtypes. The tag records the latter.
 fn nullable_extension_tag(dtype: DType) -> Option<&'static str> {
     match dtype {
         DType::Int64Nullable => Some("Int64Nullable"),
@@ -11438,6 +11446,13 @@ const LEGACY_ROW_MULTIINDEX_NAMES_METADATA_KEY: &str = "frankenpandas.row_multii
 /// pandas reads back as Int64.
 fn pandas_column_type(column: &Column) -> (&'static str, &'static str, serde_json::Value) {
     use serde_json::{Value, json};
+    if let Some(width) = column.width() {
+        return (
+            width.name(false),
+            width.name(column.dtype().is_nullable()),
+            Value::Null,
+        );
+    }
     match column.dtype() {
         DType::Int64 => ("int64", "int64", Value::Null),
         DType::Int64Nullable => ("int64", "Int64", Value::Null),
@@ -11603,7 +11618,8 @@ fn dataframe_to_record_batch(
     let mut arrays: Vec<Arc<dyn Array>> = Vec::with_capacity(columns.len());
     for (name, col) in &columns {
         let dt = col.dtype();
-        let mut field = Field::new(name.as_str(), dtype_to_arrow(dt.clone()), true)
+        let array = column_to_arrow_array(col)?;
+        let mut field = Field::new(name.as_str(), array.data_type().clone(), true)
             .with_dict_is_ordered(col.categorical().is_some_and(|meta| meta.ordered));
         if let Some(tag) = nullable_extension_tag(dt) {
             field = field.with_metadata(std::collections::HashMap::from([(
@@ -11612,7 +11628,7 @@ fn dataframe_to_record_batch(
             )]));
         }
         fields.push(field);
-        arrays.push(column_to_arrow_array(col)?);
+        arrays.push(array);
     }
     let schema = Arc::new(Schema::new_with_metadata(
         fields,
@@ -11821,9 +11837,14 @@ fn try_record_batch_to_float64_block(batch: &RecordBatch) -> Result<Option<DataF
 }
 
 /// Convert an Arrow RecordBatch back into a DataFrame.
-fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> {
+fn record_batch_to_dataframe(
+    batch: &RecordBatch,
+    masked_fields: &[bool],
+) -> Result<DataFrame, IoError> {
     #[cfg(feature = "block-storage")]
-    if let Some(frame) = try_record_batch_to_float64_block(batch)? {
+    if !masked_fields.contains(&true)
+        && let Some(frame) = try_record_batch_to_float64_block(batch)?
+    {
         return Ok(frame);
     }
 
@@ -11835,26 +11856,32 @@ fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> 
     for (i, field) in schema.fields().iter().enumerate() {
         let name = field.name().clone();
         let arr = batch.column(i);
-        // Typed fast path: convert the Arrow buffer DIRECTLY to a typed fp column
-        // (Int64/Float64/Bool/all-valid-Utf8), skipping the per-cell Vec<Scalar>
-        // materialization (~32 B/elem boxing) + Column::new re-scan that made
-        // read_parquet ~0.21x pandas/pyarrow. Bails (→ Scalar path) for
-        // Date/Timestamp (need chrono formatting) and nullable-Utf8 (no typed
-        // contiguous-nullable constructor). Bit-identical to the Scalar path's
-        // per-type null-kind conventions (Int/Bool/Utf8 → Null(Null); Float →
-        // Null(NaN)); validity constructors reproduce those exactly (verified).
-        let typed = if matches!(field.data_type(), ArrowDataType::Dictionary(_, _)) {
-            Some(arrow_dictionary_to_categorical(arr.as_ref(), field)?)
+        let col = if matches!(field.data_type(), ArrowDataType::Dictionary(_, _)) {
+            arrow_dictionary_to_categorical(arr.as_ref(), field)?
+        } else if masked_fields.get(i) == Some(&true)
+            && matches!(
+                field.data_type(),
+                ArrowDataType::Float32 | ArrowDataType::Float64
+            )
+        {
+            // A masked floating array can hold a *present* NaN. Its Arrow
+            // validity bitmap alone distinguishes that value from pandas.NA.
+            let values = if let Some(floats) = arr.as_any().downcast_ref::<Float64Array>() {
+                floats.values().to_vec()
+            } else {
+                arr.as_any()
+                    .downcast_ref::<arrow::array::Float32Array>()
+                    .ok_or_else(|| IoError::Arrow("expected Float32Array".into()))?
+                    .values()
+                    .iter()
+                    .map(|&v| f64::from(v))
+                    .collect()
+            };
+            let validity = arrow_validity_mask(arr.as_ref())
+                .unwrap_or_else(|| fp_columnar::ValidityMask::all_valid(arr.len()));
+            Column::from_nullable_f64_values_with_validity(values, validity)
         } else {
-            arrow_array_to_column_typed(arr.as_ref(), field.data_type())
-        };
-        let col = match typed {
-            Some(c) => c,
-            None => {
-                let values = arrow_array_to_scalars(arr.as_ref(), field.data_type())?;
-                let dtype = fp_dtype_for_arrow_data_type(field.data_type());
-                Column::new(dtype, values)?
-            }
+            arrow_storage_column(arr.as_ref(), field.data_type())?
         };
         let col = retag_from_field_metadata(col, field);
         columns.insert(name.clone(), col);
@@ -11870,6 +11897,115 @@ fn record_batch_to_dataframe(batch: &RecordBatch) -> Result<DataFrame, IoError> 
     // The row index the file's `pandas` metadata records is applied by the
     // readers once every batch is read (apply_pandas_metadata).
     DataFrame::new_with_column_order(index, columns, col_order).map_err(IoError::from)
+}
+
+fn arrow_storage_column(arr: &dyn Array, dt: &ArrowDataType) -> Result<Column, IoError> {
+    if dt == &ArrowDataType::UInt64 {
+        // The core holds unsigned values in i64 storage. Reject a present
+        // value above i64::MAX; the previous `as i64` silently negated it.
+        let integers = arr
+            .as_any()
+            .downcast_ref::<arrow::array::UInt64Array>()
+            .ok_or_else(|| IoError::Arrow("expected UInt64Array".into()))?;
+        let values = integers
+            .iter()
+            .map(|slot| {
+                let value = slot.unwrap_or_default();
+                i64::try_from(value).map_err(|_| ColumnError::UInt64OutOfRange { value })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(match arrow_validity_mask(arr) {
+            Some(mask) => Column::from_i64_values_with_validity(values, mask),
+            None => Column::from_i64_values_owned(values),
+        });
+    }
+    if let Some(column) = arrow_array_to_column_typed(arr, dt) {
+        return Ok(column);
+    }
+    Ok(Column::new(
+        fp_dtype_for_arrow_data_type(dt),
+        arrow_array_to_scalars(arr, dt)?,
+    )?)
+}
+
+/// In pyarrow's default conversion a missing integer promotes a NumPy
+/// column to float64, while pandas' declared masked integer keeps its width.
+fn restore_arrow_width(
+    column: Column,
+    width: NumericWidth,
+    nullable: bool,
+) -> Result<Column, IoError> {
+    if !nullable && !width.is_float() && column.has_nulls() {
+        return Ok(column.astype(DType::Float64)?);
+    }
+    Ok(column.cast_to_width(width, nullable)?)
+}
+
+/// Apply physical widths after combining batches: a null in a later batch
+/// determines the dtype of the entire column. A schema-only input also has
+/// typed columns, even though it supplies no batches to concatenate.
+fn read_arrow_batches(
+    batches: impl Iterator<Item = Result<RecordBatch, IoError>>,
+    schema: Arc<Schema>,
+    pandas: Option<&str>,
+    legacy: Option<&str>,
+) -> Result<DataFrame, IoError> {
+    let metadata = pandas.and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+    let numpy_types: HashMap<&str, &str> = metadata
+        .as_ref()
+        .and_then(|meta| meta["columns"].as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| Some((entry["field_name"].as_str()?, entry["numpy_type"].as_str()?)))
+        .collect();
+    let masked_fields: Vec<bool> = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            let (storage, name) = if let Some(width) = arrow_numeric_width(field.data_type()) {
+                (width.storage(true), width.name(true))
+            } else if field.data_type() == &ArrowDataType::Float64 {
+                (DType::Float64Nullable, "Float64")
+            } else {
+                return false;
+            };
+            field
+                .metadata()
+                .get(FP_DTYPE_METADATA_KEY)
+                .is_some_and(|tag| Some(tag.as_str()) == nullable_extension_tag(storage))
+                || numpy_types.get(field.name().as_str()) == Some(&name)
+        })
+        .collect();
+
+    let mut frames = batches
+        .map(|batch| record_batch_to_dataframe(&batch?, &masked_fields))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut frame = match frames.len() {
+        0 => record_batch_to_dataframe(&RecordBatch::new_empty(schema.clone()), &masked_fields)?,
+        1 => frames.pop().expect("one frame"),
+        _ => {
+            fp_frame::concat_dataframes_with_ignore_index(&frames.iter().collect::<Vec<_>>(), true)?
+        }
+    };
+    if schema
+        .fields()
+        .iter()
+        .any(|field| arrow_numeric_width(field.data_type()).is_some())
+    {
+        let mut columns = Vec::with_capacity(frame.num_columns());
+        for (i, field) in schema.fields().iter().enumerate() {
+            let column = frame
+                .column_at(i)
+                .ok_or_else(|| IoError::Arrow("missing Arrow column".into()))?
+                .clone();
+            columns.push(match arrow_numeric_width(field.data_type()) {
+                Some(width) => restore_arrow_width(column, width, masked_fields[i])?,
+                None => column,
+            });
+        }
+        frame = frame.with_columns_at_positions(columns);
+    }
+    apply_arrow_row_index_metadata(frame, pandas, legacy)
 }
 
 fn fp_dtype_for_arrow_data_type(dt: &ArrowDataType) -> DType {
@@ -11920,7 +12056,7 @@ fn arrow_validity_mask(arr: &dyn Array) -> Option<fp_columnar::ValidityMask> {
 fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Column> {
     use arrow::array::{
         Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, UInt8Array,
-        UInt16Array, UInt32Array, UInt64Array,
+        UInt16Array, UInt32Array,
     };
     macro_rules! i64_col {
         ($ty:ty) => {{
@@ -11959,9 +12095,6 @@ fn arrow_array_to_column_typed(arr: &dyn Array, dt: &ArrowDataType) -> Option<Co
         ArrowDataType::Int32 => i64_col!(Int32Array),
         ArrowDataType::Int16 => i64_col!(Int16Array),
         ArrowDataType::Int8 => i64_col!(Int8Array),
-        // UInt64 as i64: matches the Scalar path's `Scalar::Int64(value as ...)`
-        // reinterpretation for the width; large u64 wrap identically both ways.
-        ArrowDataType::UInt64 => i64_col!(UInt64Array),
         ArrowDataType::UInt32 => i64_col!(UInt32Array),
         ArrowDataType::UInt16 => i64_col!(UInt16Array),
         ArrowDataType::UInt8 => i64_col!(UInt8Array),
@@ -12507,39 +12640,15 @@ pub fn read_parquet_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
         None
     };
     let batch_size = total_rows.clamp(1, 16 * 1024 * 1024);
+    let schema = builder.schema().clone();
     let reader = builder
         .with_batch_size(batch_size)
         .build()
         .map_err(|e| IoError::Parquet(e.to_string()))?;
 
-    let mut all_frames: Vec<DataFrame> = Vec::new();
-    for batch_result in reader {
-        let batch: RecordBatch =
-            batch_result.map_err(|e: arrow::error::ArrowError| IoError::Parquet(e.to_string()))?;
-        all_frames.push(record_batch_to_dataframe(&batch)?);
-    }
-
-    if all_frames.is_empty() {
-        // Return empty DataFrame
-        return Ok(DataFrame::new_with_column_order(
-            Index::new(vec![]),
-            BTreeMap::new(),
-            vec![],
-        )?);
-    }
-
-    let frame = if all_frames.len() == 1 {
-        // For a single batch (common case), return directly
-        all_frames.into_iter().next().ok_or_else(|| {
-            IoError::Parquet("parquet reader produced zero record batches".to_owned())
-        })?
-    } else {
-        // Multiple batches: concatenate via fp_frame::concat_dataframes
-        let refs: Vec<&DataFrame> = all_frames.iter().collect();
-        fp_frame::concat_dataframes(&refs)?
-    };
-    apply_arrow_row_index_metadata(
-        frame,
+    read_arrow_batches(
+        reader.map(|batch| batch.map_err(|error| IoError::Parquet(error.to_string()))),
+        schema,
         pandas_metadata.as_deref(),
         legacy_metadata.as_deref(),
     )
@@ -14124,6 +14233,7 @@ pub fn read_feather_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
 
     let cursor = std::io::Cursor::new(data);
     let reader = FileReader::try_new(cursor, None).map_err(|e| IoError::Arrow(e.to_string()))?;
+    let schema = reader.schema().clone();
     let pandas_metadata = reader.schema().metadata().get(PANDAS_METADATA_KEY).cloned();
     let legacy_metadata = reader
         .schema()
@@ -14131,30 +14241,9 @@ pub fn read_feather_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
         .get(LEGACY_ROW_MULTIINDEX_NAMES_METADATA_KEY)
         .cloned();
 
-    let mut all_frames: Vec<DataFrame> = Vec::new();
-    for batch_result in reader {
-        let batch = batch_result.map_err(|e| IoError::Arrow(e.to_string()))?;
-        all_frames.push(record_batch_to_dataframe(&batch)?);
-    }
-
-    if all_frames.is_empty() {
-        return Ok(DataFrame::new_with_column_order(
-            Index::new(vec![]),
-            BTreeMap::new(),
-            vec![],
-        )?);
-    }
-
-    let frame = if all_frames.len() == 1 {
-        all_frames.into_iter().next().ok_or_else(|| {
-            IoError::Arrow("feather reader produced zero record batches".to_owned())
-        })?
-    } else {
-        let refs: Vec<&DataFrame> = all_frames.iter().collect();
-        fp_frame::concat_dataframes(&refs)?
-    };
-    apply_arrow_row_index_metadata(
-        frame,
+    read_arrow_batches(
+        reader.map(|batch| batch.map_err(|error| IoError::Arrow(error.to_string()))),
+        schema,
         pandas_metadata.as_deref(),
         legacy_metadata.as_deref(),
     )
@@ -14230,6 +14319,7 @@ pub fn read_ipc_stream_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
 
     let cursor = std::io::Cursor::new(data);
     let reader = StreamReader::try_new(cursor, None).map_err(|e| IoError::Arrow(e.to_string()))?;
+    let schema = reader.schema().clone();
     let pandas_metadata = reader.schema().metadata().get(PANDAS_METADATA_KEY).cloned();
     let legacy_metadata = reader
         .schema()
@@ -14237,30 +14327,9 @@ pub fn read_ipc_stream_bytes(data: &[u8]) -> Result<DataFrame, IoError> {
         .get(LEGACY_ROW_MULTIINDEX_NAMES_METADATA_KEY)
         .cloned();
 
-    let mut all_frames: Vec<DataFrame> = Vec::new();
-    for batch_result in reader {
-        let batch = batch_result.map_err(|e| IoError::Arrow(e.to_string()))?;
-        all_frames.push(record_batch_to_dataframe(&batch)?);
-    }
-
-    if all_frames.is_empty() {
-        return Ok(DataFrame::new_with_column_order(
-            Index::new(vec![]),
-            BTreeMap::new(),
-            vec![],
-        )?);
-    }
-
-    let frame = if all_frames.len() == 1 {
-        all_frames.into_iter().next().ok_or_else(|| {
-            IoError::Arrow("ipc stream reader produced zero record batches".to_owned())
-        })?
-    } else {
-        let refs: Vec<&DataFrame> = all_frames.iter().collect();
-        fp_frame::concat_dataframes(&refs)?
-    };
-    apply_arrow_row_index_metadata(
-        frame,
+    read_arrow_batches(
+        reader.map(|batch| batch.map_err(|error| IoError::Arrow(error.to_string()))),
+        schema,
         pandas_metadata.as_deref(),
         legacy_metadata.as_deref(),
     )
@@ -33879,6 +33948,219 @@ mod tests {
     }
 
     #[test]
+    fn arrow_narrow_numeric_schemas_and_file_roundtrips() {
+        use fp_types::NumericWidth::*;
+
+        // pyarrow.Table.from_pandas emits the same physical type for uint16
+        // and UInt16, with the masked distinction in pandas.numpy_type.
+        let widths = [
+            (Int8, ArrowDataType::Int8),
+            (Int16, ArrowDataType::Int16),
+            (Int32, ArrowDataType::Int32),
+            (UInt8, ArrowDataType::UInt8),
+            (UInt16, ArrowDataType::UInt16),
+            (UInt32, ArrowDataType::UInt32),
+            (UInt64, ArrowDataType::UInt64),
+            (Float32, ArrowDataType::Float32),
+        ];
+        let mut columns = BTreeMap::new();
+        for (width, _) in &widths {
+            for masked in [false, true] {
+                let source = if masked {
+                    vec![Scalar::Int64(7), Scalar::Null(NullKind::Null)]
+                } else {
+                    vec![Scalar::Int64(3), Scalar::Int64(7)]
+                };
+                columns.insert(
+                    width.name(masked).to_owned(),
+                    Column::from_values(source)
+                        .unwrap()
+                        .cast_to_width(*width, masked)
+                        .unwrap(),
+                );
+            }
+        }
+        let order: Vec<String> = columns.keys().cloned().collect();
+        let frame =
+            DataFrame::new_with_column_order(Index::default_range(2), columns, order).unwrap();
+        let batch = super::dataframe_to_record_batch(&frame, None).unwrap();
+        let schema = batch.schema();
+        let meta: serde_json::Value = serde_json::from_str(&schema.metadata()["pandas"]).unwrap();
+        for (width, arrow_type) in &widths {
+            for masked in [false, true] {
+                let name = width.name(masked);
+                assert_eq!(
+                    schema.field_with_name(name).unwrap().data_type(),
+                    arrow_type
+                );
+                let entry = meta["columns"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|entry| entry["field_name"] == name)
+                    .unwrap();
+                assert_eq!(entry["pandas_type"], width.name(false));
+                assert_eq!(entry["numpy_type"], name);
+            }
+        }
+        let results = [
+            read_parquet_bytes(&super::write_parquet_bytes(&frame).unwrap()).unwrap(),
+            read_feather_bytes(&super::write_feather_bytes(&frame).unwrap()).unwrap(),
+            super::read_ipc_stream_bytes(&super::write_ipc_stream_bytes(&frame).unwrap()).unwrap(),
+        ];
+        for restored in results {
+            for (width, _) in &widths {
+                for masked in [false, true] {
+                    let name = width.name(masked);
+                    let got = restored.column(name).unwrap();
+                    let source = frame.column(name).unwrap();
+                    assert_eq!(got.dtype(), source.dtype(), "{name}");
+                    assert_eq!(got.width(), Some(*width), "{name}");
+                    assert_eq!(got.values()[0], source.values()[0], "{name}");
+                    assert_eq!(got.validity().get(1), !masked, "{name}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn arrow_narrow_numeric_foreign_batches_and_empty_schema() {
+        use arrow::{
+            array::{ArrayRef, Int16Array, UInt32Array},
+            datatypes::{Field, Schema},
+            ipc::writer::StreamWriter,
+        };
+
+        // No fp-private metadata. The nullable extension is identified only
+        // by pandas' schema, and the first record batch has no nulls.
+        let schema = Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new("plain", ArrowDataType::UInt32, true),
+                Field::new("masked", ArrowDataType::Int16, true),
+            ],
+            std::collections::HashMap::from([(
+                "pandas".into(),
+                r#"{"index_columns":[],"columns":[{"field_name":"masked","numpy_type":"Int16"}]}"#
+                    .into(),
+            )]),
+        ));
+        for empty in [true, false] {
+            let mut bytes = Vec::new();
+            let mut writer = StreamWriter::try_new(&mut bytes, &schema).unwrap();
+            if !empty {
+                for value in [Some(4), None] {
+                    let arrays: Vec<ArrayRef> = vec![
+                        Arc::new(UInt32Array::from(vec![value])),
+                        Arc::new(Int16Array::from(vec![value.map(|v| v as i16)])),
+                    ];
+                    writer
+                        .write(&super::RecordBatch::try_new(schema.clone(), arrays).unwrap())
+                        .unwrap();
+                }
+            }
+            writer.finish().unwrap();
+            drop(writer);
+            let frame = super::read_ipc_stream_bytes(&bytes).unwrap();
+            assert_eq!(frame.num_columns(), 2);
+            let masked = frame.column("masked").unwrap();
+            assert_eq!(masked.dtype(), DType::Int64Nullable);
+            assert_eq!(masked.width(), Some(fp_types::NumericWidth::Int16));
+            let plain = frame.column("plain").unwrap();
+            if empty {
+                assert_eq!(plain.width(), Some(fp_types::NumericWidth::UInt32));
+                assert_eq!(plain.len(), 0);
+            } else {
+                assert_eq!(plain.dtype(), DType::Float64);
+                assert_eq!(plain.width(), None);
+                assert_eq!(plain.values()[0], Scalar::Float64(4.0));
+                assert!(plain.values()[1].is_missing() && masked.values()[1].is_missing());
+                assert_eq!(
+                    frame.index().labels(),
+                    &[IndexLabel::Int64(0), IndexLabel::Int64(1)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn arrow_masked_floats_keep_present_nan_separate_from_null() {
+        let mut valid = ValidityMask::all_valid(3);
+        valid.set(2, false);
+        let masked =
+            Column::from_nullable_f64_values_with_validity(vec![f64::NAN, 2.5, 0.0], valid);
+        let single = masked
+            .cast_to_width(fp_types::NumericWidth::Float32, true)
+            .unwrap();
+        let frame = DataFrame::new_with_column_order(
+            Index::default_range(3),
+            BTreeMap::from([("single".into(), single), ("double".into(), masked)]),
+            vec!["single".into(), "double".into()],
+        )
+        .unwrap();
+        let batch = super::dataframe_to_record_batch(&frame, None).unwrap();
+        for arr in batch.columns() {
+            assert!(arr.is_valid(0) && arr.is_null(2));
+        }
+        for restored in [
+            read_parquet_bytes(&super::write_parquet_bytes(&frame).unwrap()).unwrap(),
+            read_feather_bytes(&super::write_feather_bytes(&frame).unwrap()).unwrap(),
+        ] {
+            for name in ["single", "double"] {
+                let column = restored.column(name).unwrap();
+                assert!(column.validity().get(0) && !column.validity().get(2));
+                assert!(matches!(column.values()[0], Scalar::Float64(v) if v.is_nan()));
+                assert_eq!(column.values()[1], Scalar::Float64(2.5));
+            }
+        }
+    }
+
+    #[test]
+    fn arrow_uint64_checked_at_signed_storage_boundary() {
+        use arrow::array::UInt64Array;
+        use fp_types::NumericWidth;
+        let limit = i64::MAX as u64;
+        let good = UInt64Array::from(vec![limit]);
+        let s = super::series_from_arrow_array(
+            "v",
+            vec![IndexLabel::Int64(0)],
+            &good,
+            good.data_type(),
+        )
+        .unwrap();
+        assert_eq!(s.column().width(), Some(NumericWidth::UInt64));
+        assert_eq!(s.values()[0], Scalar::Int64(i64::MAX));
+        let (dt, back) = super::series_to_arrow_array(&s).unwrap();
+        assert_eq!(dt, ArrowDataType::UInt64);
+        assert_eq!(
+            back.as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap()
+                .value(0),
+            limit
+        );
+
+        for value in [limit + 1, u64::MAX] {
+            let bad = UInt64Array::from(vec![Some(value)]);
+            let err = super::series_from_arrow_array(
+                "v",
+                vec![IndexLabel::Int64(0)],
+                &bad,
+                bad.data_type(),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, IoError::Column(super::ColumnError::UInt64OutOfRange { value: v }) if v == value)
+            );
+            let batch =
+                super::RecordBatch::try_from_iter([("v", Arc::new(bad) as arrow::array::ArrayRef)])
+                    .unwrap();
+            assert!(
+                matches!(super::record_batch_to_dataframe(&batch, &[]), Err(IoError::Column(super::ColumnError::UInt64OutOfRange { value: v })) if v == value)
+            );
+        }
+    }
+
+    #[test]
     fn arrow_temporal_columns_round_trip_as_temporal_types() {
         // br-frankenpandas-rc0923-epic-rust-parity-bugs-4qg5w.20: Datetime64 and
         // Timedelta64 were written as plain Int64 and Timestamps were read back
@@ -34051,7 +34333,7 @@ mod tests {
             ],
         )
         .expect("batch");
-        let frame = super::record_batch_to_dataframe(&batch).expect("frame");
+        let frame = super::record_batch_to_dataframe(&batch, &[]).expect("frame");
         assert_eq!(
             frame.column("t").expect("t").dtype(),
             DType::datetime64_naive()
@@ -34083,7 +34365,7 @@ mod tests {
             )]))],
         )
         .expect("batch");
-        let err = super::record_batch_to_dataframe(&batch).expect_err("overflow must error");
+        let err = super::record_batch_to_dataframe(&batch, &[]).expect_err("overflow must error");
         assert!(format!("{err}").contains("out of bounds"), "got: {err}");
     }
 
@@ -34149,7 +34431,7 @@ mod tests {
     /// Arrow IPC round trip, and plain `Int64` / `Bool` must NOT be promoted.
     ///
     /// Arrow has one `Int64` and one `Boolean` — nullability is a validity
-    /// bitmap, not a type — so `dtype_to_arrow` maps both FrankenPandas dtypes
+    /// bitmap, not a type — so the writer maps both FrankenPandas dtypes
     /// onto the same Arrow type and the reader had no way to tell them apart.
     /// `ipc_stream_round_trip_null_hardened` caught it as `actual=false
     /// expected=true` once the payload-dtype chooser started building the
