@@ -10015,11 +10015,14 @@ pub fn nanargmin(values: &[Scalar]) -> Option<usize> {
 }
 
 /// Count of unique non-missing values.
+///
+/// Numeric values use Python's object equality: an integer, an exactly
+/// equal float and a boolean share one bucket. Host objects use their own
+/// equality and hash rather than their display text.
 pub fn nannunique(values: &[Scalar]) -> Scalar {
     use rustc_hash::FxHashSet;
     #[derive(Hash, PartialEq, Eq)]
     enum ScalarKey<'a> {
-        Bool(bool),
         Int64(i64),
         FloatBits(u64),
         Utf8(&'a str),
@@ -10027,9 +10030,7 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
         Datetime64(i64),
         Period(i64, PeriodFreq),
         Interval(u64, u64, IntervalClosed),
-        // An object cell counts by its repr (pandas hashes the object; a
-        // list would be unhashable there).
-        Object(String),
+        Object(&'a ObjectValue),
     }
 
     let mut seen = FxHashSet::default();
@@ -10038,11 +10039,18 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
             continue;
         }
         let key = match val {
-            Scalar::Bool(v) => ScalarKey::Bool(*v),
+            Scalar::Bool(v) => ScalarKey::Int64(i64::from(*v)),
             Scalar::Int64(v) => ScalarKey::Int64(*v),
             Scalar::Float64(v) => {
-                let normalized = if *v == 0.0 { 0.0 } else { *v };
-                ScalarKey::FloatBits(normalized.to_bits())
+                // The upper bound is exclusive: i64::MAX rounds to 2^63
+                // as f64, which must not equal the saturated i64 cast.
+                if v.fract() == 0.0
+                    && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(v)
+                {
+                    ScalarKey::Int64(*v as i64)
+                } else {
+                    ScalarKey::FloatBits(v.to_bits())
+                }
             }
             Scalar::Utf8(v) => ScalarKey::Utf8(v.as_str()),
             Scalar::Timedelta64(v) => ScalarKey::Timedelta64(*v),
@@ -10053,7 +10061,7 @@ pub fn nannunique(values: &[Scalar]) -> Scalar {
                 normalized_float_bits(v.right),
                 v.closed,
             ),
-            Scalar::Object(object) => ScalarKey::Object(object.repr()),
+            Scalar::Object(object) => ScalarKey::Object(object),
             Scalar::Null(_) => continue,
         };
         seen.insert(key);
@@ -14429,6 +14437,79 @@ mod tests {
     }
 
     #[test]
+    fn nannunique_object_numbers_compare_exactly_7v4wf() {
+        // pandas 2.2.3: Series(values, dtype=object).nunique() == 8.
+        // The values just beyond exact f64 integer precision must not fold
+        // together, and the string "1" remains a separate value.
+        let values = [
+            Scalar::Bool(true),
+            Scalar::Float64(1.0),
+            Scalar::Int64(1),
+            Scalar::Bool(false),
+            Scalar::Float64(-0.0),
+            Scalar::Int64(0),
+            Scalar::Utf8("1".to_owned()),
+            Scalar::Float64(1.5),
+            Scalar::Int64(9_007_199_254_740_992),
+            Scalar::Float64(9_007_199_254_740_992.0),
+            Scalar::Int64(9_007_199_254_740_993),
+            Scalar::Int64(i64::MAX),
+            Scalar::Float64(9_223_372_036_854_775_808.0),
+            Scalar::Null(NullKind::Null),
+            Scalar::Float64(f64::NAN),
+        ];
+        assert_eq!(super::nannunique(&values), Scalar::Int64(8));
+        assert_eq!(
+            super::nannunique(&[
+                Scalar::Int64(i64::MIN),
+                Scalar::Float64(-9_223_372_036_854_775_808.0),
+                Scalar::Float64(f64::NEG_INFINITY),
+                Scalar::Float64(f64::INFINITY),
+            ]),
+            Scalar::Int64(3)
+        );
+    }
+
+    #[test]
+    fn nannunique_uses_host_equality_not_repr_7v4wf() {
+        struct SameRepr(u8);
+
+        impl super::HostObject for SameRepr {
+            fn host_eq(&self, other: &dyn super::HostObject) -> bool {
+                other
+                    .as_any()
+                    .downcast_ref::<Self>()
+                    .is_some_and(|other| self.0 == other.0)
+            }
+            fn host_repr(&self) -> String {
+                "same display".to_owned()
+            }
+            fn host_str(&self) -> String {
+                self.host_repr()
+            }
+            fn host_hash(&self) -> Option<u64> {
+                Some(0)
+            }
+            fn host_cmp(&self, _: &dyn super::HostObject) -> Option<std::cmp::Ordering> {
+                None
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+
+        let cell = |id| {
+            Scalar::Object(super::ObjectValue::Host(super::HostValue::new(SameRepr(
+                id,
+            ))))
+        };
+        assert_eq!(
+            super::nannunique(&[cell(1), cell(2), cell(1), Scalar::Null(NullKind::Null)]),
+            Scalar::Int64(2)
+        );
+    }
+
+    #[test]
     fn nannunique_matches_scalar_bucket_oracle_elvbg() {
         // Differential vs independent scalar unique-bucket oracle
         // (br-frankenpandas-elvbg). Seeded LCG, no mocks.
@@ -14440,14 +14521,23 @@ mod tests {
         }
 
         fn same_bucket(left: &Scalar, right: &Scalar) -> bool {
-            match (left, right) {
-                (Scalar::Float64(left), Scalar::Float64(right)) => {
-                    let left = if *left == 0.0 { 0.0 } else { *left };
-                    let right = if *right == 0.0 { 0.0 } else { *right };
-                    left.to_bits() == right.to_bits()
-                }
-                _ => left == right,
+            if let (Scalar::Float64(left), Scalar::Float64(right)) = (left, right) {
+                return left == right;
             }
+            // Compare mixed numbers exactly through i128, independently of
+            // the production key's i64 range check and hash normalization.
+            let integer = |value: &Scalar| match value {
+                Scalar::Bool(value) => Some(i128::from(*value)),
+                Scalar::Int64(value) => Some(i128::from(*value)),
+                Scalar::Float64(value) if value.is_finite() && value.fract() == 0.0 => {
+                    Some(*value as i128)
+                }
+                _ => None,
+            };
+            if let (Some(left), Some(right)) = (integer(left), integer(right)) {
+                return left == right;
+            }
+            left == right
         }
 
         fn expected_nunique(values: &[Scalar]) -> i64 {
