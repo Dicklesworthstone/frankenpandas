@@ -11199,8 +11199,8 @@ fn frame_from_series_rows(
     let mut positions: Vec<HashMap<&IndexLabel, usize>> = Vec::with_capacity(rows.len());
     for row in rows {
         if row.index().has_duplicates() {
-            return Err(not_implemented(
-                "DataFrame of Series whose index repeats a label",
+            return Err(InvalidIndexError::new_err(
+                "Reindexing only valid with uniquely valued Index objects",
             ));
         }
         let mut at = HashMap::with_capacity(row.len());
@@ -11242,18 +11242,15 @@ fn frame_from_series_rows(
             .iter()
             .flatten()
             .any(|cell| matches!(cell, Scalar::Float64(_) | Scalar::Null(_)));
-    let mut columns = BTreeMap::new();
-    let mut order = Vec::with_capacity(labels.len());
-    for (label, values) in labels.iter().zip(cells) {
+    let mut columns = Vec::with_capacity(labels.len());
+    for (label, values) in labels.into_iter().zip(cells) {
         let column = if floats {
             Column::new(DType::Float64, values)
         } else {
             Column::from_values(promote(values))
         }
         .map_err(column_error_to_py)?;
-        let name = fp_frame::column_key(label);
-        columns.insert(name.clone(), column);
-        order.push(name);
+        columns.push((label, column));
     }
     let unnamed = rows.iter().filter(|row| row.name().is_empty()).count();
     let index = if unnamed == rows.len() {
@@ -11282,9 +11279,7 @@ fn frame_from_series_rows(
                     .iter()
                     .all(|row| row.index().range_span() == Some(*span))
         });
-    let frame = DataFrame::new_with_column_order(index, columns, order)
-        .map_err(frame_error_to_py)?
-        .with_recorded_column_labels(labels);
+    let frame = frame_of_labelled_columns(index, columns)?;
     Ok(match span {
         Some(span) => frame.with_column_range(span),
         None => frame,

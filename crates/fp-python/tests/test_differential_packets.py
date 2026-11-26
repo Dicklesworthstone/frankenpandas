@@ -44638,6 +44638,31 @@ def test_read_csv_usecols_like_pandas_5zn70(case: str) -> None:
     _more9_check(_5ZN70_CASES, case)
 
 
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_frame_of_series_rows_preserves_typed_column_selection() -> None:
+    def build(m, columns):
+        rows = [m.Series([11, 22], index=m.Index([0, "0"], dtype=object))]
+        return m.DataFrame(rows, columns=columns)
+
+    for columns in ([0], ["0"], [0, 0], ["0", "0"]):
+        want, got = build(pd, columns), build(fpd, columns)
+        assert got.columns.tolist() == want.columns.tolist()
+        assert got.values.tolist() == want.values.tolist()
+
+    # The flat store cannot represent these two labels together. Report that
+    # limitation before returning a frame with either column's data overwritten.
+    assert build(pd, None).values.tolist() == [[11, 22]]
+    with pytest.raises(NotImplementedError, match="same text"):
+        build(fpd, None)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_frame_of_series_rows_refuses_ambiguous_row_index() -> None:
+    for module in (pd, fpd):
+        with pytest.raises(module.errors.InvalidIndexError, match="uniquely valued"):
+            module.DataFrame([module.Series([11, 22], index=["x", "x"])])
+
+
 _E672H_REFUSED = {
     "rename to 0 and '0'": lambda m: m.DataFrame({"a": [1], "b": [2]}).rename(columns={"a": 0, "b": "0"}),
     "rename one beside a kept '0'": lambda m: m.DataFrame({"a": [1], "0": [2]}).rename(columns={"a": 0}),
