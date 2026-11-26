@@ -93503,6 +93503,28 @@ fn merge_impl(
         )
     };
 
+    // A materialized index must not overwrite input columns or collide with
+    // an indicator or a column name that suffixing will create.
+    let temporary_name = |base: &str| {
+        let (left_suffix, right_suffix) = options.suffixes.as_ref().map_or(
+            (Some("_x"), Some("_y")),
+            |[left, right]| (left.as_deref(), right.as_deref()),
+        );
+        let mut name = base.to_owned();
+        while left.column(&name).is_some()
+            || right.column(&name).is_some()
+            || options.indicator_name.as_deref() == Some(name.as_str())
+            || [left_suffix, right_suffix].into_iter().flatten().any(|suffix| {
+                name.strip_suffix(suffix).is_some_and(|source| {
+                    left.column(source).is_some() && right.column(source).is_some()
+                })
+            })
+        {
+            name.push('_');
+        }
+        name
+    };
+
     // One side's index against the other's column (left_index with
     // right_on, left_on with right_index), as pandas: the rows a column
     // merge gives, indexed by the column side's row labels (NaN where it has
@@ -93528,25 +93550,25 @@ fn merge_impl(
                 "merge of an index with several column keys",
             ));
         };
-        const KEY: &str = "__fp_merge_index_key__";
-        const LABEL: &str = "__fp_merge_row_label__";
+        let index_key = temporary_name("__fp_merge_index_key__");
+        let row_label = temporary_name("__fp_merge_row_label__");
         let with_labels = |frame: &DataFrame, name: &str| -> PyResult<DataFrame> {
             let column = index_key_column(frame.index()).map_err(column_error_to_py)?;
             frame.with_column(name, column).map_err(frame_error_to_py)
         };
         let (keyed_left, keyed_right, left_key, right_key) = if index_on_left {
             (
-                with_labels(left, KEY)?,
-                with_labels(right, LABEL)?,
-                KEY,
+                with_labels(left, &index_key)?,
+                with_labels(right, &row_label)?,
+                index_key.as_str(),
                 key.as_str(),
             )
         } else {
             (
-                with_labels(left, LABEL)?,
-                with_labels(right, KEY)?,
+                with_labels(left, &row_label)?,
+                with_labels(right, &index_key)?,
                 key.as_str(),
-                KEY,
+                index_key.as_str(),
             )
         };
         let merged = run(
@@ -93556,7 +93578,7 @@ fn merge_impl(
             &[right_key.to_owned()],
         )?;
         let (Some(index_keys), Some(column_keys), Some(row_labels)) =
-            (merged.column(KEY), merged.column(key), merged.column(LABEL))
+            (merged.column(&index_key), merged.column(key), merged.column(&row_label))
         else {
             return Err(not_implemented("merge of an index with a column key"));
         };
@@ -93590,7 +93612,7 @@ fn merge_impl(
         let names: Vec<String> = merged
             .column_names()
             .into_iter()
-            .filter(|name| name.as_str() != KEY && name.as_str() != LABEL)
+            .filter(|name| name.as_str() != index_key && name.as_str() != row_label)
             .cloned()
             .collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -93614,13 +93636,13 @@ fn merge_impl(
         // An aware index against a naive one is pandas' TypeError (it
         // merged the bare instants into an empty frame).
         fp_index::check_tz_compatible(left.index(), right.index()).map_err(index_error_to_py)?;
-        const KEY: &str = "__fp_merge_index_key__";
+        let index_key = temporary_name("__fp_merge_index_key__");
         let keyed = |frame: &DataFrame| -> PyResult<DataFrame> {
             let key = index_key_column(frame.index())
                 .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-            frame.with_column(KEY, key).map_err(frame_error_to_py)
+            frame.with_column(&index_key, key).map_err(frame_error_to_py)
         };
-        let key = vec![KEY.to_owned()];
+        let key = vec![index_key.clone()];
         // Two equal unique indexes pair row for row - pandas' Index.join of
         // equal ones is the index itself - so the rows merge on their
         // positions, the index kept: each side's labels became a key column
@@ -93640,11 +93662,11 @@ fn merge_impl(
             let positions = Column::from_i64_values_owned((0..rows).collect());
             let at_positions = |frame: &DataFrame| -> PyResult<DataFrame> {
                 frame
-                    .with_column(KEY, positions.clone())
+                    .with_column(&index_key, positions.clone())
                     .map_err(frame_error_to_py)
             };
             run(&at_positions(left)?, &at_positions(right)?, &key, &key)?
-                .set_index(KEY, true)
+                .set_index(&index_key, true)
                 .and_then(|merged| merged.with_index(left.index().clone()))
                 .map_err(frame_error_to_py)?
         } else {
@@ -93652,7 +93674,7 @@ fn merge_impl(
             // instants for dates), renamed below - its labels were copied
             // out and an index rebuilt from them.
             run(&keyed(left)?, &keyed(right)?, &key, &key)?
-                .set_index(KEY, true)
+                .set_index(&index_key, true)
                 .map_err(frame_error_to_py)?
         };
         // pandas' index name (see [`index_join_name`]) - never the internal
