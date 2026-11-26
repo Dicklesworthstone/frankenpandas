@@ -39790,11 +39790,11 @@ _JQ8QB_OPS = {
 @pytest.mark.parametrize("op", list(_JQ8QB_OPS))
 def test_date_object_keys_like_pandas_jq8qb(kind: str, op: str) -> None:
     if (
-        op in ("merge", "sort_values")
+        op == "sort_values"
         or kind == "with a datetime (NEGATIVE)"
         or (op == "groupby sum" and kind == "with a string (NEGATIVE)")
     ):
-        pytest.skip("merge / tie order / datetime cells / safe_sort are br-frankenpandas-l0i1l")
+        pytest.skip("tie order / datetime cells / safe_sort are br-frankenpandas-l0i1l")
 
     def answer(m: Any) -> Any:
         try:

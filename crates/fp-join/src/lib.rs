@@ -122,6 +122,8 @@ pub struct JoinedSeries {
 
 #[derive(Debug, Error)]
 pub enum JoinError {
+    #[error("'<' not supported between instances of '{other}' and 'datetime.date'")]
+    UnorderableDateKey { other: String },
     #[error(transparent)]
     Frame(#[from] FrameError),
     #[error(transparent)]
@@ -920,6 +922,9 @@ pub struct MergedDataFrame {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum JoinKeyComponent {
+    /// A host value with a cached equality key (Python's datetime.date day).
+    /// Keep its identity distinct from an ordinary integer or a timestamp.
+    NumberedHost(i64),
     Present(IndexLabel),
     FloatBits(u64),
     Missing,
@@ -927,8 +932,14 @@ enum JoinKeyComponent {
 
 impl Ord for JoinKeyComponent {
     fn cmp(&self, other: &Self) -> Ordering {
-        use JoinKeyComponent::{FloatBits, Missing, Present};
+        use JoinKeyComponent::{FloatBits, Missing, NumberedHost, Present};
         match (self, other) {
+            (NumberedHost(a), NumberedHost(b)) => a.cmp(b),
+            // pandas' safe_sort puts dates in the non-string block, ahead of
+            // strings and nulls. Incomparable mixed object keys are checked
+            // before sorting.
+            (NumberedHost(_), _) => Ordering::Less,
+            (_, NumberedHost(_)) => Ordering::Greater,
             (Missing, Missing) => Ordering::Equal,
             (Missing, _) => Ordering::Greater,
             (_, Missing) => Ordering::Less,
@@ -1064,20 +1075,21 @@ impl Ord for JoinKeyComponent {
 /// Stable per-variant fallback for comparisons without a dedicated arm.
 /// Numeric keys and their relation to extension keys are handled above.
 fn join_component_rank(c: &JoinKeyComponent) -> u8 {
-    use JoinKeyComponent::{FloatBits, Missing, Present};
+    use JoinKeyComponent::{FloatBits, Missing, NumberedHost, Present};
     match c {
-        Present(IndexLabel::Int64(_)) => 0,
-        Present(IndexLabel::Float64(_)) => 1,
-        Present(IndexLabel::Bool(_)) => 2,
-        Present(IndexLabel::Utf8(_)) => 3,
-        Present(IndexLabel::Timedelta64(_)) => 4,
-        Present(IndexLabel::Datetime64(_)) => 5,
-        Present(IndexLabel::Object(_)) => 6,
-        Present(IndexLabel::Period(_)) => 7,
-        Present(IndexLabel::Interval(_)) => 8,
-        Present(IndexLabel::Null(_)) => 9,
-        FloatBits(_) => 10,
-        Missing => 11,
+        NumberedHost(_) => 0,
+        Present(IndexLabel::Int64(_)) => 1,
+        Present(IndexLabel::Float64(_)) => 2,
+        Present(IndexLabel::Bool(_)) => 3,
+        Present(IndexLabel::Utf8(_)) => 4,
+        Present(IndexLabel::Timedelta64(_)) => 5,
+        Present(IndexLabel::Datetime64(_)) => 6,
+        Present(IndexLabel::Object(_)) => 7,
+        Present(IndexLabel::Period(_)) => 8,
+        Present(IndexLabel::Interval(_)) => 9,
+        Present(IndexLabel::Null(_)) => 10,
+        FloatBits(_) => 11,
+        Missing => 12,
     }
 }
 
@@ -1114,16 +1126,19 @@ fn scalar_to_key_component(s: &fp_types::Scalar) -> JoinKeyComponent {
         fp_types::Scalar::Object(object @ fp_types::ObjectValue::Bytes(_)) => {
             JoinKeyComponent::Present(IndexLabel::Object(object.clone()))
         }
+        fp_types::Scalar::Object(fp_types::ObjectValue::Host(host)) => host
+            .number()
+            .map_or(JoinKeyComponent::Missing, JoinKeyComponent::NumberedHost),
         // Enumerate the missing/unsupported representations so adding a new
         // scalar kind cannot silently turn every value of that kind into the
-        // same missing join key. List/host objects are rejected by
+        // same missing join key. Lists and opaque hosts are rejected by
         // validate_object_join_keys before key collection.
         fp_types::Scalar::Null(_)
         | fp_types::Scalar::Float64(_)
         | fp_types::Scalar::Timedelta64(_)
         | fp_types::Scalar::Datetime64(_)
         | fp_types::Scalar::Period(_)
-        | fp_types::Scalar::Object(_) => JoinKeyComponent::Missing,
+        | fp_types::Scalar::Object(fp_types::ObjectValue::List(_)) => JoinKeyComponent::Missing,
     }
 }
 
@@ -1154,15 +1169,14 @@ fn validate_object_join_keys(column: &Column) -> Result<(), JoinError> {
         return Ok(());
     }
     if matches!(column.dtype(), DType::Utf8 | DType::Categorical)
-        && column.values().iter().any(|value| {
-            matches!(
-                value,
-                Scalar::Object(fp_types::ObjectValue::List(_) | fp_types::ObjectValue::Host(_))
-            )
+        && column.values().iter().any(|value| match value {
+            Scalar::Object(fp_types::ObjectValue::List(_)) => true,
+            Scalar::Object(fp_types::ObjectValue::Host(host)) => host.number().is_none(),
+            _ => false,
         })
     {
         return Err(JoinError::Frame(FrameError::CompatibilityRejected(
-            "list and host object join keys are unsupported; bytes keys are supported".to_owned(),
+            "list and opaque host object join keys are unsupported".to_owned(),
         )));
     }
     Ok(())
@@ -1463,6 +1477,35 @@ impl MergeKeySortOrder {
     }
 }
 
+/// Numbered host values (dates in the Python binding) sort alongside text
+/// and missing values. Python cannot order them against numbers, bytes, or
+/// temporal scalars. A categorical with its own ranks needs no such comparison.
+fn validate_numbered_host_sort(left: &Column, right: &Column) -> Result<(), JoinError> {
+    let contains_date = |column: &Column| {
+        matches!(column.dtype(), DType::Utf8 | DType::Categorical)
+            && column.as_utf8_window().is_none()
+            && column.as_nullable_utf8_contiguous().is_none()
+            && column.values().iter().any(|value| {
+                matches!(value, Scalar::Object(fp_types::ObjectValue::Host(host)) if host.number().is_some())
+            })
+    };
+    if contains_date(left) || contains_date(right) {
+        for value in left.values().iter().chain(right.values()) {
+            if !value.is_missing()
+                && !matches!(
+                    value,
+                    Scalar::Utf8(_) | Scalar::Object(fp_types::ObjectValue::Host(_))
+                )
+            {
+                return Err(JoinError::UnorderableDateKey {
+                    other: value.python_type_name(),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 fn sort_merge_rows_by_join_keys(
     left_keys: &[CompositeJoinKey],
     right_keys: &[CompositeJoinKey],
@@ -1470,10 +1513,34 @@ fn sort_merge_rows_by_join_keys(
     right_key_columns: &[&Column],
     left_positions: &mut Vec<Option<usize>>,
     right_positions: &mut Vec<Option<usize>>,
-) {
+) -> Result<(), JoinError> {
     let n = left_positions.len();
+    if n == 0 && (left_keys.is_empty() || right_keys.is_empty()) {
+        return Ok(());
+    }
+    // pandas joins two singleton object indexes directly. When only one is
+    // a date it cannot compare the two, so their union keeps input order.
+    if let ([left], [right]) = (left_keys, right_keys)
+        && let ([left], [right]) = (left.as_slice(), right.as_slice())
+        && matches!(left, JoinKeyComponent::NumberedHost(_))
+            != matches!(right, JoinKeyComponent::NumberedHost(_))
+        && (left_key_columns[0].categorical().is_none()
+            || right_key_columns[0].categorical().is_none())
+    {
+        return Ok(());
+    }
+    let orders: Vec<_> = left_key_columns
+        .iter()
+        .zip(right_key_columns)
+        .map(|(left, right)| MergeKeySortOrder::for_columns(left, right))
+        .collect();
+    for ((left, right), order) in left_key_columns.iter().zip(right_key_columns).zip(&orders) {
+        if order.category_ranks.is_none() {
+            validate_numbered_host_sort(left, right)?;
+        }
+    }
     if n <= 1 {
-        return;
+        return Ok(());
     }
     // pandas sorts merge output by the join key. The naive O(n·log n) COMPARISON
     // sort re-compares full keys (string compares for Utf8) on every step. Instead
@@ -1495,11 +1562,6 @@ fn sort_merge_rows_by_join_keys(
             .filter(|k| set.insert(*k))
             .collect()
     };
-    let orders: Vec<_> = left_key_columns
-        .iter()
-        .zip(right_key_columns)
-        .map(|(left, right)| MergeKeySortOrder::for_columns(left, right))
-        .collect();
     if orders
         .iter()
         .all(|order| !order.missing_first && order.category_ranks.is_none())
@@ -1550,6 +1612,7 @@ fn sort_merge_rows_by_join_keys(
     }
     reorder_vec_by_index(left_positions, &order);
     reorder_vec_by_index(right_positions, &order);
+    Ok(())
 }
 
 /// Match pandas `libjoin.inner_join(..., sort=False)` when `output_len == left.len()`
@@ -10680,7 +10743,7 @@ fn merge_dataframes_on_with_options_storage(
                     &right_key_columns,
                     &mut left_positions,
                     &mut right_positions,
-                );
+                )?;
             }
             (left_positions, right_positions, out_row_keys)
         };

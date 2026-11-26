@@ -4558,6 +4558,7 @@ pub fn classify_join_error_category(
     err: &fp_join::JoinError,
 ) -> (ExpectedErrorCategory, &'static str) {
     match err {
+        fp_join::JoinError::UnorderableDateKey { .. } => (ExpectedErrorCategory::Type, "TypeError"),
         fp_join::JoinError::Frame(fe) => {
             let (cat, cls) = classify_frame_error_category(fe);
             if cat == ExpectedErrorCategory::Value {

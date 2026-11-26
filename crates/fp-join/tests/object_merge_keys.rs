@@ -111,9 +111,14 @@ fn bytes_stay_distinct_from_strings_and_match_nulls_only_as_nulls() {
     }
 }
 
-struct OpaqueKey;
+// Only the cached number can identify these dates. Every host callback panics.
+struct TestHost(Option<i64>);
 
-impl HostObject for OpaqueKey {
+impl HostObject for TestHost {
+    fn host_number(&self) -> Option<i64> {
+        self.0
+    }
+
     fn host_eq(&self, _: &dyn HostObject) -> bool {
         panic!("refused host keys must not invoke equality")
     }
@@ -141,7 +146,7 @@ impl HostObject for OpaqueKey {
 
 #[test]
 fn host_keys_are_refused_without_invoking_host_callbacks() {
-    let host = || Scalar::Object(ObjectValue::Host(HostValue::new(OpaqueKey)));
+    let host = || Scalar::Object(ObjectValue::Host(HostValue::new(TestHost(None))));
     let left = frame(vec![host()], vec![10], "left");
     let right = frame(vec![host()], vec![20], "right");
     for result in [
@@ -164,6 +169,87 @@ fn host_keys_are_refused_without_invoking_host_callbacks() {
         MergeAsofOptions::new().by(vec!["key".to_owned()]),
     );
     assert!(result.is_err());
+}
+
+fn day(number: i64) -> Scalar {
+    Scalar::Object(ObjectValue::Host(HostValue::new(TestHost(Some(number)))))
+}
+
+#[test]
+fn date_keys_join_by_day_preserving_duplicates_missing_keys_and_objects() {
+    let missing = Scalar::Null(NullKind::NaN);
+    let left = frame(
+        vec![day(2), missing.clone(), day(0), day(2)],
+        vec![0, 1, 2, 3],
+        "left",
+    );
+    let right = frame(
+        vec![day(2), day(2), missing.clone(), day(4)],
+        vec![4, 5, 6, 7],
+        "right",
+    );
+    for result in [
+        merge_dataframes(&left, &right, "key", JoinType::Inner),
+        merge_dataframes_on(&left, &right, &["key"], JoinType::Inner),
+    ] {
+        let merged = result.unwrap();
+        assert_eq!(
+            merged.columns["left"].values(),
+            &[0, 0, 1, 3, 3].map(Scalar::Int64)
+        );
+        assert_eq!(
+            merged.columns["right"].values(),
+            &[4, 5, 6, 4, 5].map(Scalar::Int64)
+        );
+        assert_eq!(
+            merged.columns["key"].values(),
+            &[day(2), day(2), missing.clone(), day(2), day(2)]
+        );
+    }
+    let outer = merge_dataframes(&left, &right, "key", JoinType::Outer).unwrap();
+    assert_eq!(
+        outer.columns["key"].values(),
+        &[day(0), day(2), day(2), day(2), day(2), day(4), missing]
+    );
+}
+
+#[test]
+fn distinct_date_and_integer_keys_with_the_same_number_never_match() {
+    let left = frame(vec![day(0), Scalar::Int64(0)], vec![1, 2], "left");
+    let right = frame(vec![Scalar::Int64(0), day(0)], vec![3, 4], "right");
+    let merged = merge_dataframes(&left, &right, "key", JoinType::Inner).unwrap();
+    assert_eq!(
+        merged.columns["right"].values(),
+        &[Scalar::Int64(4), Scalar::Int64(3)]
+    );
+    assert!(merge_dataframes(&left, &right, "key", JoinType::Outer).is_err());
+}
+
+#[test]
+fn composite_and_asof_joins_use_the_date_identity_in_each_group() {
+    let left = frame(vec![day(1), day(2), day(1)], vec![1, 2, 3], "left")
+        .with_column("time", Column::from_i64_values(vec![1, 2, 3]))
+        .unwrap();
+    let right = frame(vec![day(1), day(2), day(1)], vec![10, 20, 30], "right")
+        .with_column("time", Column::from_i64_values(vec![1, 1, 3]))
+        .unwrap();
+    let exact = merge_dataframes_on(&left, &right, &["key", "time"], JoinType::Inner).unwrap();
+    assert_eq!(
+        exact.columns["right"].values(),
+        &[Scalar::Int64(10), Scalar::Int64(30)]
+    );
+    let asof = merge_asof_with_options(
+        &left,
+        &right,
+        "time",
+        AsofDirection::Backward,
+        MergeAsofOptions::new().by(vec!["key".to_owned()]),
+    )
+    .unwrap();
+    assert_eq!(
+        asof.columns["right"].values(),
+        &[10, 20, 30].map(Scalar::Int64)
+    );
 }
 
 #[test]

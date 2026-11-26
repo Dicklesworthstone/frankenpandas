@@ -9332,15 +9332,28 @@ impl PyHost {
     /// hash and comparison of a date cell called date.__hash__ / __eq__
     /// (groupby(index.date) 0.41x pandas; br-frankenpandas-jq8qb). Its hash is the day's,
     /// not Python's - a date only equals a date (a datetime never does),
-    /// and every date cell is made here; a date subclass overriding __eq__
-    /// would be read as its date.
+    /// and subclasses overriding date identity or ordering stay opaque.
     fn new(object: Py<PyAny>) -> Self {
         let day = Python::attach(|py| {
             let value = object.bind(py);
             if value.is_instance_of::<PyDateTime>() {
                 return None;
             }
-            value.cast::<pyo3::types::PyDate>().ok().map(Self::day_of)
+            let date = value.cast::<pyo3::types::PyDate>().ok()?;
+            if !value.is_exact_instance_of::<pyo3::types::PyDate>() {
+                // Only inherited date comparisons and hashing justify using
+                // the day as a key. A subclass may redefine identity or order.
+                let class = value.get_type();
+                let base = py.get_type::<pyo3::types::PyDate>();
+                for method in [
+                    "__eq__", "__ne__", "__hash__", "__lt__", "__le__", "__gt__", "__ge__",
+                ] {
+                    if !class.getattr(method).ok()?.is(&base.getattr(method).ok()?) {
+                        return None;
+                    }
+                }
+            }
+            Some(Self::day_of(date))
         });
         Self(object, day)
     }
@@ -92827,6 +92840,9 @@ fn merge_key_names(frame: &DataFrame, keys: &Bound<'_, PyAny>) -> PyResult<Vec<S
 
 /// fp-join's validate failure as pandas' MergeError message.
 fn merge_error_to_py(error: fp_join::JoinError) -> PyErr {
+    if matches!(error, fp_join::JoinError::UnorderableDateKey { .. }) {
+        return PyErr::new::<pyo3::exceptions::PyTypeError, _>(error.to_string());
+    }
     let message = error.to_string();
     // Neither side unique: pandas names both (z6jxh).
     if message.contains("validate='one_to_one' failed: left and right keys are not unique") {
