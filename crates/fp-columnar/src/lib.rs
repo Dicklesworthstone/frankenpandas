@@ -13655,11 +13655,11 @@ fn interval_key(interval: &Interval) -> (u64, u64, IntervalClosed) {
 }
 
 /// Hashable membership key for a non-missing scalar — the same equivalence
-/// `Column::unique` uses (Float64 ±0.0 normalized to one key). `None` for
+/// `Column::unique_non_missing` uses (Float64 ±0.0 normalized to one key). `None` for
 /// missing values. Lets the np set-ops (`setdiff1d`/`intersect1d`/`setxor1d`/
 /// `in1d`) replace an O(N·M) linear `semantic_eq` scan over the other operand
 /// with an O(1) hash-set probe. Because every operand is first passed through
-/// `unique()` (which dedups by this exact key) and missing/NaN values are
+/// `unique_non_missing()` (which dedups by this exact key) and missing/NaN values are
 /// filtered out, key equality matches the `semantic_eq` test on the values that
 /// actually flow through.
 #[derive(Hash, PartialEq, Eq)]
@@ -13695,6 +13695,57 @@ fn set_member_key(v: &Scalar) -> Option<SetMemberKey<'_>> {
         Scalar::Object(object) => SetMemberKey::Object(object.repr()),
         Scalar::Null(_) => return None,
     })
+}
+
+/// Equality for pandas object-column distinct operations. Numeric values
+/// compare across their scalar variants, while text and missing kinds remain
+/// distinct. The original scalar is retained separately for result values.
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+enum ObjectDistinctKey<'a> {
+    Missing(NullKind),
+    Int64(i64),
+    FloatBits(u64),
+    Utf8(&'a str),
+    Timedelta64(i64),
+    Datetime64(i64),
+    Period(i64, PeriodFreq),
+    Interval(u64, u64, IntervalClosed),
+    Object(&'a fp_types::ObjectValue),
+}
+
+fn object_distinct_key(value: &Scalar) -> ObjectDistinctKey<'_> {
+    if value.is_missing() {
+        return ObjectDistinctKey::Missing(match value {
+            Scalar::Null(kind) => *kind,
+            Scalar::Float64(_) => NullKind::NaN,
+            _ => NullKind::NaT,
+        });
+    }
+    match value {
+        Scalar::Bool(value) => ObjectDistinctKey::Int64(i64::from(*value)),
+        Scalar::Int64(value) => ObjectDistinctKey::Int64(*value),
+        Scalar::Float64(value) => {
+            // The exclusive upper bound prevents the rounded f64 value
+            // of i64::MAX (2^63) from saturating into the integer bucket.
+            if value.fract() == 0.0
+                && (-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(value)
+            {
+                ObjectDistinctKey::Int64(*value as i64)
+            } else {
+                ObjectDistinctKey::FloatBits(value.to_bits())
+            }
+        }
+        Scalar::Utf8(value) => ObjectDistinctKey::Utf8(value),
+        Scalar::Timedelta64(value) => ObjectDistinctKey::Timedelta64(*value),
+        Scalar::Datetime64(value) => ObjectDistinctKey::Datetime64(*value),
+        Scalar::Period(value) => ObjectDistinctKey::Period(value.ordinal, value.freq),
+        Scalar::Interval(value) => {
+            let (left, right, closed) = interval_key(value);
+            ObjectDistinctKey::Interval(left, right, closed)
+        }
+        Scalar::Object(value) => ObjectDistinctKey::Object(value),
+        Scalar::Null(kind) => ObjectDistinctKey::Missing(*kind),
+    }
 }
 
 #[derive(Debug, Error, Clone, PartialEq)]
@@ -28509,7 +28560,8 @@ impl Column {
     /// Count of distinct values with explicit missing-value handling.
     ///
     /// Matches `pd.Series.nunique(dropna=...)`. When `dropna=false`,
-    /// all missing values contribute a single extra distinct bucket.
+    /// object columns distinguish missing kinds; typed columns count one
+    /// additional missing bucket.
     #[must_use]
     pub fn nunique_with_dropna(&self, dropna: bool) -> Scalar {
         // Dense direct-address fast path: an all-valid, bounded-range Int64
@@ -28640,6 +28692,16 @@ impl Column {
                 distinct += 1;
             }
             return Scalar::Int64(distinct);
+        }
+
+        if self.dtype == DType::Utf8 && !self.pandas_string {
+            let mut seen = FxHashSet::default();
+            for value in &self.values {
+                if !dropna || !value.is_missing() {
+                    seen.insert(object_distinct_key(value));
+                }
+            }
+            return Scalar::Int64(seen.len() as i64);
         }
 
         let mut distinct = match nannunique(&self.values) {
@@ -30273,7 +30335,11 @@ impl Column {
                 out.push(v.clone());
             }
         }
-        Self::new(self.dtype.clone(), out)
+        if self.dtype == DType::Utf8 && !self.pandas_string {
+            Ok(Self::from_object_values(out))
+        } else {
+            Self::new(self.dtype.clone(), out)
+        }
     }
 
     /// Element-wise comparison against `other`, emitting a 2-column
@@ -34374,8 +34440,8 @@ impl Column {
     /// Per-row boolean flag for duplicated values (keep='first').
     ///
     /// Matches `pd.Series.duplicated()` — all but the first occurrence
-    /// of each value is flagged true. Missing values are treated as a
-    /// single bucket (pandas equates NaN for this purpose).
+    /// of each value is flagged true. Repeated missing values compare equal;
+    /// object columns retain distinct buckets for different missing kinds.
     pub fn duplicated(&self) -> Result<Self, ColumnError> {
         self.duplicated_keep("first")
     }
@@ -34655,6 +34721,13 @@ impl Column {
                     }
                 })
                 .collect();
+            return Ok(Self::from_bool_values(duplicated_flags_typed(
+                &keys, policy,
+            )));
+        }
+
+        if self.dtype == DType::Utf8 && !self.pandas_string {
+            let keys: Vec<_> = self.values.iter().map(object_distinct_key).collect();
             return Ok(Self::from_bool_values(duplicated_flags_typed(
                 &keys, policy,
             )));
@@ -39374,12 +39447,66 @@ impl Column {
         Ok(Self::from_bool_values(out))
     }
 
-    /// Unique values in first-seen order, missing values dropped.
-    ///
-    /// Matches `pd.Series.unique()` (pandas returns values in order of
-    /// appearance and drops NaN/NA). Float NaN is deduplicated on bit
-    /// pattern; +0.0 / -0.0 fold to the same key.
+    /// Unique values in first-seen order. Object columns preserve the first
+    /// scalar of each equal numeric value and retain distinct missing kinds.
+    /// Other dtypes use the existing non-missing distinct-value kernels.
     pub fn unique(&self) -> Result<Self, ColumnError> {
+        if self.dtype == DType::Utf8 && !self.pandas_string && self.as_utf8_contiguous().is_none() {
+            // Retain the first missing row while deduplicating byte spans:
+            // a fresh nullable text column needs no Scalar/String per row.
+            if let ScalarValues::LazyNullableUtf8 {
+                bytes,
+                offsets,
+                validity,
+                gap,
+                values,
+            } = &self.values
+                && values.get().is_none()
+            {
+                let mut seen: FxHashSet<&[u8]> = FxHashSet::default();
+                let mut out_bytes = Vec::new();
+                let mut out_offsets = vec![0];
+                let mut missing_position = None;
+                for (row, span) in offsets.windows(2).enumerate() {
+                    if validity.get(row) {
+                        let bytes = &bytes[span[0]..span[1]];
+                        if !seen.insert(bytes) {
+                            continue;
+                        }
+                        out_bytes.extend_from_slice(bytes);
+                    } else if missing_position.is_none() {
+                        missing_position = Some(out_offsets.len() - 1);
+                    } else {
+                        continue;
+                    }
+                    out_offsets.push(out_bytes.len());
+                }
+                let mut out_validity = ValidityMask::all_valid(out_offsets.len() - 1);
+                if let Some(position) = missing_position {
+                    out_validity.set(position, false);
+                }
+                return Ok(Self::from_utf8_values_with_gap(
+                    out_bytes,
+                    out_offsets,
+                    out_validity,
+                    *gap,
+                ));
+            }
+            let mut seen = FxHashSet::default();
+            let mut out = Vec::new();
+            for value in &self.values {
+                if seen.insert(object_distinct_key(value)) {
+                    out.push(value.clone());
+                }
+            }
+            return Ok(Self::from_object_values(out));
+        }
+        self.unique_non_missing()
+    }
+
+    // Set operations use their existing non-missing, variant-sensitive keys.
+    // Keep their distinct kernel separate from object-column unique equality.
+    fn unique_non_missing(&self) -> Result<Self, ColumnError> {
         // Dense direct-address fast path: an all-valid, bounded-range Int64
         // column dedups via a seen-bitset indexed by `v - min` — hash-free, no
         // per-element Scalar enum — preserving first-seen order. Bit-identical to
@@ -39563,7 +39690,7 @@ impl Column {
     ///
     /// Matches np.setdiff1d().
     pub fn setdiff1d(&self, other: &Self) -> Result<Self, ColumnError> {
-        let other_unique = other.unique()?;
+        let other_unique = other.unique_non_missing()?;
         // O(N+M): hash-set membership for `other`, plus a `seen` set replacing
         // the O(N²) `out.any(...)` first-seen dedup.
         let other_set: FxHashSet<SetMemberKey<'_>> = other_unique
@@ -39588,8 +39715,8 @@ impl Column {
     ///
     /// Matches np.intersect1d().
     pub fn intersect1d(&self, other: &Self) -> Result<Self, ColumnError> {
-        let self_unique = self.unique()?;
-        let other_unique = other.unique()?;
+        let self_unique = self.unique_non_missing()?;
+        let other_unique = other.unique_non_missing()?;
         let other_set: FxHashSet<SetMemberKey<'_>> = other_unique
             .values()
             .iter()
@@ -39614,7 +39741,7 @@ impl Column {
         let mut combined = self.values.to_vec();
         combined.extend(other.values().iter().cloned());
         let temp = Self::new(self.dtype.clone(), combined)?;
-        temp.unique()
+        temp.unique_non_missing()
     }
 
     /// Set symmetric difference: unique values in either but not both.
@@ -39622,8 +39749,8 @@ impl Column {
     /// Matches np.setxor1d(). Returns unique values that are in exactly
     /// one of the input arrays.
     pub fn setxor1d(&self, other: &Self) -> Result<Self, ColumnError> {
-        let a_unique = self.unique()?;
-        let b_unique = other.unique()?;
+        let a_unique = self.unique_non_missing()?;
+        let b_unique = other.unique_non_missing()?;
         let a_set: FxHashSet<SetMemberKey<'_>> = a_unique
             .values()
             .iter()
@@ -39660,7 +39787,7 @@ impl Column {
     ///
     /// Matches np.in1d(). Returns Bool column.
     pub fn in1d(&self, other: &Self) -> Result<Self, ColumnError> {
-        let other_unique = other.unique()?;
+        let other_unique = other.unique_non_missing()?;
         let other_set: FxHashSet<SetMemberKey<'_>> = other_unique
             .values()
             .iter()
@@ -39949,7 +40076,21 @@ impl Column {
             true
         };
 
-        if !dense_done {
+        if self.dtype == DType::Utf8 && !self.pandas_string {
+            let mut index: FxHashMap<ObjectDistinctKey<'_>, usize> = FxHashMap::default();
+            for value in &self.values {
+                if dropna && value.is_missing() {
+                    continue;
+                }
+                let key = object_distinct_key(value);
+                if let Some(&position) = index.get(&key) {
+                    counts[position].1 += 1;
+                } else {
+                    index.insert(key, counts.len());
+                    counts.push((value.clone(), 1));
+                }
+            }
+        } else if !dense_done {
             let mut index: rustc_hash::FxHashMap<SetMemberKey<'_>, usize> =
                 rustc_hash::FxHashMap::default();
             for value in &self.values {
@@ -40005,7 +40146,11 @@ impl Column {
             }
         }
 
-        let values = Self::new(self.dtype.clone(), values_out)?;
+        let values = if self.dtype == DType::Utf8 && !self.pandas_string {
+            Self::from_object_values(values_out)
+        } else {
+            Self::new(self.dtype.clone(), values_out)?
+        };
         let counts = Self::new(
             if normalize {
                 DType::Float64
@@ -42586,7 +42731,11 @@ mod tests {
             Column::from_f64_owned_chunks_with_validity(
                 vec![
                     (Arc::new(vec![1.5, 0.0, -0.0]), 0, 3),
-                    (Arc::new(vec![f64::INFINITY, f64::NAN, f64::NEG_INFINITY]), 0, 3),
+                    (
+                        Arc::new(vec![f64::INFINITY, f64::NAN, f64::NEG_INFINITY]),
+                        0,
+                        3,
+                    ),
                 ],
                 6,
                 validity,
@@ -53282,12 +53431,9 @@ mod tests {
 
         #[test]
         fn unique_nullable_utf8_typed_matches_generic() {
-            // The typed nullable-Utf8 unique arm (cold cache) must be BIT-EXACT to the
-            // generic Key path: FP drops nulls, keeps distinct present values in first-seen
-            // order. A/B on identical LazyNullableUtf8 data: `col_cold` (fresh, cold cache)
-            // exercises the typed arm; `col_warm` has its Scalar cache pre-materialized so
-            // the cold-cache gate defers it to the generic path. Seeded short strings over
-            // {a,b,c,d} + varied null densities (incl. all-null ⇒ empty).
+            // Object unique must give the same first-seen values, including a
+            // missing bucket, with either a cold or populated Scalar cache.
+            // Seeded strings over {a,b,c,d} and varied missing densities.
             let mut state: u64 = 0x0417_C0DE_1234_9E37;
             let mut next = || {
                 state = state
@@ -64977,12 +65123,17 @@ mod tests {
                 }
             }
 
-            fn expected_nunique(values: &[Scalar], dropna: bool) -> i64 {
+            fn expected_nunique(values: &[Scalar], dropna: bool, object: bool) -> i64 {
                 let mut seen = Vec::<Scalar>::new();
-                let mut saw_missing = false;
+                let mut missing_kinds = [false; 3];
                 for value in values {
                     if value.is_missing() {
-                        saw_missing = true;
+                        let kind = match value {
+                            Scalar::Null(NullKind::Null) => 0,
+                            Scalar::Null(NullKind::NaN) | Scalar::Float64(_) => 1,
+                            _ => 2,
+                        };
+                        missing_kinds[kind] = true;
                         continue;
                     }
                     if !seen
@@ -64992,12 +65143,18 @@ mod tests {
                         seen.push(value.clone());
                     }
                 }
-                let missing_bucket = i64::from(!dropna && saw_missing);
-                seen.len() as i64 + missing_bucket
+                let missing_count = missing_kinds.into_iter().filter(|seen| *seen).count();
+                let missing_count = if object {
+                    missing_count
+                } else {
+                    usize::from(missing_count > 0)
+                };
+                (seen.len() + if dropna { 0 } else { missing_count }) as i64
             }
 
             fn assert_reducers(case: usize, family: &str, values: Vec<Scalar>) {
                 let input = Column::from_values(values.clone()).expect("column");
+                let object = input.dtype() == DType::Utf8 && !input.is_pandas_string();
                 let expected_count = values.iter().filter(|value| !value.is_missing()).count();
                 assert_eq!(
                     input.count(),
@@ -65006,12 +65163,12 @@ mod tests {
                 );
                 assert_eq!(
                     input.nunique(),
-                    Scalar::Int64(expected_nunique(&values, true)),
+                    Scalar::Int64(expected_nunique(&values, true, object)),
                     "case={case} family={family}: nunique(dropna=true) mismatch for {values:?}"
                 );
                 assert_eq!(
                     input.nunique_with_dropna(false),
-                    Scalar::Int64(expected_nunique(&values, false)),
+                    Scalar::Int64(expected_nunique(&values, false, object)),
                     "case={case} family={family}: nunique(dropna=false) mismatch for {values:?}"
                 );
             }
@@ -68811,9 +68968,18 @@ mod tests {
             let (values, counts) = col
                 .value_counts_with_options(false, true, false, false)
                 .expect("value_counts");
-            assert_eq!(values.values()[0], Scalar::Utf8("a".into()));
-            assert!(values.values()[1].is_missing());
-            assert_eq!(counts.values(), &[Scalar::Int64(2), Scalar::Int64(2)]);
+            assert_eq!(
+                values.values(),
+                &[
+                    Scalar::Utf8("a".into()),
+                    Scalar::Null(NullKind::NaN),
+                    Scalar::Null(NullKind::Null),
+                ]
+            );
+            assert_eq!(
+                counts.values(),
+                &[Scalar::Int64(2), Scalar::Int64(1), Scalar::Int64(1)]
+            );
         }
 
         #[test]
@@ -69226,7 +69392,9 @@ mod tests {
             .unwrap();
             let out3 = utf8.convolve(&v, "full").unwrap();
             assert!(
-                out3.values().iter().all(|s| *s == Scalar::Null(NullKind::NaN)),
+                out3.values()
+                    .iter()
+                    .all(|s| *s == Scalar::Null(NullKind::NaN)),
                 "a Utf8 column must yield NaN, not silently integrate as zeros"
             );
 
@@ -78666,6 +78834,270 @@ mod masked_integer_reflected_zero_division_znfox {
                 ],
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod object_distinct_7v4wf {
+    use fp_types::{HostObject, HostValue, ObjectValue};
+
+    use super::{Column, DType, NullKind, Scalar, ValidityMask};
+
+    fn assert_values(column: &Column, expected: &[Scalar]) {
+        assert_eq!(column.dtype(), DType::Utf8);
+        assert_eq!(column.len(), expected.len());
+        for (actual, expected) in column.values().iter().zip(expected) {
+            match (actual, expected) {
+                (Scalar::Float64(actual), Scalar::Float64(expected)) if expected.is_nan() => {
+                    assert!(actual.is_nan());
+                }
+                (Scalar::Float64(actual), Scalar::Float64(expected)) => {
+                    assert_eq!(actual.to_bits(), expected.to_bits());
+                }
+                _ => assert_eq!(actual, expected),
+            }
+        }
+    }
+
+    #[test]
+    fn distinct_operations_agree_on_numbers_and_missing_kinds() {
+        // Measured with pandas 2.2.3 Series(..., dtype=object). Temporal
+        // sentinels represent pd.NaT; Null(NaN) and Float64(NaN) are NaN.
+        let column = Column::from_object_values(vec![
+            Scalar::Bool(true),
+            Scalar::Float64(1.0),
+            Scalar::Int64(1),
+            Scalar::Utf8("1".to_owned()),
+            Scalar::Bool(false),
+            Scalar::Float64(-0.0),
+            Scalar::Int64(0),
+            Scalar::Float64(0.0),
+            Scalar::Null(NullKind::Null),
+            Scalar::Float64(f64::NAN),
+            Scalar::Null(NullKind::NaT),
+            Scalar::Null(NullKind::NaN),
+            Scalar::Null(NullKind::Null),
+            Scalar::Datetime64(i64::MIN),
+            Scalar::Timedelta64(i64::MIN),
+        ]);
+        let first = [
+            Scalar::Bool(true),
+            Scalar::Utf8("1".to_owned()),
+            Scalar::Bool(false),
+            Scalar::Null(NullKind::Null),
+            Scalar::Float64(f64::NAN),
+            Scalar::Null(NullKind::NaT),
+        ];
+        assert_values(&column.unique().unwrap(), &first);
+        assert_values(&column.drop_duplicates().unwrap(), &first);
+        assert_eq!(column.nunique(), Scalar::Int64(3));
+        assert_eq!(column.nunique_with_dropna(false), Scalar::Int64(6));
+
+        for (policy, flags) in [
+            (
+                "first",
+                vec![
+                    false, true, true, false, false, true, true, true, false, false, false, true,
+                    true, true, true,
+                ],
+            ),
+            (
+                "last",
+                vec![
+                    true, true, false, false, true, true, true, false, true, true, true, false,
+                    false, true, false,
+                ],
+            ),
+            (
+                "false",
+                vec![
+                    true, true, true, false, true, true, true, true, true, true, true, true, true,
+                    true, true,
+                ],
+            ),
+        ] {
+            assert_eq!(
+                column.duplicated_keep(policy).unwrap().values(),
+                flags.into_iter().map(Scalar::Bool).collect::<Vec<_>>()
+            );
+        }
+        assert_values(
+            &column.drop_duplicates_keep("last").unwrap(),
+            &[
+                Scalar::Int64(1),
+                Scalar::Utf8("1".to_owned()),
+                Scalar::Float64(0.0),
+                Scalar::Null(NullKind::NaN),
+                Scalar::Null(NullKind::Null),
+                Scalar::Timedelta64(i64::MIN),
+            ],
+        );
+        assert_values(
+            &column.drop_duplicates_keep("false").unwrap(),
+            &[Scalar::Utf8("1".to_owned())],
+        );
+        let (values, counts) = column
+            .value_counts_with_options(false, false, false, false)
+            .unwrap();
+        assert_values(&values, &first);
+        assert_eq!(counts.as_i64_slice().unwrap(), &[3, 1, 4, 2, 2, 3]);
+
+        let (values, counts) = column
+            .value_counts_with_options(false, true, true, false)
+            .unwrap();
+        assert_values(
+            &values,
+            &[
+                first[1].clone(),
+                first[3].clone(),
+                first[4].clone(),
+                first[0].clone(),
+                first[5].clone(),
+                first[2].clone(),
+            ],
+        );
+        assert_eq!(counts.as_i64_slice().unwrap(), &[1, 2, 2, 3, 3, 4]);
+        let (values, counts) = column
+            .value_counts_with_options(true, true, false, true)
+            .unwrap();
+        assert_values(
+            &values,
+            &[first[2].clone(), first[0].clone(), first[1].clone()],
+        );
+        assert_eq!(counts.as_f64_slice().unwrap(), &[0.5, 0.375, 0.125]);
+    }
+
+    #[test]
+    fn first_numeric_scalar_type_is_preserved_in_object_outputs() {
+        for first in [Scalar::Bool(true), Scalar::Int64(1), Scalar::Float64(1.0)] {
+            let column = Column::from_object_values(vec![
+                first.clone(),
+                Scalar::Bool(true),
+                Scalar::Int64(1),
+                Scalar::Float64(1.0),
+            ]);
+            assert_values(&column.unique().unwrap(), std::slice::from_ref(&first));
+            assert_values(
+                &column.drop_duplicates().unwrap(),
+                std::slice::from_ref(&first),
+            );
+            let (values, counts) = column.value_counts().unwrap();
+            assert_values(&values, std::slice::from_ref(&first));
+            assert_eq!(counts.as_i64_slice().unwrap(), &[4]);
+        }
+        let zeros = Column::from_object_values(vec![
+            Scalar::Float64(-0.0),
+            Scalar::Bool(false),
+            Scalar::Int64(0),
+        ]);
+        assert_values(&zeros.unique().unwrap(), &[Scalar::Float64(-0.0)]);
+    }
+
+    #[test]
+    fn large_integers_are_not_rounded_into_float_buckets() {
+        let column = Column::from_object_values(vec![
+            Scalar::Int64(9_007_199_254_740_992),
+            Scalar::Float64(9_007_199_254_740_992.0),
+            Scalar::Int64(9_007_199_254_740_993),
+            Scalar::Int64(i64::MAX),
+            Scalar::Float64(9_223_372_036_854_775_808.0),
+            Scalar::Int64(i64::MIN),
+            Scalar::Float64(-9_223_372_036_854_775_808.0),
+            Scalar::Float64(f64::INFINITY),
+            Scalar::Float64(f64::NEG_INFINITY),
+        ]);
+        let expected: Vec<_> = [0, 2, 3, 4, 5, 7, 8]
+            .into_iter()
+            .map(|position| column.values()[position].clone())
+            .collect();
+        assert_values(&column.unique().unwrap(), &expected);
+        assert_values(&column.drop_duplicates().unwrap(), &expected);
+        assert_eq!(column.nunique(), Scalar::Int64(7));
+        let (values, counts) = column
+            .value_counts_with_options(false, false, false, true)
+            .unwrap();
+        assert_values(&values, &expected);
+        assert_eq!(counts.as_i64_slice().unwrap(), &[2, 1, 1, 1, 2, 1, 1]);
+    }
+
+    #[test]
+    fn nullable_text_keeps_missing_first_with_cold_or_warm_cache() {
+        for gap in [NullKind::Null, NullKind::NaN, NullKind::NaT] {
+            for warm in [false, true] {
+                let mut validity = ValidityMask::all_valid(5);
+                validity.set(0, false);
+                validity.set(2, false);
+                let column = Column::from_utf8_values_with_gap(
+                    b"ab".to_vec(),
+                    vec![0, 0, 1, 1, 1, 2],
+                    validity,
+                    gap,
+                );
+                if warm {
+                    let _ = column.values();
+                }
+                let expected = [
+                    Scalar::Null(gap),
+                    Scalar::Utf8("a".to_owned()),
+                    Scalar::Utf8(String::new()),
+                    Scalar::Utf8("b".to_owned()),
+                ];
+                assert_values(&column.unique().unwrap(), &expected);
+                if !warm {
+                    assert!(matches!(
+                        &column.values,
+                        super::ScalarValues::LazyNullableUtf8 { values, .. }
+                            if values.get().is_none()
+                    ));
+                }
+                let (values, counts) = column
+                    .value_counts_with_options(false, false, false, false)
+                    .unwrap();
+                assert_values(&values, &expected);
+                assert_eq!(counts.as_i64_slice().unwrap(), &[2, 1, 1, 1]);
+            }
+        }
+    }
+
+    #[test]
+    fn equal_display_text_does_not_make_host_objects_equal() {
+        struct SameRepr(u8);
+        impl HostObject for SameRepr {
+            fn host_eq(&self, other: &dyn HostObject) -> bool {
+                other
+                    .as_any()
+                    .downcast_ref::<Self>()
+                    .is_some_and(|other| self.0 == other.0)
+            }
+            fn host_repr(&self) -> String {
+                "same display".to_owned()
+            }
+            fn host_str(&self) -> String {
+                self.host_repr()
+            }
+            fn host_hash(&self) -> Option<u64> {
+                Some(0)
+            }
+            fn host_cmp(&self, _: &dyn HostObject) -> Option<std::cmp::Ordering> {
+                None
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+        let cell = |id| Scalar::Object(ObjectValue::Host(HostValue::new(SameRepr(id))));
+        let column = Column::from_object_values(vec![cell(1), cell(2), cell(1)]);
+        let expected = [cell(1), cell(2)];
+        assert_values(&column.unique().unwrap(), &expected);
+        assert_values(&column.drop_duplicates().unwrap(), &expected);
+        assert_eq!(column.nunique(), Scalar::Int64(2));
+        assert_eq!(
+            column.duplicated().unwrap().values(),
+            &[Scalar::Bool(false), Scalar::Bool(false), Scalar::Bool(true)]
+        );
+        let (values, counts) = column.value_counts().unwrap();
+        assert_values(&values, &expected);
+        assert_eq!(counts.as_i64_slice().unwrap(), &[2, 1]);
     }
 }
 
