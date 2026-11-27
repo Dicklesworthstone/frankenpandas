@@ -80528,24 +80528,7 @@ fn flat_index_level_values(index: &Index, level: &Bound<'_, PyAny>) -> PyResult<
     // adds the unused ones, in category order; they were its labels;
     // br-frankenpandas-cld41).
     if let Some(categories) = index.categories() {
-        let ranks: HashMap<&IndexLabel, i64> = categories.categories.iter().zip(0_i64..).collect();
-        let codes = index
-            .labels()
-            .iter()
-            .map(|label| ranks.get(label).copied().unwrap_or(-1))
-            .collect();
-        let series = Series::from_categorical_codes(
-            "",
-            codes,
-            categories
-                .categories
-                .iter()
-                .map(index_label_to_scalar)
-                .collect(),
-            categories.ordered,
-        )
-        .map_err(frame_error_to_py)?;
-        return Ok(series.column().clone());
+        return group_category_column(index, categories);
     }
     let values = index.labels().iter().map(index_label_to_scalar).collect();
     let column = Column::from_values(values).map_err(column_error_to_py)?;
@@ -80555,6 +80538,27 @@ fn flat_index_level_values(index: &Index, level: &Bound<'_, PyAny>) -> PyResult<
         Some(zone) => column.with_dtype(DType::datetime64_tz(zone)),
         None => column,
     })
+}
+
+fn group_category_column(index: &Index, categories: &fp_index::IndexCategories) -> PyResult<Column> {
+    let ranks: HashMap<&IndexLabel, i64> = categories.categories.iter().zip(0_i64..).collect();
+    let codes = index
+        .labels()
+        .iter()
+        .map(|label| ranks.get(label).copied().unwrap_or(-1))
+        .collect();
+    let series = Series::from_categorical_codes(
+        "",
+        codes,
+        categories
+            .categories
+            .iter()
+            .map(index_label_to_scalar)
+            .collect(),
+        categories.ordered,
+    )
+    .map_err(frame_error_to_py)?;
+    Ok(series.column().clone())
 }
 
 /// One MultiIndex level as a groupby key column: an all-int level typed
@@ -81939,12 +81943,7 @@ impl PyGroupBy {
     /// NotImplementedError for a per-group operation that does not add
     /// pandas' rows for unused categories (observed=False) yet.
     fn observed_only(&self, op: &str) -> PyResult<()> {
-        // ngroup numbers the input rows, so unobserved combinations do
-        // not need rows of their own. Other unmodelled reductions still
-        // refuse instead of silently omitting part of the result.
-        let product_missing = if op != "ngroup"
-            && let Some(product) = &self.category_product
-        {
+        let product_missing = if let Some(product) = &self.category_product {
             let (_, groups) = self
                 .grouped()
                 .and_then(|grouped| grouped.group_codes())
@@ -84038,13 +84037,21 @@ impl PyGroupBy {
 
     #[pyo3(signature = (ascending=true))]
     fn ngroup(&self, ascending: Option<bool>) -> PyResult<PySeries> {
-        self.observed_only("ngroup")?;
-        let res = self
-            .grouped()
-            .map_err(frame_error_to_py)?
-            .ngroup_with_ascending(ascending.unwrap_or(true))
-            .map_err(frame_error_to_py)?;
-        Ok(PySeries { inner: res })
+        let gb = self.grouped().map_err(frame_error_to_py)?;
+        let ascending = ascending.unwrap_or(true);
+        if self.unused.is_empty() && !self.df.is_empty() {
+            let inner = gb
+                .ngroup_with_ascending(ascending)
+                .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner });
+        }
+        let (codes, groups) = gb.group_codes().map_err(frame_error_to_py)?;
+        ngroup_from_codes(
+            &self.df.series_index(),
+            &codes,
+            groups.len() + self.unused.len(),
+            ascending,
+        )
     }
 
     /// pandas 2.x's `nth` is a row filter: each group's row(s) at position
@@ -84645,6 +84652,44 @@ fn missing_key_groups(by: &Series, sort: bool) -> PyResult<(Series, Index)> {
     ))
 }
 
+/// Group codes are dense over observed groups. pandas reverses those codes
+/// against ngroups, which also counts unused categories for a single key.
+fn ngroup_from_codes(
+    index: &Index,
+    codes: &Column,
+    ngroups: usize,
+    ascending: bool,
+) -> PyResult<PySeries> {
+    let last = ngroups as i64 - 1;
+    let column = if codes.is_empty() {
+        Column::from_i64_values(Vec::new())
+    } else if let Some(values) = codes.as_i64_slice() {
+        if ascending {
+            codes.clone()
+        } else {
+            Column::from_i64_values_owned(values.iter().map(|&code| last - code).collect())
+        }
+    } else {
+        // A dropped row has no number. pandas exposes NaN in a float64
+        // result even when every row was dropped.
+        let column = codes.astype(DType::Float64).map_err(column_error_to_py)?;
+        if ascending {
+            column
+        } else {
+            Column::from_f64_values_owned(
+                column
+                    .values()
+                    .iter()
+                    .map(|value| value.to_f64().map_or(f64::NAN, |code| last as f64 - code))
+                    .collect(),
+            )
+        }
+    };
+    Series::new("", index.clone(), column)
+        .map(|inner| PySeries { inner })
+        .map_err(frame_error_to_py)
+}
+
 impl PySeriesGroupBy {
     /// pandas' `any` / `all` (`all`) with `skipna`: skipna=False reads a
     /// missing value as numpy's truthy NaN (fp-frame's
@@ -85127,10 +85172,9 @@ impl PySeriesGroupBy {
     /// NotImplementedError for a per-group operation that does not add
     /// pandas' rows for unused categories (observed=False) yet.
     fn observed_only(&self, op: &str) -> PyResult<()> {
-        let product_missing = op != "ngroup"
-            && self.category_product.as_ref().is_some_and(|product| {
-                product.has_unobserved(self.groups.as_ref().map_or(0, Index::len))
-            });
+        let product_missing = self.category_product.as_ref().is_some_and(|product| {
+            product.has_unobserved(self.groups.as_ref().map_or(0, Index::len))
+        });
         if product_missing && matches!(op, "idxmin" | "idxmax") {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "Can't get {op} of an empty group due to unobserved categories. Specify observed=True in groupby instead."
@@ -85228,9 +85272,24 @@ impl PySeriesGroupBy {
         }
         match res.reset_index(false).map_err(frame_error_to_py)? {
             fp_frame::SeriesResetIndexResult::DataFrame(df) => {
-                let df = match &self.category_product {
-                    Some(product) => product.reset_keys(df, res.index())?,
-                    None => df,
+                let df = if let Some(product) = &self.category_product {
+                    product.reset_keys(df, res.index())?
+                } else if let Some(levels) = res.index().row_multiindex() {
+                    // reset_index materializes the MultiIndex level labels.
+                    // Preserve the full category domain on observed-only keys.
+                    let mut df = df;
+                    for level in 0..levels.nlevels() {
+                        if let Some(categories) = levels.level_categories(level) {
+                            let index = levels.get_level_values(level).map_err(index_error_to_py)?;
+                            let name = df.column_names()[level].clone();
+                            df = df
+                                .with_column(name, group_category_column(&index, categories)?)
+                                .map_err(frame_error_to_py)?;
+                        }
+                    }
+                    df
+                } else {
+                    df
                 };
                 Ok(Py::new(py, PyDataFrame { inner: df })?.into_any())
             }
@@ -86612,39 +86671,33 @@ impl PySeriesGroupBy {
 
     #[pyo3(signature = (ascending=true))]
     fn ngroup(&self, ascending: Option<bool>) -> PyResult<PySeries> {
-        self.observed_only("ngroup")?;
         let ascending = ascending.unwrap_or(true);
-        let res = self
-            .grouped()?
-            .ngroup_with_ascending(ascending)
+        if let Some(groups) = &self.groups {
+            return ngroup_from_codes(
+                self.series.index(),
+                self.by.column(),
+                groups.len(),
+                ascending,
+            );
+        }
+        if !self.sort && self.unused.is_empty() && !self.series.is_empty() {
+            let inner = self
+                .grouped()?
+                .ngroup_with_ascending(ascending)
+                .map_err(frame_error_to_py)?;
+            return Ok(PySeries { inner });
+        }
+        let keys = self.by.to_frame(Some("key")).map_err(frame_error_to_py)?;
+        let (codes, groups) = keys
+            .groupby_full_options(&["key"], true, self.sort, true)
+            .and_then(|gb| gb.group_codes())
             .map_err(frame_error_to_py)?;
-        if self.by.column().categorical().is_none() {
-            return Ok(PySeries { inner: res });
-        }
-        // A category key numbers its groups in category order (fp-frame's
-        // numbers follow first sight).
-        let groups = self.ordered_groups(false)?;
-        let mut codes: Vec<Scalar> = vec![Scalar::Null(NullKind::NaN); self.series.len()];
-        for (number, (_, positions)) in groups.iter().enumerate() {
-            let number = if ascending {
-                number
-            } else {
-                groups.len() - 1 - number
-            };
-            for &position in positions {
-                codes[position] = Scalar::Int64(number as i64);
-            }
-        }
-        // A row whose key is missing makes the numbers float64, as pandas.
-        let column = Column::from_values(codes).map_err(column_error_to_py)?;
-        let column = if column.validity().all() {
-            column
-        } else {
-            column.astype(DType::Float64).map_err(column_error_to_py)?
-        };
-        let inner =
-            Series::new(res.name(), res.index().clone(), column).map_err(frame_error_to_py)?;
-        Ok(PySeries { inner })
+        ngroup_from_codes(
+            self.series.index(),
+            &codes,
+            groups.len() + self.unused.len(),
+            ascending,
+        )
     }
 
     /// pandas' `nth(n)`: each group's row at position `n` (negative from the
@@ -86946,9 +86999,11 @@ impl PySeriesGroupBy {
     /// in an object Series indexed by the groups (it gave every value
     /// flattened, the groups repeated) - over several keys (or a missing
     /// key kept) their MultiIndex, the group codes relabelled (wsu74).
-    fn unique(&self, py: Python<'_>) -> PyResult<PySeries> {
-        self.observed_only("unique")?;
-        let groups = self.ordered_groups(false)?;
+    fn unique(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        // A single unused category has an empty array of the value dtype.
+        // Unobserved combinations of several keys are filled with NaN
+        // after reducing the observed groups.
+        let groups = self.ordered_groups(true)?;
         let mut cells = Vec::with_capacity(groups.len());
         let mut labels = Vec::with_capacity(groups.len());
         for (label, positions) in groups {
@@ -86965,12 +87020,15 @@ impl PySeriesGroupBy {
             labels.push(label);
         }
         let key = self.by.name();
-        let index = Index::new(labels).rename_index((!key.is_empty()).then_some(key.as_str()));
+        let index = Index::new(labels).set_names((!key.is_empty()).then_some(key));
         let inner = Series::new(self.series.name(), index, Column::from_object_values(cells))
             .map_err(frame_error_to_py)?;
-        Ok(PySeries {
-            inner: self.label_groups(inner)?,
-        })
+        let inner = self.label_groups(inner)?;
+        let inner = match &self.category_product {
+            Some(product) => product.series("unique", inner, None)?,
+            None => with_group_categories(inner, self.by.column())?,
+        };
+        self.keyed(py, inner)
     }
 }
 

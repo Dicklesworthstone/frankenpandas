@@ -126,6 +126,74 @@ def _mixed_key_frame(module):
     )
 
 
+
+@pytest.mark.parametrize("sort", [True, False])
+@pytest.mark.parametrize("observed", [True, False])
+@pytest.mark.parametrize("ascending", [True, False])
+@pytest.mark.parametrize("selected", [True, False])
+@pytest.mark.parametrize("keys", ["a", ["a", "b"]])
+def test_group_numbers_use_observed_ranks(sort, observed, ascending, selected, keys):
+    def run(module):
+        frame = _frame(module)
+        frame.index = module.Index([8, 5, 8, 2, 0, 4], name="source")
+        groups = frame.groupby(keys, observed=observed, sort=sort)
+        return (groups["v"] if selected else groups).ngroup(ascending=ascending)
+
+    _result(run(fpd), run(pd))
+
+
+@pytest.mark.parametrize("dropped", [[], [None, None]])
+@pytest.mark.parametrize("ascending", [True, False])
+def test_group_numbers_with_no_observed_rows(dropped, ascending):
+    def run(module):
+        frame = module.DataFrame({
+            "k": module.Categorical(dropped, categories=["unused", "more"]),
+            "v": module.Series([1] * len(dropped), dtype="int64"),
+        })
+        return frame.groupby("k", observed=False)["v"].ngroup(ascending=ascending)
+
+    _result(run(fpd), run(pd))
+
+
+@pytest.mark.parametrize("sort", [True, False])
+@pytest.mark.parametrize("dropna", [True, False])
+@pytest.mark.parametrize("keys", ["a", ["a", "b"]])
+def test_frame_category_group_numbers_with_missing_keys(sort, dropna, keys):
+    def run(module):
+        return _frame(module).groupby(keys, observed=False, sort=sort, dropna=dropna).ngroup(False)
+
+    _result(run(fpd), run(pd))
+
+
+@pytest.mark.parametrize("sort", [True, False])
+@pytest.mark.parametrize("observed", [True, False])
+@pytest.mark.parametrize("as_index", [True, False])
+@pytest.mark.parametrize("keys", ["a", ["a", "b"]])
+def test_group_unique_keeps_empty_categories(sort, observed, as_index, keys):
+    def run(module):
+        frame = _frame(module)
+        return frame.groupby(keys, observed=observed, sort=sort, as_index=as_index)["v"].unique()
+
+    actual, expected = run(fpd), run(pd)
+    _index(actual.index, expected.index)
+    if not as_index:
+        _index(actual.columns, expected.columns)
+        for key in [keys] if isinstance(keys, str) else keys:
+            _values(actual[key].tolist(), expected[key].tolist())
+            _dtype(actual[key].dtype, expected[key].dtype)
+        actual, expected = actual["v"], expected["v"]
+    assert actual.name == expected.name
+    assert str(actual.dtype) == str(expected.dtype) == "object"
+    for a, e in zip(actual.tolist(), expected.tolist(), strict=True):
+        if isinstance(e, np.ndarray):
+            assert isinstance(a, np.ndarray)
+            assert a.dtype == e.dtype
+            np.testing.assert_array_equal(a, e)
+        else:
+            assert np.isnan(e)
+            assert np.isnan(a)
+
+
 REDUCTIONS = [
     "sum", "prod", "count", "size", "nunique", "min", "max", "mean",
     "median", "first", "last", "std", "var", "sem", "any", "all",
