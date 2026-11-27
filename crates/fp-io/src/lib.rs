@@ -2506,6 +2506,11 @@ impl CsvWriteOptions {
                 )));
             }
         };
+        // Python checks the original field's type. The csv crate's NonNumeric
+        // policy parses the rendered text and loses information (e.g. "001").
+        if self.quoting == CsvQuoting::NonNumeric {
+            return Ok(CsvRecordSink::Python(String::new()));
+        }
         // An escaping dialect took Python's rules above: this writer would
         // quote a field Python escapes ("q\"r" for q\"r).
         Ok(CsvRecordSink::Crate(Box::new(
@@ -2545,11 +2550,12 @@ impl CsvRecordSink {
         &mut self,
         fields: &[String],
         options: &CsvWriteOptions,
+        is_numeric: impl Fn(usize) -> bool,
     ) -> Result<(), IoError> {
         match self {
             Self::Crate(writer) => Ok(writer.write_record(fields)?),
             Self::Python(text) => {
-                text.push_str(&csv_record_text(fields, options)?);
+                text.push_str(&csv_record_text_by_type(fields, options, is_numeric)?);
                 Ok(())
             }
         }
@@ -2575,6 +2581,29 @@ impl CsvRecordSink {
 /// without an `escapechar`, and a record of one empty field under
 /// QUOTE_NONE, are Python's csv.Error.
 pub fn csv_record_text(fields: &[String], options: &CsvWriteOptions) -> Result<String, IoError> {
+    csv_record_text_by_type(fields, options, |_| false)
+}
+
+/// Serialize typed header labels. QUOTE_NONNUMERIC distinguishes a numeric
+/// label from a string with the same spelling.
+pub fn csv_label_record_text(
+    labels: &[IndexLabel],
+    options: &CsvWriteOptions,
+) -> Result<String, IoError> {
+    let fields = labels.iter().map(ToString::to_string).collect::<Vec<_>>();
+    csv_record_text_by_type(&fields, options, |i| csv_numeric_label(&labels[i]))
+}
+
+fn csv_numeric_label(label: &IndexLabel) -> bool {
+    matches!(label, IndexLabel::Int64(_) | IndexLabel::Bool(_))
+        || matches!(label, IndexLabel::Float64(v) if !v.0.is_nan())
+}
+
+fn csv_record_text_by_type(
+    fields: &[String],
+    options: &CsvWriteOptions,
+    is_numeric: impl Fn(usize) -> bool,
+) -> Result<String, IoError> {
     let quote = char::from(options.quote);
     let quote_is_special = options.quoting != CsvQuoting::None;
     let delimiter = char::from(options.delimiter);
@@ -2596,7 +2625,7 @@ pub fn csv_record_text(fields: &[String], options: &CsvWriteOptions) -> Result<S
         }
         let mut quoted = match options.quoting {
             CsvQuoting::All => true,
-            CsvQuoting::NonNumeric => field.parse::<f64>().is_err(),
+            CsvQuoting::NonNumeric => !is_numeric(position),
             CsvQuoting::Minimal | CsvQuoting::None => false,
         };
         let mut body = String::with_capacity(field.len());
@@ -3401,34 +3430,31 @@ pub fn write_csv_string_with_options(
         let mut nested_options = options.clone();
         nested_options.include_index = false;
         nested_options.index_label = None;
-        let level_names: Vec<String> = row_multiindex
-            .names()
-            .iter()
-            .map(|name| name.as_ref().map(ToString::to_string).unwrap_or_default())
-            .collect();
-        // The levels head their own columns; aliases name the data columns.
-        let column_names =
-            options.header_names(frame.column_names().into_iter().cloned().collect())?;
-        if !options.header || row_multiindex.names().iter().all(Option::is_some) {
-            if options.header_aliases.is_some() {
-                let mut full = level_names;
-                full.extend(column_names);
-                nested_options.header_aliases = Some(full);
-            }
-            return write_csv_string_with_options(&materialized, &nested_options);
-        }
-        // pandas heads an UNNAMED level with a blank cell - MultiIndex
-        // levels (p, 1) unnamed -> ",,v" - where reset_index names it
-        // level_{i}. Frame columns cannot all be named "", so write the body
-        // headerless and put pandas' header line on top. (4qg5w.1)
         nested_options.header = false;
         nested_options.header_aliases = None;
         let body = write_csv_string_with_options(&materialized, &nested_options)?;
-        let mut header = level_names;
-        header.extend(column_names);
-        let mut writer = options.writer()?;
-        writer.write_record(&header, options)?;
-        return Ok(writer.into_string()? + &body);
+        if !options.header {
+            return Ok(body);
+        }
+
+        // reset_index gives unnamed levels synthetic names. Emit their original
+        // names (or blank cells), and preserve label types for QUOTE_NONNUMERIC.
+        let mut header = row_multiindex
+            .names()
+            .iter()
+            .map(|name| {
+                name.as_ref()
+                    .map_or_else(|| IndexLabel::Utf8(String::new()), |name| name.label())
+            })
+            .collect::<Vec<_>>();
+        if options.header_aliases.is_some() {
+            let aliases =
+                options.header_names(frame.column_names().into_iter().cloned().collect())?;
+            header.extend(aliases.into_iter().map(IndexLabel::Utf8));
+        } else {
+            header.extend(frame.column_labels());
+        }
+        return Ok(csv_label_record_text(&header, options)? + &body);
     }
 
     // Typed fast path (br-frankenpandas-qk2i9): when every column is an all-valid
@@ -3461,7 +3487,17 @@ pub fn write_csv_string_with_options(
             header_row.push(resolve_csv_index_header(frame, options));
         }
         header_row.extend(options.header_names(headers.clone())?);
-        writer.write_record(&header_row, options)?;
+        writer.write_record(&header_row, options, |i| {
+            if options.include_index && i == 0 {
+                return options.index_label.is_none()
+                    && frame
+                        .index()
+                        .name()
+                        .is_some_and(|name| csv_numeric_label(&name.label()));
+            }
+            let name = &headers[i - usize::from(options.include_index)];
+            options.header_aliases.is_none() && csv_numeric_label(&frame.column_label(name))
+        })?;
     }
 
     // Every column by position: a repeated column key writes its own cells
@@ -3499,7 +3535,11 @@ pub fn write_csv_string_with_options(
     for row_idx in 0..frame.index().len() {
         let mut row = Vec::with_capacity(headers.len() + if options.include_index { 1 } else { 0 });
         if options.include_index {
-            row.push(index_label_csv_string(frame, row_idx, index_dt_format)?);
+            row.push(match &frame.index().labels()[row_idx] {
+                label if label.is_missing() => options.na_rep.clone(),
+                IndexLabel::Float64(v) => options.float_text(format_pandas_float(v.0)),
+                _ => index_label_csv_string(frame, row_idx, index_dt_format)?,
+            });
         }
         row.extend(columns.iter().enumerate().map(|(col_idx, column)| {
             let value = column.and_then(|column| column.value(row_idx));
@@ -3517,7 +3557,19 @@ pub fn write_csv_string_with_options(
                 None => options.na_rep.clone(),
             }
         }));
-        writer.write_record(&row, options)?;
+        writer.write_record(&row, options, |i| {
+            if options.include_index && i == 0 {
+                let label = &frame.index().labels()[row_idx];
+                return csv_numeric_label(label)
+                    && !(options.decimal != b'.' && matches!(label, IndexLabel::Float64(_)));
+            }
+            let column = columns[i - usize::from(options.include_index)];
+            match column.and_then(|col| col.value(row_idx)) {
+                Some(Scalar::Bool(_) | Scalar::Int64(_)) => true,
+                Some(Scalar::Float64(v)) => !v.is_nan() && options.decimal == b'.',
+                _ => false,
+            }
+        })?;
     }
 
     writer.into_string()
@@ -21431,6 +21483,37 @@ mod tests {
         // The values stay with their renamed columns.
         let frame = read_csv_str("a,a\n1,2\n").expect("read");
         assert_eq!(frame.column("a.1").unwrap().values()[0], Scalar::Int64(2));
+    }
+
+    #[test]
+    fn csv_nonnumeric_distinguishes_text_from_numbers() {
+        // pandas 2.2.3: text IDs, missing markers and string headers retain
+        // their quotes even if every character in them is a digit.
+        let frame = DataFrame::from_dict(
+            &["001", "n", "flag"],
+            vec![
+                ("001", vec![Scalar::Utf8("007".into()), Scalar::Utf8("1e2".into())]),
+                ("n", vec![Scalar::Float64(1.5), Scalar::Null(NullKind::NaN)]),
+                ("flag", vec![Scalar::Bool(true), Scalar::Bool(false)]),
+            ],
+        )
+        .unwrap();
+        for escapechar in [None, Some(b'\\')] {
+            let text = write_csv_string_with_options(
+                &frame,
+                &CsvWriteOptions {
+                    quoting: super::CsvQuoting::NonNumeric,
+                    na_rep: "0".to_owned(),
+                    escapechar,
+                    ..CsvWriteOptions::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                text,
+                "\"\",\"001\",\"n\",\"flag\"\n0,\"007\",1.5,True\n1,\"1e2\",\"0\",False\n"
+            );
+        }
     }
 
     #[test]

@@ -2740,6 +2740,39 @@ def test_implemented_parameter_values_match_pandas(case: Any) -> None:
 
 
 @pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+def test_to_csv_quote_nonnumeric_preserves_field_types() -> None:
+    import csv
+
+    def frame(m):
+        return m.DataFrame(
+            {"001": ["007", "1e2"], 2: [1.5, _NAN], "flag": [True, False]},
+            index=m.Index(["003", "004"], name=7),
+        )
+
+    for opts in ({}, {"escapechar": "\\"}, {"na_rep": "0"}, {"float_format": "%.2f"},
+                 {"index_label": False}, {"header": [1, "002", "flag"]}, {"index_label": [2]}):
+        assert frame(fpd).to_csv(quoting=csv.QUOTE_NONNUMERIC, **opts) == frame(pd).to_csv(
+            quoting=csv.QUOTE_NONNUMERIC, **opts
+        )
+
+    # A downstream QUOTE_NONNUMERIC reader preserves quoted identifiers;
+    # an unquoted "007" silently becomes 7.0.
+    text = frame(fpd)[["001"]].to_csv(quoting=csv.QUOTE_NONNUMERIC, index=False)
+    assert list(csv.reader(io.StringIO(text), quoting=csv.QUOTE_NONNUMERIC)) == [["001"], ["007"], ["1e2"]]
+
+    def levels(m):
+        columns = m.MultiIndex.from_tuples([(1, "001"), (2, 2.5)], names=[1, "003"])
+        return m.DataFrame([[1, True], [2, False]], columns=columns, index=m.Index(["001", "002"], name=2))
+
+    assert levels(fpd).to_csv(quoting=2) == levels(pd).to_csv(quoting=2)
+
+    for opts in ({"decimal": ",", "sep": ";"}, {"float_format": "%.2f"}, {"float_format": "%.2f", "decimal": ","}):
+        f = fpd.DataFrame({"n": [1.5, _NAN]}, index=[1.25, 2.5])
+        p = pd.DataFrame({"n": [1.5, _NAN]}, index=[1.25, 2.5])
+        assert f.to_csv(quoting=2, na_rep="0", **opts) == p.to_csv(quoting=2, na_rep="0", **opts)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
 def test_to_csv_keywords_and_targets_match_pandas(tmp_path: Path) -> None:
     frame = {"a": [1.5, _NAN, 3.0], "s": ["x,y", 'q"t', "z"]}
     pdf, fdf = pd.DataFrame(frame, index=["r1", "r2", "r3"]), fpd.DataFrame(frame, index=["r1", "r2", "r3"])

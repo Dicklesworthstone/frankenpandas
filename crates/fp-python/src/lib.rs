@@ -110556,8 +110556,14 @@ fn write_csv_py(
         }
     };
     // header: a bool or pandas' list of aliases (it took only a bool).
-    let aliases: Option<Vec<String>> = match args.header {
-        Some(header) if header.extract::<bool>().is_err() => Some(header.extract()?),
+    let labels_from = |items: &Bound<'_, PyAny>| {
+        items
+            .try_iter()?
+            .map(|item| py_to_index_label(&item?))
+            .collect::<PyResult<Vec<_>>>()
+    };
+    let aliases = match args.header {
+        Some(header) if header.extract::<bool>().is_err() => Some(labels_from(header)?),
         _ => None,
     };
     unsupported_params(
@@ -110609,7 +110615,18 @@ fn write_csv_py(
     let formatted;
     let frame = match args.float_format.filter(|fmt| !fmt.is_none()) {
         Some(fmt) => {
-            let py = fmt.py();
+            let render = |v: f64| -> PyResult<String> {
+                let value = v.into_pyobject(fmt.py())?;
+                if fmt.is_callable() {
+                    return Ok(fmt.call1((value,))?.str()?.to_string());
+                }
+                let text = fmt.call_method1("__mod__", (value,))?.str()?.to_string();
+                Ok(if args.decimal == "." {
+                    text
+                } else {
+                    text.replacen('.', args.decimal, 1)
+                })
+            };
             let mut out = frame.clone();
             for position in 0..frame.shape().1 {
                 let Some(column) = frame.column_at(position) else {
@@ -110622,20 +110639,30 @@ fn write_csv_py(
                     .values()
                     .iter()
                     .map(|value| match value {
-                        Scalar::Float64(v) if !v.is_nan() => {
-                            let v = v.into_pyobject(py)?;
-                            let text = if fmt.is_callable() {
-                                fmt.call1((v,))?
-                            } else {
-                                fmt.call_method1("__mod__", (v,))?
-                            };
-                            Ok(Scalar::Utf8(text.str()?.to_string()))
-                        }
+                        Scalar::Float64(v) if !v.is_nan() => Ok(Scalar::Utf8(render(*v)?)),
                         _ => Ok(Scalar::Null(NullKind::NaN)),
                     })
                     .collect::<PyResult<Vec<_>>>()?;
                 let column = Column::from_values(values).map_err(column_error_to_py)?;
                 out = out.isetitem(position, column).map_err(frame_error_to_py)?;
+            }
+            let index_labels = frame.index().labels();
+            if args.index
+                && frame.row_multiindex().is_none()
+                && index_labels.iter().any(|label| matches!(label, IndexLabel::Float64(_)))
+                && index_labels.iter().all(|label| {
+                    matches!(label, IndexLabel::Float64(_) | IndexLabel::Null(_))
+                })
+            {
+                let labels = index_labels
+                    .iter()
+                    .map(|label| match label {
+                        IndexLabel::Float64(v) if !v.0.is_nan() => Ok(IndexLabel::Utf8(render(v.0)?)),
+                        other => Ok(other.clone()),
+                    })
+                    .collect::<PyResult<Vec<_>>>()?;
+                let index = Index::new(labels).rename_index(frame.index().name());
+                out = out.with_index(index).map_err(frame_error_to_py)?;
             }
             formatted = out;
             &formatted
@@ -110666,36 +110693,23 @@ fn write_csv_py(
     // any length, as pandas writes them) or False for none (a list and False
     // were refused, and a label over a row MultiIndex was dropped;
     // br-frankenpandas-u6p7i).
-    let index_header: Option<Vec<String>> = match args.index_label.filter(|label| !label.is_none())
+    let index_header = match args.index_label.filter(|label| !label.is_none())
     {
         None => None,
         Some(label) if label.is_instance_of::<pyo3::types::PyBool>() && !label.is_truthy()? => {
             Some(Vec::new())
         }
         Some(label) if label.is_instance_of::<PyList>() || label.is_instance_of::<PyTuple>() => {
-            Some(
-                label
-                    .try_iter()?
-                    .map(|item| Ok(item?.str()?.to_string()))
-                    .collect::<PyResult<Vec<_>>>()?,
-            )
+            Some(labels_from(label)?)
         }
-        Some(label) => Some(vec![label.str()?.to_string()]),
+        Some(label) => Some(vec![py_to_index_label(label)?]),
     };
     let mut options = fp_io::CsvWriteOptions {
         delimiter,
         na_rep: args.na_rep.to_owned(),
         header: aliases.is_some() || args.header.map_or(Ok(true), |h| h.extract::<bool>())?,
         include_index: args.index,
-        // fp-io writes one label over a flat index; any other header is
-        // written here.
-        index_label: index_header
-            .as_ref()
-            .filter(|_| frame.row_multiindex().is_none())
-            .and_then(|cells| match cells.as_slice() {
-                [only] => Some(only.clone()),
-                _ => None,
-            }),
+        index_label: None,
         // QUOTE_NONE, an escapechar and doublequote=False write as Python's
         // csv does (they were refused; br-frankenpandas-0gmqq).
         quoting: match args.quoting {
@@ -110707,7 +110721,7 @@ fn write_csv_py(
         quote: one_byte(args.quotechar).unwrap_or(b'"'),
         line_terminator: args.lineterminator.unwrap_or("\n").to_owned(),
         decimal: one_byte(args.decimal).unwrap_or(b'.'),
-        header_aliases: aliases,
+        header_aliases: None,
         escapechar: args.escapechar.and_then(one_byte),
         doublequote: args.doublequote,
     };
@@ -110716,71 +110730,60 @@ fn write_csv_py(
     // and after them a row of the index names when any is set (only the
     // flat leaf names were written; i17d4).
     let mut header = String::new();
-    let row_text =
-        |row: Vec<String>| fp_io::csv_record_text(&row, &options).map_err(io_error_to_py);
-    let mut write_own_header = false;
     if options.header
-        && options.header_aliases.is_none()
-        && let Some(levels) = frame.columns_multiindex()
+        && (frame.columns_multiindex().is_some() || aliases.is_some() || index_header.is_some())
     {
-        let text_of = |name: Option<&LabelName>| name.map(ToString::to_string).unwrap_or_default();
-        let index_names: Vec<String> = if !options.include_index {
+        let blank = || IndexLabel::Utf8(String::new());
+        let label_of = |name: Option<&LabelName>| name.map_or_else(blank, LabelName::label);
+        let index_names = if !options.include_index {
             Vec::new()
-        } else if let Some(cells) = &index_header {
-            cells.clone()
+        } else if let Some(cells) = index_header {
+            cells
         } else if let Some(rows) = frame.row_multiindex() {
             rows.names()
                 .iter()
-                .map(|name| text_of(name.as_ref()))
+                .map(|name| label_of(name.as_ref()))
                 .collect()
         } else {
-            vec![text_of(frame.index().name())]
+            vec![label_of(frame.index().name())]
         };
-        let mut push_row = |row: Vec<String>| -> PyResult<()> {
-            header.push_str(&row_text(row)?);
+        let mut push_row = |row: &[IndexLabel]| -> PyResult<()> {
+            header.push_str(&fp_io::csv_label_record_text(row, &options).map_err(io_error_to_py)?);
             Ok(())
         };
-        for level in 0..levels.nlevels() {
-            let mut row = Vec::with_capacity(levels.len() + index_names.len());
-            if options.include_index {
-                row.push(text_of(levels.names().get(level).and_then(Option::as_ref)));
-                row.extend(std::iter::repeat_n(
-                    String::new(),
-                    index_names.len().saturating_sub(1),
-                ));
+        if aliases.is_none()
+            && let Some(levels) = frame.columns_multiindex()
+        {
+            for level in 0..levels.nlevels() {
+                let mut row = Vec::with_capacity(levels.len() + index_names.len());
+                if options.include_index {
+                    row.push(label_of(levels.names().get(level).and_then(Option::as_ref)));
+                    row.extend(std::iter::repeat_n(
+                        blank(),
+                        index_names.len().saturating_sub(1),
+                    ));
+                }
+                row.extend((0..levels.len()).map(|position| {
+                    levels
+                        .get_tuple(position)
+                        .and_then(|labels| labels.get(level).copied().cloned())
+                        .unwrap_or_else(blank)
+                }));
+                push_row(&row)?;
             }
-            row.extend((0..levels.len()).map(|position| {
-                levels
-                    .get_tuple(position)
-                    .and_then(|labels| labels.get(level).map(ToString::to_string))
-                    .unwrap_or_default()
-            }));
-            push_row(row)?;
-        }
-        if index_names.iter().any(|name| !name.is_empty()) {
+            if index_names
+                .iter()
+                .any(|name| !matches!(name, IndexLabel::Utf8(s) if s.is_empty()))
+            {
+                let mut row = index_names;
+                row.extend(std::iter::repeat_n(blank(), levels.len()));
+                push_row(&row)?;
+            }
+        } else {
             let mut row = index_names;
-            row.extend(std::iter::repeat_n(String::new(), levels.len()));
-            push_row(row)?;
+            row.extend(aliases.unwrap_or_else(|| frame.column_labels()));
+            push_row(&row)?;
         }
-        write_own_header = true;
-    } else if options.header
-        && options.include_index
-        && options.index_label.is_none()
-        && let Some(cells) = &index_header
-    {
-        // The index label cells as given, then the column names (or their
-        // aliases).
-        let mut row = cells.clone();
-        row.extend(
-            options
-                .header_aliases
-                .clone()
-                .unwrap_or_else(|| frame.column_names().into_iter().cloned().collect()),
-        );
-        header.push_str(&row_text(row)?);
-        write_own_header = true;
-    }
-    if write_own_header {
         options.header = false;
     }
     let text = fp_io::write_csv_string_with_options(frame, &options).map_err(io_error_to_py)?;
