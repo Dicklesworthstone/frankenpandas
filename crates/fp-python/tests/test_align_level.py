@@ -12,6 +12,54 @@ import pytest
 import frankenpandas as fpd
 
 
+@pytest.mark.parametrize("join", ["outer", "inner", "left", "right"])
+@pytest.mark.parametrize("kind", ["series", "rows", "columns", "series_frame", "frame_series"])
+@pytest.mark.parametrize("fill", [None, -5])
+def test_flat_duplicate_align_uses_each_source_position(join, kind, fill):
+    def run(module):
+        def operand(keys, values, name, series):
+            labels = module.Index(keys, name=name)
+            if series:
+                return module.Series(values, index=labels, name=17)
+            frame = module.DataFrame({"v": values}, index=labels)
+            return frame.T if kind == "columns" else frame
+
+        left = operand(["b", "a", "b"], [11, 12, 13], "left", kind in ("series", "series_frame"))
+        right = operand(["b", "c", "b", "b"], [21, 22, 23, 24], "right", kind in ("series", "frame_series"))
+        return left.align(right, join=join, axis=1 if kind == "columns" else 0, fill_value=fill)
+
+    _result(run)
+
+
+@pytest.mark.parametrize("join", ["outer", "inner", "left", "right"])
+@pytest.mark.parametrize("left_keys,right_keys", [
+    ([3, 3, 1], [4, 1]), ([1, 3], [1, 1, 2]),
+    ([1, 1], []), ([], [2, 2]), ([1, 1], [3, 3]), ([1, 1], [1, 1]),
+    ([1, 1, 3], [1.0, 1.5, 1.0]),
+])
+def test_flat_duplicate_align_gaps_equal_axes_and_empty_results(join, left_keys, right_keys):
+    def run(module):
+        def operand(keys, name):
+            index = module.Index(keys, name=name, dtype="float64" if any(isinstance(k, float) for k in keys) else "int64")
+            return module.Series(range(len(keys)), index=index, dtype="Int64", name=name)
+        return operand(left_keys, "first").align(operand(right_keys, "second"), join=join)
+
+    _pair(run(fpd), run(pd))
+
+
+@pytest.mark.parametrize("join", ["outer", "inner", "left", "right"])
+@pytest.mark.parametrize("axis", [0, 1])
+def test_frame_aligns_to_duplicate_series_on_one_axis(join, axis):
+    def run(module):
+        frame = module.DataFrame({"v": [5, 6]}, index=["a", "b"])
+        if axis == 1:
+            frame = frame.T
+        series = module.Series([7, 8, 9], index=["b", "b", "c"])
+        return frame.align(series, axis=axis, join=join)
+
+    _result(run)
+
+
 def _scalar(actual, expected):
     if isinstance(expected, tuple):
         assert isinstance(actual, tuple)
