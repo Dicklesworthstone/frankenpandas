@@ -33,6 +33,55 @@ except ImportError:
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fp-conformance" / "fixtures" / "packets"
 
 
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("into", [dict, collections.OrderedDict, collections.UserDict,
+                                  collections.defaultdict(list, old="unused")])
+@pytest.mark.parametrize("orient", ["dict", "series", "list", "records", "index", "split", "TIGHT"])
+def test_to_dict_mapping_types_n57tz(orient, into):
+    def snapshot(value):
+        if isinstance(value, collections.abc.Mapping):
+            return type(value), getattr(value, "default_factory", None), [
+                (k, snapshot(v)) for k, v in value.items()
+            ]
+        if isinstance(value, list):
+            return [snapshot(v) for v in value]
+        if isinstance(value, (pd.Series, fpd.Series)):
+            return value.name, list(value.index), value.tolist()
+        return value
+
+    def export(module):
+        df = module.DataFrame({0: [2, 3], "b": ["v", "w"]}, index=["r", "s"])
+        return snapshot(df.to_dict(orient, into=into)), snapshot(df[0].to_dict(into=into))
+
+    assert export(fpd) == export(pd)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("orient", ["split", "tight", "dict", "list", "records", "index", "series"])
+def test_to_dict_excluding_index_n57tz(orient):
+    def export(module):
+        df = module.DataFrame([[5, 6]], columns=["v", "v"], index=["row"])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            return df.to_dict(orient, index=False)
+
+    if orient in ("split", "tight"):
+        assert export(fpd) == export(pd)
+    else:
+        for module in (pd, fpd):
+            with pytest.raises(ValueError, match="index=False"):
+                export(module)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("into", [None, list, [], collections.defaultdict])
+def test_to_dict_rejects_invalid_mapping_n57tz(into):
+    for module in (pd, fpd):
+        for obj in (module.Series([1]), module.DataFrame({"v": [1]})):
+            with pytest.raises(TypeError):
+                obj.to_dict(into=into)
+
+
 def parse_val(v: Any) -> Any:
     if not isinstance(v, dict):
         return v

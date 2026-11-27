@@ -8001,6 +8001,74 @@ fn to_dict_cell(py: Python<'_>, column: &Column, value: &Scalar) -> PyResult<Py<
     Ok(cell)
 }
 
+/// Normalize pandas' `into` argument once, including the default factory of
+/// an initialized defaultdict. Plain dicts keep the direct insertion path.
+fn to_dict_factory<'py>(py: Python<'py>, into: Passed<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let Some(into) = into.0 else { return Ok(None) };
+    let kind = into
+        .cast::<pyo3::types::PyType>()
+        .cloned()
+        .unwrap_or_else(|_| into.get_type());
+    if kind.is(&py.get_type::<PyDict>()) {
+        return Ok(None);
+    }
+    let defaultdict = py.import("collections")?.getattr("defaultdict")?;
+    if into.is_instance(&defaultdict)? {
+        return Ok(Some(
+            py.import("functools")?
+                .getattr("partial")?
+                .call1((defaultdict, into.getattr("default_factory")?))?,
+        ));
+    }
+    if kind.is(&defaultdict) {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "to_dict() only accepts initialized defaultdicts",
+        ));
+    }
+    if !kind.is_subclass(&py.import("collections.abc")?.getattr("Mapping")?)? {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "unsupported type: {kind}"
+        )));
+    }
+    Ok(Some(kind.into_any()))
+}
+
+/// Custom mappings consume the original ordered pairs, including duplicate
+/// keys. Constructing a dict first would discard pairs before the caller sees them.
+enum DictItems<'py> {
+    Plain(Bound<'py, PyDict>),
+    Custom {
+        factory: Bound<'py, PyAny>,
+        pairs: Bound<'py, PyList>,
+    },
+}
+
+impl<'py> DictItems<'py> {
+    fn new(py: Python<'py>, factory: Option<&Bound<'py, PyAny>>) -> Self {
+        match factory {
+            Some(factory) => Self::Custom {
+                factory: factory.clone(),
+                pairs: PyList::empty(py),
+            },
+            None => Self::Plain(PyDict::new(py)),
+        }
+    }
+
+    fn set_item(&self, key: impl IntoPyObject<'py>, value: impl IntoPyObject<'py>) -> PyResult<()> {
+        match self {
+            Self::Plain(dict) => dict.set_item(key, value),
+            Self::Custom { pairs, .. } => pairs.append((key, value)),
+        }
+    }
+
+    fn finish(self) -> PyResult<Py<PyAny>> {
+        match self {
+            Self::Plain(dict) => Ok(dict.into_any().unbind()),
+            Self::Custom { factory, pairs } => Ok(factory.call1((pairs,))?.unbind()),
+        }
+    }
+}
+
 /// A row the core read from `frame` (iloc_row / loc_row), each tz-aware
 /// column's instant a tz-aware Timestamp in its zone, as pandas' object
 /// row holds it: the core's interleaved cell is the naive UTC instant
@@ -41452,8 +41520,10 @@ impl PySeries {
         }
     }
 
-    fn to_dict(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let dict = PyDict::new(py);
+    #[pyo3(signature = (*, into=Passed(None)))]
+    fn to_dict<'py>(&self, py: Python<'py>, into: Passed<'py>) -> PyResult<Py<PyAny>> {
+        let factory = to_dict_factory(py, into)?;
+        let dict = DictItems::new(py, factory.as_ref());
         let keys = row_keys_to_py(py, self.inner.index())?;
         // A cell as its column holds it: a tz-aware instant in its zone (it
         // was the naive UTC wall clock; br-frankenpandas-wuize).
@@ -41462,7 +41532,7 @@ impl PySeries {
             let v = to_dict_cell(py, column, val)?;
             dict.set_item(k, v)?;
         }
-        Ok(dict.into_any().unbind())
+        dict.finish()
     }
 
     /// pandas' `rolling(...)` ([`rolling_of`]): `window` a row count or a
@@ -57502,12 +57572,31 @@ impl PyDataFrame {
     }
 
     /// Export to a Python dictionary (pandas `DataFrame.to_dict(orient=...)`).
-    #[pyo3(signature = (orient="dict"))]
-    fn to_dict(&self, py: Python<'_>, orient: &str) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (orient="dict", *, into=Passed(None), index=true))]
+    fn to_dict<'py>(
+        &self,
+        py: Python<'py>,
+        orient: &str,
+        into: Passed<'py>,
+        index: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let factory = to_dict_factory(py, into)?;
+        let mapping = || DictItems::new(py, factory.as_ref());
+        let orient = orient.to_ascii_lowercase();
+        let orient = orient.as_str();
+        if !index && !matches!(orient, "split" | "tight") {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "'index=False' is only valid when 'orient' is 'split' or 'tight'",
+            ));
+        }
         let n_rows = self.inner.len();
         let col_names = self.inner.column_names();
         // A row's key: its MultiIndex tuple, a tz-aware instant in its zone.
-        let row_keys = frame_row_keys_to_py(py, &self.inner)?;
+        let row_keys = if index && matches!(orient, "dict" | "index" | "split" | "tight") {
+            frame_row_keys_to_py(py, &self.inner)?
+        } else {
+            Vec::new()
+        };
         // A column's key, by position: its typed label (0, not '0';
         // fvsao.32), its tuple under MultiIndex columns (g3bux).
         let keys = (0..col_names.len())
@@ -57542,19 +57631,19 @@ impl PyDataFrame {
 
         match orient {
             "dict" => {
-                let out = PyDict::new(py);
+                let out = mapping();
                 for (position, key) in keys.iter().enumerate() {
                     let col = column_at(position)?;
-                    let inner_dict = PyDict::new(py);
+                    let inner_dict = mapping();
                     for (key, val) in row_keys.iter().zip(col.values()) {
                         inner_dict.set_item(key, to_dict_cell(py, col, val)?)?;
                     }
-                    out.set_item(key, inner_dict)?;
+                    out.set_item(key, inner_dict.finish()?)?;
                 }
-                Ok(out.into_any().unbind())
+                out.finish()
             }
             "list" => {
-                let out = PyDict::new(py);
+                let out = mapping();
                 for (position, key) in keys.iter().enumerate() {
                     let col = column_at(position)?;
                     let values: Vec<Py<PyAny>> = col
@@ -57564,23 +57653,23 @@ impl PyDataFrame {
                         .collect::<PyResult<Vec<_>>>()?;
                     out.set_item(key, PyList::new(py, values)?)?;
                 }
-                Ok(out.into_any().unbind())
+                out.finish()
             }
             "records" => {
                 let mut rows_list = Vec::with_capacity(n_rows);
                 for row_idx in 0..n_rows {
-                    let row_dict = PyDict::new(py);
+                    let row_dict = mapping();
                     for (position, key) in keys.iter().enumerate() {
                         let col = column_at(position)?;
                         let v = to_dict_cell(py, col, &col.values()[row_idx])?;
                         row_dict.set_item(key, v)?;
                     }
-                    rows_list.push(row_dict);
+                    rows_list.push(row_dict.finish()?);
                 }
                 Ok(PyList::new(py, rows_list)?.into_any().unbind())
             }
             "index" => {
-                let out = PyDict::new(py);
+                let out = mapping();
                 for (row_idx, k) in row_keys.iter().enumerate() {
                     let row_dict = PyDict::new(py);
                     for (position, key) in keys.iter().enumerate() {
@@ -57590,19 +57679,21 @@ impl PyDataFrame {
                     }
                     out.set_item(k, row_dict)?;
                 }
-                Ok(out.into_any().unbind())
+                out.finish()
             }
             "series" => {
-                let out = PyDict::new(py);
+                let out = mapping();
                 for (position, key) in keys.iter().enumerate() {
                     let col_series = self.column_series_at(position)?;
                     out.set_item(key, Py::new(py, col_series)?)?;
                 }
-                Ok(out.into_any().unbind())
+                out.finish()
             }
             "split" | "tight" => {
-                let out = PyDict::new(py);
-                out.set_item("index", PyList::new(py, &row_keys)?)?;
+                let out = mapping();
+                if index {
+                    out.set_item("index", PyList::new(py, &row_keys)?)?;
+                }
                 out.set_item("columns", PyList::new(py, &keys)?)?;
                 // Columns by position, so a duplicated name keeps its own data
                 // (br-frankenpandas-5ihhi).
@@ -57629,18 +57720,20 @@ impl PyDataFrame {
                                 .map(|name| axis_name_to_py(py, name.as_ref()))
                                 .collect()
                         };
-                    let index_names = typed(match self.inner.row_multiindex() {
-                        Some(levels) => levels.names().to_vec(),
-                        None => vec![self.inner.index().name().cloned()],
-                    })?;
+                    if index {
+                        let index_names = typed(match self.inner.row_multiindex() {
+                            Some(levels) => levels.names().to_vec(),
+                            None => vec![self.inner.index().name().cloned()],
+                        })?;
+                        out.set_item("index_names", index_names)?;
+                    }
                     let column_names = typed(match self.inner.columns_multiindex() {
                         Some(levels) => levels.names().to_vec(),
                         None => vec![self.inner.columns_name().cloned()],
                     })?;
-                    out.set_item("index_names", index_names)?;
                     out.set_item("column_names", column_names)?;
                 }
-                Ok(out.into_any().unbind())
+                out.finish()
             }
             other => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                 "orient '{other}' not understood"
@@ -64901,11 +64994,12 @@ impl PyDataFrame {
 
     fn to_xarray(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         if let Ok(xr) = py.import("xarray")
-            && let Ok(ds) = xr.call_method1("Dataset", (self.to_dict(py, "list")?,))
+            && let Ok(ds) =
+                xr.call_method1("Dataset", (self.to_dict(py, "list", Passed(None), true)?,))
         {
             return Ok(ds.into_any().unbind());
         }
-        self.to_dict(py, "list")
+        self.to_dict(py, "list", Passed(None), true)
     }
 
     /// pandas' `DataFrame.to_xml` in its pretty-printed element form: the
@@ -114641,22 +114735,23 @@ mod tests {
             assert_eq!(mod_df.column_labels(), vec!["b"]);
             assert!(mod_df.pop(&key("nonexistent")).is_err());
 
-            let dict_obj = py_df.to_dict(py, "dict").expect("to_dict dict"); // ubs:ignore — test fixture
+            let export = |orient| py_df.to_dict(py, orient, Passed(None), true);
+            let dict_obj = export("dict").expect("to_dict dict"); // ubs:ignore — test fixture
             assert!(dict_obj.bind(py).is_instance_of::<pyo3::types::PyDict>());
 
-            let list_obj = py_df.to_dict(py, "list").expect("to_dict list"); // ubs:ignore — test fixture
+            let list_obj = export("list").expect("to_dict list"); // ubs:ignore — test fixture
             assert!(list_obj.bind(py).is_instance_of::<pyo3::types::PyDict>());
 
-            let records_obj = py_df.to_dict(py, "records").expect("to_dict records"); // ubs:ignore — test fixture
+            let records_obj = export("records").expect("to_dict records"); // ubs:ignore — test fixture
             assert!(records_obj.bind(py).is_instance_of::<pyo3::types::PyList>());
 
-            let index_obj = py_df.to_dict(py, "index").expect("to_dict index"); // ubs:ignore — test fixture
+            let index_obj = export("index").expect("to_dict index"); // ubs:ignore — test fixture
             assert!(index_obj.bind(py).is_instance_of::<pyo3::types::PyDict>());
 
-            let split_obj = py_df.to_dict(py, "split").expect("to_dict split"); // ubs:ignore — test fixture
+            let split_obj = export("split").expect("to_dict split"); // ubs:ignore — test fixture
             assert!(split_obj.bind(py).is_instance_of::<pyo3::types::PyDict>());
 
-            assert!(py_df.to_dict(py, "invalid_orient").is_err());
+            assert!(export("invalid_orient").is_err());
         });
     }
 
