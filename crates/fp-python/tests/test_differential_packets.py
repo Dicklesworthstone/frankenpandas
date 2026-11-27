@@ -26118,8 +26118,8 @@ _4OHJC_OPS = {
     "round": lambda s: s.round(1),
     "interp": lambda s: s.interpolate(),
 }
-_4OHJC_EMPTY_RESIDUE = {("cumsum", "datetime64[ns]"), ("cumprod", "datetime64[ns]"), ("gb mean", "object"), ("gb mean", "string"), ("diff", "bool"), ("diff", "string"), ("pct", "object"), ("pct", "string"), ("pow2", "Int64"), ("pow2", "string"), ("pow2", "datetime64[ns]"), ("pow2", "timedelta64[ns]"),("add1", "datetime64[ns]"), ("div2", "string"), ("div2", "datetime64[ns]"), ("div2", "timedelta64[ns]"), ("eq1", "datetime64[ns]"), ("eq1", "timedelta64[ns]"), ("roll sum", "object"), ("roll sum", "string"), ("exp mean", "object"), ("exp mean", "string"), ("interp", "Int64")}
-_4OHJC_ONE_ROW_RESIDUE = {("cumprod", "object"), ("diff", "string"), ("pct", "object"), ("pct", "string")}
+_4OHJC_EMPTY_RESIDUE = {("cumsum", "datetime64[ns]"), ("cumprod", "datetime64[ns]"), ("gb mean", "object"), ("gb mean", "string"), ("pct", "object"), ("pct", "string"), ("pow2", "Int64"), ("pow2", "string"), ("pow2", "datetime64[ns]"), ("pow2", "timedelta64[ns]"),("add1", "datetime64[ns]"), ("div2", "string"), ("div2", "datetime64[ns]"), ("div2", "timedelta64[ns]"), ("eq1", "datetime64[ns]"), ("eq1", "timedelta64[ns]"), ("roll sum", "object"), ("roll sum", "string"), ("exp mean", "object"), ("exp mean", "string"), ("interp", "Int64")}
+_4OHJC_ONE_ROW_RESIDUE = {("cumprod", "object"), ("pct", "object"), ("pct", "string")}
 
 
 def _4ohjc_cells(residue: set[tuple[str, str]], bead: str) -> list[Any]:
@@ -28467,6 +28467,53 @@ _1F8C6_CASES = {
 @pytest.mark.parametrize("case", list(_1F8C6_CASES))
 def test_diff_like_pandas_1f8c6(case: str) -> None:
     assert _1f8c6_shown(_1F8C6_CASES[case](fpd)) == _1f8c6_shown(_1F8C6_CASES[case](pd))
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("periods", [-5, -1, 0, 1, 5])
+@pytest.mark.parametrize(
+    ("dtype", "values"),
+    [
+        ("bool", [True, False, False]),
+        ("boolean", [True, None, False]),
+        ("int8", [-128, 127, -128]),
+        ("int16", [-32768, 32767, -32768]),
+        ("int32", [-(2**31), 2**31 - 1, -(2**31)]),
+        ("int64", [2**53, 2**53 + 1, 2**53 + 3]),
+        ("uint8", [1, 0, 255]),
+        ("uint16", [1, 0, 65535]),
+        ("uint32", [1, 0, 2**32 - 1]),
+        ("uint64", [1, 0, 2**62]),
+        ("object", [3, 2, 8]),
+    ],
+)
+def test_diff_series_and_frame_column_dtypes(periods, dtype, values):
+    def results(module):
+        series = module.Series(values, dtype=dtype, name="v", index=["a", "a", "b"])
+        frame = module.DataFrame({"v": series})
+        return series.diff(periods), frame.diff(periods)["v"]
+
+    for actual, expected in zip(results(fpd), results(pd), strict=True):
+        assert actual.index.tolist() == expected.index.tolist()
+        assert actual.name == expected.name
+        assert _1f8c6_shown(actual) == _1f8c6_shown(expected)
+
+
+@pytest.mark.skipif(fpd is None, reason="frankenpandas not installed")
+@pytest.mark.parametrize("dtype", ["object", "string", "category"])
+@pytest.mark.parametrize("periods", [-1, 0, 1, 3])
+def test_frame_diff_text_preserves_missing_or_raises(dtype, periods):
+    def run(module):
+        frame = module.DataFrame({"text": module.Series(["12", "10"], dtype=dtype)})
+        return frame.diff(periods)
+
+    try:
+        expected = run(pd)
+    except TypeError:
+        with pytest.raises(TypeError):
+            run(fpd)
+    else:
+        assert _1f8c6_shown(run(fpd)) == _1f8c6_shown(expected)
 
 
 # br-frankenpandas-egi8t: to_timedelta takes a tuple or a 1-d numpy array as the

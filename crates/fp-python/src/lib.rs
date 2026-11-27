@@ -39675,7 +39675,7 @@ impl PySeries {
         }
         // A categorical has no difference: pandas' TypeError (it answered
         // NaN; br-frankenpandas-76kq0).
-        if self.inner.cat().is_some() {
+        if self.inner.cat().is_some() || self.inner.dtype() == DType::Categorical {
             return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
                 "Categorical has no 'diff' method. Convert to a suitable dtype prior to calling 'diff'.",
             ));
@@ -39693,12 +39693,27 @@ impl PySeries {
                     "unsupported operand type(s) for -: 'str' and 'str'",
                 ));
             }
+            // No two present strings met. Every difference is a missing
+            // string, including when the lag exceeds the length.
+            let missing = vec![Scalar::Null(NullKind::Null); column.len()];
+            let result = Column::from_object_values(missing).as_pandas_string();
+            return wrap_series(Series::new(
+                self.inner.name(),
+                self.inner.index().clone(),
+                result,
+            ));
         }
-        if (column.dtype() == DType::Utf8 && !column.is_pandas_string())
-            || column.dtype() == DType::Period
-        {
+        if matches!(column.dtype(), DType::Utf8 | DType::Period) {
             let inner = Python::attach(|py| object_diff(py, &self.inner, periods))?;
             return Ok(PySeries { inner });
+        }
+        if matches!(column.dtype(), DType::Int64 | DType::Bool | DType::BoolNullable) {
+            let result = column.diff(periods).map_err(column_error_to_py)?;
+            return wrap_series(Series::new(
+                self.inner.name(),
+                self.inner.index().clone(),
+                result,
+            ));
         }
         let r = self.inner.diff(periods).map_err(frame_error_to_py)?;
         Ok(PySeries { inner: r })
@@ -58391,6 +58406,22 @@ impl PyDataFrame {
     fn diff(&self, periods: i64, axis: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
         let ax = parse_axis_param_for_type(axis, "DataFrame")?.unwrap_or(0);
         let res = match ax {
+            // Object subtraction may call Python's operator; categoricals
+            // reject subtraction, and bool and narrow int have their own
+            // result dtypes. Use the Series rules on each physical column
+            // while retaining both axes (including repeated column labels).
+            0 if self.inner.columns().ordered_columns().any(|col| {
+                matches!(col.dtype(), DType::Utf8 | DType::Period | DType::Categorical)
+                    || col.dtype().is_bool()
+                    || (col.dtype() == DType::Int64 && col.width().is_some())
+            }) => {
+                let mut columns = Vec::with_capacity(self.inner.num_columns());
+                for pos in 0..self.inner.num_columns() {
+                    let result = self.column_series_at(pos)?.diff(periods, None)?;
+                    columns.push(result.inner.column().clone());
+                }
+                self.inner.with_columns_at_positions(columns)
+            }
             0 => self.inner.diff(periods).map_err(frame_error_to_py)?,
             1 => self.inner.diff_axis1(periods).map_err(frame_error_to_py)?,
             other => {
