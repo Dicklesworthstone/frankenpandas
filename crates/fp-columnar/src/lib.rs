@@ -34207,29 +34207,73 @@ impl Column {
 
     /// First-order difference: `values[i] - values[i - periods]`.
     ///
-    /// Matches `pd.Series.diff(periods)`. The leading `|periods|`
-    /// positions are Null(NaN). Negative periods compute
-    /// `values[i] - values[i + |periods|]`. Non-numeric inputs return
-    /// a type error. Result dtype is always Float64.
+    /// Positive periods leave a leading gap and negative periods a trailing
+    /// one. Plain booleans produce object-typed XOR results, integers produce
+    /// floating differences, and temporal values produce timedeltas.
     pub fn diff(&self, periods: i64) -> Result<Self, ColumnError> {
-        let len = self.values.len();
-        // Per br-frankenpandas-e607u: Timedelta64 diff preserves dtype
-        // matching pandas, instead of forcing Float64 output and NaN-ing
-        // via the to_f64-else catch-all.
-        // Per pandas 2.2.3: Bool.diff() is XOR (cur != prev), yielding a bool
-        // result with a missing leading element — NOT numeric subtraction
-        // (older pandas gave [-1, 0, 1]). Timedelta64 keeps its dtype; all other
-        // numeric types diff as Float64.
+        let len = self.len();
+        let lag = usize::try_from(periods.unsigned_abs())
+            .unwrap_or(usize::MAX)
+            .min(len);
+        let (current, partner) = if periods >= 0 { (lag, 0) } else { (0, lag) };
+        if self.dtype == DType::Int64 {
+            // pandas widens signed 8/16-bit inputs before subtracting. Other
+            // integer widths subtract in their own precision before conversion.
+            let column = match self.width() {
+                Some(NumericWidth::UInt8) => self.integer_diff_by(current, partner, |a, b| {
+                    f64::from((a as u8).wrapping_sub(b as u8))
+                }),
+                Some(NumericWidth::UInt16) => self.integer_diff_by(current, partner, |a, b| {
+                    f64::from((a as u16).wrapping_sub(b as u16))
+                }),
+                Some(NumericWidth::UInt32) => self.integer_diff_by(current, partner, |a, b| {
+                    f64::from((a as u32).wrapping_sub(b as u32))
+                }),
+                Some(NumericWidth::UInt64) => self.integer_diff_by(current, partner, |a, b| {
+                    (a as u64).wrapping_sub(b as u64) as f64
+                }),
+                Some(NumericWidth::Int32) => self.integer_diff_by(current, partner, |a, b| {
+                    f64::from((a as i32).wrapping_sub(b as i32))
+                }),
+                _ => self.integer_diff_by(current, partner, |a, b| a.wrapping_sub(b) as f64),
+            };
+            return Ok(match self.width() {
+                // Every possible difference of these inputs is exact in f32.
+                Some(NumericWidth::Int8 | NumericWidth::Int16) => {
+                    column.with_width_unchecked(NumericWidth::Float32)
+                }
+                _ => column,
+            });
+        }
+        if self.dtype.is_bool() {
+            let nullable = self.dtype == DType::BoolNullable;
+            let missing = if nullable { NullKind::Null } else { NullKind::NaN };
+            let mut out = vec![Scalar::Null(missing); len];
+            let values = self.values();
+            for ((slot, left), right) in out[current..]
+                .iter_mut()
+                .zip(&values[current..])
+                .zip(&values[partner..])
+            {
+                if let (Scalar::Bool(a), Scalar::Bool(b)) = (left, right) {
+                    *slot = Scalar::Bool(a ^ b);
+                }
+            }
+            return if nullable {
+                Self::new(DType::BoolNullable, out)
+            } else {
+                Ok(Self::from_object_values(out))
+            };
+        }
         let out_dtype = match &self.dtype {
             DType::Timedelta64 | DType::Datetime64 { .. } => DType::Timedelta64,
-            DType::Bool | DType::BoolNullable => DType::Bool,
             _ => DType::Float64,
         };
         if len == 0 {
             return Self::new(out_dtype, Vec::new());
         }
-        let abs = periods.unsigned_abs() as usize;
-        // Typed Float64-output fast paths (i64 / f64 inputs): fill an f64 body
+        let abs = lag;
+        // Typed Float64-output fast path: fill an f64 body
         // buffer, mark the vacated boundary as a single invalid range, and MOVE it
         // into a LazyNullableFloat64 backing via from_f64_values_with_validity (no
         // NaN scan, no Arc::from realloc). Bit-identical to the Scalar loop: that
@@ -34246,21 +34290,6 @@ impl Column {
             } else {
                 ValidityMask::from_invalid_ranges(Arc::from([(len - abs, abs)]), len)
             };
-            // Int64: (x as f64) − (y as f64) is always finite (|i64 as f64| ≤ 9.2e18,
-            // difference ≤ 1.8e19) so the body carries no NaN.
-            if let Some(data) = self.as_i64_slice() {
-                let mut out = vec![0.0_f64; len];
-                if periods > 0 {
-                    for i in abs..len {
-                        out[i] = data[i] as f64 - data[i - abs] as f64;
-                    }
-                } else {
-                    for i in 0..len - abs {
-                        out[i] = data[i] as f64 - data[i + abs] as f64;
-                    }
-                }
-                return Ok(Self::from_f64_values_with_validity(out, validity));
-            }
             // Float64: only safe when inf-free — finite−finite is never NaN (only
             // finite or an overflow ±inf, both valid). An inf INPUT could yield
             // inf−inf = NaN at a VALID slot, which LazyNullableFloat64 keeps as
@@ -34337,17 +34366,51 @@ impl Column {
                 }
                 continue;
             }
-            if let (Scalar::Bool(cur_b), Scalar::Bool(prev_b)) = (cur, prev) {
-                // pandas 2.2.3 Bool.diff() == (cur XOR prev).
-                out.push(Scalar::Bool(cur_b != prev_b));
-                continue;
-            }
             match (cur.to_f64(), prev.to_f64()) {
                 (Ok(a), Ok(b)) => out.push(Scalar::Float64(a - b)),
                 _ => out.push(Scalar::Null(NullKind::NaN)),
             }
         }
         Self::new(out_dtype, out)
+    }
+
+    fn integer_diff_by(
+        &self,
+        current: usize,
+        partner: usize,
+        subtract: impl Fn(i64, i64) -> f64,
+    ) -> Self {
+        let len = self.len();
+        if let Some(data) = self.as_i64_slice() {
+            let mut out = vec![0.0; len];
+            for ((slot, &a), &b) in out[current..]
+                .iter_mut()
+                .zip(&data[current..])
+                .zip(&data[partner..])
+            {
+                *slot = subtract(a, b);
+            }
+            let validity = if current == 0 && partner == 0 {
+                ValidityMask::all_valid(len)
+            } else {
+                let gap = current.max(partner);
+                let start = if current == 0 { len - gap } else { 0 };
+                ValidityMask::from_invalid_ranges(Arc::from([(start, gap)]), len)
+            };
+            return Self::from_f64_values_with_validity(out, validity);
+        }
+        let values = self.values();
+        let mut out = vec![f64::NAN; len];
+        for ((slot, left), right) in out[current..]
+            .iter_mut()
+            .zip(&values[current..])
+            .zip(&values[partner..])
+        {
+            if let (Scalar::Int64(a), Scalar::Int64(b)) = (left, right) {
+                *slot = subtract(*a, *b);
+            }
+        }
+        Self::from_f64_values(out)
     }
 
     /// Consecutive differences with optional prepend/append values.
@@ -57685,6 +57748,34 @@ mod tests {
         }
 
         #[test]
+        fn integer_diff_uses_the_input_width_before_float_conversion() {
+            use fp_types::NumericWidth::{Float32, Int8, Int16, Int32, UInt8, UInt16, UInt32, UInt64};
+
+            for (width, a, b, expected, output_width) in [
+                (Int8, -128, 127, 255.0, Some(Float32)),
+                (Int16, -32768, 32767, 65535.0, Some(Float32)),
+                (Int32, i64::from(i32::MIN), i64::from(i32::MAX), -1.0, None),
+                (UInt8, 1, 0, 255.0, None),
+                (UInt16, 1, 0, 65535.0, None),
+                (UInt32, 1, 0, f64::from(u32::MAX), None),
+                (UInt64, 1, 0, u64::MAX as f64, None),
+            ] {
+                let col = Column::from_i64_values(vec![a, b, a])
+                    .cast_to_width(width, false)
+                    .unwrap();
+                for (periods, row) in [(1, 1), (-1, 1)] {
+                    let diff = col.diff(periods).unwrap();
+                    assert_eq!(diff.width(), output_width);
+                    assert_eq!(diff.values()[row], Scalar::Float64(expected));
+                    assert!(diff.values()[if periods > 0 { 0 } else { 2 }].is_missing());
+                }
+            }
+            let exact = Column::from_i64_values(vec![1_i64 << 53, (1_i64 << 53) + 1]);
+            assert_eq!(exact.diff(1).unwrap().values()[1], Scalar::Float64(1.0));
+            assert!(exact.diff(i64::MIN).unwrap().values().iter().all(Scalar::is_missing));
+        }
+
+        #[test]
         fn diff_periods_zero_computes_zero_difference() {
             let col_int = Column::from_values(vec![
                 Scalar::Int64(10),
@@ -57718,7 +57809,7 @@ mod tests {
             let col_bool =
                 Column::from_values(vec![Scalar::Bool(true), Scalar::Bool(false)]).unwrap();
             let d_bool = col_bool.diff(0).unwrap();
-            assert_eq!(d_bool.dtype(), DType::Bool);
+            assert_eq!(d_bool.dtype(), DType::Utf8); // object, even without a boundary gap
             assert_eq!(d_bool.values(), &[Scalar::Bool(false), Scalar::Bool(false)]);
 
             let one_hour = 3_600 * 1_000_000_000_i64;
