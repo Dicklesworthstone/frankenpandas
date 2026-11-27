@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   id-token: write
 
 concurrency:
@@ -187,6 +188,27 @@ jobs:
     needs: [linux, macos, windows, sdist]
     if: "startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release'"
     steps:
+      # Resolve the actual tag target, not github.sha's possible tag-object SHA.
+      # This gate is publication-only; manual wheel builds remain available.
+      - uses: actions/checkout@v7
+      - name: Require successful CI on the exact tagged commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_sha="$(git rev-parse HEAD)"
+          runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$target_sha&per_page=100")"
+          if ! jq -e --arg sha "$target_sha" '
+            any(.workflow_runs[];
+              .head_sha == $sha and .head_branch == "main"
+              and .status == "completed" and .conclusion == "success"
+            )
+          ' <<< "$runs" >/dev/null; then
+            echo "::error::Refusing wheel publication: CI has not succeeded for main commit $target_sha"
+            echo "Run CI on the tagged commit before publishing wheels."
+            exit 1
+          fi
       - uses: actions/download-artifact@v8
         with:
           pattern: wheels-*
