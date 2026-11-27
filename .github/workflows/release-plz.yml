@@ -41,6 +41,7 @@ on:
 permissions:
   pull-requests: write
   contents: write
+  actions: read
 
 concurrency:
   group: release-plz-${{ github.ref }}
@@ -54,6 +55,26 @@ jobs:
     # Running it on the weekly cron would re-tag an unchanged tree.
     if: ${{ github.repository_owner == 'Dicklesworthstone' && github.event_name == 'push' }}
     steps:
+      # Full CI is scheduled/manual, not push-triggered. A successful run
+      # on an older main SHA must never authorize publishing this SHA.
+      - name: Require successful CI for the exact release commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&per_page=100")"
+          if ! jq -e --arg sha "$GITHUB_SHA" '
+            any(.workflow_runs[];
+              .head_sha == $sha and .head_branch == "main"
+              and .status == "completed" and .conclusion == "success"
+            )
+          ' <<< "$runs" >/dev/null; then
+            echo "::error::Refusing release: CI has not succeeded for main commit $GITHUB_SHA"
+            echo "Run the CI workflow on this commit and retry the release."
+            exit 1
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
